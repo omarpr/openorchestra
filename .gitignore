@@ -3,3 +3,6 @@ node_modules/
 .harness/
 .DS_Store
 .spike3-sync.tar.gz
+dist/
+assets/openOrchestra.iconset/
+_to_delete/

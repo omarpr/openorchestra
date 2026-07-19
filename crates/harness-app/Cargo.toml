@@ -50,6 +50,18 @@ tree-sitter-rust = "0.24.2"
 # Spike 4: the headless worktree manager + registry (git worktree lifecycle,
 # status, merge-base diff). Path dep — light (serde only), no zed cone.
 worktrees = { path = "../worktrees" }
+# Live sidebar data: forge poller (PR/CI badges via `gh`) + status watcher
+# (agent pill via .harness/status.json). Path deps; degrade gracefully when gh
+# or pi are absent.
+forge = { path = "../forge" }
+status-watch = { path = "../status-watch" }
+
+# Proper terminal view (pty sizing, input, IME, scrollback, selection) replacing
+# the custom renderer. workspace + project are already compiled transitively by
+# `editor`; terminal_view references them via weak handles (no real Workspace).
+terminal_view = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+workspace = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+project = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
 
 anyhow = "1"
 semver = "1"

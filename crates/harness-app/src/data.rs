@@ -35,34 +35,25 @@ pub struct WorkspaceData {
 }
 
 impl WorkspaceData {
-    /// Build the view from the registry, computing git status per worktree.
-    /// The primary repo (the one the app was launched in) is always present,
-    /// even with zero worktrees, so the sidebar shows its `main` entry.
+    /// Build the view from an explicit list of repo roots (persisted + added via
+    /// the folder picker) + the registry. An empty `repo_roots` yields an empty
+    /// `repos` (the app shows its empty state). Each repo shows even with zero
+    /// worktrees, so its read-only `main` entry is always present.
     pub fn build(
         git: &GitWorktrees<SystemRunner>,
         registry: &Registry,
-        primary_repo: &str,
-        primary_root: &Path,
+        repo_roots: &[std::path::PathBuf],
     ) -> Self {
         let mut repos: Vec<RepoView> = Vec::new();
-
-        // Seed with the primary repo so `main` always shows.
-        repos.push(new_repo_view(git, primary_repo, primary_root));
-
-        for group in registry.grouped_by_repo() {
-            let repo_ix = match repos.iter().position(|r| r.name == group.repo) {
-                Some(ix) => ix,
-                None => {
-                    repos.push(new_repo_view(git, group.repo, group.repo_root));
-                    repos.len() - 1
-                }
-            };
-            let compare_ref = repos[repo_ix].compare_ref.clone();
-            for entry in group.entries {
-                let status = git
-                    .status(&entry.path, Some(&compare_ref))
-                    .unwrap_or_default();
-                repos[repo_ix].worktrees.push(WorktreeView {
+        for root in repo_roots {
+            let name = root
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| root.display().to_string());
+            let mut rv = new_repo_view(git, &name, root);
+            for entry in registry.active().filter(|e| &e.repo_root == root) {
+                let status = git.status(&entry.path, Some(&rv.compare_ref)).unwrap_or_default();
+                rv.worktrees.push(WorktreeView {
                     id: entry.id.clone(),
                     name: entry.name.clone(),
                     branch: entry.branch.clone(),
@@ -74,8 +65,8 @@ impl WorkspaceData {
                     dirty: status.dirty_files,
                 });
             }
+            repos.push(rv);
         }
-
         WorkspaceData { repos }
     }
 }

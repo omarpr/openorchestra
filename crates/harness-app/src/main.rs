@@ -11,7 +11,6 @@
 mod data;
 mod editor_pane;
 mod harness_zed_theme;
-mod model;
 mod terminal_pane;
 mod theme;
 mod workspace;
@@ -19,8 +18,8 @@ mod workspace;
 use std::path::PathBuf;
 
 use gpui::{
-    App, AppContext as _, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions,
-    actions, px, size,
+    App, AppContext as _, Bounds, KeyBinding, TitlebarOptions, UpdateGlobal, WindowBounds,
+    WindowOptions, actions, px, size,
 };
 
 use crate::theme::HarnessTheme;
@@ -31,12 +30,21 @@ actions!(harness, [Quit]);
 fn main() {
     env_logger::init();
 
+    // Launch hint: an explicit arg/env, else the cwd (unless it's "/", which is
+    // what Finder-launched .app bundles get), else the user's home. If the hint
+    // is a git repo it's auto-added to the sidebar; otherwise the app opens on
+    // its empty state and the user picks a folder.
+    let home = std::env::var_os("HOME").map(PathBuf::from);
     let worktree_root = std::env::args()
         .nth(1)
         .map(PathBuf::from)
         .or_else(|| std::env::var("HARNESS_WORKTREE_ROOT").ok().map(PathBuf::from))
-        .or_else(|| std::env::current_dir().ok())
-        .expect("could not determine a worktree root");
+        .or_else(|| match std::env::current_dir() {
+            Ok(d) if d != PathBuf::from("/") => Some(d),
+            _ => None,
+        })
+        .or_else(|| home.clone())
+        .unwrap_or_else(|| PathBuf::from("."));
 
     gpui_platform::application().run(move |cx: &mut App| {
         // Globals required by zed's `terminal` + `editor` crates (settings
@@ -44,6 +52,18 @@ fn main() {
         release_channel::init(semver::Version::new(0, 1, 0), cx);
         settings::init(cx);
         theme_settings::init(::theme::LoadThemes::JustBase, cx);
+
+        // Zed's default buffer/terminal font is a bundled font not present on the
+        // user's machine, which falls back to a proportional face (spaced-out
+        // terminal glyphs). Pin a real macOS monospace so editor + terminal read
+        // correctly.
+        settings::SettingsStore::update_global(cx, |store, cx| {
+            let _ = store.set_user_settings(
+                r#"{ "buffer_font_family": "Menlo", "buffer_font_size": 13,
+                     "terminal": { "font_family": "Menlo", "font_size": 13 } }"#,
+                cx,
+            );
+        });
 
         // Harness design tokens (§3.4). Install them as the active zed theme
         // (Spike 3c) BEFORE creating editor panes, so editor + terminal read
@@ -62,6 +82,19 @@ fn main() {
         cx.bind_keys([
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("ctrl-q", Quit, None),
+        ]);
+
+        // Minimal editing keymap for zed editor panes (scoped to the "Editor"
+        // key context). Without this, only IME text entry works — Enter,
+        // Backspace, and arrows would do nothing. Full keymap is an MVP item.
+        use editor::actions::{Backspace, Delete, MoveLeft, MoveRight, Newline, Tab};
+        cx.bind_keys([
+            KeyBinding::new("enter", Newline, Some("Editor")),
+            KeyBinding::new("backspace", Backspace, Some("Editor")),
+            KeyBinding::new("delete", Delete, Some("Editor")),
+            KeyBinding::new("left", MoveLeft, Some("Editor")),
+            KeyBinding::new("right", MoveRight, Some("Editor")),
+            KeyBinding::new("tab", Tab, Some("Editor")),
         ]);
 
         let bounds = Bounds::centered(None, size(px(1400.0), px(880.0)), cx);

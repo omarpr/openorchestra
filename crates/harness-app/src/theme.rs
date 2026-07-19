@@ -16,6 +16,8 @@ pub struct HarnessTheme {
     // Surfaces
     pub surface: Rgba,
     pub surface_hover: Rgba,
+    /// Elevated surface (popovers).
+    pub surface2: Rgba,
     // Text ramp
     pub tx0: Rgba,
     pub tx1: Rgba,
@@ -27,32 +29,36 @@ pub struct HarnessTheme {
     pub amber: Rgba,
     // Chrome
     pub border: Rgba,
+    pub border2: Rgba,
     // Fonts
     pub font_ui: &'static str,
     pub font_mono: &'static str,
 }
 
 impl HarnessTheme {
+    /// Values transcribed from the design reference `Harness.dc.html` CSS tokens
+    /// (`--bg0`, `--bg1`, `--surface`, `--accent`, `--green/amber/red`, `--tx*`).
     pub fn dark() -> Self {
         Self {
-            bg0: rgb(0x0d1117),
-            bg1: rgb(0x11161f),
-            bg2: rgb(0x161d28),
-            surface: rgb(0x1b2330),
-            surface_hover: rgb(0x222c3c),
-            tx0: rgb(0xe6edf3),
-            tx1: rgb(0x9aa7b4),
-            tx2: rgb(0x5c6773),
-            accent: rgb(0x4f8ff7),
-            green: rgb(0x3fb950),
-            red: rgb(0xf85149),
-            amber: rgb(0xd29922),
-            border: rgb(0x2a3441),
+            bg0: rgb(0x0e1013),
+            bg1: rgb(0x16191d),
+            bg2: rgb(0x1c2025),
+            surface: rgb(0x1c2025),
+            surface_hover: rgb(0x22272e),
+            surface2: rgb(0x22272e),
+            tx0: rgb(0xe6e9ee),
+            tx1: rgb(0x9aa3af),
+            tx2: rgb(0x646b76),
+            accent: rgb(0x5b9bff),
+            green: rgb(0x4ec26b),
+            red: rgb(0xf0616d),
+            amber: rgb(0xe0a83b),
+            border: rgb(0x24272c),
+            border2: rgb(0x2f333a),
             font_ui: ui_font_family(),
             font_mono: mono_font_family(),
         }
     }
-
 }
 
 impl Global for HarnessTheme {}

@@ -48,11 +48,6 @@ impl EditorPane {
         Self { editor, title }
     }
 
-    /// Move keyboard focus into the editor (called when its tab is activated).
-    pub fn focus(&self, window: &mut Window, cx: &mut App) {
-        let handle = self.editor.focus_handle(cx);
-        window.focus(&handle, cx);
-    }
 }
 
 impl Focusable for EditorPane {
