@@ -137,7 +137,7 @@ impl<R: CommandRunner> Forge for GhCli<R> {
         self.ensure_available()?;
         let out = self.run_gh(
             repo_dir,
-            &["pr", "view", branch, "--json", "number,state,isDraft,title"],
+            &["pr", "view", "--json", "number,state,isDraft,title", "--", branch],
         )?;
 
         if !out.success() {
@@ -172,7 +172,7 @@ impl<R: CommandRunner> Forge for GhCli<R> {
         self.ensure_available()?;
         let out = self.run_gh(
             repo_dir,
-            &["pr", "checks", branch, "--json", "name,state,bucket"],
+            &["pr", "checks", "--json", "name,state,bucket", "--", branch],
         )?;
 
         // `gh pr checks` uses exit codes as signal (8 = pending, non-zero on

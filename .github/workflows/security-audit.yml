@@ -1,0 +1,31 @@
+name: Security audit
+
+on:
+  push:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".github/workflows/security-audit.yml"
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+  schedule:
+    # Weekly, so new RustSec advisories are caught without a code change.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  cargo-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      # Two lockfiles: the headless workspace, and harness-app which is a
+      # standalone package (zed git-dependency cone).
+      - name: Audit workspace lockfile
+        run: cargo audit --file Cargo.lock
+      - name: Audit harness-app lockfile
+        run: cargo audit --file crates/harness-app/Cargo.lock

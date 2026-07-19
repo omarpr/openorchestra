@@ -81,8 +81,8 @@ fn repo() -> &'static Path {
     Path::new("/repos/omar-harness")
 }
 
-const VIEW_ARGS: &str = "pr view feat/nav --json number,state,isDraft,title";
-const CHECKS_ARGS: &str = "pr checks feat/nav --json name,state,bucket";
+const VIEW_ARGS: &str = "pr view --json number,state,isDraft,title -- feat/nav";
+const CHECKS_ARGS: &str = "pr checks --json name,state,bucket -- feat/nav";
 
 // ---- pr_for_branch ---------------------------------------------------------
 

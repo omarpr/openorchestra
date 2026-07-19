@@ -158,7 +158,7 @@ impl<R: CommandRunner> GitWorktrees<R> {
 
     // ---- lifecycle (§6.1) ------------------------------------------------
 
-    /// `git worktree add <path> -b <branch> [<base_ref>]` from `repo_root`.
+    /// `git worktree add -b <branch> -- <path> [<base_ref>]` from `repo_root`.
     pub fn add_worktree(
         &self,
         repo_root: &Path,
@@ -167,7 +167,8 @@ impl<R: CommandRunner> GitWorktrees<R> {
         base_ref: Option<&str>,
     ) -> Result<(), GitError> {
         let path_str = path.to_string_lossy();
-        let mut args = vec!["worktree", "add", &path_str, "-b", branch];
+        // `--` keeps caller-influenced positionals from ever parsing as flags.
+        let mut args = vec!["worktree", "add", "-b", branch, "--", &path_str];
         if let Some(base) = base_ref {
             args.push(base);
         }
@@ -181,13 +182,13 @@ impl<R: CommandRunner> GitWorktrees<R> {
     /// [`delete_branch`]: GitWorktrees::delete_branch
     pub fn remove_worktree(&self, repo_root: &Path, path: &Path) -> Result<(), GitError> {
         let path_str = path.to_string_lossy();
-        self.git_ok(repo_root, &["worktree", "remove", "--force", &path_str])
+        self.git_ok(repo_root, &["worktree", "remove", "--force", "--", &path_str])
             .map(|_| ())
     }
 
     /// `git branch -D <branch>` (Delete flow only — §6.1 D6).
     pub fn delete_branch(&self, repo_root: &Path, branch: &str) -> Result<(), GitError> {
-        self.git_ok(repo_root, &["branch", "-D", branch]).map(|_| ())
+        self.git_ok(repo_root, &["branch", "-D", "--", branch]).map(|_| ())
     }
 
     /// Parse `git worktree list --porcelain`.

@@ -101,11 +101,13 @@ fi
 if command -v pi >/dev/null 2>&1; then
   say "pi OK ($(command -v pi))"
 elif command -v npm >/dev/null 2>&1; then
-  say "Installing pi (npm i -g @mariozechner/pi-coding-agent)"
-  npm install -g @mariozechner/pi-coding-agent \
-    || say "pi install failed — install manually: npm i -g @mariozechner/pi-coding-agent"
+  # Pinned to the version the harness-status extension is tested against
+  # (docs/spike2-notes.md); bump deliberately alongside the extension.
+  say "Installing pi (npm i -g @mariozechner/pi-coding-agent@0.70.6)"
+  npm install -g @mariozechner/pi-coding-agent@0.70.6 \
+    || say "pi install failed — install manually: npm i -g @mariozechner/pi-coding-agent@0.70.6"
 else
-  say "npm not found even after installing node — open a new shell, then: npm i -g @mariozechner/pi-coding-agent"
+  say "npm not found even after installing node — open a new shell, then: npm i -g @mariozechner/pi-coding-agent@0.70.6"
 fi
 
 # gh auth is interactive — just nudge (don't block setup).

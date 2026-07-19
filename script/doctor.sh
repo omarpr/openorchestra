@@ -25,7 +25,7 @@ if have node; then ok "node       $(node --version 2>/dev/null)"; else warn "nod
 if have pi; then
   ok "pi         $(command -v pi)"
 else
-  warn "pi         npm install -g @mariozechner/pi-coding-agent"
+  warn "pi         npm install -g @mariozechner/pi-coding-agent@0.70.6"
 fi
 
 sec "Forge — PR + CI badges (optional; badges hide when absent)"
