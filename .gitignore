@@ -1,3 +1,5 @@
 target/
 node_modules/
 .harness/
+.DS_Store
+.spike3-sync.tar.gz

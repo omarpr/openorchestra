@@ -45,10 +45,13 @@ pub struct TerminalPane {
 impl TerminalPane {
     pub fn new(
         worktree_root: PathBuf,
+        spawn_agent: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (shell, spawned) = match resolve_pi() {
+        // The `main` entry is a read-only workspace with no agent (§6.1 D8), so
+        // it gets a plain shell; worktree tabs spawn pi.
+        let (shell, spawned) = match spawn_agent.then(resolve_pi).flatten() {
             Some(pi) => (
                 Shell::WithArguments {
                     program: pi.to_string_lossy().into_owned(),
@@ -57,7 +60,8 @@ impl TerminalPane {
                 },
                 format!("pi ({})", pi.display()),
             ),
-            None => (Shell::System, "$SHELL (pi not found on PATH)".to_string()),
+            None if spawn_agent => (Shell::System, "$SHELL (pi not found on PATH)".to_string()),
+            None => (Shell::System, "$SHELL (main — no agent)".to_string()),
         };
 
         let window_id = window.window_handle().window_id().as_u64();

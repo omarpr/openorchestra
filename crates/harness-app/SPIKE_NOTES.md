@@ -116,3 +116,203 @@ display; see README.md for the macOS instructions).
 - `src/workspace.rs` — three-column layout, sidebar cards, tab strip, status
   bar, diff placeholder.
 - `src/terminal_pane.rs` — pi spawn + custom terminal renderer (see above).
+
+---
+
+# Spike 3 notes — Zed editor pane + theme mapping
+
+Date: 2026-07-19 · Status: **GO** (`cargo check` + `cargo build` + link clean;
+app executed headless with no panic; theme-generation unit test passes). This is
+the §9 go/no-go gate for §3.2 (embedding zed's `editor`). **Verdict: proceed —
+R1 retired for the editor path.**
+
+## What was proven
+
+1. **Zed's `editor` crate is consumable out-of-tree at the pinned rev
+   (`v1.11.3`), with ZERO patch-list changes.** Adding `editor` (+ `language`,
+   `grammars`, `tree-sitter-rust`) to the standalone package compiled the entire
+   cone — `workspace`, `project`, `lsp`, `dap`, `db`, `multi_buffer`, `client`,
+   `node_runtime` all build transitively — in ~4 min cold. The `[patch.crates-io]`
+   set from Spike 1 was sufficient unchanged. **This was the whole risk (R1); it
+   passed.**
+2. **A real `Editor` renders as an embedded pane WITHOUT the `workspace` crate
+   at runtime.** `Editor::for_buffer(buffer, None /* no Project */, window, cx)`
+   (`editor.rs:1781`). `editor::init(cx)` is called (safe — sets defensive
+   globals + workspace item hooks) but is not required for `for_buffer`.
+3. **Out-of-tree Rust syntax highlighting with minimal deps.** We do NOT pull the
+   heavy `languages` crate (all ~18 grammars + LSP adapters + `pet*`). Instead:
+   the light `grammars` crate (rust-embed of zed's `config.toml` + `.scm` query
+   files; depended on WITHOUT its `load-grammars` feature) + `tree-sitter-rust`
+   directly, so we compile **one** grammar. Build path
+   (`src/editor_pane.rs::build_rust_language`):
+   `Language::new(grammars::load_config("rust"), Some(tree_sitter_rust::LANGUAGE.into()))
+   .with_queries(grammars::load_queries("rust"))` then
+   `language.set_theme(active.syntax())` to bind capture IDs → colors, then
+   `Buffer::set_language(...)`. Parsing runs on the gpui `BackgroundExecutor`.
+4. **Design-token → zed-theme generation (R6).** `src/harness_zed_theme.rs`
+   builds a `ThemeFamilyContent` from the `HarnessTheme` tokens via a `json!`
+   value (every content field is `Option`/`#[serde(default)]`, so a partial
+   object deserializes and `theme_settings::refine_theme_family` fills the ~100
+   other color fields with coherent dark defaults), registers it in the
+   `ThemeRegistry`, and activates it with `GlobalTheme::update_theme`. **Because
+   both `editor` and `terminal` read `cx.theme()`, one token set now drives
+   chrome + editor + terminal + syntax** — the R6 goal. Verified by a pure-fn
+   unit test (`tokens_map_into_resolved_theme`): tokens survive the round-trip
+   into the resolved theme's `editor_background`, `terminal_ansi_*`, and syntax
+   captures (`keyword`=accent, `string`=green).
+5. **UI:** the center pane now has two real, clickable tabs — `❯_ terminal`
+   (Spike 1) and `{} editor` (Spike 3) — with focus handed to the active pane on
+   switch. Editor opens a real worktree file (`src/main.rs` / `crates/harness-app
+   /src/main.rs`), falling back to a bundled sample so it always shows highlighted
+   Rust.
+
+## Deferred (as designed — mirrors Spike 1's terminal scope)
+
+- **rust-analyzer / LSP — Phase D, not yet wired, but de-risked.** The full
+  `project`+`lsp`+`client`+`node_runtime` cone already compiles (it's under
+  `editor`), so this is now *construction*, not a build risk. Minimal path
+  (verified against source): `Project::local(client, node, user_store,
+  languages, fs, None, flags, cx)` with `Editor::for_buffer(buf, Some(project),
+  …)` — the editor auto-registers the buffer with `LspStore` and holds the LSP
+  handle. rust-analyzer resolves from `$PATH`/rustup before any download.
+  **Gotcha found (corrects the exploration note):** at this rev
+  `LocalProjectFlags::default()` has `init_worktree_trust: **true**` — you MUST
+  pass `LocalProjectFlags { init_worktree_trust: false, .. }`, otherwise LSP
+  stalls on a trust prompt that has no UI. Also needs the heavier `languages`
+  crate (all grammars) and `languages::init(languages, fs, node, cx)`.
+- **Editing keymap.** Typing flows through the editor's IME input handler; arrow
+  keys / backspace / selection need a keymap bound (or zed's default keymap
+  loaded). Deferred to the MVP chrome pass. Mouse click-to-place-cursor works.
+- **`terminal_view` swap.** Now that `workspace` is in the graph anyway, revisit
+  replacing Spike 1's custom terminal view with zed's `terminal_view` for
+  selections/scrollback/IME "for free" (Spike 1 open item).
+
+## Risks confirmed / updated (vs §8)
+
+- **R1 (zed `editor` cone) — RETIRED for the editor path.** Compiled out-of-tree
+  at the pinned rev with no patch changes; renders headless without panic. The
+  fallback custom-editor plan is no longer needed. (Ongoing: the standing
+  `[patch.crates-io]` re-diff chore on every rev bump still applies — R1
+  sub-risk from Spike 1.)
+- **R6 (token→theme mapping) — RESOLVED.** One token set generates the zed theme
+  for all panes; unit-tested. Syntax hues not in the chrome token set (purple
+  functions, teal types, orange numbers) are currently literals in
+  `harness_zed_theme.rs` — extending `HarnessTheme` with a first-class syntax
+  ramp is the tidy follow-up.
+- **R2 (GPL) — unchanged/now broader**: linking `editor` (GPL-3.0-or-later)
+  reinforces the binary's GPL status (already accepted, §3.2).
+- **Disk/build:** the package `target/` grows to ~6–7 GB with the editor cone
+  (`debug = 0`); cold `cargo build` ≈ 10 min in-container. Incremental is fine.
+- New: **`recursion_limit = "256"`** needed at the crate root — the harness-theme
+  `json!` literal nests past the default 128.
+
+## How to run / test (Spike 3)
+
+```sh
+cd crates/harness-app
+cargo run                    # terminal tab (pi) + editor tab (highlighted Rust)
+cargo test                   # includes tokens_map_into_resolved_theme (theme gen)
+# Container-only: needs libxkbcommon-dev + libxkbcommon-x11-dev to LINK on Linux
+# (gpui x11/wayland); irrelevant on macOS.
+```
+
+## Files (Spike 3)
+
+- `src/editor_pane.rs` — `EditorPane` view: builds the Rust `Language`, opens a
+  worktree file into a `Buffer`, `Editor::for_buffer(.., None, ..)`, renders.
+- `src/harness_zed_theme.rs` — token → `ThemeFamilyContent` → active `Theme`
+  (`install`); `theme_family_content` is the pure, unit-tested core.
+- `src/main.rs` — installs the harness theme + `editor::init` before window open;
+  `recursion_limit`.
+- `src/workspace.rs` — two-tab center pane (terminal · editor) with focus
+  routing.
+- `Cargo.toml` — `editor`/`language`/`grammars`/`tree-sitter-rust`/`serde_json`.
+
+---
+
+# Spike 4 notes — Worktree vertical slice
+
+Date: 2026-07-19 · Status: **landed** (headless crate fully real-git-tested;
+app builds + runs headless with no panic against the real repo). Completes the
+§9 spike plan.
+
+## Headless crate: `crates/worktrees` (the tested core)
+
+UI-free, in the root workspace (fast build), mirroring `forge`/`status-watch`.
+Three layers:
+
+- **`Registry`** (`registry.rs`) — the on-disk index (§6.1). Atomic JSON
+  persistence (write-temp + rename); `WorktreeEntry` = repo, root, branch, slug,
+  editable name, path, session file, avatar (initials + palette color), PR
+  number, created_at, archived. Renames/avatar edits mutate the registry only,
+  never git (§6.1). `grouped_by_repo` powers the D4 sidebar; created_at is
+  caller-supplied so the crate has **no clock** (deterministic tests).
+- **`GitWorktrees<R>`** (`git.rs`) — git ops behind the same injectable
+  `CommandRunner` as forge: `worktree add/remove`, `branch -D`, `worktree list`,
+  `default_branch` (origin/HEAD → local main/master probe), `status` (porcelain
+  dirty count + `rev-list --left-right` ahead/behind), and `diff` against
+  `merge-base(base_ref, HEAD)` → per-file numstat + name-status (M/A/D/R) +
+  unified text (§6.1 D10). Diff is taken merge-base → **working tree**, so it
+  shows committed *and* uncommitted task changes. Unresolvable base → empty diff,
+  never an error.
+- **`Manager<R>`** (`lib.rs`) — ties them together for create / archive / delete
+  (§6.1 D6): git op first, then registry update + persist, so a git failure
+  never leaves a phantom entry. Archive keeps branch + entry (marked archived,
+  §6.4); delete removes worktree + branch + entry.
+
+**Tests (real git, unlike Spike 2's fixture-only gh):** `tests/git_e2e.rs`
+spins up temp repos and drives the full lifecycle — create two worktrees, make
+committed + uncommitted changes, assert ahead/behind/dirty, assert the
+merge-base diff (files, M/A/D, adds/dels, unified text), archive (dir gone,
+branch kept), delete (dir + branch + entry gone), and registry persistence
+across reload. `tests/registry.rs` covers add/dup/rename/avatar/archive/group/
+atomic-persist. **8 tests, all pass; workspace total now 41.**
+
+## App integration (`crates/harness-app`)
+
+- **`data.rs`** — `WorkspaceData::build` turns the registry + live git into the
+  view model (replaces Spike 1's `model.rs` mocks). Always seeds the primary
+  repo (the one the app launched in, via `git rev-parse --show-toplevel`) so its
+  read-only `main` entry shows even with zero worktrees. `compare_ref` =
+  `origin/<default>` when the remote ref exists, else local `<default>`.
+- **`workspace.rs`** (rewritten) — sidebar from `data.repos` (real avatars +
+  ↑ahead ↓behind ~dirty); **per-worktree tab sets (D5)** via a
+  `HashMap<selection-key, PaneSet>` cache built lazily on first selection (so we
+  don't spawn N pis up front); diff panel renders the selected entry's real
+  merge-base diff (file list + M/A/D badges + a capped unified preview);
+  `+ new worktree`, **Archive**, and **Delete (two-click confirm)** call the real
+  `Manager`. The `main` entry gets a plain shell (no pi) via a new
+  `TerminalPane::new(_, spawn_agent, _)` flag (§6.1 D8).
+- Harness state lives in `<repo_parent>/.omar-harness/` (`registry.json` +
+  `worktrees/`) so worktrees don't nest inside the repo.
+
+## Verified
+
+- `cargo test` at root: **41 pass** (worktrees 8, forge 23, status-watch 9,
+  +1 doc). `cargo check`/`build` on harness-app clean.
+- Headless run against the real `omar-harness` repo: no panic — registry load,
+  `WorkspaceData::build` (real `git rev-parse`/`default_branch`/`status`), pane
+  creation, and the `main` merge-base diff all execute. (gpui headless fallback,
+  same bar as Spikes 1 & 3.)
+
+## Deferred / follow-ups
+
+- **Agent-status pill is still a static placeholder.** Wiring Spike 2's
+  `status-watch` (`.harness/status.json` → the pill) into the app is the clean
+  next integration — the pipeline exists, it's just not connected to the sidebar.
+- **Create UX is a generated slug** (`task-N`). A proper new-worktree dialog
+  (name/branch/base input) wants a text field — the editor crate is now in-tree,
+  so an `Editor::single_line` input modal is the natural approach.
+- **Diff/status are computed synchronously on selection.** Fine for a spike;
+  move to a background task + the forge poller / a status watcher for live
+  refresh in the MVP (avoids blocking the UI on `git diff` for large repos).
+- Per-worktree panes cache but never evict; archived/deleted panes are dropped,
+  but long sessions with many worktrees will hold many pi processes — add an LRU
+  or explicit close in the MVP.
+
+## Files (Spike 4)
+
+- `crates/worktrees/src/{lib,registry,git,runner}.rs` + `tests/{registry,git_e2e}.rs`
+- `crates/harness-app/src/data.rs` (new), `workspace.rs` (rewritten),
+  `model.rs` (trimmed to `AgentStatus`), `terminal_pane.rs` (`spawn_agent` flag),
+  `main.rs` (`mod data`).
