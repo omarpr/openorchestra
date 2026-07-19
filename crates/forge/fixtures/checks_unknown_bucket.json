@@ -1,0 +1,12 @@
+[
+	{
+		"bucket": "somethingnew",
+		"name": "exotic-check",
+		"state": "SUCCESS"
+	},
+	{
+		"bucket": "",
+		"name": "stateless-check",
+		"state": "WEIRD_STATE"
+	}
+]

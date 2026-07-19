@@ -1,0 +1,12 @@
+[
+	{
+		"bucket": "pass",
+		"name": "build",
+		"state": "SUCCESS"
+	},
+	{
+		"bucket": "pass",
+		"name": "test",
+		"state": "SUCCESS"
+	}
+]

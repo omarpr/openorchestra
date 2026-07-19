@@ -1,0 +1,32 @@
+[
+	{
+		"bucket": "pass",
+		"name": "build (ubuntu-latest)",
+		"state": "SUCCESS"
+	},
+	{
+		"bucket": "fail",
+		"name": "test (macos-latest)",
+		"state": "FAILURE"
+	},
+	{
+		"bucket": "pending",
+		"name": "clippy",
+		"state": "IN_PROGRESS"
+	},
+	{
+		"bucket": "pending",
+		"name": "deploy-preview",
+		"state": "QUEUED"
+	},
+	{
+		"bucket": "skipping",
+		"name": "docs",
+		"state": "SKIPPED"
+	},
+	{
+		"bucket": "cancel",
+		"name": "nightly",
+		"state": "CANCELLED"
+	}
+]

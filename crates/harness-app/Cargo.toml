@@ -1,0 +1,63 @@
+# harness-app — Spike 1: GPUI shell + embedded terminal running pi's TUI.
+#
+# This package is DELIBERATELY standalone (empty [workspace] below) and excluded
+# from the repo root workspace: it carries the zed git dependency cone with its
+# own Cargo.lock, so the headless crates (worktrees, forge, status-watch) keep a
+# fast, small build graph.
+#
+# Zed pin: tag v1.11.3 = commit 952d712dac48a4af2c54fb22c82d82a9d69b72d4
+# (latest stable release tag at time of writing). Upgrade deliberately; keep all
+# zed crates on the same rev (§3.1 of docs/architecture.md).
+
+[package]
+name = "harness-app"
+version = "0.1.0"
+edition = "2024"
+publish = false
+# GPL because we link zed's `terminal` crate (GPL-3.0-or-later). Accepted in
+# docs/architecture.md §3.2. gpui itself is Apache-2.0.
+license = "GPL-3.0-or-later"
+
+[workspace]
+# Intentionally empty: makes this package its own workspace root so cargo does
+# not try to attach it to the repo root workspace.
+
+[dependencies]
+gpui = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+# Platform entry point (Application constructor) — new split at v1.11.x; the
+# features mirror what zed's own gpui examples enable.
+gpui_platform = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4", features = ["font-kit", "wayland", "x11"] }
+# Zed's terminal model crate (pty + alacritty state machine). GPL-3.0-or-later.
+terminal = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+# Required globals for `terminal`:
+settings = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+theme = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+theme_settings = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+release_channel = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+task = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+util = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+
+anyhow = "1"
+semver = "1"
+log = "0.4"
+env_logger = "0.11"
+
+# Zed's workspace [patch.crates-io] entries do NOT propagate to out-of-tree
+# consumers, so we replicate the ones inside our dependency cone (from zed's
+# root Cargo.toml at the pinned rev). calloop is pinned to the rev zed's own
+# Cargo.lock resolved at v1.11.3.
+[patch.crates-io]
+async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
+async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
+calloop = { git = "https://github.com/zed-industries/calloop", rev = "eb6b4fd17b9af5ecc226546bdd04185391b3e265" }
+notify = { git = "https://github.com/zed-industries/notify", rev = "faecbc33db4f59313e5225ef766bfd9e54a54cfd" }
+notify-types = { git = "https://github.com/zed-industries/notify", rev = "faecbc33db4f59313e5225ef766bfd9e54a54cfd" }
+
+[profile.dev]
+# Keep target/ small (the zed cone is huge). Bump to "limited" locally if you
+# need backtraces with symbols.
+debug = 0
+incremental = false
+
+[profile.release]
+debug = 0
