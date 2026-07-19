@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/worktrees",
+    "crates/forge",
+    "crates/status-watch",
+]
+# harness-app is intentionally a standalone package for the spike phase:
+# it drags the zed git dependency cone, and keeping it out of this workspace
+# lets the headless crates build fast with their own lockfile.
+exclude = ["crates/harness-app"]
+
+[profile.dev]
+debug = 0
