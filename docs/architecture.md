@@ -396,11 +396,13 @@ openOrchestra today is a running macOS GPUI app that, against a real repo:
 - renders the **merge-base diff** asynchronously, discarding results for a selection the user has left;
 - creates / archives / deletes worktrees, with optional `#branch` and `@base-ref` in the create input, and LRU-evicts pane sets so long sessions do not accumulate live agent processes;
 - **harvests session exhaust into schema-versioned training records** (`harvest` binary), against a versioned tool contract both the agent runtime and the training generator import;
-- ships with `make doctor` (now version-checking the pi pin), a macOS `.app` bundler + icon, and a cargo-audit CI workflow.
+- toggles **light/dark** from the top bar, regenerating the zed theme so editor and terminal follow, and remembers that plus panel sizes in `~/.openorchestra/prefs.json`;
+- uses **IBM Plex** when installed (Menlo otherwise);
+- ships with `make doctor` (version-checking the pi pin and rust-analyzer's *runnability*), a macOS `.app` bundler + icon, and a cargo-audit CI workflow.
 
-Backend crates are UI-free and fully tested — **123 headless tests** across `worktrees`, `forge`, `status-watch`, `agent-runtime`, `agent-schema`, `training`, and `pi-client`, plus 7 in the app — with two `--ignored` live tests that drive real `pi` processes end to end. Everything is clippy-clean.
+Backend crates are UI-free and fully tested — **130 headless tests** across `worktrees`, `forge`, `status-watch`, `agent-runtime`, `agent-schema`, `training`, and `pi-client`, plus 7 in the app — with two `--ignored` live tests that drive real `pi` processes end to end. Everything is clippy-clean.
 
-**Known incomplete:** the cross-cutting list below (light-theme toggle, IBM Plex bundling, panel-size persistence, `gh pr create`, fork-head PR badges, and a `make doctor` check for the rust-analyzer component).
+**Known incomplete:** vendoring the IBM Plex font files into `assets/` (a licensing/repo-weight decision, §12), and `gh pr create` is implemented in `forge` but not yet surfaced as a button in the UI.
 
 **Two bugs this session found that the doc had recorded as working:**
 
