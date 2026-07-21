@@ -237,8 +237,6 @@ enum Drag {
     Sidebar,
     /// Right diff panel width. Grows leftward, so the delta is negated.
     DiffPanel,
-    /// Height of the changed-files list inside the diff panel.
-    DiffSplit,
 }
 
 /// A splitter drag in progress.
@@ -484,6 +482,15 @@ impl HarnessWorkspace {
             focus_handle: cx.focus_handle(),
         };
         this.ensure_pane(window, cx);
+        // Test hook: open an editor tab without going through the ＋ menu, so
+        // "the menu is broken" and "the editor is broken" can be told apart.
+        if std::env::var_os("HARNESS_OPEN_EDITOR").is_some() {
+            this.open_tab(TabKind::Editor, window, cx);
+            log::info!(
+                "HARNESS_OPEN_EDITOR: tabs now = {:?}",
+                this.panes.values().next().map(|p| p.tabs.len())
+            );
+        }
         this.recompute_diff(cx);
 
         cx.spawn(async move |view, cx| loop {
@@ -1330,19 +1337,18 @@ impl HarnessWorkspace {
     /// 6px wide with a 1px visible line: narrower than this and it is fiddly to
     /// grab, wider and it reads as a gap in the chrome.
     fn splitter(&self, hx: &HarnessTheme, target: Drag, cx: &mut Context<Self>) -> impl IntoElement {
-        let vertical = target != Drag::DiffSplit;
+        // Both remaining splitters are vertical dividers between columns.
+        let vertical = true;
         let active = self.drag.map(|d| d.target) == Some(target);
         let start_value = match target {
             Drag::Sidebar => self.prefs.sidebar_width,
             Drag::DiffPanel => self.prefs.diff_width,
-            Drag::DiffSplit => self.prefs.diff_split,
         };
 
         let base = div()
             .id(match target {
                 Drag::Sidebar => "split-sidebar",
                 Drag::DiffPanel => "split-diff",
-                Drag::DiffSplit => "split-diff-inner",
             })
             .flex_none()
             .cursor(if vertical {
@@ -1385,14 +1391,12 @@ impl HarnessWorkspace {
             Drag::Sidebar => (ev.position.x, 1.0),
             // The diff panel is right-anchored, so dragging left widens it.
             Drag::DiffPanel => (ev.position.x, -1.0),
-            Drag::DiffSplit => (ev.position.y, 1.0),
         };
         let delta = f32::from(pos - drag.start) * sign;
         let next = drag.start_value + delta;
         match drag.target {
             Drag::Sidebar => self.prefs.sidebar_width = next,
             Drag::DiffPanel => self.prefs.diff_width = next,
-            Drag::DiffSplit => self.prefs.diff_split = next,
         }
         // Clamp every frame, not on release: a panel must never be draggable
         // to zero width and become unrecoverable.
@@ -1442,6 +1446,42 @@ impl HarnessWorkspace {
                     .child(div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx0).child("openOrchestra"))
                     .child(div().text_xs().text_color(hx.tx2).child("·"))
                     .child(div().text_xs().font_family(hx.font_mono).text_color(hx.tx1).child(branch)),
+            )
+            .child(
+                div()
+                    .id("toggle-sidebar")
+                    .flex_none()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .text_xs()
+                    .text_color(if self.prefs.sidebar_open { hx.tx1 } else { hx.tx2 })
+                    .cursor_pointer()
+                    .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
+                    .child("▤ worktrees")
+                    .on_click(cx.listener(|ws, _, _, cx| {
+                        ws.prefs.sidebar_open = !ws.prefs.sidebar_open;
+                        ws.save_prefs(cx);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .id("toggle-diff")
+                    .flex_none()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .text_xs()
+                    .text_color(if self.prefs.diff_open { hx.tx1 } else { hx.tx2 })
+                    .cursor_pointer()
+                    .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
+                    .child("diff ▤")
+                    .on_click(cx.listener(|ws, _, _, cx| {
+                        ws.prefs.diff_open = !ws.prefs.diff_open;
+                        ws.save_prefs(cx);
+                        cx.notify();
+                    })),
             )
             .child(
                 div()
@@ -1877,6 +1917,14 @@ impl HarnessWorkspace {
             .flex()
             .flex_col()
             .gap_1()
+            // Swallow mouse-DOWN inside the menu. The dismiss backdrop listens
+            // on mouse-down, and a click is down-then-up: without this the
+            // backdrop closed the menu on the way down and the item's on_click
+            // never fired on the way up. That is why ＋ → Editor did nothing.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
+            )
             .child(self.menu_item(hx, "Rename", false, cx.listener(move |ws, _, window, cx| {
                 cx.stop_propagation();
                 let name = ws.manager.registry.get(&rename_id).map(|e| e.name.clone()).unwrap_or_default();
@@ -2106,6 +2154,11 @@ impl HarnessWorkspace {
             .flex()
             .flex_col()
             .gap_1()
+            // Typing in the popover must not count as "clicked outside".
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
+            )
             .child(
                 div()
                     .flex()
@@ -2158,6 +2211,14 @@ impl HarnessWorkspace {
             .flex()
             .flex_col()
             .gap_1()
+            // Swallow mouse-DOWN inside the menu. The dismiss backdrop listens
+            // on mouse-down, and a click is down-then-up: without this the
+            // backdrop closed the menu on the way down and the item's on_click
+            // never fired on the way up. That is why ＋ → Editor did nothing.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
+            )
             .child(self.tab_menu_item(hx, "❯_  Terminal", "⌘T", TabKind::Shell, cx))
             .child(self.tab_menu_item(hx, "{ }  Editor", "⌘E", TabKind::Editor, cx));
         // `main` is a read-only checkout and runs no agent (D8).
@@ -2272,205 +2333,20 @@ impl HarnessWorkspace {
             .unwrap_or_else(|| self.diff.unified.clone())
     }
 
-    fn render_diff_panel(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
-        let Some(r) = self.resolve() else {
-            return div()
-                .flex()
-                .flex_col()
-                .flex_none()
-                .w(px(self.prefs.diff_width))
-                .h_full()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .px_3()
-                .bg(hx.bg1)
-                .border_l_1()
-                .border_color(hx.border)
-                .child(div().text_sm().text_color(hx.tx1).child("No project or folder"))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(hx.tx2)
-                        .child("There is no project / folder selected or created. Create your first one!"),
-                )
-                .into_any_element();
-        };
-        let (adds, dels) = self.diff.totals();
-        let review_count = self.resolve().map_or(0, |r| self.review.count(&r.key));
-        let clearing_review = self.clearing_review;
-
-        let mut panel = div()
-            .flex()
-            .flex_col()
-            .flex_none()
-            .w(px(self.prefs.diff_width))
-            .h_full()
-            .bg(hx.bg1)
-            .border_l_1()
-            .border_color(hx.border)
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap_2()
-                    .h(px(34.0))
-                    .px_3()
-                    .border_b_1()
-                    .border_color(hx.border)
-                    .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx2).child("DIFF"))
-                    .child(div().flex_1().min_w_0().text_xs().font_family(hx.font_mono).text_color(hx.tx1).overflow_hidden().child(r.branch.clone()))
-                    // Markdown is the one case where the diff is usually the
-                    // wrong view: wrapped prose becomes long `+` lines with no
-                    // structure. Offer the rendered document instead, like the
-                    // editor does.
-                    .when(
-                        self.diff_file.as_deref().is_some_and(crate::markdown_preview::is_markdown),
-                        |d| {
-                            let previewing = self.md_preview.is_some();
-                            d.child(
-                                div()
-                                    .id("md-preview-toggle")
-                                    .flex_none()
-                                    .px_1p5()
-                                    .rounded_md()
-                                    .text_xs()
-                                    .text_color(if previewing { hx.accent } else { hx.tx2 })
-                                    .cursor_pointer()
-                                    .hover(|h| h.bg(hx.surface))
-                                    .child(if previewing { "◨ diff" } else { "◧ preview" })
-                                    .on_click(cx.listener(|ws, _, _, cx| ws.toggle_md_preview(cx))),
-                            )
-                        },
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_between()
-                    .px_3()
-                    .py_2()
-                    .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx0).child(
-                        if self.diff_pending {
-                            "Changed files  …".to_string()
-                        } else {
-                            format!("Changed files  {}", self.diff.files.len())
-                        },
-                    ))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_xs()
-                            .font_family(hx.font_mono)
-                            .when(review_count > 0, |d| {
-                                d.child(
-                                    div()
-                                        .id("copy-review")
-                                        .px_1p5()
-                                        .rounded_md()
-                                        .text_color(hx.amber)
-                                        .cursor_pointer()
-                                        .hover(|h| h.bg(hx.surface))
-                                        .child(format!("⌸ {review_count}"))
-                                        .on_click(cx.listener(|ws, _, _, cx| ws.copy_review(cx))),
-                                )
-                                .child(
-                                    // Two-click confirm, like worktree delete:
-                                    // a review is real work to lose.
-                                    div()
-                                        .id("clear-review")
-                                        .px_1()
-                                        .rounded_md()
-                                        .text_color(hx.tx2)
-                                        .cursor_pointer()
-                                        .hover(|h| h.bg(hx.surface).text_color(hx.red))
-                                        .child(if clearing_review { "sure?" } else { "×" })
-                                        .on_click(cx.listener(|ws, _, _, cx| ws.clear_review(cx))),
-                                )
-                            })
-                            .child(div().text_color(hx.green).child(format!("+{adds}")))
-                            .child(div().text_color(hx.red).child(format!("−{dels}"))),
-                    ),
-            );
-
-        // Scrollable and height-capped: a worktree with fifty changed files
-        // would otherwise push the diff preview off the bottom of the panel
-        // entirely, which is the same "can't see it" problem as the preview.
-        let mut files = div()
-            .id("diff-files")
-            .flex()
-            .flex_col()
-            .flex_none()
-            .h(px(self.prefs.diff_split))
-            .overflow_y_scroll()
-            .px_2()
-            .pb_1();
-        if self.diff.files.is_empty() {
-            files = files.child(div().px_2().py_1().text_xs().text_color(hx.tx2).child("no changes vs merge-base"));
-        }
-        for (i, file) in self.diff.files.iter().enumerate() {
-            let path = file.path.clone();
-            let is_sel = self.diff_file.as_deref() == Some(file.path.as_str());
-            let badge_color = match file.change {
-                Change::Added => hx.green,
-                Change::Deleted => hx.red,
-                Change::Renamed => hx.accent,
-                _ => hx.amber,
-            };
-            files = files.child(
-                div()
-                    .id(("difffile", i))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .when(is_sel, |d| d.bg(hx.surface))
-                    .cursor_pointer()
-                    .hover(|d| d.bg(hx.surface))
-                    .on_click(cx.listener(move |ws, _, _, cx| {
-                        ws.diff_file = if ws.diff_file.as_deref() == Some(path.as_str()) {
-                            None
-                        } else {
-                            Some(path.clone())
-                        };
-                        // The preview snapshots file contents, so it belongs to
-                        // one selection and must not survive into the next.
-                        ws.md_preview = None;
-                        cx.notify();
-                    }))
-                    .child(div().flex_none().w(px(12.0)).text_xs().font_family(hx.font_mono).text_color(badge_color).child(file.change.badge().to_string()))
-                    .child(div().flex_1().min_w_0().text_xs().font_family(hx.font_mono).text_color(hx.tx1).overflow_hidden().child(file.path.clone()))
-                    .child(div().flex_none().text_xs().font_family(hx.font_mono).text_color(hx.green).child(format!("+{}", file.adds)))
-                    .child(div().flex_none().text_xs().font_family(hx.font_mono).text_color(hx.red).child(format!("−{}", file.dels))),
-            );
-        }
-        panel = panel.child(files).child(self.splitter(hx, Drag::DiffSplit, cx));
-
+    /// The unified diff body, rendered inline beneath the file it belongs
+    /// to (or beneath the whole list when no single file is selected).
+    fn render_diff_body(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
         let mut preview = div()
             .id("diff-preview")
             .flex()
             .flex_col()
-            .flex_1()
-            .min_h_0()
-            .m_2()
+            .flex_none()
+            .my_1()
             .rounded_md()
             .bg(hx.bg0)
             .border_1()
             .border_color(hx.border)
-            // Both axes. `overflow_scroll` alone was not enough: in a flex
-            // column, children stretch to the container's cross-axis size, so
-            // every row was exactly as wide as the panel and the content never
-            // exceeded it — nothing to scroll horizontally, however long the
-            // line. `items_start` lets rows size to their content instead.
             .items_start()
-            .overflow_scroll()
             .text_xs()
             .font_family(hx.font_mono);
         let unified = self.unified_for_selected();
@@ -2665,7 +2541,201 @@ impl HarnessWorkspace {
                 );
             }
         }
-        panel.child(preview).into_any_element()
+        preview.into_any_element()
+    }
+
+    fn render_diff_panel(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
+        let Some(r) = self.resolve() else {
+            return div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .w(px(self.prefs.diff_width))
+                .h_full()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .px_3()
+                .bg(hx.bg1)
+                .border_l_1()
+                .border_color(hx.border)
+                .child(div().text_sm().text_color(hx.tx1).child("No project or folder"))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(hx.tx2)
+                        .child("There is no project / folder selected or created. Create your first one!"),
+                )
+                .into_any_element();
+        };
+        let (adds, dels) = self.diff.totals();
+        let review_count = self.resolve().map_or(0, |r| self.review.count(&r.key));
+        let clearing_review = self.clearing_review;
+
+        let mut panel = div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w(px(self.prefs.diff_width))
+            .h_full()
+            .bg(hx.bg1)
+            .border_l_1()
+            .border_color(hx.border)
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap_2()
+                    .h(px(34.0))
+                    .px_3()
+                    .border_b_1()
+                    .border_color(hx.border)
+                    .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx2).child("DIFF"))
+                    .child(div().flex_1().min_w_0().text_xs().font_family(hx.font_mono).text_color(hx.tx1).overflow_hidden().child(r.branch.clone()))
+                    // Markdown is the one case where the diff is usually the
+                    // wrong view: wrapped prose becomes long `+` lines with no
+                    // structure. Offer the rendered document instead, like the
+                    // editor does.
+                    .when(
+                        self.diff_file.as_deref().is_some_and(crate::markdown_preview::is_markdown),
+                        |d| {
+                            let previewing = self.md_preview.is_some();
+                            d.child(
+                                div()
+                                    .id("md-preview-toggle")
+                                    .flex_none()
+                                    .px_1p5()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(if previewing { hx.accent } else { hx.tx2 })
+                                    .cursor_pointer()
+                                    .hover(|h| h.bg(hx.surface))
+                                    .child(if previewing { "◨ diff" } else { "◧ preview" })
+                                    .on_click(cx.listener(|ws, _, _, cx| ws.toggle_md_preview(cx))),
+                            )
+                        },
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_between()
+                    .px_3()
+                    .py_2()
+                    .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx0).child(
+                        if self.diff_pending {
+                            "Changed files  …".to_string()
+                        } else {
+                            format!("Changed files  {}", self.diff.files.len())
+                        },
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_xs()
+                            .font_family(hx.font_mono)
+                            .when(review_count > 0, |d| {
+                                d.child(
+                                    div()
+                                        .id("copy-review")
+                                        .px_1p5()
+                                        .rounded_md()
+                                        .text_color(hx.amber)
+                                        .cursor_pointer()
+                                        .hover(|h| h.bg(hx.surface))
+                                        .child(format!("⌸ {review_count}"))
+                                        .on_click(cx.listener(|ws, _, _, cx| ws.copy_review(cx))),
+                                )
+                                .child(
+                                    // Two-click confirm, like worktree delete:
+                                    // a review is real work to lose.
+                                    div()
+                                        .id("clear-review")
+                                        .px_1()
+                                        .rounded_md()
+                                        .text_color(hx.tx2)
+                                        .cursor_pointer()
+                                        .hover(|h| h.bg(hx.surface).text_color(hx.red))
+                                        .child(if clearing_review { "sure?" } else { "×" })
+                                        .on_click(cx.listener(|ws, _, _, cx| ws.clear_review(cx))),
+                                )
+                            })
+                            .child(div().text_color(hx.green).child(format!("+{adds}")))
+                            .child(div().text_color(hx.red).child(format!("−{dels}"))),
+                    ),
+            );
+
+        // One scroller holding the file list, with the selected file's diff
+        // expanded directly beneath its row — so the diff is next to the name
+        // it belongs to instead of in a separate pane you have to look away to.
+        let mut files = div()
+            .id("diff-files")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .items_start()
+            .overflow_scroll()
+            .px_2()
+            .pb_1();
+        if self.diff.files.is_empty() {
+            files = files.child(div().px_2().py_1().text_xs().text_color(hx.tx2).child("no changes vs merge-base"));
+        }
+        for (i, file) in self.diff.files.iter().enumerate() {
+            let path = file.path.clone();
+            let is_sel = self.diff_file.as_deref() == Some(file.path.as_str());
+            let badge_color = match file.change {
+                Change::Added => hx.green,
+                Change::Deleted => hx.red,
+                Change::Renamed => hx.accent,
+                _ => hx.amber,
+            };
+            files = files.child(
+                div()
+                    .id(("difffile", i))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .when(is_sel, |d| d.bg(hx.surface))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(hx.surface))
+                    .on_click(cx.listener(move |ws, _, _, cx| {
+                        ws.diff_file = if ws.diff_file.as_deref() == Some(path.as_str()) {
+                            None
+                        } else {
+                            Some(path.clone())
+                        };
+                        // The preview snapshots file contents, so it belongs to
+                        // one selection and must not survive into the next.
+                        ws.md_preview = None;
+                        cx.notify();
+                    }))
+                    .child(div().flex_none().w(px(12.0)).text_xs().font_family(hx.font_mono).text_color(badge_color).child(file.change.badge().to_string()))
+                    .child(div().flex_1().min_w_0().text_xs().font_family(hx.font_mono).text_color(hx.tx1).overflow_hidden().child(file.path.clone()))
+                    .child(div().flex_none().text_xs().font_family(hx.font_mono).text_color(hx.green).child(format!("+{}", file.adds)))
+                    .child(div().flex_none().text_xs().font_family(hx.font_mono).text_color(hx.red).child(format!("−{}", file.dels))),
+            );
+            // The diff for the file you just clicked, directly under its name.
+            if is_sel {
+                files = files.child(self.render_diff_body(hx, cx));
+            }
+        }
+        // Nothing selected: show the whole diff below the list, as before.
+        if self.diff_file.is_none() && !self.diff.files.is_empty() {
+            files = files.child(self.render_diff_body(hx, cx));
+        }
+        panel = panel.child(files);
+
+        panel.into_any_element()
+
     }
 }
 
@@ -2692,11 +2762,17 @@ impl Render for HarnessWorkspace {
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_sidebar(&hx, cx))
-                    .child(self.splitter(&hx, Drag::Sidebar, cx))
+                    // Collapsing hides the splitter too — a resize handle for
+                    // a panel that isn't there is just a dead strip of chrome.
+                    .when(self.prefs.sidebar_open, |d| {
+                        d.child(self.render_sidebar(&hx, cx))
+                            .child(self.splitter(&hx, Drag::Sidebar, cx))
+                    })
                     .child(self.render_center(&hx, cx))
-                    .child(self.splitter(&hx, Drag::DiffPanel, cx))
-                    .child(self.render_diff_panel(&hx, cx)),
+                    .when(self.prefs.diff_open, |d| {
+                        d.child(self.splitter(&hx, Drag::DiffPanel, cx))
+                            .child(self.render_diff_panel(&hx, cx))
+                    }),
             )
             // Drag tracking lives on the root so the pointer can leave the
             // 6px handle mid-drag without the resize stopping.
@@ -2886,8 +2962,6 @@ struct Prefs {
     dark: bool,
     sidebar_width: f32,
     diff_width: f32,
-    /// Height of the changed-files list inside the diff panel.
-    diff_split: f32,
     sidebar_open: bool,
     diff_open: bool,
 }
@@ -2898,7 +2972,6 @@ impl Default for Prefs {
             dark: true,
             sidebar_width: 280.0,
             diff_width: 340.0,
-            diff_split: 220.0,
             sidebar_open: true,
             diff_open: true,
         }
@@ -2911,7 +2984,6 @@ impl Prefs {
     fn sanitized(mut self) -> Self {
         self.sidebar_width = self.sidebar_width.clamp(180.0, 640.0);
         self.diff_width = self.diff_width.clamp(220.0, 800.0);
-        self.diff_split = self.diff_split.clamp(60.0, 600.0);
         self
     }
 }
@@ -3204,17 +3276,15 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
 
     #[test]
     fn panel_sizes_are_clamped_so_a_drag_cannot_make_one_unrecoverable() {
-        let squashed = Prefs { sidebar_width: 0.0, diff_width: -50.0, diff_split: 0.0, ..Prefs::default() }
+        let squashed = Prefs { sidebar_width: 0.0, diff_width: -50.0, ..Prefs::default() }
             .sanitized();
         assert!(squashed.sidebar_width >= 180.0);
         assert!(squashed.diff_width >= 220.0);
-        assert!(squashed.diff_split >= 60.0);
 
-        let huge = Prefs { sidebar_width: 9999.0, diff_width: 9999.0, diff_split: 9999.0, ..Prefs::default() }
+        let huge = Prefs { sidebar_width: 9999.0, diff_width: 9999.0, ..Prefs::default() }
             .sanitized();
         assert!(huge.sidebar_width <= 640.0);
         assert!(huge.diff_width <= 800.0);
-        assert!(huge.diff_split <= 600.0);
     }
 
     #[test]
