@@ -64,6 +64,7 @@ fn full_lifecycle_create_status_diff_archive_delete() {
             branch: "feat/nav".into(),
             base_ref: None,
             created_at: "2026-07-19T00:00:00Z".into(),
+            agent_kind: Default::default(),
         })
         .unwrap();
     let diff_id = mgr
@@ -74,6 +75,7 @@ fn full_lifecycle_create_status_diff_archive_delete() {
             branch: "feat/diff".into(),
             base_ref: None,
             created_at: "2026-07-19T00:00:00Z".into(),
+            agent_kind: Default::default(),
         })
         .unwrap();
 

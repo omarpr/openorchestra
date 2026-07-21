@@ -17,6 +17,84 @@ use serde::{Deserialize, Serialize};
 /// Number of avatar swatches in the design palette (§3.4).
 pub const AVATAR_PALETTE_LEN: u8 = 8;
 
+/// Which coding agent a worktree runs (§4.5, D12).
+///
+/// This lives here rather than in `agent-runtime` because it is *registry
+/// schema* — persisted per worktree and read back on every load — and keeping
+/// it here lets `agent-runtime` depend on `worktrees` without a cycle.
+///
+/// Serialized as a plain string. Unrecognized values are preserved verbatim in
+/// [`AgentKind::Other`] rather than collapsed to a catch-all variant: an older
+/// build must never rewrite a newer build's `"kimi"` as `"unknown"` and silently
+/// repoint the worktree at a different CLI.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum AgentKind {
+    /// The reference runtime — the one we train (§4.4).
+    #[default]
+    Pi,
+    OpenCode,
+    Codex,
+    ClaudeCode,
+    Kimi,
+    /// An agent this build does not know about. Round-trips unchanged.
+    Other(String),
+}
+
+impl AgentKind {
+    pub fn as_str(&self) -> &str {
+        match self {
+            AgentKind::Pi => "pi",
+            AgentKind::OpenCode => "opencode",
+            AgentKind::Codex => "codex",
+            AgentKind::ClaudeCode => "claude-code",
+            AgentKind::Kimi => "kimi",
+            AgentKind::Other(s) => s,
+        }
+    }
+
+    /// Every kind this build knows how to drive, in sidebar order.
+    pub fn known() -> [AgentKind; 5] {
+        [
+            AgentKind::Pi,
+            AgentKind::OpenCode,
+            AgentKind::Codex,
+            AgentKind::ClaudeCode,
+            AgentKind::Kimi,
+        ]
+    }
+}
+
+impl From<&str> for AgentKind {
+    fn from(s: &str) -> Self {
+        match s {
+            "pi" => AgentKind::Pi,
+            "opencode" => AgentKind::OpenCode,
+            "codex" => AgentKind::Codex,
+            "claude-code" => AgentKind::ClaudeCode,
+            "kimi" => AgentKind::Kimi,
+            other => AgentKind::Other(other.to_string()),
+        }
+    }
+}
+
+impl std::fmt::Display for AgentKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for AgentKind {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentKind {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(AgentKind::from(String::deserialize(d)?.as_str()))
+    }
+}
+
 /// A worktree card's avatar: 2-letter initials + a palette color index.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Avatar {
@@ -64,6 +142,10 @@ pub struct WorktreeEntry {
     /// (§6.1). Kept in the registry as training-data provenance (§6.4).
     #[serde(default)]
     pub archived: bool,
+    /// Which agent CLI this worktree runs (§4.5). Additive: registries written
+    /// before this field existed load as [`AgentKind::Pi`].
+    #[serde(default)]
+    pub agent_kind: AgentKind,
 }
 
 impl WorktreeEntry {

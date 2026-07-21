@@ -19,7 +19,7 @@ mod runner;
 
 pub use git::{Change, Diff, DiffFile, GitError, GitStatus, GitWorktrees, WorktreeListEntry};
 pub use registry::{
-    AVATAR_PALETTE_LEN, Avatar, Registry, RegistryError, RepoGroup, WorktreeEntry,
+    AVATAR_PALETTE_LEN, AgentKind, Avatar, Registry, RegistryError, RepoGroup, WorktreeEntry,
 };
 pub use runner::{CommandOutput, CommandRunner, SystemRunner};
 
@@ -38,6 +38,8 @@ pub struct CreateRequest {
     pub base_ref: Option<String>,
     /// ISO-8601 timestamp (caller-supplied — no clock in this crate).
     pub created_at: String,
+    /// Which agent CLI this worktree will run (§4.5). Defaults to pi.
+    pub agent_kind: AgentKind,
 }
 
 /// Errors from the lifecycle flows.
@@ -130,6 +132,7 @@ impl<R: CommandRunner> Manager<R> {
             pr_number: None,
             created_at: req.created_at,
             archived: false,
+            agent_kind: req.agent_kind,
         };
         self.registry.add(entry)?;
         self.registry.save()?;

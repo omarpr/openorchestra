@@ -1,0 +1,13 @@
+[package]
+name = "agent-runtime"
+version = "0.1.0"
+edition = "2021"
+description = "Agent-agnostic runtime adapters: one AgentRuntime per vendor CLI, normalizing optional 'needs input' signals onto one bus (architecture §4.5-4.6)"
+
+[dependencies]
+worktrees = { path = "../worktrees" }
+status-watch = { path = "../status-watch" }
+crossbeam-channel = "0.5"
+
+[dev-dependencies]
+tempfile = "3"

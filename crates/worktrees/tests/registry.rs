@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use worktrees::{Avatar, Registry, RegistryError, WorktreeEntry};
+use worktrees::{AgentKind, Avatar, Registry, RegistryError, WorktreeEntry};
 
 fn entry(repo: &str, slug: &str) -> WorktreeEntry {
     WorktreeEntry {
@@ -18,7 +18,68 @@ fn entry(repo: &str, slug: &str) -> WorktreeEntry {
         pr_number: None,
         created_at: "2026-07-19T00:00:00Z".to_string(),
         archived: false,
+        agent_kind: AgentKind::default(),
     }
+}
+
+// ---- agent_kind (§4.5 / §6.1, additive field) ------------------------------
+
+#[test]
+fn agent_kind_defaults_to_pi_when_absent() {
+    // Registries written before the field existed must still load, as pi.
+    let legacy = r#"{"entries":[{
+        "id":"app/nav","repo":"app","repo_root":"/repos/app","branch":"feat/nav",
+        "task_slug":"nav","name":"nav","path":"/wt/app/nav",
+        "avatar":{"initials":"NA","color":1},
+        "created_at":"2026-07-19T00:00:00Z"
+    }]}"#;
+    let reg: Registry = serde_json::from_str(legacy).unwrap();
+    assert_eq!(reg.get("app/nav").unwrap().agent_kind, AgentKind::Pi);
+}
+
+#[test]
+fn agent_kind_serializes_as_the_documented_wire_strings() {
+    for (kind, wire) in [
+        (AgentKind::Pi, "pi"),
+        (AgentKind::OpenCode, "opencode"),
+        (AgentKind::Codex, "codex"),
+        (AgentKind::ClaudeCode, "claude-code"),
+        (AgentKind::Kimi, "kimi"),
+    ] {
+        assert_eq!(serde_json::to_string(&kind).unwrap(), format!("\"{wire}\""));
+        assert_eq!(
+            serde_json::from_str::<AgentKind>(&format!("\"{wire}\"")).unwrap(),
+            kind
+        );
+        assert_eq!(kind.as_str(), wire);
+    }
+}
+
+#[test]
+fn unknown_agent_kind_round_trips_losslessly() {
+    // An older build must not silently rewrite a newer build's agent to
+    // "unknown" — that would repoint the worktree at the wrong CLI.
+    let kind: AgentKind = serde_json::from_str("\"some-future-agent\"").unwrap();
+    assert_eq!(kind, AgentKind::Other("some-future-agent".to_string()));
+    assert_eq!(serde_json::to_string(&kind).unwrap(), "\"some-future-agent\"");
+    assert_eq!(kind.as_str(), "some-future-agent");
+}
+
+#[test]
+fn agent_kind_survives_a_registry_save_load_cycle() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("registry.json");
+    let mut reg = Registry::new_at(&path);
+    let mut e = entry("app", "nav");
+    e.agent_kind = AgentKind::ClaudeCode;
+    reg.add(e).unwrap();
+    reg.save().unwrap();
+
+    let loaded = Registry::load(&path).unwrap();
+    assert_eq!(
+        loaded.get("app/nav").unwrap().agent_kind,
+        AgentKind::ClaudeCode
+    );
 }
 
 #[test]

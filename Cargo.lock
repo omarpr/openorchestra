@@ -3,6 +3,16 @@
 version = 4
 
 [[package]]
+name = "agent-runtime"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "status-watch",
+ "tempfile",
+ "worktrees",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
