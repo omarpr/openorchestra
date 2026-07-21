@@ -6,11 +6,21 @@
 //! only uses them on graceful (`.upgrade().ok()`) paths — never on construction
 //! or render — so we pass invalid handles and never create a real Workspace.
 //!
-//! On creation the pane runs `pi` (worktree tabs) or a plain shell (`main`, D8)
-//! with cwd = the configured root. When the process exits (e.g. you quit pi) the
-//! pane respawns a plain shell in the same dir, so the tab stays usable.
+//! On creation the pane runs **whichever agent the worktree records**
+//! (§4.5) — pi, opencode, claude, codex, kimi — or a plain shell on the
+//! read-only `main` entry (D8), with cwd = the configured root. When the
+//! process exits (e.g. you quit the agent) the pane respawns a plain shell in
+//! the same dir, so the tab stays usable.
+//!
+//! The command is not resolved here: an [`AgentCommand`] comes from the
+//! worktree's `AgentRuntime` adapter, which has already run `on_spawn` to drop
+//! in whatever config that agent needs to expose a status signal. A `None`
+//! command means the CLI is not installed — a plain shell, not an error, since
+//! a terminal is still useful.
 
 use std::path::PathBuf;
+
+use agent_runtime::AgentCommand;
 
 use gpui::{
     App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, Render, Styled,
@@ -40,9 +50,11 @@ pub struct TerminalPane {
 }
 
 impl TerminalPane {
+    /// `agent` is the resolved command for this worktree's agent, or `None` for
+    /// a plain shell (the `main` entry, or an agent that is not installed).
     pub fn new(
         worktree_root: PathBuf,
-        spawn_agent: bool,
+        agent: Option<AgentCommand>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -56,22 +68,30 @@ impl TerminalPane {
             respawn_pending: false,
             focus_handle: cx.focus_handle(),
         };
-        this.spawn(spawn_agent, window, cx);
+        this.spawn(agent, window, cx);
         this
     }
 
-    fn spawn(&mut self, use_agent: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let (shell, spawned) = match use_agent.then(resolve_pi).flatten() {
-            Some(pi) => (
-                Shell::WithArguments {
-                    program: pi.to_string_lossy().into_owned(),
-                    args: Vec::new(),
-                    title_override: Some("pi".to_string()),
-                },
-                format!("pi ({})", pi.display()),
-            ),
-            None if use_agent => (Shell::System, "$SHELL (pi not found on PATH)".to_string()),
-            None => (Shell::System, "$SHELL".to_string()),
+    fn spawn(
+        &mut self,
+        agent: Option<AgentCommand>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (shell, spawned, env) = match agent {
+            Some(cmd) => {
+                let spawned = format!("{} ({})", cmd.label, cmd.program.display());
+                (
+                    Shell::WithArguments {
+                        program: cmd.program.to_string_lossy().into_owned(),
+                        args: cmd.args,
+                        title_override: Some(cmd.label),
+                    },
+                    spawned,
+                    cmd.env,
+                )
+            }
+            None => (Shell::System, "$SHELL".to_string(), Vec::new()),
         };
 
         self.spawned = spawned;
@@ -82,7 +102,9 @@ impl TerminalPane {
             Some(self.worktree_root.clone()),
             None,
             shell,
-            Default::default(),
+            // The adapter's env (e.g. HARNESS_AGENT_SCHEMA, so the pi tool
+            // extension finds the contract from inside a packaged .app).
+            env.into_iter().collect(),
             SettingsCursorShape::default(),
             AlternateScroll::On,
             None,
@@ -148,7 +170,9 @@ impl Render for TerminalPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.respawn_pending {
             self.respawn_pending = false;
-            self.spawn(false, window, cx);
+            // Respawn a plain shell, not the agent: quitting the agent is a
+            // deliberate act, and relaunching it would trap the user in a loop.
+            self.spawn(None, window, cx);
         }
         let hx = theme(cx).clone();
         match &self.view {
@@ -165,29 +189,4 @@ impl Render for TerminalPane {
                 ),
         }
     }
-}
-
-/// Find `pi` on $PATH (npm `@mariozechner/pi-coding-agent`).
-fn resolve_pi() -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join("pi");
-        if is_executable(&candidate) {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-#[cfg(unix)]
-fn is_executable(path: &std::path::Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    path.metadata()
-        .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-fn is_executable(path: &std::path::Path) -> bool {
-    path.is_file()
 }

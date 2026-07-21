@@ -21,8 +21,10 @@ use gpui::{
     Window, div, prelude::*, px, rgb,
 };
 
+use agent_runtime::{
+    runtime_for, AgentKind, AgentSignal, AgentState, Bus, StatusFileSource, WaitFidelity,
+};
 use forge::{BranchKey, BranchStatus, CheckStatus, ForgeUpdate, GhCli, Poller, PollerConfig, PrState};
-use status_watch::{AgentState, StatusEvent, StatusWatcher};
 use worktrees::{Change, CreateRequest, GitWorktrees, Manager, Registry, SystemRunner};
 
 use crate::data::{compute_diff, WorkspaceData};
@@ -71,7 +73,9 @@ struct PaneSet {
 struct Resolved {
     key: String,
     path: PathBuf,
-    spawn_agent: bool,
+    /// Which agent this entry runs, or `None` for the read-only `main`
+    /// checkout, which gets a plain shell (D8).
+    agent_kind: Option<AgentKind>,
     compare_ref: String,
     branch: String,
 }
@@ -102,8 +106,15 @@ pub struct HarnessWorkspace {
     note: String,
     forge_status: HashMap<String, BranchStatus>,
     agent_status: HashMap<PathBuf, AgentState>,
+    /// Fidelity of the adapter behind each worktree's status, so the UI can be
+    /// honest about how much the pill actually knows (R11).
+    agent_fidelity: HashMap<PathBuf, WaitFidelity>,
     _poller: Option<Poller>,
-    watcher: Option<StatusWatcher>,
+    /// One watcher for every StatusFile-signalled worktree (pi, Claude Code).
+    status_source: Option<StatusFileSource>,
+    /// Where the adapters materialize their extensions and shims.
+    state_dir: PathBuf,
+    bus: Bus,
     tools: ToolStatus,
     focus_handle: FocusHandle,
 }
@@ -146,16 +157,23 @@ impl HarnessWorkspace {
             .collect();
         let (poller, forge_rx) = Poller::spawn(Arc::new(GhCli::new()), branches, PollerConfig::default());
 
-        let (watcher, status_rx) = match StatusWatcher::new() {
-            Ok((mut w, rx)) => {
+        // One bus for every adapter's signal (§4.6). The sidebar pill, the
+        // status bar, and the notifier each take their own subscription, so it
+        // must fan out rather than work-steal.
+        let bus = Bus::new();
+        let status_rx = Some(bus.subscribe());
+        let status_source = match StatusFileSource::new(bus.clone()) {
+            Ok(mut source) => {
                 for e in manager.registry.active() {
-                    let _ = w.watch(&e.path);
+                    if let Err(err) = source.watch(&e.path, e.agent_kind.clone()) {
+                        log::warn!("cannot watch {}: {err}", e.path.display());
+                    }
                 }
-                (Some(w), Some(rx))
+                Some(source)
             }
             Err(e) => {
                 log::warn!("status watcher unavailable: {e}");
-                (None, None)
+                None
             }
         };
 
@@ -186,8 +204,11 @@ impl HarnessWorkspace {
             note: String::new(),
             forge_status: HashMap::new(),
             agent_status: HashMap::new(),
+            agent_fidelity: HashMap::new(),
             _poller: Some(poller),
-            watcher,
+            status_source,
+            state_dir: data_dir.clone(),
+            bus,
             tools: detect_tools(),
             focus_handle: cx.focus_handle(),
         };
@@ -241,9 +262,82 @@ impl HarnessWorkspace {
         cx.notify();
     }
 
-    fn apply_agent(&mut self, ev: StatusEvent, cx: &mut Context<Self>) {
-        self.agent_status.insert(ev.worktree_root, ev.status.state);
+    fn apply_agent(&mut self, signal: AgentSignal, cx: &mut Context<Self>) {
+        let previous = self.agent_status.insert(signal.worktree_root.clone(), signal.state);
+
+        // Record the session file the moment an adapter reports one: it is the
+        // harvesting hook M7 reads, and pi only learns it after startup.
+        if let (Some(session), Some(id)) = (
+            &signal.session_file,
+            self.worktree_id_for_path(&signal.worktree_root),
+        ) {
+            let changed = self
+                .manager
+                .registry
+                .get(&id)
+                .is_none_or(|e| e.session_file.as_deref() != Some(session.as_path()));
+            if changed {
+                let _ = self
+                    .manager
+                    .registry
+                    .set_session_file(&id, Some(session.clone()));
+                let _ = self.manager.registry.save();
+            }
+        }
+
+        // Notify on any *transition* into Waiting, and only when the adapter's
+        // signal is exact (R11) — a best-effort turn-complete dressed up as
+        // "input needed" is the one thing that would make this noise.
+        let fidelity = self
+            .agent_fidelity
+            .get(&signal.worktree_root)
+            .copied()
+            .unwrap_or(WaitFidelity::TerminalOnly);
+        if previous != Some(signal.state) && signal.should_notify(fidelity) {
+            self.notify_needs_input(&signal);
+        }
         cx.notify();
+    }
+
+    /// Post a native "needs input" notification, unless the user is already
+    /// looking at that worktree — telling someone about the prompt they are
+    /// staring at is pure noise (§4.6).
+    fn notify_needs_input(&self, signal: &AgentSignal) {
+        if self
+            .resolve()
+            .is_some_and(|active| active.path == signal.worktree_root)
+        {
+            return;
+        }
+        let entry = self
+            .manager
+            .registry
+            .entries()
+            .iter()
+            .find(|e| e.path == signal.worktree_root);
+        let (name, repo) = match entry {
+            Some(e) => (e.name.clone(), e.repo.clone()),
+            None => (String::new(), String::new()),
+        };
+        crate::notifier::notify_needs_input(
+            &crate::notifier::label_for(&name, &signal.worktree_root),
+            &repo,
+            match signal.reason {
+                agent_runtime::WaitReason::PermissionPrompt => "waiting for approval",
+                agent_runtime::WaitReason::IdlePrompt => "waiting for your next instruction",
+                _ => "needs input",
+            },
+        );
+    }
+
+    /// Resolve a worktree path back to its registry id.
+    fn worktree_id_for_path(&self, path: &Path) -> Option<String> {
+        self.manager
+            .registry
+            .entries()
+            .iter()
+            .find(|e| e.path == path)
+            .map(|e| e.id.clone())
     }
 
     // ---- selection resolution (None when no folder is open) --------------
@@ -253,7 +347,7 @@ impl HarnessWorkspace {
         let main_of = |r: &crate::data::RepoView| Resolved {
             key: format!("main:{}", r.name),
             path: r.repo_root.clone(),
-            spawn_agent: false,
+            agent_kind: None,
             compare_ref: r.compare_ref.clone(),
             branch: r.default_branch.clone(),
         };
@@ -268,7 +362,13 @@ impl HarnessWorkspace {
                         return Some(Resolved {
                             key: id.clone(),
                             path: w.path.clone(),
-                            spawn_agent: true,
+                            agent_kind: Some(
+                                self.manager
+                                    .registry
+                                    .get(id)
+                                    .map(|e| e.agent_kind.clone())
+                                    .unwrap_or_default(),
+                            ),
                             compare_ref: r.compare_ref.clone(),
                             branch: w.branch.clone(),
                         });
@@ -284,9 +384,40 @@ impl HarnessWorkspace {
         if self.panes.contains_key(&r.key) {
             return;
         }
-        let terminal = cx.new(|cx| TerminalPane::new(r.path.clone(), r.spawn_agent, window, cx));
+        // Build the adapter for whatever agent this worktree records (§4.5),
+        // let it drop in its config, then run the command it names. A failing
+        // on_spawn costs the status signal, never the terminal.
+        let agent_command = r.agent_kind.as_ref().and_then(|kind| {
+            let runtime = runtime_for(kind, &r.path, &self.state_dir);
+            if let Err(e) = runtime.on_spawn(&r.path) {
+                log::warn!("{kind} setup failed for {}: {e}", r.path.display());
+            }
+            self.agent_fidelity.insert(r.path.clone(), runtime.fidelity());
+            // Adapters that stream their own signals (OpenCode's SSE) publish
+            // straight onto the shared bus; file-based ones are already served
+            // by StatusFileSource.
+            if let Some(rx) = runtime.subscribe() {
+                let bus = self.bus.clone();
+                std::thread::Builder::new()
+                    .name("agent-signal-forward".into())
+                    .spawn(move || {
+                        for signal in rx {
+                            bus.publish(signal);
+                        }
+                    })
+                    .ok();
+            }
+            let command = runtime.command(&r.path);
+            if command.is_none() {
+                log::info!("{kind} not on PATH — falling back to a plain shell");
+            }
+            command
+        });
+        let spawns_agent = agent_command.is_some();
+
+        let terminal = cx.new(|cx| TerminalPane::new(r.path.clone(), agent_command, window, cx));
         let editor = cx.new(|cx| EditorPane::new(&r.path, window, cx));
-        let active_tab = if r.spawn_agent {
+        let active_tab = if spawns_agent {
             ActiveTab::Terminal
         } else {
             ActiveTab::Editor
@@ -345,9 +476,17 @@ impl HarnessWorkspace {
                 });
             }
         }
-        if let Some(watcher) = &mut self.watcher {
+        if let Some(source) = &mut self.status_source {
             for (_, _, path) in &items {
-                let _ = watcher.watch(path);
+                let kind = self
+                    .manager
+                    .registry
+                    .entries()
+                    .iter()
+                    .find(|e| &e.path == path)
+                    .map(|e| e.agent_kind.clone())
+                    .unwrap_or_default();
+                let _ = source.watch(path, kind);
             }
         }
 
@@ -517,6 +656,9 @@ impl HarnessWorkspace {
             branch: format!("feat/{slug}"),
             base_ref: Some(repo.compare_ref.clone()),
             created_at: now_stamp(),
+            // pi is the reference runtime and the default (§4.4). Choosing a
+            // peer per worktree is the natural next step in the create dialog.
+            agent_kind: AgentKind::Pi,
         };
         match self.manager.create(req) {
             Ok(id) => {

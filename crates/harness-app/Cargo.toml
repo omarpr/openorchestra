@@ -55,6 +55,9 @@ worktrees = { path = "../worktrees" }
 # or pi are absent.
 forge = { path = "../forge" }
 status-watch = { path = "../status-watch" }
+# The agent-agnostic layer (§4.5-4.6): picks the CLI per worktree, drops in the
+# per-agent config, and normalizes every adapter's signal onto one bus.
+agent-runtime = { path = "../agent-runtime" }
 
 # Proper terminal view (pty sizing, input, IME, scrollback, selection) replacing
 # the custom renderer. workspace + project are already compiled transitively by

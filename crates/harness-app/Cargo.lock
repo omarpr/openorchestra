@@ -129,6 +129,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-runtime"
+version = "0.1.0"
+dependencies = [
+ "agent-schema",
+ "crossbeam-channel",
+ "serde_json",
+ "status-watch",
+ "worktrees",
+]
+
+[[package]]
+name = "agent-schema"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "agent_settings"
 version = "0.1.0"
 source = "git+https://github.com/zed-industries/zed.git?rev=952d712dac48a4af2c54fb22c82d82a9d69b72d4#952d712dac48a4af2c54fb22c82d82a9d69b72d4"
@@ -4188,6 +4207,7 @@ dependencies = [
 name = "harness-app"
 version = "0.1.0"
 dependencies = [
+ "agent-runtime",
  "anyhow",
  "editor",
  "env_logger",
