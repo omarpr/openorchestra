@@ -1515,25 +1515,47 @@ impl HarnessWorkspace {
             )
     }
 
+    /// The sidebar footer: the only way in when nothing is open, so it gets
+    /// its own region rather than floating as the last item in a scrolling
+    /// list.
+    ///
+    /// It sits in a padded, top-bordered strip because the sidebar column is
+    /// `overflow_hidden` and full height — a button flush against that edge had
+    /// its own border clipped off by the container.
     fn add_folder_button(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .id("add-folder")
             .flex()
-            .items_center()
-            .justify_center()
-            .gap_1()
-            .mx_2()
-            .mt_2()
-            .py_1()
-            .rounded_md()
-            .border_1()
-            .border_color(hx.border2)
-            .text_sm()
-            .text_color(hx.tx1)
-            .cursor_pointer()
-            .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
-            .on_click(cx.listener(|ws, _, window, cx| ws.add_folder(window, cx)))
-            .child("＋ Add folder")
+            .flex_none()
+            .p_2()
+            .border_t_1()
+            .border_color(hx.border)
+            .child(
+                div()
+                    .id("add-folder")
+                    .flex()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .gap_1p5()
+                    .h(px(30.0))
+                    .rounded_md()
+                    .bg(hx.surface)
+                    .border_1()
+                    .border_color(hx.border2)
+                    .text_sm()
+                    .text_color(hx.tx1)
+                    .cursor_pointer()
+                    .hover(|d| {
+                        d.bg(hx.surface_hover)
+                            .border_color(hx.accent)
+                            .text_color(hx.tx0)
+                    })
+                    .on_click(cx.listener(|ws, _, window, cx| ws.add_folder(window, cx)))
+                    // Icon and label as separate children so the gap is real
+                    // spacing rather than a space character in the glyph run.
+                    .child(div().text_color(hx.accent).child("＋"))
+                    .child("Add folder"),
+            )
     }
 
     fn render_sidebar(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1571,7 +1593,12 @@ impl HarnessWorkspace {
                     .child(div().text_sm().text_color(hx.tx1).child("No folders yet"))
                     .child(div().text_xs().text_color(hx.tx2).child("Open a git repository to begin.")),
             );
-            return column.child(self.add_folder_button(hx, cx));
+            // Spacer so the footer sits at the bottom here too. Without it the
+            // top-bordered strip would float mid-column, reading as a divider
+            // across nothing.
+            return column
+                .child(div().flex_1())
+                .child(self.add_folder_button(hx, cx));
         }
 
         let mut groups = div().flex().flex_col().flex_1().overflow_hidden().pt_1();
