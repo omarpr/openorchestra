@@ -126,37 +126,8 @@ impl HarnessTheme {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::HarnessTheme;
-
-    // Palettes are asserted without a gpui App: font resolution needs a text
-    // system, but the colors — which is what these tests are about — do not.
-    fn dark() -> HarnessTheme {
-        HarnessTheme::dark_colors()
-    }
-    fn light() -> HarnessTheme {
-        HarnessTheme::light_colors()
-    }
-
-    #[test]
-    fn palettes_are_distinguishable() {
-        assert!(dark().is_dark());
-        assert!(!light().is_dark());
-    }
-
-    #[test]
-    fn light_palette_keeps_text_readable_on_its_background() {
-        // A light theme that reused the dark palette's text colors would be
-        // unreadable; assert the contrast direction actually flipped.
-        let light = light();
-        assert!(light.bg0.r > 0.9, "light background should be near-white");
-        assert!(light.tx0.r < 0.3, "primary text should be near-black");
-        assert!(dark().tx0.r > 0.8, "dark primary text should be near-white");
-    }
-}
-
 impl Global for HarnessTheme {}
+
 
 pub fn theme(cx: &App) -> &HarnessTheme {
     cx.global::<HarnessTheme>()
@@ -212,4 +183,34 @@ fn mono_font_family(cx: &App) -> &'static str {
         if cfg!(target_os = "macos") { "Menlo" } else { "DejaVu Sans Mono" },
         cx,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HarnessTheme;
+
+    // Palettes are asserted without a gpui App: font resolution needs a text
+    // system, but the colors — which is what these tests are about — do not.
+    fn dark() -> HarnessTheme {
+        HarnessTheme::dark_colors()
+    }
+    fn light() -> HarnessTheme {
+        HarnessTheme::light_colors()
+    }
+
+    #[test]
+    fn palettes_are_distinguishable() {
+        assert!(dark().is_dark());
+        assert!(!light().is_dark());
+    }
+
+    #[test]
+    fn light_palette_keeps_text_readable_on_its_background() {
+        // A light theme that reused the dark palette's text colors would be
+        // unreadable; assert the contrast direction actually flipped.
+        let light = light();
+        assert!(light.bg0.r > 0.9, "light background should be near-white");
+        assert!(light.tx0.r < 0.3, "primary text should be near-black");
+        assert!(dark().tx0.r > 0.8, "dark primary text should be near-white");
+    }
 }

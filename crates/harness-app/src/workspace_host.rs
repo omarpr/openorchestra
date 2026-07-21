@@ -194,3 +194,79 @@ pub fn workspace_for(
 
     Ok(workspace)
 }
+
+/// Report whether a hosted workspace is actually usable, as opposed to merely
+/// constructed.
+///
+/// A blank editor pane is undiagnosable from the outside: every layer reports
+/// success individually while the tab shows nothing. This asserts the whole
+/// chain instead — the file tree is registered, its dock is open *and* has an
+/// active panel (both are required, see `workspace_for`), and the worktree scan
+/// found files. `HARNESS_PROBE_OPEN=<path-in-worktree>` additionally opens that
+/// file and reports how many items the pane ends up holding, which is the one
+/// question the state above cannot answer: whether editing works at all.
+///
+/// Deliberately state-based rather than screenshot-based, so it answers in CI
+/// and over ssh. What it cannot cover is layout — an element correct in every
+/// respect but sized to zero still logs clean here.
+pub fn probe(hosted: &Entity<Workspace>, window: &mut Window, cx: &mut App) {
+    let hosted = hosted.clone();
+    window
+        .spawn(cx, async move |cx| {
+            // The worktree scan and `ProjectPanel::load` are both async, so an
+            // immediate read is guaranteed to report zeros and prove nothing.
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(1500))
+                .await;
+
+            if let Some(rel) = std::env::var_os("HARNESS_PROBE_OPEN") {
+                probe_open(&hosted, &rel.to_string_lossy(), cx).await;
+            }
+
+            hosted.update(cx, |ws, cx| {
+                let dock = ws.left_dock().read(cx);
+                let entries: usize = ws
+                    .project()
+                    .read(cx)
+                    .visible_worktrees(cx)
+                    .map(|wt| wt.read(cx).visible_entry_count())
+                    .sum();
+                log::info!(
+                    "editor tab: dock panels={} open={} active={:?} tree_entries={entries}",
+                    dock.panels_len(),
+                    dock.is_open(),
+                    dock.active_panel_index(),
+                );
+            });
+        })
+        .detach();
+}
+
+/// Open one file in a hosted workspace and report the pane's item count.
+async fn probe_open(hosted: &Entity<Workspace>, rel: &str, cx: &mut gpui::AsyncWindowContext) {
+    let Ok(rel) = util::rel_path::RelPath::new(Path::new(rel), util::paths::PathStyle::local())
+    else {
+        log::error!("HARNESS_PROBE_OPEN: {rel:?} is not a worktree-relative path");
+        return;
+    };
+    let rel: Arc<util::rel_path::RelPath> = rel.as_ref().into();
+
+    let task = hosted.update_in(cx, |ws, window, cx| {
+        let worktree = ws.project().read(cx).visible_worktrees(cx).next()?;
+        let path = project::ProjectPath {
+            worktree_id: worktree.read(cx).id(),
+            path: rel,
+        };
+        Some(ws.open_path(path, None, true, window, cx))
+    });
+    match task {
+        Ok(Some(task)) => match task.await {
+            Ok(_) => {
+                let items = hosted.update(cx, |ws, cx| ws.active_pane().read(cx).items_len());
+                log::info!("HARNESS_PROBE_OPEN: opened; pane items = {items:?}");
+            }
+            Err(e) => log::error!("HARNESS_PROBE_OPEN: open failed: {e:#}"),
+        },
+        _ => log::error!("HARNESS_PROBE_OPEN: no visible worktree to open against"),
+    }
+}

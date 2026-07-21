@@ -756,33 +756,7 @@ impl HarnessWorkspace {
             }
             TabKind::Editor => match crate::workspace_host::workspace_for(&r.path, window, cx) {
                 Ok(hosted) => {
-                    // Report what the tab should be showing. A blank editor
-                    // pane is otherwise undiagnosable without screenshots —
-                    // this says whether the file tree is registered, open,
-                    // active, and populated, which is every precondition for
-                    // it to draw.
-                    let probe = hosted.clone();
-                    cx.spawn(async move |_, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(1500))
-                            .await;
-                        probe.update(cx, |ws, cx| {
-                            let dock = ws.left_dock().read(cx);
-                            let entries: usize = ws
-                                .project()
-                                .read(cx)
-                                .visible_worktrees(cx)
-                                .map(|wt| wt.read(cx).visible_entry_count())
-                                .sum();
-                            log::info!(
-                                "editor tab: dock panels={} open={} active={:?} tree_entries={entries}",
-                                dock.panels_len(),
-                                dock.is_open(),
-                                dock.active_panel_index(),
-                            );
-                        });
-                    })
-                    .detach();
+                    crate::workspace_host::probe(&hosted, window, cx);
                     (TabContent::Editor(hosted), "{ } editor".to_string())
                 }
                 Err(e) => {
