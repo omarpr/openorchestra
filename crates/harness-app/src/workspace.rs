@@ -140,9 +140,7 @@ pub fn readable_diff_lines(unified: &str) -> Vec<DiffRow> {
             // section heading, which is worth showing on its own. Later hunks
             // always get one, because the line numbers jump.
             if !first_hunk_of_file || !section.is_empty() {
-                // Carry the hunk's starting line: with the editor's gutter off,
-                // this header is where positional information now lives.
-                out.push(row(DiffLineKind::HunkBreak, Some(new), section));
+                out.push(row(DiffLineKind::HunkBreak, None, section));
             }
             first_hunk_of_file = false;
             continue;
@@ -177,6 +175,17 @@ pub fn readable_diff_lines(unified: &str) -> Vec<DiffRow> {
     out
 }
 
+
+/// Cap on rendered diff lines.
+///
+/// Each line is its own element, so an enormous diff would build tens of
+/// thousands of them and stall the frame. Set well above any realistic
+/// single-file hunk; when it bites, the UI says so rather than truncating
+/// silently.
+const MAX_DIFF_LINES: usize = 5000;
+
+const DIFF_ADD_TX: u32 = 0x7fdd97;
+const DIFF_DEL_TX: u32 = 0xf2868f;
 
 /// What a tab can hold. Tab sets are per worktree and fully dynamic (§3.4):
 /// a worktree can carry any number of terminals, editors, and chats.
@@ -309,11 +318,10 @@ pub struct HarnessWorkspace {
     panes: HashMap<String, PaneSet>,
     diff: worktrees::Diff,
     diff_file: Option<String>,
-    /// The read-only editor showing the current diff body.
-    diff_editor: Option<Entity<editor::Editor>>,
-    /// The rows that editor was built from, so a cursor row maps back to a
-    /// file and line for commenting.
-    diff_rows: Vec<DiffRow>,
+    /// Selected diff rows, as an inclusive index range into the rendered rows.
+    diff_selection: Option<(usize, usize)>,
+    /// True while dragging a selection.
+    diff_selecting: bool,
     /// Inline review comments, keyed by worktree (§3.4).
     review: crate::diff_review::ReviewNotes,
     review_path: PathBuf,
@@ -435,8 +443,8 @@ impl HarnessWorkspace {
             panes: HashMap::new(),
             diff: worktrees::Diff::default(),
             diff_file: None,
-            diff_editor: None,
-            diff_rows: Vec::new(),
+            diff_selection: None,
+            diff_selecting: false,
             review: crate::diff_review::ReviewNotes::load(
                 &crate::diff_review::ReviewNotes::path_in(&data_dir),
             ),
@@ -866,6 +874,45 @@ impl HarnessWorkspace {
     /// generation that requested them, so a slow diff for a worktree the user
     /// has already navigated away from is dropped rather than painted over the
     /// current one.
+    /// Copy the selected diff rows to the clipboard.
+    ///
+    /// Copies the *code*, not the diff decoration: no gutter numbers and no
+    /// +/- markers, so a pasted selection compiles.
+    fn copy_diff_selection(&mut self, cx: &mut Context<Self>) {
+        let Some((from, to)) = self.diff_selection else { return };
+        let rows = readable_diff_lines(&self.unified_for_selected());
+        let text: Vec<String> = rows
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i >= from && *i <= to)
+            .filter(|(_, r)| r.number.is_some())
+            .map(|(_, r)| r.text.clone())
+            .collect();
+        if text.is_empty() {
+            return;
+        }
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.join("\n")));
+        self.note = format!("copied {} line(s)", text.len());
+        cx.notify();
+    }
+
+    /// Begin, extend, or clear a row selection.
+    fn select_diff_row(&mut self, row: usize, extend: bool, cx: &mut Context<Self>) {
+        self.diff_selection = match (self.diff_selection, extend) {
+            // Shift-click extends from the existing anchor.
+            (Some((from, _)), true) => Some((from.min(row), from.max(row))),
+            _ => Some((row, row)),
+        };
+        cx.notify();
+    }
+
+    fn extend_diff_selection(&mut self, row: usize, cx: &mut Context<Self>) {
+        if let Some((from, _)) = self.diff_selection {
+            self.diff_selection = Some((from.min(row), from.max(row)));
+            cx.notify();
+        }
+    }
+
     /// Open the comment editor for a diff line, seeded with any existing note.
     fn begin_comment(
         &mut self,
@@ -979,50 +1026,6 @@ impl HarnessWorkspace {
             self.note = "comments discarded".to_string();
         }
         cx.notify();
-    }
-
-    /// Rebuild the diff editor for whatever is currently shown.
-    ///
-    /// Called on selection change and after a recompute, since an `Editor` owns
-    /// its buffer — a stale one would show the previous file's diff.
-    fn rebuild_diff_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let unified = self.unified_for_selected();
-        if unified.is_empty() {
-            self.diff_editor = None;
-            self.diff_rows = Vec::new();
-            return;
-        }
-        self.diff_rows = readable_diff_lines(&unified);
-        self.diff_editor = Some(crate::diff_editor::build(&unified, None, window, cx));
-        cx.notify();
-    }
-
-    /// The file and line under the diff editor's cursor, for commenting.
-    ///
-    /// The editor has no gutter to click, so the cursor is the anchor instead:
-    /// put it on a line, press the comment button. Rows carry the file they
-    /// came from, so this works in the all-files view too.
-    fn commentable_line_at_cursor(&self, cx: &App) -> Option<(String, u32)> {
-        let editor = self.diff_editor.as_ref()?;
-        // `newest_anchor` avoids needing a DisplaySnapshot; the anchor's text
-        // position is what maps to our row list anyway.
-        let editor = editor.read(cx);
-        let snapshot = editor.buffer().read(cx).snapshot(cx);
-        let row = multi_buffer::ToPoint::to_point(
-            &editor.selections.newest_anchor().head(),
-            &snapshot,
-        )
-        .row as usize;
-        let mut file = self.diff_file.clone().unwrap_or_default();
-        for (ix, r) in self.diff_rows.iter().enumerate() {
-            if r.kind == DiffLineKind::FileHeader {
-                file = r.text.clone();
-            }
-            if ix == row {
-                return r.number.filter(|_| r.kind != DiffLineKind::HunkBreak).map(|n| (file, n));
-            }
-        }
-        None
     }
 
     /// Toggle between the raw diff and a rendered preview of the selected
@@ -2439,10 +2442,9 @@ impl HarnessWorkspace {
     /// The review toolbar above the file list: how many comments there are,
     /// and what can be done with them.
     ///
-    /// Always visible, even at zero, because it also carries the "comment on
-    /// this line" action — with the editor's gutter gone, this is the entry
-    /// point, and an affordance that appears only once you already have a
-    /// comment is a chicken-and-egg.
+    /// Shown only when there is something to act on. Adding a comment is a
+    /// click on a line's gutter number in the diff itself, so this bar is
+    /// purely about what to do with the comments you already have.
     fn render_review_bar(
         &self,
         hx: &HarnessTheme,
@@ -2472,73 +2474,239 @@ impl HarnessWorkspace {
             .px_3()
             .pb_1()
             .font_family(hx.font_mono)
-            .child(
-                chip("add-comment", "＋ comment".to_string(), hx.tx2).on_click(cx.listener(
-                    |ws, ev: &gpui::ClickEvent, window, cx| {
-                        match ws.commentable_line_at_cursor(cx) {
-                            Some((file, line)) => {
-                                ws.begin_comment(file, line, ev.position(), window, cx)
-                            }
-                            None => {
-                                ws.note =
-                                    "put the cursor on a diff line first".to_string();
-                                cx.notify();
-                            }
-                        }
-                    },
-                )),
-            )
             .child(div().flex_1())
-            .when(count > 0, |d| {
-                d.child(
+            .child(div().flex_1())
+            .child(
                     div()
                         .text_xs()
                         .text_color(hx.amber)
                         .child(format!("{count} comment{}", if count == 1 { "" } else { "s" })),
                 )
-                .child(chip("copy-review", "copy".to_string(), hx.tx2).on_click(
-                    cx.listener(|ws, _, _, cx| ws.copy_review(cx)),
-                ))
-                .child(chip("save-review", "save .md".to_string(), hx.tx2).on_click(
-                    cx.listener(|ws, _, _, cx| ws.save_review_markdown(cx)),
-                ))
-                .child(
-                    chip(
+            .child(chip("copy-review", "copy".to_string(), hx.tx2).on_click(
+                cx.listener(|ws, _, _, cx| ws.copy_review(cx)),
+            ))
+            .child(chip("save-review", "save .md".to_string(), hx.tx2).on_click(
+                cx.listener(|ws, _, _, cx| ws.save_review_markdown(cx)),
+            ))
+            .child(
+                chip(
                         "clear-review",
                         if self.clearing_review { "discard?".to_string() } else { "clear".to_string() },
                         if self.clearing_review { hx.red } else { hx.tx2 },
                     )
                     .on_click(cx.listener(|ws, _, _, cx| ws.clear_review(cx))),
-                )
-            })
+            )
     }
 
-    /// The diff body: a read-only `Editor`, so text can be selected, copied,
-    /// and searched, and both axes scroll — none of which a stack of `div`
-    /// rows could do (see `diff_editor`).
-    fn render_diff_body(&self, hx: &HarnessTheme, _cx: &mut Context<Self>) -> AnyElement {
-        match &self.diff_editor {
-            Some(editor) => div()
-                .flex()
-                .flex_col()
-                .flex_none()
-                .w_full()
-                .h(px(self.prefs.diff_body_height))
-                .my_1()
-                .rounded_md()
-                .bg(hx.bg0)
-                .border_1()
-                .border_color(hx.border)
-                .child(editor.clone())
-                .into_any_element(),
-            None => div()
-                .px_2()
-                .py_1()
-                .text_xs()
-                .text_color(hx.tx2)
-                .child("—")
-                .into_any_element(),
+    /// The unified diff body, rendered inline beneath the file it belongs
+    /// to (or beneath the whole list when no single file is selected).
+    fn render_diff_body(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
+        let mut preview = div()
+            .id("diff-preview")
+            .flex()
+            .flex_col()
+            .flex_none()
+            .my_1()
+            .rounded_md()
+            .bg(hx.bg0)
+            .border_1()
+            .border_color(hx.border)
+            .items_start()
+            .text_xs()
+            .font_family(hx.font_mono);
+        let unified = self.unified_for_selected();
+        if unified.is_empty() {
+            preview = preview.child(div().p_2().text_color(hx.tx2).child("—"));
+        } else {
+            let shown = readable_diff_lines(&unified);
+            let total = shown.len();
+            let transparent = Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+            // Comments hang off (file, line); with no file selected the rows
+            // span several files, so fall back to each row's own header.
+            let worktree_key = self.resolve().map(|r| r.key);
+            let mut file_for_comments = self.diff_file.clone().unwrap_or_default();
+            for (ix, r) in shown.iter().enumerate().take(MAX_DIFF_LINES) {
+                if r.kind == DiffLineKind::FileHeader {
+                    file_for_comments = r.text.clone();
+                }
+                // A hunk boundary is a thin rule plus git's section text (the
+                // enclosing function or heading). The old `@@ -a,b +c,d @@`
+                // coordinates are gone: the gutter shows the real line numbers,
+                // which is the same information without the decoding step.
+                if r.kind == DiffLineKind::HunkBreak {
+                    preview = preview.child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .gap_2()
+                            .h(px(18.0))
+                            .px_2()
+                            .border_t_1()
+                            .border_color(hx.border)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_color(hx.tx2)
+                                    .whitespace_nowrap()
+                                    .child(r.text.clone()),
+                            ),
+                    );
+                    continue;
+                }
+
+                let (fg, bg, marker) = match r.kind {
+                    DiffLineKind::FileHeader => (hx.tx0, hx.surface, ""),
+                    DiffLineKind::Added => (rgb(DIFF_ADD_TX), tint(hx.green, 0.13), "+"),
+                    DiffLineKind::Removed => (rgb(DIFF_DEL_TX), tint(hx.red, 0.13), "−"),
+                    DiffLineKind::Context => (hx.tx2, transparent, " "),
+                    DiffLineKind::HunkBreak => unreachable!("handled above"),
+                };
+
+                let selected = self
+                    .diff_selection
+                    .is_some_and(|(from, to)| ix >= from && ix <= to);
+                let row_bg = if selected { tint(hx.accent, 0.22) } else { bg };
+
+                if r.kind == DiffLineKind::FileHeader {
+                    preview = preview.child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .h(px(15.0))
+                            .bg(row_bg)
+                            .px_2()
+                            .text_color(fg)
+                            .whitespace_nowrap()
+                            .child(r.text.clone()),
+                    );
+                    continue;
+                }
+
+                let line_no = r.number;
+                let comment_key = (file_for_comments.clone(), line_no);
+                let has_comment = line_no.is_some_and(|n| {
+                    worktree_key
+                        .as_deref()
+                        .is_some_and(|k| self.review.get(k, &file_for_comments, n).is_some())
+                });
+
+                preview = preview.child(
+                    div()
+                        .id(("diffrow", ix))
+                        .flex()
+                        .flex_none()
+                        .h(px(15.0))
+                        .bg(row_bg)
+                        .cursor_pointer()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
+                                ws.diff_selecting = true;
+                                ws.select_diff_row(ix, ev.modifiers.shift, cx);
+                            }),
+                        )
+                        // Dragging over rows extends the selection, which is
+                        // what "highlight some lines" means with a mouse.
+                        .on_mouse_move(cx.listener(move |ws, _: &MouseMoveEvent, _, cx| {
+                            if ws.diff_selecting {
+                                ws.extend_diff_selection(ix, cx);
+                            }
+                        }))
+                        .child(
+                            // Fixed-width gutter so the code column stays
+                            // aligned as numbers grow past 999. Doubles as the
+                            // comment affordance.
+                            div()
+                                .id(("diffgutter", ix))
+                                .flex_none()
+                                .w(px(46.0))
+                                .pr_1()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .when(has_comment, |d| d.bg(tint(hx.amber, 0.18)))
+                                .text_color(if has_comment { hx.amber } else { hx.tx2 })
+                                .hover(|d| d.bg(hx.surface).text_color(hx.accent))
+                                // The marker sits in a fixed slot rather than
+                                // being prefixed to the number, so commented
+                                // lines do not shift their digits sideways.
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .w(px(8.0))
+                                        .child(if has_comment { "▸" } else { "" }),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .child(line_no.map(|n| n.to_string()).unwrap_or_default()),
+                                )
+                                .on_click(cx.listener(
+                                    move |ws, ev: &gpui::ClickEvent, window, cx| {
+                                        cx.stop_propagation();
+                                        if let Some(line) = comment_key.1 {
+                                            ws.begin_comment(
+                                                comment_key.0.clone(),
+                                                line,
+                                                ev.position(),
+                                                window,
+                                                cx,
+                                            );
+                                        }
+                                    },
+                                )),
+                        )
+                        .child(div().flex_none().w(px(10.0)).text_color(fg).child(marker))
+                        .child(
+                            div()
+                                .flex_none()
+                                .pr_2()
+                                .text_color(fg)
+                                .whitespace_nowrap()
+                                .child(r.text.clone()),
+                        ),
+                );
+
+                // An existing note renders under its line, where the thing it
+                // is about is still on screen.
+                if has_comment
+                    && let (Some(k), Some(n)) = (worktree_key.as_deref(), line_no)
+                    && let Some(c) = self.review.get(k, &file_for_comments, n)
+                {
+                    preview = preview.child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .py_0p5()
+                            .pl(px(56.0))
+                            .pr_2()
+                            .bg(tint(hx.amber, 0.10))
+                            .border_l_2()
+                            .border_color(hx.amber)
+                            .text_color(hx.tx1)
+                            .child(c.body.clone()),
+                    );
+                }
+            }
+            if total > MAX_DIFF_LINES {
+                // Never truncate silently — a diff that just stops looks like
+                // the change is smaller than it is.
+                preview = preview.child(
+                    div()
+                        .flex_none()
+                        .h(px(15.0))
+                        .px_2()
+                        .text_color(hx.amber)
+                        .child(format!(
+                            "… {} more lines — select a single file, or view the full diff in git",
+                            total - MAX_DIFF_LINES
+                        )),
+                );
+            }
         }
+        preview.into_any_element()
     }
 
     fn render_diff_panel(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
@@ -2677,7 +2845,7 @@ impl HarnessWorkspace {
                     .when(is_sel, |d| d.bg(hx.surface))
                     .cursor_pointer()
                     .hover(|d| d.bg(hx.surface))
-                    .on_click(cx.listener(move |ws, _, window, cx| {
+                    .on_click(cx.listener(move |ws, _, _, cx| {
                         ws.diff_file = if ws.diff_file.as_deref() == Some(path.as_str()) {
                             None
                         } else {
@@ -2687,7 +2855,6 @@ impl HarnessWorkspace {
                         // they belong to one selection and must not survive
                         // into the next.
                         ws.md_preview = None;
-                        ws.rebuild_diff_editor(window, cx);
                         cx.notify();
                     }))
                     .child(div().flex_none().w(px(12.0)).text_xs().font_family(hx.font_mono).text_color(badge_color).child(file.change.badge().to_string()))
@@ -2704,7 +2871,10 @@ impl HarnessWorkspace {
         if self.diff_file.is_none() && !self.diff.files.is_empty() {
             files = files.child(self.render_diff_body(hx, cx));
         }
-        panel = panel.child(self.render_review_bar(hx, review_count, cx)).child(files);
+        if review_count > 0 {
+            panel = panel.child(self.render_review_bar(hx, review_count, cx));
+        }
+        panel = panel.child(files);
 
         panel.into_any_element()
 
@@ -2748,6 +2918,9 @@ impl Render for HarnessWorkspace {
             )
             // Drag tracking lives on the root so the pointer can leave the
             // 6px handle mid-drag without the resize stopping.
+            .on_action(cx.listener(|ws, _: &crate::CopyDiffSelection, _, cx| {
+                ws.copy_diff_selection(cx)
+            }))
             .on_action(cx.listener(|ws, _: &crate::NewTerminal, window, cx| {
                 ws.open_tab(TabKind::Shell, window, cx)
             }))
@@ -2760,7 +2933,10 @@ impl Render for HarnessWorkspace {
             .on_mouse_move(cx.listener(|ws, ev: &MouseMoveEvent, _, cx| ws.drag_move(ev, cx)))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|ws, _: &MouseUpEvent, _, cx| ws.end_drag(cx)),
+                cx.listener(|ws, _: &MouseUpEvent, _, cx| {
+                    ws.diff_selecting = false;
+                    ws.end_drag(cx);
+                }),
             );
 
         if let Some(m) = &self.menu {
@@ -2928,8 +3104,6 @@ struct Prefs {
     dark: bool,
     sidebar_width: f32,
     diff_width: f32,
-    /// Height of the inline diff body under a selected file.
-    diff_body_height: f32,
     sidebar_open: bool,
     diff_open: bool,
 }
@@ -2940,7 +3114,6 @@ impl Default for Prefs {
             dark: true,
             sidebar_width: 280.0,
             diff_width: 340.0,
-            diff_body_height: 420.0,
             sidebar_open: true,
             diff_open: true,
         }
@@ -2953,7 +3126,6 @@ impl Prefs {
     fn sanitized(mut self) -> Self {
         self.sidebar_width = self.sidebar_width.clamp(180.0, 640.0);
         self.diff_width = self.diff_width.clamp(220.0, 800.0);
-        self.diff_body_height = self.diff_body_height.clamp(120.0, 1200.0);
         self
     }
 }

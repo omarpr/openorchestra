@@ -4488,7 +4488,6 @@ dependencies = [
  "languages",
  "log",
  "markdown",
- "multi_buffer",
  "node_runtime",
  "pi-client",
  "project",
