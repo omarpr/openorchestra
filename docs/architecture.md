@@ -290,14 +290,17 @@ omar-harness/
 ├── crates/
 │   ├── harness-app/      # openOrchestra GPUI app — EXCLUDED from root workspace
 │   │                     #   (own [workspace]+lock; keeps zed cone out of the others)
-│   ├── worktrees/        # git worktree manager + registry (no UI deps) — BUILT
+│   ├── worktrees/        # git worktree manager + registry (+ agent_kind) — BUILT
 │   ├── forge/            # gh-CLI poller behind a Forge trait (no UI deps) — BUILT
 │   ├── status-watch/     # .harness/status.json file watcher (no UI deps) — BUILT
+│   ├── agent-runtime/    # AgentRuntime adapters + notification bus (§4.5) — BUILT (A1)
+│   ├── agent-schema/     # embeds + version-checks the tool contract — BUILT (M6)
+│   ├── training/         # session harvesting + the `harvest` binary — BUILT (M7)
 │   └── pi-client/        # Phase 2: RPC protocol types + framed stdio client — NOT YET
-├── pi-ext/               # TypeScript: harness-status extension (+ future custom tools,
-│                         #   prompt templates, models.json template) — status ext BUILT
-├── agent-schema/         # tool schema source of truth — EMPTY STUB
-├── training/             # schema-versioned training-data generation — EMPTY STUB
+├── pi-ext/               # TypeScript: harness-status + harness-tools extensions,
+│                         #   testing/ (stub provider + capture-lifecycle.sh) — BUILT
+├── agent-schema/         # v1/tools.json — the tool contract (source of truth) — BUILT
+├── training/             # harvesting docs + record format — BUILT
 ├── script/               # doctor.sh, setup-macos.sh, package-mac.sh, gen-icon.py
 ├── assets/               # openOrchestra icon (.icns / .png)
 ├── .github/workflows/    # security-audit.yml (weekly + manifest-triggered cargo-audit)
@@ -388,9 +391,9 @@ The spikes proved feasibility; this is the sequenced path from the current MVP t
 
 **M5 — Worktree-lifecycle UX polish.** (a) A proper new-worktree dialog: branch name + base ref selection (today branch = `feat/<slug>`, base = compare ref are auto-derived); now that the editor crate is in-graph, an `Editor::single_line` modal is the natural input. (b) Pane cache eviction: per-worktree panes cache but never evict, so long sessions hold many live pi processes — add an LRU or explicit close. *Deps: M3 makes single-line inputs trivial.*
 
-**M6 — `agent-schema/` — the tool-schema source of truth (§4.4).** Fill the empty stub: the versioned tool schema (JSON Schema + generated Rust types), imported by both the pi extension (`registerTool`/`setActiveTools`) and the training generator, with a schema-version field checkpoints declare and the harness enforces. This is the contract the trained model is trained against — foundational for M7 and for R5. *Deps: M2 (stable pi surface).*
+**M6 — `agent-schema/` — the tool-schema source of truth (§4.4). ✅ DONE (July 21, 2026).** `agent-schema/v1/tools.json` is the contract, v1.0 pinned to pi's seven built-ins and dumped verbatim from pi 0.73.1's own `createAllToolDefinitions` rather than transcribed. Three consumers: `pi-ext/harness-tools.ts` (`setActiveTools` + two-way drift reporting), `crates/agent-schema` (embeds it; `MAJOR.MINOR` checkpoint compatibility — minor is additive, major refused, undeclared refused), and `training/` (stamps records). `PiRuntime` materializes it next to the extensions and points pi at it via `HARNESS_AGENT_SCHEMA` so a packaged `.app` carries the contract. See `agent-schema/README.md`.
 
-**M7 — `training/` — session-exhaust harvesting (§6.4).** Fill the empty stub: walk archived session JSONL (via the registry's `sessionFile` + `archived` flags), join final diffs and merged/abandoned outcome labels (from the forge poller), and emit schema-versioned training records. Closes the loop that motivates the whole project. *Deps: M6 (schema), M1 (reliable outcome labels).*
+**M7 — `training/` — session-exhaust harvesting (§6.4). ✅ DONE (July 21, 2026).** `crates/training` + the `harvest` binary. Three things it gets deliberately right: (1) the session file is a **tree**, so it resolves the *active branch* by walking `parentId` from the last record rather than reading the file in order — otherwise forked-away branches get spliced into the transcript and the model trains on paths the user rejected; (2) outcome labels are never guessed — a live worktree with no PR is `unknown`, and a `gh` failure is treated as *no information* rather than "no PR", since a transient error must not relabel merged work as abandoned; (3) records carry both the `agent-schema` version and the pi session-format version, and an unrecognized session format is **refused** rather than parsed on a guess. Parser is tested against a real captured session, plus fork / truncation / cycle cases. See `training/README.md`.
 
 **M8 — Phase 2: RPC chat panel + `pi-client` crate (§4.2–4.3).** The largest unbuilt piece and the graduation of "Agent chat — soon." Build the `pi-client` crate (serde types mirroring `rpc-types.ts`, tokio framed-read task per process, event bus GPUI entities subscribe to, conformance tests replaying recorded JSONL), spawn `pi --mode rpc` sidecars from the agent supervisor, and render the native chat tab (streaming deltas, tool cards, session tree, native approval modals from `extension_ui_request`). Retires R8's fidelity ceiling (real `agent_settled` + dialog events). Keep the Phase 1 status-file path as the fallback/legacy surface. *Deps: M2 (pin), ideally M6 (schema) so tool cards render known tools.*
 

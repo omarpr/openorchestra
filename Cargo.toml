@@ -6,6 +6,7 @@ members = [
     "crates/status-watch",
     "crates/agent-runtime",
     "crates/agent-schema",
+    "crates/training",
 ]
 # harness-app is intentionally a standalone package for the spike phase:
 # it drags the zed git dependency cone, and keeping it out of this workspace

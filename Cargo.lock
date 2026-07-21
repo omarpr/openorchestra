@@ -334,6 +334,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "training"
+version = "0.1.0"
+dependencies = [
+ "agent-schema",
+ "forge",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "worktrees",
+]
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
