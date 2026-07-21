@@ -59,6 +59,20 @@ impl ReviewNotes {
         state_dir.join("review-notes.json")
     }
 
+    /// Where a worktree's exported markdown review is written.
+    ///
+    /// Under the harness state dir, never the repo: an exported review is the
+    /// user's own notes, and dropping an untracked file into their project is
+    /// what the git-exclude work exists to avoid. The worktree id contains a
+    /// `/`, so it is flattened rather than creating a stray directory.
+    pub fn markdown_path_in(state_dir: &Path, worktree: &str) -> PathBuf {
+        let stem: String = worktree
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+            .collect();
+        state_dir.join("reviews").join(format!("{stem}.md"))
+    }
+
     /// Add or replace the note on `(file, line)`.
     ///
     /// One note per line, replaced rather than appended: a second thought about
@@ -231,6 +245,37 @@ mod tests {
             .filter(|n| n != "review-notes.json")
             .collect();
         assert!(strays.is_empty(), "left {strays:?} behind");
+    }
+
+    #[test]
+    fn the_markdown_export_lands_outside_the_repo_with_a_flat_filename() {
+        // A worktree id is "repo/slug"; left alone that `/` would create a
+        // directory, and worse, a path component the user did not ask for.
+        let path = ReviewNotes::markdown_path_in(Path::new("/state"), "app/nav");
+        assert_eq!(path, Path::new("/state/reviews/app-nav.md"));
+        assert!(!path.to_string_lossy().contains("app/nav"));
+    }
+
+    #[test]
+    fn the_full_review_cycle_survives_add_export_and_clear() {
+        // Pins the three affordances the toolbar exposes, so a future refactor
+        // that drops one fails here rather than in a screenshot.
+        let dir = tempfile::tempdir().unwrap();
+        let notes_path = ReviewNotes::path_in(dir.path());
+        let mut n = ReviewNotes::default();
+
+        n.set("app/nav", "src/a.rs", 12, "this leaks");
+        n.save(&notes_path);
+        assert_eq!(ReviewNotes::load(&notes_path).count("app/nav"), 1);
+
+        // copy — plain feedback for the agent
+        assert!(n.as_review("app/nav").contains("line 12: this leaks"));
+        // save .md — a document for a human
+        assert!(n.as_markdown("app/nav", "feat/nav").contains("- **line 12** — this leaks"));
+        // clear
+        n.clear("app/nav");
+        n.save(&notes_path);
+        assert_eq!(ReviewNotes::load(&notes_path).count("app/nav"), 0);
     }
 
     #[test]

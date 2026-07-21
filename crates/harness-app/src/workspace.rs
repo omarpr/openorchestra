@@ -1003,9 +1003,10 @@ impl HarnessWorkspace {
             cx.notify();
             return;
         }
-        let dir = self.state_dir.join("reviews");
-        let file = dir.join(format!("{}.md", slugify(&r.key)));
-        let _ = std::fs::create_dir_all(&dir);
+        let file = crate::diff_review::ReviewNotes::markdown_path_in(&self.state_dir, &r.key);
+        if let Some(dir) = file.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
         match std::fs::write(&file, md) {
             Ok(()) => self.note = format!("saved {}", file.display()),
             Err(e) => self.note = format!("could not save review: {e}"),
