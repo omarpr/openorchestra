@@ -11,6 +11,7 @@
 mod chat_pane;
 mod data;
 mod harness_zed_theme;
+mod markdown_preview;
 mod notifier;
 mod terminal_pane;
 mod theme;

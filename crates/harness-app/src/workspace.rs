@@ -223,6 +223,9 @@ pub struct HarnessWorkspace {
     panes: HashMap<String, PaneSet>,
     diff: worktrees::Diff,
     diff_file: Option<String>,
+    /// Rendered-markdown preview of the selected `.md` file, when the user has
+    /// switched to it. Rebuilt on selection, since it snapshots file contents.
+    md_preview: Option<Entity<crate::markdown_preview::MarkdownPreview>>,
     /// Bumped per request so a slow background diff for a since-abandoned
     /// selection can be identified and discarded.
     diff_gen: u64,
@@ -332,6 +335,7 @@ impl HarnessWorkspace {
             panes: HashMap::new(),
             diff: worktrees::Diff::default(),
             diff_file: None,
+            md_preview: None,
             diff_gen: 0,
             diff_pending: false,
             pane_clock: 0,
@@ -670,8 +674,25 @@ impl HarnessWorkspace {
     /// generation that requested them, so a slow diff for a worktree the user
     /// has already navigated away from is dropped rather than painted over the
     /// current one.
+    /// Toggle between the raw diff and a rendered preview of the selected
+    /// markdown file.
+    fn toggle_md_preview(&mut self, cx: &mut Context<Self>) {
+        if self.md_preview.is_some() {
+            self.md_preview = None;
+            cx.notify();
+            return;
+        }
+        let (Some(rel), Some(r)) = (self.diff_file.clone(), self.resolve()) else {
+            return;
+        };
+        let abs = r.path.join(&rel);
+        self.md_preview = Some(cx.new(|cx| crate::markdown_preview::MarkdownPreview::new(abs, cx)));
+        cx.notify();
+    }
+
     fn recompute_diff(&mut self, cx: &mut Context<Self>) {
         self.diff_file = None;
+        self.md_preview = None;
         let Some(r) = self.resolve() else {
             self.diff = worktrees::Diff::default();
             self.diff_pending = false;
@@ -1810,7 +1831,30 @@ impl HarnessWorkspace {
                     .border_b_1()
                     .border_color(hx.border)
                     .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx2).child("DIFF"))
-                    .child(div().flex_1().min_w_0().text_xs().font_family(hx.font_mono).text_color(hx.tx1).overflow_hidden().child(r.branch.clone())),
+                    .child(div().flex_1().min_w_0().text_xs().font_family(hx.font_mono).text_color(hx.tx1).overflow_hidden().child(r.branch.clone()))
+                    // Markdown is the one case where the diff is usually the
+                    // wrong view: wrapped prose becomes long `+` lines with no
+                    // structure. Offer the rendered document instead, like the
+                    // editor does.
+                    .when(
+                        self.diff_file.as_deref().is_some_and(crate::markdown_preview::is_markdown),
+                        |d| {
+                            let previewing = self.md_preview.is_some();
+                            d.child(
+                                div()
+                                    .id("md-preview-toggle")
+                                    .flex_none()
+                                    .px_1p5()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(if previewing { hx.accent } else { hx.tx2 })
+                                    .cursor_pointer()
+                                    .hover(|h| h.bg(hx.surface))
+                                    .child(if previewing { "◨ diff" } else { "◧ preview" })
+                                    .on_click(cx.listener(|ws, _, _, cx| ws.toggle_md_preview(cx))),
+                            )
+                        },
+                    ),
             )
             .child(
                 div()
@@ -1880,6 +1924,9 @@ impl HarnessWorkspace {
                         } else {
                             Some(path.clone())
                         };
+                        // The preview snapshots file contents, so it belongs to
+                        // one selection and must not survive into the next.
+                        ws.md_preview = None;
                         cx.notify();
                     }))
                     .child(div().flex_none().w(px(12.0)).text_xs().font_family(hx.font_mono).text_color(badge_color).child(file.change.badge().to_string()))
@@ -1894,6 +1941,22 @@ impl HarnessWorkspace {
         // no scroll container, so everything past the panel height was clipped
         // and simply unreachable — clicking a file showed only its first
         // screenful.
+        if let Some(md) = &self.md_preview {
+            return panel
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .m_2()
+                        .rounded_md()
+                        .bg(hx.bg0)
+                        .border_1()
+                        .border_color(hx.border)
+                        .child(md.clone()),
+                )
+                .into_any_element();
+        }
+
         let mut preview = div()
             .id("diff-preview")
             .flex()
