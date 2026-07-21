@@ -2052,6 +2052,16 @@ impl HarnessWorkspace {
                     // and dies silently.
                     ws.update(cx, |workspace, cx| workspace.actions(div(), window, cx))
                         .key_context("Workspace")
+                        // `.flex()`, because gpui divs default to `display:
+                        // Block`, and taffy's block layout does not resolve
+                        // child percentage *heights*. zed's own window root
+                        // wraps the workspace in `h_flex()` for this reason.
+                        // Without it the whole hosted workspace is silently
+                        // content-sized: panes look fine (they have intrinsic
+                        // content), but the dock caches its panel as a
+                        // childless leaf whose content height is zero — an
+                        // invisible file tree with healthy state.
+                        .flex()
                         .size_full()
                         .child(ws.clone())
                         .when(std::env::var_os("HARNESS_PROBE_PAINT").is_some(), |d| {
@@ -2102,7 +2112,7 @@ impl HarnessWorkspace {
             .min_w_0()
             .bg(hx.bg0)
             .child(strip)
-            .child(div().flex_1().min_h_0().child(content))
+            .child(div().flex_1().h_full().min_h_0().child(content))
             .child(self.render_status_bar(hx, Some(&r), cx))
             .into_any_element()
     }
@@ -3019,6 +3029,15 @@ impl Render for HarnessWorkspace {
                 div()
                     .flex()
                     .flex_1()
+                    // `h_full` alongside `flex_1`, the way zed's own containers
+                    // pair them. flex_1 alone leaves the height *indefinite* in
+                    // taffy's eyes: the div gets stretched to the right size,
+                    // but percentage heights below it fall back to content
+                    // size. zed's dock caches its panel as a childless leaf
+                    // node, whose content height is zero — so the file tree
+                    // laid out into a 239×0 box while every state probe read
+                    // healthy. min_h_0 still allows shrinking.
+                    .h_full()
                     .min_h_0()
                     // Collapsing hides the splitter too — a resize handle for
                     // a panel that isn't there is just a dead strip of chrome.
