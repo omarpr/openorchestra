@@ -469,7 +469,7 @@ Getting there required **four** separate fixes, none of which produced an error 
 - **`gh pr create`** — done. `Forge::create_pr`, the trait's only mutating call, kept explicit so a poller can never trigger it (the test fake panics if one tries). Every user value is passed as a flag *argument*, so a branch or title starting with `-` cannot become an option. gh prints a URL rather than JSON, so the backend re-reads the branch — one source of truth for PR state.
 - **Fork-head PR badges** — done. `pr_for_branch` now uses `gh pr list --head` instead of `gh pr view <branch>`, which could not see fork-opened PRs at all (M1 §5). Bonus: `pr list` reports "no PR" as an empty array on exit 0, so the fragile stderr-string match is gone. When a branch carries several PRs, an open one wins; otherwise the most recent.
 - **`make doctor` rust-analyzer check** — done, and it checks *runnability*, not presence: the rustup shim sits on `$PATH` even when the component is absent (N2 §4), so "installed" is exactly the misleading answer.
-- **IBM Plex bundling** — **still open.** Menlo remains the interim mono face. This one needs the font files vendored into `assets/` and a licensing decision, which is a call for the project owner rather than something to quietly add.
+- **IBM Plex** — the app now **uses IBM Plex Sans / Mono when the user has them installed**, falling back to Helvetica Neue / Menlo otherwise, so the intended typography (§3.4, D7) reaches anyone who installs the fonts today. *Still open:* **vendoring** the font files into `assets/` so it works out of the box. Plex is OFL and redistributable, so this is possible — but it is a repo-weight and attribution decision for the project owner, deliberately not made silently here.
 
 ---
 

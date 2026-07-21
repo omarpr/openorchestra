@@ -126,7 +126,7 @@ mod tests {
     // same colors on the resolved editor/terminal/syntax theme (R6 invariant).
     #[test]
     fn tokens_map_into_resolved_theme() {
-        let hx = HarnessTheme::dark();
+        let hx = HarnessTheme::dark_colors();
         let family = refine_theme_family(theme_family_content(&hx));
         let theme = family
             .themes

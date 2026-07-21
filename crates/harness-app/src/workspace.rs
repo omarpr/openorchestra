@@ -873,7 +873,7 @@ impl HarnessWorkspace {
     }
 
     fn toggle_theme(&mut self, cx: &mut Context<Self>) {
-        let next = theme(cx).toggled();
+        let next = theme(cx).toggled(cx);
         crate::harness_zed_theme::install(&next, cx);
         cx.set_global(next);
         self.save_prefs(cx);

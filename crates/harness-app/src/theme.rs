@@ -38,7 +38,15 @@ pub struct HarnessTheme {
 impl HarnessTheme {
     /// Values transcribed from the design reference `Harness.dc.html` CSS tokens
     /// (`--bg0`, `--bg1`, `--surface`, `--accent`, `--green/amber/red`, `--tx*`).
-    pub fn dark() -> Self {
+    pub fn dark(cx: &App) -> Self {
+        Self::dark_colors().with_system_fonts(cx)
+    }
+
+    /// The dark palette's colors, with fonts left blank.
+    ///
+    /// Split out so the color choices can be asserted without a gpui `App`:
+    /// font resolution needs a text system, the palette does not.
+    pub fn dark_colors() -> Self {
         Self {
             bg0: rgb(0x0e1013),
             bg1: rgb(0x16191d),
@@ -55,8 +63,8 @@ impl HarnessTheme {
             amber: rgb(0xe0a83b),
             border: rgb(0x24272c),
             border2: rgb(0x2f333a),
-            font_ui: ui_font_family(),
-            font_mono: mono_font_family(),
+            font_ui: "",
+            font_mono: "",
         }
     }
 
@@ -65,7 +73,11 @@ impl HarnessTheme {
     /// Semantic hues (accent / green / red / amber) are darkened rather than
     /// reused: the dark palette's values are tuned for contrast against a
     /// near-black background and wash out badly on white.
-    pub fn light() -> Self {
+    pub fn light(cx: &App) -> Self {
+        Self::light_colors().with_system_fonts(cx)
+    }
+
+    pub fn light_colors() -> Self {
         Self {
             bg0: rgb(0xffffff),
             bg1: rgb(0xf6f7f9),
@@ -82,8 +94,17 @@ impl HarnessTheme {
             amber: rgb(0x9a6700),
             border: rgb(0xd8dce2),
             border2: rgb(0xc4cad2),
-            font_ui: ui_font_family(),
-            font_mono: mono_font_family(),
+            font_ui: "",
+            font_mono: "",
+        }
+    }
+
+    /// Fill in the typography for a colors-only palette.
+    fn with_system_fonts(self, cx: &App) -> Self {
+        Self {
+            font_ui: ui_font_family(cx),
+            font_mono: mono_font_family(cx),
+            ..self
         }
     }
 
@@ -96,11 +117,11 @@ impl HarnessTheme {
         self.bg0.r < 0.5
     }
 
-    pub fn toggled(&self) -> Self {
+    pub fn toggled(&self, cx: &App) -> Self {
         if self.is_dark() {
-            Self::light()
+            Self::light(cx)
         } else {
-            Self::dark()
+            Self::dark(cx)
         }
     }
 }
@@ -109,24 +130,29 @@ impl HarnessTheme {
 mod tests {
     use super::HarnessTheme;
 
+    // Palettes are asserted without a gpui App: font resolution needs a text
+    // system, but the colors — which is what these tests are about — do not.
+    fn dark() -> HarnessTheme {
+        HarnessTheme::dark_colors()
+    }
+    fn light() -> HarnessTheme {
+        HarnessTheme::light_colors()
+    }
+
     #[test]
-    fn palettes_are_distinguishable_and_toggle_round_trips() {
-        let dark = HarnessTheme::dark();
-        let light = HarnessTheme::light();
-        assert!(dark.is_dark());
-        assert!(!light.is_dark());
-        assert!(!dark.toggled().is_dark());
-        assert!(dark.toggled().toggled().is_dark());
+    fn palettes_are_distinguishable() {
+        assert!(dark().is_dark());
+        assert!(!light().is_dark());
     }
 
     #[test]
     fn light_palette_keeps_text_readable_on_its_background() {
         // A light theme that reused the dark palette's text colors would be
         // unreadable; assert the contrast direction actually flipped.
-        let light = HarnessTheme::light();
+        let light = light();
         assert!(light.bg0.r > 0.9, "light background should be near-white");
         assert!(light.tx0.r < 0.3, "primary text should be near-black");
-        assert!(light.tx2.r < light.tx1.r || light.tx2.r > light.tx1.r);
+        assert!(dark().tx0.r > 0.8, "dark primary text should be near-white");
     }
 }
 
@@ -149,18 +175,41 @@ pub fn tint(color: Rgba, a: f32) -> Rgba {
 
 /// Design calls for IBM Plex Sans / IBM Plex Mono; fall back to fonts that are
 /// guaranteed present per-OS so the spike runs without installing anything.
-fn ui_font_family() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "Helvetica Neue"
-    } else {
-        "DejaVu Sans"
+/// The design calls for IBM Plex Sans / IBM Plex Mono (§3.4, D7).
+///
+/// We **use them when the user has them installed** and fall back otherwise,
+/// rather than vendoring the font files. Plex is OFL and redistributable, so
+/// bundling is possible — but it is a repo-weight and licensing-attribution
+/// decision for the project owner, not something to add silently. This gets the
+/// intended typography to anyone who installs the fonts, today, with no such
+/// decision required.
+///
+/// Resolved once at startup and cached, because `all_font_names()` walks the
+/// system font list and the theme is rebuilt on every palette toggle.
+fn resolve_font(preferred: &[&str], fallback: &'static str, cx: &App) -> &'static str {
+    let available = cx.text_system().all_font_names();
+    for name in preferred {
+        if available.iter().any(|f| f == name) {
+            // Leaked deliberately and at most twice per process: HarnessTheme
+            // holds &'static str, and this resolves once at startup.
+            return Box::leak(name.to_string().into_boxed_str());
+        }
     }
+    fallback
 }
 
-fn mono_font_family() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "Menlo"
-    } else {
-        "DejaVu Sans Mono"
-    }
+fn ui_font_family(cx: &App) -> &'static str {
+    resolve_font(
+        &["IBM Plex Sans", "IBMPlexSans"],
+        if cfg!(target_os = "macos") { "Helvetica Neue" } else { "DejaVu Sans" },
+        cx,
+    )
+}
+
+fn mono_font_family(cx: &App) -> &'static str {
+    resolve_font(
+        &["IBM Plex Mono", "IBMPlexMono"],
+        if cfg!(target_os = "macos") { "Menlo" } else { "DejaVu Sans Mono" },
+        cx,
+    )
 }

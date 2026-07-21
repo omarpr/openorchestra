@@ -122,9 +122,9 @@ fn main() {
         // before the zed theme is generated, means a light-theme user never
         // sees a dark flash on launch.
         let hx = if workspace::persisted_dark_theme() {
-            HarnessTheme::dark()
+            HarnessTheme::dark(cx)
         } else {
-            HarnessTheme::light()
+            HarnessTheme::light(cx)
         };
         harness_zed_theme::install(&hx, cx);
 
