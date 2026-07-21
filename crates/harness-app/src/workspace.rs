@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, ParentElement, PathPromptOptions, Pixels, Render, Rgba, Styled,
-    Window, div, prelude::*, px, rgb,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, PathPromptOptions,
+    Pixels, Render, Rgba, Styled, Window, div, prelude::*, px, rgb,
 };
 
 use agent_runtime::{
@@ -34,6 +34,82 @@ use crate::theme::{theme, tint, HarnessTheme};
 const SWATCHES: [u32; 8] = [
     0x5b9bff, 0x4ec26b, 0xa877f5, 0xe0a83b, 0xf0616d, 0x22b8cf, 0xf27bb0, 0x8b93a0,
 ];
+/// Strip git's per-file metadata preamble from a unified diff.
+///
+/// `diff --git`, `index <sha>..<sha>`, mode/rename lines, and the `---` / `+++`
+/// pair carry nothing a reader needs: the file being viewed is already named in
+/// the changed-files list above, and in the all-files view we render our own
+/// header. Left in, they cost five lines of noise at the top of every file —
+/// which on a short change is most of what you can see.
+///
+/// `@@` hunk headers are kept: they carry the line numbers, which is real
+/// navigational information.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum DiffLineKind {
+    /// A synthesized per-file header, replacing git's `diff --git` preamble.
+    FileHeader,
+    Hunk,
+    Added,
+    Removed,
+    Context,
+}
+
+fn readable_diff_lines(unified: &str) -> Vec<(DiffLineKind, String)> {
+    const NOISE: [&str; 7] = [
+        "index ",
+        "new file mode ",
+        "deleted file mode ",
+        "old mode ",
+        "new mode ",
+        "similarity index ",
+        "dissimilarity index ",
+    ];
+    let mut out: Vec<(DiffLineKind, String)> = Vec::new();
+    for line in unified.lines() {
+        // The `diff --git a/X b/Y` line is where a file starts. We drop the
+        // command itself but keep the boundary, as a header — without it the
+        // all-files view would run every file together.
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            // `diff --git a/<old> b/<new>` — take the new path, which is the
+            // one that matters for a rename.
+            let path = rest
+                .rsplit_once(" b/")
+                .map(|(_, new)| new)
+                .unwrap_or(rest);
+            out.push((DiffLineKind::FileHeader, path.to_string()));
+            continue;
+        }
+        if NOISE.iter().any(|p| line.starts_with(p)) {
+            continue;
+        }
+        // `--- a/x` and `+++ b/x` are the file pair, not content. Real content
+        // lines are a single `-`/`+` followed by the text, so requiring the
+        // triple form avoids eating a legitimate `--foo` deletion.
+        if line.starts_with("--- ") || line.starts_with("+++ ") {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("rename from ") {
+            out.push((DiffLineKind::Context, format!("renamed from {rest}")));
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("rename to ") {
+            out.push((DiffLineKind::Context, format!("renamed to {rest}")));
+            continue;
+        }
+        let kind = if line.starts_with("@@") {
+            DiffLineKind::Hunk
+        } else if line.starts_with('+') {
+            DiffLineKind::Added
+        } else if line.starts_with('-') {
+            DiffLineKind::Removed
+        } else {
+            DiffLineKind::Context
+        };
+        out.push((kind, line.to_string()));
+    }
+    out
+}
+
 /// Cap on rendered diff lines.
 ///
 /// Each line is its own element, so an enormous diff would build tens of
@@ -65,6 +141,29 @@ enum Edit {
     NewName(String),
     Rename(String, String),
     Avatar(String, String),
+}
+
+/// Which splitter is currently being dragged (§3.4: panels are resizable).
+#[derive(Clone, Copy, PartialEq)]
+enum Drag {
+    /// Left worktree sidebar width.
+    Sidebar,
+    /// Right diff panel width. Grows leftward, so the delta is negated.
+    DiffPanel,
+    /// Height of the changed-files list inside the diff panel.
+    DiffSplit,
+}
+
+/// A splitter drag in progress.
+///
+/// Tracked as a start position plus a start value rather than reading absolute
+/// coordinates, so a handle does not need to know where it sits in the layout
+/// and the pointer can drift off the 6px handle mid-drag without losing it.
+#[derive(Clone, Copy)]
+struct DragState {
+    target: Drag,
+    start: Pixels,
+    start_value: f32,
 }
 
 struct CardMenu {
@@ -151,6 +250,7 @@ pub struct HarnessWorkspace {
     state_dir: PathBuf,
     prefs: Prefs,
     prefs_path: PathBuf,
+    drag: Option<DragState>,
     bus: Bus,
     tools: ToolStatus,
     focus_handle: FocusHandle,
@@ -251,6 +351,7 @@ impl HarnessWorkspace {
             state_dir: data_dir.clone(),
             prefs,
             prefs_path,
+            drag: None,
             bus,
             tools: detect_tools(),
             focus_handle: cx.focus_handle(),
@@ -875,6 +976,88 @@ impl HarnessWorkspace {
 
     /// Swap the palette and regenerate the zed theme from it, so editor,
     /// terminal, and the hosted workspace follow the chrome (§3.5, D7).
+    /// A draggable splitter. `target` says which dimension it drives.
+    ///
+    /// 6px wide with a 1px visible line: narrower than this and it is fiddly to
+    /// grab, wider and it reads as a gap in the chrome.
+    fn splitter(&self, hx: &HarnessTheme, target: Drag, cx: &mut Context<Self>) -> impl IntoElement {
+        let vertical = target != Drag::DiffSplit;
+        let active = self.drag.map(|d| d.target) == Some(target);
+        let start_value = match target {
+            Drag::Sidebar => self.prefs.sidebar_width,
+            Drag::DiffPanel => self.prefs.diff_width,
+            Drag::DiffSplit => self.prefs.diff_split,
+        };
+
+        let base = div()
+            .id(match target {
+                Drag::Sidebar => "split-sidebar",
+                Drag::DiffPanel => "split-diff",
+                Drag::DiffSplit => "split-diff-inner",
+            })
+            .flex_none()
+            .cursor(if vertical {
+                gpui::CursorStyle::ResizeLeftRight
+            } else {
+                gpui::CursorStyle::ResizeUpDown
+            })
+            .when(active, |d| d.bg(hx.accent))
+            .when(!active, |d| d.hover(|h| h.bg(hx.accent)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
+                    ws.drag = Some(DragState {
+                        target,
+                        start: if vertical { ev.position.x } else { ev.position.y },
+                        start_value,
+                    });
+                    cx.notify();
+                }),
+            );
+
+        if vertical {
+            base.w(px(6.0)).h_full()
+        } else {
+            base.h(px(6.0)).w_full()
+        }
+    }
+
+    /// Apply an in-progress drag. Called from the root element so the pointer
+    /// can leave the 6px handle without dropping the drag.
+    fn drag_move(&mut self, ev: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let Some(drag) = self.drag else { return };
+        // The button can be released outside the window, in which case no
+        // mouse-up ever reaches us; treat "moving with no button" as the end.
+        if ev.pressed_button != Some(MouseButton::Left) {
+            self.end_drag(cx);
+            return;
+        }
+        let (pos, sign) = match drag.target {
+            Drag::Sidebar => (ev.position.x, 1.0),
+            // The diff panel is right-anchored, so dragging left widens it.
+            Drag::DiffPanel => (ev.position.x, -1.0),
+            Drag::DiffSplit => (ev.position.y, 1.0),
+        };
+        let delta = f32::from(pos - drag.start) * sign;
+        let next = drag.start_value + delta;
+        match drag.target {
+            Drag::Sidebar => self.prefs.sidebar_width = next,
+            Drag::DiffPanel => self.prefs.diff_width = next,
+            Drag::DiffSplit => self.prefs.diff_split = next,
+        }
+        // Clamp every frame, not on release: a panel must never be draggable
+        // to zero width and become unrecoverable.
+        self.prefs = self.prefs.clone().sanitized();
+        cx.notify();
+    }
+
+    fn end_drag(&mut self, cx: &mut Context<Self>) {
+        if self.drag.take().is_some() {
+            save_prefs_to(&self.prefs_path, &self.prefs);
+            cx.notify();
+        }
+    }
+
     fn save_prefs(&mut self, cx: &App) {
         self.prefs.dark = theme(cx).is_dark();
         save_prefs_to(&self.prefs_path, &self.prefs);
@@ -1663,7 +1846,7 @@ impl HarnessWorkspace {
             .flex()
             .flex_col()
             .flex_none()
-            .max_h(px(220.0))
+            .h(px(self.prefs.diff_split))
             .overflow_y_scroll()
             .px_2()
             .pb_1();
@@ -1705,7 +1888,7 @@ impl HarnessWorkspace {
                     .child(div().flex_none().text_xs().font_family(hx.font_mono).text_color(hx.red).child(format!("−{}", file.dels))),
             );
         }
-        panel = panel.child(files);
+        panel = panel.child(files).child(self.splitter(hx, Drag::DiffSplit, cx));
 
         // The diff preview scrolls. It previously used `overflow_hidden` with
         // no scroll container, so everything past the panel height was clipped
@@ -1729,16 +1912,17 @@ impl HarnessWorkspace {
         if unified.is_empty() {
             preview = preview.child(div().p_2().text_color(hx.tx2).child("—"));
         } else {
-            let total = unified.lines().count();
-            for line in unified.lines().take(MAX_DIFF_LINES) {
-                let (fg, bg) = if line.starts_with("@@") {
-                    (hx.accent, tint(hx.accent, 0.10))
-                } else if line.starts_with('+') {
-                    (rgb(DIFF_ADD_TX), tint(hx.green, 0.13))
-                } else if line.starts_with('-') {
-                    (rgb(DIFF_DEL_TX), tint(hx.red, 0.13))
-                } else {
-                    (hx.tx2, Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 })
+            let shown = readable_diff_lines(&unified);
+            let total = shown.len();
+            let transparent = Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+            for (kind, line) in shown.iter().take(MAX_DIFF_LINES) {
+                let line = line.as_str();
+                let (fg, bg) = match kind {
+                    DiffLineKind::FileHeader => (hx.tx0, hx.surface),
+                    DiffLineKind::Hunk => (hx.accent, tint(hx.accent, 0.10)),
+                    DiffLineKind::Added => (rgb(DIFF_ADD_TX), tint(hx.green, 0.13)),
+                    DiffLineKind::Removed => (rgb(DIFF_DEL_TX), tint(hx.red, 0.13)),
+                    DiffLineKind::Context => (hx.tx2, transparent),
                 };
                 // Long lines scroll horizontally instead of being clipped:
                 // a minified file or a long string literal is exactly where
@@ -1798,8 +1982,17 @@ impl Render for HarnessWorkspace {
                     .flex_1()
                     .min_h_0()
                     .child(self.render_sidebar(&hx, cx))
+                    .child(self.splitter(&hx, Drag::Sidebar, cx))
                     .child(self.render_center(&hx, cx))
+                    .child(self.splitter(&hx, Drag::DiffPanel, cx))
                     .child(self.render_diff_panel(&hx, cx)),
+            )
+            // Drag tracking lives on the root so the pointer can leave the
+            // 6px handle mid-drag without the resize stopping.
+            .on_mouse_move(cx.listener(|ws, ev: &MouseMoveEvent, _, cx| ws.drag_move(ev, cx)))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|ws, _: &MouseUpEvent, _, cx| ws.end_drag(cx)),
             );
 
         if let Some(m) = &self.menu {
@@ -1927,6 +2120,8 @@ struct Prefs {
     dark: bool,
     sidebar_width: f32,
     diff_width: f32,
+    /// Height of the changed-files list inside the diff panel.
+    diff_split: f32,
     sidebar_open: bool,
     diff_open: bool,
 }
@@ -1937,6 +2132,7 @@ impl Default for Prefs {
             dark: true,
             sidebar_width: 280.0,
             diff_width: 340.0,
+            diff_split: 220.0,
             sidebar_open: true,
             diff_open: true,
         }
@@ -1949,6 +2145,7 @@ impl Prefs {
     fn sanitized(mut self) -> Self {
         self.sidebar_width = self.sidebar_width.clamp(180.0, 640.0);
         self.diff_width = self.diff_width.clamp(220.0, 800.0);
+        self.diff_split = self.diff_split.clamp(60.0, 600.0);
         self
     }
 }
@@ -2109,5 +2306,106 @@ mod new_worktree_tests {
         let spec = NewWorktree::parse("x #a #b @c @d", "origin/main");
         assert_eq!(spec.branch.as_deref(), Some("b"));
         assert_eq!(spec.base_ref, "d");
+    }
+}
+
+#[cfg(test)]
+mod diff_render_tests {
+    use super::{readable_diff_lines, DiffLineKind, NewWorktree, Prefs};
+
+    /// Verbatim shape of the noise a new file produces — the case that
+    /// prompted this: five metadata lines before any content.
+    const NEW_FILE: &str = "\
+diff --git a/agent-schema/README.md b/agent-schema/README.md
+new file mode 100644
+index 0000000..2cf3f44
+--- /dev/null
++++ b/agent-schema/README.md
+@@ -0,0 +1,67 @@
++# agent-schema — the tool contract
++
+";
+
+    #[test]
+    fn git_metadata_preamble_is_replaced_by_a_single_file_header() {
+        let lines = readable_diff_lines(NEW_FILE);
+        let kinds: Vec<DiffLineKind> = lines.iter().map(|(k, _)| *k).collect();
+        assert_eq!(kinds[0], DiffLineKind::FileHeader);
+        assert_eq!(lines[0].1, "agent-schema/README.md", "header names the file");
+        assert_eq!(kinds[1], DiffLineKind::Hunk, "@@ survives — it has the line numbers");
+
+        let text: Vec<&str> = lines.iter().map(|(_, l)| l.as_str()).collect();
+        for noise in ["diff --git", "new file mode", "index 0000000", "--- /dev/null", "+++ b/"] {
+            assert!(
+                !text.iter().any(|l| l.contains(noise)),
+                "{noise:?} should not be rendered, got {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn content_lines_keep_their_kind() {
+        let lines = readable_diff_lines(NEW_FILE);
+        assert!(lines.iter().any(|(k, l)| *k == DiffLineKind::Added && l.contains("agent-schema")));
+    }
+
+    #[test]
+    fn a_deletion_of_a_dashed_line_is_not_mistaken_for_a_file_marker() {
+        // `--- ` is the file-pair marker, but `--foo` is a legitimate removed
+        // line. Requiring the space-terminated triple form keeps them apart.
+        let diff = "@@ -1 +1 @@\n---foo\n-  --bar\n+baz\n";
+        let lines = readable_diff_lines(diff);
+        let removed: Vec<&str> = lines
+            .iter()
+            .filter(|(k, _)| *k == DiffLineKind::Removed)
+            .map(|(_, l)| l.as_str())
+            .collect();
+        assert_eq!(removed, vec!["---foo", "-  --bar"]);
+    }
+
+    #[test]
+    fn renames_are_stated_in_words_rather_than_dropped() {
+        let diff = "diff --git a/old.rs b/new.rs\nsimilarity index 98%\nrename from old.rs\nrename to new.rs\n";
+        let lines = readable_diff_lines(diff);
+        let text: Vec<&str> = lines.iter().map(|(_, l)| l.as_str()).collect();
+        assert_eq!(text[0], "new.rs", "header uses the post-rename path");
+        assert!(text.contains(&"renamed from old.rs"));
+        assert!(!text.iter().any(|l| l.contains("similarity index")));
+    }
+
+    #[test]
+    fn multiple_files_each_get_a_header() {
+        let diff = "diff --git a/a.rs b/a.rs\nindex 1..2 100644\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n+x\n\
+diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@\n+y\n";
+        let headers: Vec<String> = readable_diff_lines(diff)
+            .into_iter()
+            .filter(|(k, _)| *k == DiffLineKind::FileHeader)
+            .map(|(_, l)| l)
+            .collect();
+        assert_eq!(headers, vec!["a.rs", "b.rs"]);
+    }
+
+    #[test]
+    fn panel_sizes_are_clamped_so_a_drag_cannot_make_one_unrecoverable() {
+        let squashed = Prefs { sidebar_width: 0.0, diff_width: -50.0, diff_split: 0.0, ..Prefs::default() }
+            .sanitized();
+        assert!(squashed.sidebar_width >= 180.0);
+        assert!(squashed.diff_width >= 220.0);
+        assert!(squashed.diff_split >= 60.0);
+
+        let huge = Prefs { sidebar_width: 9999.0, diff_width: 9999.0, diff_split: 9999.0, ..Prefs::default() }
+            .sanitized();
+        assert!(huge.sidebar_width <= 640.0);
+        assert!(huge.diff_width <= 800.0);
+        assert!(huge.diff_split <= 600.0);
+    }
+
+    #[test]
+    fn worktree_spec_still_parses() {
+        // Guards the M5a syntax against regressions from this refactor.
+        let spec = NewWorktree::parse("fix bug #hot/fix @v2", "origin/main");
+        assert_eq!(spec.name, "fix bug");
+        assert_eq!(spec.branch.as_deref(), Some("hot/fix"));
+        assert_eq!(spec.base_ref, "v2");
     }
 }
