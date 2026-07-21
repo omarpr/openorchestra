@@ -48,13 +48,45 @@ const SWATCHES: [u32; 8] = [
 pub enum DiffLineKind {
     /// A synthesized per-file header, replacing git's `diff --git` preamble.
     FileHeader,
-    Hunk,
+    /// A hunk boundary. Carries the enclosing section (the text git puts
+    /// *after* the second `@@`) rather than the coordinates.
+    HunkBreak,
     Added,
     Removed,
     Context,
 }
 
-fn readable_diff_lines(unified: &str) -> Vec<(DiffLineKind, String)> {
+/// One rendered row of the diff.
+#[derive(Debug, PartialEq, Clone)]
+pub struct DiffRow {
+    pub kind: DiffLineKind,
+    /// Line number for the gutter — the file's real line number, which is what
+    /// the `@@ -a,b +c,d @@` coordinates encoded far less directly. Removed
+    /// lines carry the *old* file's number, everything else the new file's.
+    pub number: Option<u32>,
+    pub text: String,
+}
+
+/// Parse a `@@ -old,n +new,n @@ section` header.
+///
+/// Returns the starting line numbers plus the trailing section text, which git
+/// fills with the enclosing function or heading. The coordinates become the
+/// gutter; the section is the only part worth showing as text.
+fn parse_hunk(line: &str) -> Option<(u32, u32, String)> {
+    let rest = line.strip_prefix("@@ ")?;
+    let (ranges, section) = rest.split_once(" @@")?;
+    let (old, new) = ranges.split_once(' ')?;
+    let start = |spec: &str| -> Option<u32> {
+        spec.trim_start_matches(['-', '+'])
+            .split(',')
+            .next()?
+            .parse()
+            .ok()
+    };
+    Some((start(old)?, start(new)?, section.trim().to_string()))
+}
+
+fn readable_diff_lines(unified: &str) -> Vec<DiffRow> {
     const NOISE: [&str; 7] = [
         "index ",
         "new file mode ",
@@ -64,7 +96,12 @@ fn readable_diff_lines(unified: &str) -> Vec<(DiffLineKind, String)> {
         "similarity index ",
         "dissimilarity index ",
     ];
-    let mut out: Vec<(DiffLineKind, String)> = Vec::new();
+    let row = |kind, number, text: String| DiffRow { kind, number, text };
+
+    let mut out: Vec<DiffRow> = Vec::new();
+    let (mut old_no, mut new_no) = (0u32, 0u32);
+    let mut first_hunk_of_file = true;
+
     for line in unified.lines() {
         // The `diff --git a/X b/Y` line is where a file starts. We drop the
         // command itself but keep the boundary, as a header — without it the
@@ -72,11 +109,9 @@ fn readable_diff_lines(unified: &str) -> Vec<(DiffLineKind, String)> {
         if let Some(rest) = line.strip_prefix("diff --git ") {
             // `diff --git a/<old> b/<new>` — take the new path, which is the
             // one that matters for a rename.
-            let path = rest
-                .rsplit_once(" b/")
-                .map(|(_, new)| new)
-                .unwrap_or(rest);
-            out.push((DiffLineKind::FileHeader, path.to_string()));
+            let path = rest.rsplit_once(" b/").map(|(_, new)| new).unwrap_or(rest);
+            out.push(row(DiffLineKind::FileHeader, None, path.to_string()));
+            first_hunk_of_file = true;
             continue;
         }
         if NOISE.iter().any(|p| line.starts_with(p)) {
@@ -89,23 +124,53 @@ fn readable_diff_lines(unified: &str) -> Vec<(DiffLineKind, String)> {
             continue;
         }
         if let Some(rest) = line.strip_prefix("rename from ") {
-            out.push((DiffLineKind::Context, format!("renamed from {rest}")));
+            out.push(row(DiffLineKind::Context, None, format!("renamed from {rest}")));
             continue;
         }
         if let Some(rest) = line.strip_prefix("rename to ") {
-            out.push((DiffLineKind::Context, format!("renamed to {rest}")));
+            out.push(row(DiffLineKind::Context, None, format!("renamed to {rest}")));
             continue;
         }
-        let kind = if line.starts_with("@@") {
-            DiffLineKind::Hunk
-        } else if line.starts_with('+') {
-            DiffLineKind::Added
-        } else if line.starts_with('-') {
-            DiffLineKind::Removed
+
+        if let Some((old, new, section)) = parse_hunk(line) {
+            old_no = old;
+            new_no = new;
+            // The first hunk right after a file header needs no separator —
+            // the header already marks the boundary — unless git gave us a
+            // section heading, which is worth showing on its own. Later hunks
+            // always get one, because the line numbers jump.
+            if !first_hunk_of_file || !section.is_empty() {
+                out.push(row(DiffLineKind::HunkBreak, None, section));
+            }
+            first_hunk_of_file = false;
+            continue;
+        }
+
+        // `\ No newline at end of file` is git commentary, not content.
+        if line.starts_with('\\') {
+            out.push(row(DiffLineKind::Context, None, line.trim_start_matches('\\').trim().to_string()));
+            continue;
+        }
+
+        // Strip the leading +/-/space marker: the gutter and the row's tint
+        // already say what happened, and keeping it shifts every line by one
+        // column against the file's real indentation.
+        let (kind, number, text) = if let Some(rest) = line.strip_prefix('+') {
+            let n = new_no;
+            new_no += 1;
+            (DiffLineKind::Added, Some(n), rest)
+        } else if let Some(rest) = line.strip_prefix('-') {
+            let n = old_no;
+            old_no += 1;
+            (DiffLineKind::Removed, Some(n), rest)
         } else {
-            DiffLineKind::Context
+            let rest = line.strip_prefix(' ').unwrap_or(line);
+            let n = new_no;
+            new_no += 1;
+            old_no += 1;
+            (DiffLineKind::Context, Some(n), rest)
         };
-        out.push((kind, line.to_string()));
+        out.push(row(kind, number, text.to_string()));
     }
     out
 }
@@ -260,6 +325,8 @@ pub struct HarnessWorkspace {
     blink_gen: u64,
     new_target_repo: String,
     menu: Option<CardMenu>,
+    /// Open "new tab" menu, anchored under the `+` in the tab strip.
+    tab_menu: Option<Pixels>,
     pending_delete: Option<String>,
     note: String,
     forge_status: HashMap<String, BranchStatus>,
@@ -366,6 +433,7 @@ impl HarnessWorkspace {
             blink_gen: 0,
             new_target_repo,
             menu: None,
+            tab_menu: None,
             pending_delete: None,
             note: String::new(),
             forge_status: HashMap::new(),
@@ -1690,7 +1758,7 @@ impl HarnessWorkspace {
                 strip = strip.child(self.render_tab(hx, tab, tab.id == p.active, cx));
             }
         }
-        strip = strip.child(self.render_new_tab_buttons(hx, &r, cx));
+        strip = strip.child(self.render_new_tab_button(hx, cx));
 
         div()
             .flex()
@@ -1785,56 +1853,96 @@ impl HarnessWorkspace {
             )
     }
 
-    /// The `+` menu: what you can add to a worktree (§3.4).
-    fn render_new_tab_buttons(
-        &self,
-        hx: &HarnessTheme,
-        r: &Resolved,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let agent_label = r
-            .agent_kind
-            .as_ref()
-            .map(|k| format!("＋{k}"))
-            .unwrap_or_default();
-        let has_agent = r.agent_kind.is_some();
+    /// The single `+` that opens the new-tab menu (§3.4).
+    ///
+    /// One affordance rather than one button per kind: the strip already
+    /// carries the worktree's tabs, and four permanent `＋x` buttons competed
+    /// with them for both space and attention.
+    fn render_new_tab_button(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .id("new-tab")
             .flex()
+            .flex_none()
             .items_center()
-            .gap_1()
+            .justify_center()
+            .h(px(22.0))
+            .w(px(24.0))
             .ml_1()
-            .child(self.new_tab_button(hx, "new-shell", "＋❯_", TabKind::Shell, cx))
-            .when(has_agent, |d| {
-                d.child(self.new_tab_button(hx, "new-agent", &agent_label, TabKind::Agent, cx))
-            })
-            .child(self.new_tab_button(hx, "new-editor", "＋{ }", TabKind::Editor, cx))
-            .when(has_agent, |d| {
-                d.child(self.new_tab_button(hx, "new-chat", "＋◆", TabKind::Chat, cx))
-            })
+            .rounded_md()
+            .text_xs()
+            .text_color(hx.tx2)
+            .cursor_pointer()
+            .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
+            .child("＋")
+            .on_click(cx.listener(|ws, ev: &gpui::ClickEvent, _, cx| {
+                // Anchor under the button that was clicked, so the menu lands
+                // wherever the strip has scrolled to.
+                ws.tab_menu = Some(ev.position().x);
+                cx.notify();
+            }))
     }
 
-    fn new_tab_button(
+    /// The popup listing what can be opened in this worktree.
+    fn render_tab_menu(
         &self,
         hx: &HarnessTheme,
-        id: &'static str,
+        x: Pixels,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let agent = self.resolve().and_then(|r| r.agent_kind);
+        let mut menu = div()
+            .absolute()
+            .left(x)
+            // Just below the top bar + tab strip.
+            .top(px(72.0))
+            .w(px(190.0))
+            .p(px(4.0))
+            .rounded_md()
+            .bg(hx.surface2)
+            .border_1()
+            .border_color(hx.border2)
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(self.tab_menu_item(hx, "❯_  Terminal", "⌘T", TabKind::Shell, cx))
+            .child(self.tab_menu_item(hx, "{ }  Editor", "⌘E", TabKind::Editor, cx));
+        // `main` is a read-only checkout and runs no agent (D8).
+        if let Some(kind) = agent {
+            menu = menu
+                .child(self.tab_menu_item(hx, &format!("❯_  {kind}"), "", TabKind::Agent, cx))
+                .child(self.tab_menu_item(hx, "◆  Agent chat", "⌘⇧C", TabKind::Chat, cx));
+        }
+        menu
+    }
+
+    fn tab_menu_item(
+        &self,
+        hx: &HarnessTheme,
         label: &str,
+        shortcut: &str,
         kind: TabKind,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
-            .id(id)
+            .id(gpui::SharedString::from(format!("tabmenu-{label}")))
             .flex()
             .items_center()
-            .h(px(22.0))
-            .px_1p5()
+            .justify_between()
+            .gap_2()
+            .px_2()
+            .py_1()
             .rounded_md()
             .text_xs()
-            .font_family(hx.font_mono)
-            .text_color(hx.tx2)
+            .text_color(hx.tx1)
             .cursor_pointer()
-            .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
-            .child(label.to_string())
-            .on_click(cx.listener(move |ws, _, window, cx| ws.open_tab(kind, window, cx)))
+            .hover(|d| d.bg(hx.surface_hover).text_color(hx.tx0))
+            .child(div().font_family(hx.font_mono).child(label.to_string()))
+            .child(div().text_color(hx.tx2).child(shortcut.to_string()))
+            .on_click(cx.listener(move |ws, _, window, cx| {
+                cx.stop_propagation();
+                ws.tab_menu = None;
+                ws.open_tab(kind, window, cx);
+            }))
     }
 
     fn render_status_bar(
@@ -2103,28 +2211,73 @@ impl HarnessWorkspace {
             let shown = readable_diff_lines(&unified);
             let total = shown.len();
             let transparent = Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
-            for (kind, line) in shown.iter().take(MAX_DIFF_LINES) {
-                let line = line.as_str();
-                let (fg, bg) = match kind {
-                    DiffLineKind::FileHeader => (hx.tx0, hx.surface),
-                    DiffLineKind::Hunk => (hx.accent, tint(hx.accent, 0.10)),
-                    DiffLineKind::Added => (rgb(DIFF_ADD_TX), tint(hx.green, 0.13)),
-                    DiffLineKind::Removed => (rgb(DIFF_DEL_TX), tint(hx.red, 0.13)),
-                    DiffLineKind::Context => (hx.tx2, transparent),
+            for r in shown.iter().take(MAX_DIFF_LINES) {
+                // A hunk boundary is a thin rule plus git's section text (the
+                // enclosing function or heading). The old `@@ -a,b +c,d @@`
+                // coordinates are gone: the gutter shows the real line numbers,
+                // which is the same information without the decoding step.
+                if r.kind == DiffLineKind::HunkBreak {
+                    preview = preview.child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .gap_2()
+                            .h(px(18.0))
+                            .px_2()
+                            .border_t_1()
+                            .border_color(hx.border)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_color(hx.tx2)
+                                    .whitespace_nowrap()
+                                    .child(r.text.clone()),
+                            ),
+                    );
+                    continue;
+                }
+
+                let (fg, bg, marker) = match r.kind {
+                    DiffLineKind::FileHeader => (hx.tx0, hx.surface, ""),
+                    DiffLineKind::Added => (rgb(DIFF_ADD_TX), tint(hx.green, 0.13), "+"),
+                    DiffLineKind::Removed => (rgb(DIFF_DEL_TX), tint(hx.red, 0.13), "−"),
+                    DiffLineKind::Context => (hx.tx2, transparent, " "),
+                    DiffLineKind::HunkBreak => unreachable!("handled above"),
                 };
-                // Long lines scroll horizontally instead of being clipped:
-                // a minified file or a long string literal is exactly where
-                // you need to see the end of the line.
-                preview = preview.child(
-                    div()
-                        .flex_none()
-                        .h(px(15.0))
-                        .px_2()
-                        .bg(bg)
-                        .text_color(fg)
-                        .whitespace_nowrap()
-                        .child(line.to_string()),
-                );
+
+                let mut line = div().flex().flex_none().h(px(15.0)).bg(bg);
+                if r.kind == DiffLineKind::FileHeader {
+                    line = line.px_2().text_color(fg).child(r.text.clone());
+                } else {
+                    line = line
+                        .child(
+                            // Fixed-width gutter so the code column stays
+                            // aligned as numbers grow past 999.
+                            div()
+                                .flex_none()
+                                .w(px(46.0))
+                                .pr_1()
+                                .text_color(hx.tx2)
+                                .child(
+                                    r.number
+                                        .map(|n| n.to_string())
+                                        .unwrap_or_default(),
+                                ),
+                        )
+                        .child(div().flex_none().w(px(10.0)).text_color(fg).child(marker))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .pr_2()
+                                .text_color(fg)
+                                .whitespace_nowrap()
+                                .child(r.text.clone()),
+                        );
+                }
+                preview = preview.child(line);
             }
             if total > MAX_DIFF_LINES {
                 // Never truncate silently — a diff that just stops looks like
@@ -2211,6 +2364,27 @@ impl Render for HarnessWorkspace {
                     ),
             );
             root = root.child(self.render_context_menu(&hx, &menu, cx));
+        }
+
+        if let Some(x) = self.tab_menu {
+            root = root
+                .child(
+                    // Click-anywhere-else dismisses, same as the card menu.
+                    div()
+                        .id("tab-menu-backdrop")
+                        .absolute()
+                        .top(px(0.0))
+                        .left(px(0.0))
+                        .size_full()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|ws, _, _, cx| {
+                                ws.tab_menu = None;
+                                cx.notify();
+                            }),
+                        ),
+                )
+                .child(self.render_tab_menu(&hx, x, cx));
         }
         root
     }
@@ -2525,46 +2699,97 @@ index 0000000..2cf3f44
 
     #[test]
     fn git_metadata_preamble_is_replaced_by_a_single_file_header() {
-        let lines = readable_diff_lines(NEW_FILE);
-        let kinds: Vec<DiffLineKind> = lines.iter().map(|(k, _)| *k).collect();
-        assert_eq!(kinds[0], DiffLineKind::FileHeader);
-        assert_eq!(lines[0].1, "agent-schema/README.md", "header names the file");
-        assert_eq!(kinds[1], DiffLineKind::Hunk, "@@ survives — it has the line numbers");
+        let rows = readable_diff_lines(NEW_FILE);
+        assert_eq!(rows[0].kind, DiffLineKind::FileHeader);
+        assert_eq!(rows[0].text, "agent-schema/README.md", "header names the file");
 
-        let text: Vec<&str> = lines.iter().map(|(_, l)| l.as_str()).collect();
-        for noise in ["diff --git", "new file mode", "index 0000000", "--- /dev/null", "+++ b/"] {
+        for noise in [
+            "diff --git", "new file mode", "index 0000000", "--- /dev/null", "+++ b/", "@@",
+        ] {
             assert!(
-                !text.iter().any(|l| l.contains(noise)),
-                "{noise:?} should not be rendered, got {text:?}"
+                !rows.iter().any(|r| r.text.contains(noise)),
+                "{noise:?} should not be rendered, got {:?}",
+                rows.iter().map(|r| &r.text).collect::<Vec<_>>()
             );
         }
     }
 
     #[test]
-    fn content_lines_keep_their_kind() {
-        let lines = readable_diff_lines(NEW_FILE);
-        assert!(lines.iter().any(|(k, l)| *k == DiffLineKind::Added && l.contains("agent-schema")));
+    fn every_content_line_carries_its_real_file_line_number() {
+        // This is what replaces the `@@ -0,0 +1,67 @@` header: the coordinates
+        // were only ever a way to work out these numbers by hand.
+        let rows = readable_diff_lines(NEW_FILE);
+        let added: Vec<(Option<u32>, &str)> = rows
+            .iter()
+            .filter(|r| r.kind == DiffLineKind::Added)
+            .map(|r| (r.number, r.text.as_str()))
+            .collect();
+        assert_eq!(added[0].0, Some(1), "new file starts at line 1");
+        assert_eq!(added[0].1, "# agent-schema — the tool contract");
+        assert_eq!(added[1].0, Some(2), "and increments");
+    }
+
+    #[test]
+    fn line_numbers_track_old_and_new_files_independently() {
+        // Removed lines number against the OLD file, added and context against
+        // the new one — otherwise a deletion shifts every later number.
+        let diff = "@@ -10,4 +20,4 @@\n ctx\n-gone\n+added\n ctx2\n";
+        let rows = readable_diff_lines(diff);
+        let n = |k: DiffLineKind| -> Vec<Option<u32>> {
+            rows.iter().filter(|r| r.kind == k).map(|r| r.number).collect()
+        };
+        assert_eq!(n(DiffLineKind::Removed), vec![Some(11)], "old-file numbering");
+        assert_eq!(n(DiffLineKind::Added), vec![Some(21)], "new-file numbering");
+        assert_eq!(n(DiffLineKind::Context), vec![Some(20), Some(22)]);
+    }
+
+    #[test]
+    fn the_hunk_section_heading_survives_but_the_coordinates_do_not() {
+        // git puts the enclosing function/heading after the second `@@`. That
+        // part is genuinely useful; the numbers are what the gutter now shows.
+        let diff = "@@ -1,2 +1,2 @@ fn interesting()\n a\n@@ -50,2 +50,2 @@ fn other()\n b\n";
+        let rows = readable_diff_lines(diff);
+        let breaks: Vec<&str> = rows
+            .iter()
+            .filter(|r| r.kind == DiffLineKind::HunkBreak)
+            .map(|r| r.text.as_str())
+            .collect();
+        assert_eq!(breaks, vec!["fn interesting()", "fn other()"]);
+    }
+
+    #[test]
+    fn the_diff_marker_column_is_stripped_from_the_text() {
+        // The gutter and the row tint already say what happened; keeping the
+        // leading +/- shifts every line against the file's real indentation.
+        let diff = "@@ -1,1 +1,1 @@\n-    old_indented()\n+    new_indented()\n";
+        let rows = readable_diff_lines(diff);
+        let texts: Vec<&str> = rows
+            .iter()
+            .filter(|r| r.number.is_some())
+            .map(|r| r.text.as_str())
+            .collect();
+        assert_eq!(texts, vec!["    old_indented()", "    new_indented()"]);
     }
 
     #[test]
     fn a_deletion_of_a_dashed_line_is_not_mistaken_for_a_file_marker() {
         // `--- ` is the file-pair marker, but `--foo` is a legitimate removed
         // line. Requiring the space-terminated triple form keeps them apart.
-        let diff = "@@ -1 +1 @@\n---foo\n-  --bar\n+baz\n";
-        let lines = readable_diff_lines(diff);
-        let removed: Vec<&str> = lines
+        let diff = "@@ -1,3 +1,1 @@\n---foo\n-  --bar\n+baz\n";
+        let removed: Vec<String> = readable_diff_lines(diff)
             .iter()
-            .filter(|(k, _)| *k == DiffLineKind::Removed)
-            .map(|(_, l)| l.as_str())
+            .filter(|r| r.kind == DiffLineKind::Removed)
+            .map(|r| r.text.clone())
             .collect();
-        assert_eq!(removed, vec!["---foo", "-  --bar"]);
+        // The leading `-` marker is stripped; the rest of the line is intact.
+        assert_eq!(removed, vec!["--foo", "  --bar"]);
     }
 
     #[test]
     fn renames_are_stated_in_words_rather_than_dropped() {
         let diff = "diff --git a/old.rs b/new.rs\nsimilarity index 98%\nrename from old.rs\nrename to new.rs\n";
-        let lines = readable_diff_lines(diff);
-        let text: Vec<&str> = lines.iter().map(|(_, l)| l.as_str()).collect();
+        let rows = readable_diff_lines(diff);
+        let text: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
         assert_eq!(text[0], "new.rs", "header uses the post-rename path");
         assert!(text.contains(&"renamed from old.rs"));
         assert!(!text.iter().any(|l| l.contains("similarity index")));
@@ -2576,8 +2801,8 @@ index 0000000..2cf3f44
 diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@\n+y\n";
         let headers: Vec<String> = readable_diff_lines(diff)
             .into_iter()
-            .filter(|(k, _)| *k == DiffLineKind::FileHeader)
-            .map(|(_, l)| l)
+            .filter(|r| r.kind == DiffLineKind::FileHeader)
+            .map(|r| r.text)
             .collect();
         assert_eq!(headers, vec!["a.rs", "b.rs"]);
     }
