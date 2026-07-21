@@ -542,6 +542,17 @@ impl HarnessWorkspace {
             if let Err(e) = runtime.on_spawn(&r.path) {
                 log::warn!("{kind} setup failed for {}: {e}", r.path.display());
             }
+            // The harness runs inside the user's own repository, so anything it
+            // drops there would otherwise show up as uncommitted changes in
+            // their project. Exclude locally (.git/info/exclude) rather than
+            // touching their tracked .gitignore.
+            if let Err(e) = self
+                .manager
+                .git()
+                .exclude_locally(&r.path, runtime.ignored_paths())
+            {
+                log::warn!("could not add local git excludes for {}: {e}", r.path.display());
+            }
             self.agent_fidelity.insert(r.path.clone(), runtime.fidelity());
             // Adapters that stream their own signals (OpenCode's SSE) publish
             // straight onto the shared bus; file-based ones are already served

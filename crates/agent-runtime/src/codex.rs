@@ -79,6 +79,10 @@ impl AgentRuntime for CodexRuntime {
         SignalKind::Notify
     }
 
+    fn ignored_paths(&self) -> &'static [&'static str] {
+        &[".harness/", ".codex/"]
+    }
+
     fn on_spawn(&self, worktree_root: &Path) -> io::Result<()> {
         let shim = self.materialize_shim()?;
         let dir = worktree_root.join(".codex");

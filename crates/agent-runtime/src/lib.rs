@@ -128,6 +128,17 @@ pub trait AgentRuntime: Send + Sync {
     /// How the optional enhancement arrives, if at all.
     fn signal_kind(&self) -> SignalKind;
 
+    /// Paths this adapter writes into the worktree, for the caller to add to
+    /// the repo's local git excludes.
+    ///
+    /// The harness runs inside the user's own repositories, so anything it
+    /// drops there would otherwise show up as uncommitted changes in their
+    /// project — and in Claude Code's case carry a machine-specific absolute
+    /// path that must never be committed.
+    fn ignored_paths(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Prepare the worktree before spawning: drop in whatever per-agent config
     /// enables the signal surface (a pi extension, a `.claude/settings.json`
     /// hook, a `notify` entry). Must be idempotent — it runs on every spawn.

@@ -152,3 +152,81 @@ fn diff_is_empty_when_base_is_unresolvable() {
     assert!(diff.files.is_empty());
     assert!(diff.base.is_empty());
 }
+
+// ---- local excludes (harness must not dirty the user's repo) ---------------
+
+#[test]
+fn exclude_locally_hides_harness_files_in_a_real_worktree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_root = tmp.path().join("app");
+    init_repo(&repo_root);
+    let g = GitWorktrees::new(SystemRunner);
+    let wt = tmp.path().join("wt");
+    g.add_worktree(&repo_root, &wt, "feat/excl", None).unwrap();
+
+    // Exactly what the adapters drop into a worktree.
+    fs::create_dir_all(wt.join(".harness")).unwrap();
+    fs::write(wt.join(".harness/status.json"), "{}").unwrap();
+    fs::create_dir_all(wt.join(".codex")).unwrap();
+    fs::write(wt.join(".codex/config.toml"), "notify = []").unwrap();
+    fs::create_dir_all(wt.join(".claude")).unwrap();
+    fs::write(wt.join(".claude/settings.local.json"), "{}").unwrap();
+
+    assert!(
+        !git_out(&wt, &["status", "--porcelain"]).trim().is_empty(),
+        "precondition: harness files show as changes before excluding"
+    );
+
+    g.exclude_locally(&wt, &[".harness/", ".codex/", ".claude/settings.local.json"])
+        .unwrap();
+
+    assert_eq!(
+        git_out(&wt, &["status", "--porcelain"]).trim(),
+        "",
+        "harness-written files must not appear as changes in the user's repo"
+    );
+}
+
+#[test]
+fn exclude_locally_is_idempotent_and_preserves_the_users_entries() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_root = tmp.path().join("app");
+    init_repo(&repo_root);
+    let g = GitWorktrees::new(SystemRunner);
+
+    let exclude = repo_root.join(".git/info/exclude");
+    fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+    fs::write(&exclude, "# the user's own entry\nmy-scratch/\n").unwrap();
+
+    g.exclude_locally(&repo_root, &[".harness/"]).unwrap();
+    g.exclude_locally(&repo_root, &[".harness/", ".codex/"]).unwrap();
+    g.exclude_locally(&repo_root, &[".harness/", ".codex/"]).unwrap();
+
+    let text = fs::read_to_string(&exclude).unwrap();
+    assert!(text.contains("my-scratch/"), "the user's entries must survive: {text}");
+    assert_eq!(
+        text.matches(".harness/").count(),
+        1,
+        "repeated calls must replace our block, not append forever: {text}"
+    );
+    assert!(text.contains(".codex/"));
+}
+
+#[test]
+fn exclude_locally_targets_the_common_dir_not_the_worktree_git_dir() {
+    // Git reads only $GIT_COMMON_DIR/info/exclude. A linked worktree's own
+    // $GIT_DIR/info/exclude is silently ignored — verified against real git,
+    // and getting it wrong yields code that looks correct and does nothing.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_root = tmp.path().join("app");
+    init_repo(&repo_root);
+    let g = GitWorktrees::new(SystemRunner);
+    let wt = tmp.path().join("wt2");
+    g.add_worktree(&repo_root, &wt, "feat/excl2", None).unwrap();
+
+    g.exclude_locally(&wt, &[".harness/"]).unwrap();
+
+    let common = repo_root.join(".git/info/exclude");
+    assert!(common.exists(), "must write the common dir's exclude file");
+    assert!(fs::read_to_string(&common).unwrap().contains(".harness/"));
+}

@@ -198,6 +198,41 @@ fn opencode_needs_no_config_injection() {
 // ---- Claude Code adapter ---------------------------------------------------
 
 #[test]
+fn claude_code_never_touches_the_tracked_settings_file() {
+    // settings.json is committed by teams, and our hook embeds an absolute
+    // path to a shim under ~/.openorchestra — machine-specific and wrong on
+    // anyone else's checkout. settings.local.json is the untracked override.
+    let state = tempfile::tempdir().unwrap();
+    let wt = tempfile::tempdir().unwrap();
+    ClaudeCodeRuntime::new(state.path()).on_spawn(wt.path()).unwrap();
+
+    assert!(wt.path().join(".claude/settings.local.json").exists());
+    assert!(
+        !wt.path().join(".claude/settings.json").exists(),
+        "the tracked settings file must be left alone"
+    );
+}
+
+#[test]
+fn adapters_declare_what_they_write_into_the_worktree() {
+    // These feed `git exclude_locally`, so a path written but not declared
+    // would silently dirty the user's repo.
+    let state = tempfile::tempdir().unwrap();
+    let wt = tempfile::tempdir().unwrap();
+
+    let claude = ClaudeCodeRuntime::new(state.path());
+    assert!(claude.ignored_paths().contains(&".claude/settings.local.json"));
+    assert!(claude.ignored_paths().contains(&".harness/"));
+
+    let codex = CodexRuntime::new(state.path());
+    assert!(codex.ignored_paths().contains(&".codex/"));
+
+    // OpenCode and Kimi write nothing, and must not claim otherwise.
+    assert!(OpenCodeRuntime::new(wt.path()).ignored_paths().is_empty());
+    assert!(KimiRuntime.ignored_paths().is_empty());
+}
+
+#[test]
 fn claude_code_writes_notification_hooks_pointing_at_the_shim() {
     let state = tempfile::tempdir().unwrap();
     let wt = tempfile::tempdir().unwrap();
@@ -206,7 +241,7 @@ fn claude_code_writes_notification_hooks_pointing_at_the_shim() {
 
     assert!(rt.shim_path().exists(), "shim must be materialized");
     let settings: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(wt.path().join(".claude/settings.json")).unwrap())
+        serde_json::from_str(&std::fs::read_to_string(wt.path().join(".claude/settings.local.json")).unwrap())
             .unwrap();
 
     let matchers: Vec<&str> = settings["hooks"]["Notification"]
@@ -230,20 +265,20 @@ fn claude_code_writes_notification_hooks_pointing_at_the_shim() {
 
 #[test]
 fn claude_code_preserves_the_users_own_settings_and_hooks() {
-    // Clobbering a project's .claude/settings.json would be a hostile thing
-    // for a harness to do.
+    // Clobbering a project's settings would be a hostile thing for a harness
+    // to do — even in the local file, which may hold the user's own hooks.
     let state = tempfile::tempdir().unwrap();
     let wt = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(wt.path().join(".claude")).unwrap();
     std::fs::write(
-        wt.path().join(".claude/settings.json"),
+        wt.path().join(".claude/settings.local.json"),
         r#"{"model":"opus","hooks":{"Notification":[{"matcher":"mine","hooks":[{"type":"command","command":"echo user-hook"}]}]}}"#,
     )
     .unwrap();
 
     ClaudeCodeRuntime::new(state.path()).on_spawn(wt.path()).unwrap();
 
-    let text = std::fs::read_to_string(wt.path().join(".claude/settings.json")).unwrap();
+    let text = std::fs::read_to_string(wt.path().join(".claude/settings.local.json")).unwrap();
     let settings: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert_eq!(settings["model"], "opus", "unrelated settings must survive");
     assert!(text.contains("echo user-hook"), "the user's own hook must survive");
@@ -261,7 +296,7 @@ fn claude_code_on_spawn_is_idempotent() {
     rt.on_spawn(wt.path()).unwrap();
 
     let settings: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(wt.path().join(".claude/settings.json")).unwrap())
+        serde_json::from_str(&std::fs::read_to_string(wt.path().join(".claude/settings.local.json")).unwrap())
             .unwrap();
     assert_eq!(
         settings["hooks"]["Notification"].as_array().unwrap().len(),

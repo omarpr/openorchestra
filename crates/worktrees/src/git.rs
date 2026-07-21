@@ -94,10 +94,18 @@ pub struct WorktreeListEntry {
     pub head: Option<String>,
 }
 
+/// Markers around the harness's block in `.git/info/exclude`, so repeated
+/// calls replace their own entries instead of appending forever, and a human
+/// reading the file knows what put them there.
+const BLOCK_START: &str = "# >>> openOrchestra (harness-managed; safe to delete) >>>";
+const BLOCK_END: &str = "# <<< openOrchestra <<<";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitError {
     /// Could not start `git` (binary missing, etc.).
     Spawn(String),
+    /// A filesystem error while reading or writing git metadata.
+    Io(String),
     /// `git` ran but exited non-zero.
     Failed {
         command: String,
@@ -110,6 +118,7 @@ impl std::fmt::Display for GitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             GitError::Spawn(msg) => write!(f, "could not run git: {msg}"),
+            GitError::Io(msg) => write!(f, "git metadata io error: {msg}"),
             GitError::Failed {
                 command,
                 code,
@@ -203,6 +212,78 @@ impl<R: CommandRunner> GitWorktrees<R> {
     pub fn repo_root(&self, dir: &Path) -> Result<std::path::PathBuf, GitError> {
         let out = self.git_ok(dir, &["rev-parse", "--show-toplevel"])?;
         Ok(std::path::PathBuf::from(out.stdout.trim()))
+    }
+
+    /// Add `patterns` to the repo's local exclude file, so harness-written
+    /// files never show up as changes in the user's project.
+    ///
+    /// Uses `.git/info/exclude` rather than the repo's tracked `.gitignore`:
+    /// the harness must not edit a file the user commits. Entries are wrapped
+    /// in a marked block so a later call can replace them cleanly, and the
+    /// whole thing is idempotent.
+    ///
+    /// **The path is the git *common* dir, not the worktree's git dir.**
+    /// Verified against real git: writing to a linked worktree's own
+    /// `$GIT_DIR/info/exclude` has **no effect** — git only reads
+    /// `$GIT_COMMON_DIR/info/exclude`. One consequence worth knowing: the
+    /// exclusions apply to the main checkout and every worktree of that repo,
+    /// which is what we want (one entry covers every worktree the harness will
+    /// ever create there).
+    pub fn exclude_locally(&self, dir: &Path, patterns: &[&str]) -> Result<(), GitError> {
+        if patterns.is_empty() {
+            return Ok(());
+        }
+        let common = self.git_ok(dir, &["rev-parse", "--git-common-dir"])?;
+        let common = common.stdout.trim();
+        // `--git-common-dir` may be relative to `dir` (it is plain `.git` for a
+        // primary checkout), so resolve it against the directory we asked in.
+        let common = if Path::new(common).is_absolute() {
+            std::path::PathBuf::from(common)
+        } else {
+            dir.join(common)
+        };
+
+        let info = common.join("info");
+        let exclude = info.join("exclude");
+        let existing = std::fs::read_to_string(&exclude).unwrap_or_default();
+
+        let mut kept: Vec<&str> = Vec::new();
+        let mut inside = false;
+        for line in existing.lines() {
+            if line == BLOCK_START {
+                inside = true;
+                continue;
+            }
+            if line == BLOCK_END {
+                inside = false;
+                continue;
+            }
+            if !inside {
+                kept.push(line);
+            }
+        }
+
+        let mut out = kept.join("\n");
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(BLOCK_START);
+        out.push('\n');
+        for pattern in patterns {
+            out.push_str(pattern);
+            out.push('\n');
+        }
+        out.push_str(BLOCK_END);
+        out.push('\n');
+
+        std::fs::create_dir_all(&info).map_err(|e| GitError::Io(e.to_string()))?;
+        // Atomic, like every other write in this codebase: git may be reading
+        // this file concurrently, and a truncated exclude file would start
+        // showing spurious changes.
+        let tmp = info.join(".exclude.harness.tmp");
+        std::fs::write(&tmp, out).map_err(|e| GitError::Io(e.to_string()))?;
+        std::fs::rename(&tmp, &exclude).map_err(|e| GitError::Io(e.to_string()))?;
+        Ok(())
     }
 
     /// Whether a ref resolves in this repo (e.g. to prefer `origin/main` over a

@@ -1,7 +1,7 @@
 //! The Claude Code adapter (§4.5, roadmap A3).
 //!
 //! Claude Code exposes `Notification` hooks: a project-local
-//! `.claude/settings.json` can name a command to run when the agent needs
+//! `.claude/settings.local.json` can name a command to run when the agent needs
 //! permission, goes idle at a prompt, or stops. We write that settings file and
 //! point it at a **shim** that writes the shared `.harness/status.json` — so
 //! Claude Code normalizes through exactly the same file pi does, and the
@@ -16,6 +16,13 @@
 //! `claude` from `$PATH` as a separate subprocess and run none of its code in
 //! process — exactly as a user typing `claude` in Terminal.app would. Nothing
 //! is bundled, redistributed, or linked.
+//!
+//! **We write `settings.local.json`, never `settings.json`.** The latter is a
+//! file teams commit, and our hook embeds an **absolute path** to a shim under
+//! `~/.openorchestra` — machine-specific, and wrong on anyone else's checkout.
+//! `settings.local.json` is Claude Code's documented per-machine override and
+//! is conventionally untracked, so the harness never touches a file the user
+//! version-controls.
 //!
 //! **Hook-schema drift (R12 residual):** the hook schema moved across 2.1.x, so
 //! the shim is written to be tolerant — it reads several spellings of each
@@ -88,14 +95,14 @@ impl ClaudeCodeRuntime {
         })
     }
 
-    /// Merge our hooks into the worktree's `.claude/settings.json`.
+    /// Merge our hooks into the worktree's `.claude/settings.local.json`.
     ///
-    /// Merge rather than overwrite: the user may have their own hooks and
-    /// settings there, and clobbering them would be a hostile thing for a
+    /// Merge rather than overwrite: even a local settings file may hold the
+    /// user's own hooks, and clobbering them would be a hostile thing for a
     /// harness to do to a project directory.
     fn write_settings(&self, worktree_root: &Path, shim: &Path) -> io::Result<()> {
         let dir = worktree_root.join(".claude");
-        let path = dir.join("settings.json");
+        let path = dir.join("settings.local.json");
 
         let mut root: serde_json::Value = fs::read_to_string(&path)
             .ok()
@@ -128,7 +135,7 @@ impl ClaudeCodeRuntime {
         }
 
         fs::create_dir_all(&dir)?;
-        let tmp = dir.join(".settings.json.tmp");
+        let tmp = dir.join(".settings.local.json.tmp");
         fs::write(&tmp, serde_json::to_string_pretty(&root)?)?;
         fs::rename(&tmp, &path)
     }
@@ -146,6 +153,10 @@ impl AgentRuntime for ClaudeCodeRuntime {
 
     fn signal_kind(&self) -> SignalKind {
         SignalKind::StatusFile
+    }
+
+    fn ignored_paths(&self) -> &'static [&'static str] {
+        &[".harness/", ".claude/settings.local.json"]
     }
 
     fn on_spawn(&self, worktree_root: &Path) -> io::Result<()> {

@@ -110,6 +110,12 @@ impl AgentRuntime for PiRuntime {
         SignalKind::StatusFile
     }
 
+    fn ignored_paths(&self) -> &'static [&'static str] {
+        // The extension writes this; the extensions themselves live in the
+        // state dir, outside the repo entirely.
+        &[".harness/"]
+    }
+
     fn on_spawn(&self, _worktree_root: &Path) -> io::Result<()> {
         self.materialize_assets()
     }
