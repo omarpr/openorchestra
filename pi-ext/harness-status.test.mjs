@@ -2,15 +2,18 @@
 // ExtensionAPI/ExtensionContext and asserts every state transition and the
 // atomic-write contract. Run with:  npm install && npm test   (in pi-ext/)
 //
-// The extension is loaded through @mariozechner/jiti — the same loader real pi
-// uses — so TS loading is part of what's under test.
+// The extension is loaded through jiti — the same loader real pi uses — so TS
+// loading is part of what's under test. pi 0.73.1 switched from the
+// @mariozechner/jiti fork to upstream jiti 2.7 (`jiti/static`), so this import
+// tracks it; if it ever diverges again, extension loading breaks in production
+// while a stale fork keeps the test green.
 
 process.env.HARNESS_STATUS_SETTLE_MS = "50";
 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createJiti } from "@mariozechner/jiti";
+import { createJiti } from "jiti/static";
 
 const jiti = createJiti(import.meta.url, { interopDefault: true });
 const factory = await jiti.import(
@@ -26,6 +29,12 @@ const ui = {
 	confirm: async () => {
 		await new Promise((r) => setTimeout(r, 80));
 		return true;
+	},
+	// `custom` takes keyboard focus and resolves via done() — it blocks the
+	// agent just like confirm, so the wrap must cover it too.
+	custom: async () => {
+		await new Promise((r) => setTimeout(r, 80));
+		return "picked";
 	},
 };
 const ctx = {
@@ -72,6 +81,24 @@ await sleep(20);
 assert(state().state === "waiting", "open dialog -> waiting");
 await dialog;
 assert(state().state === "running", "dialog resolved -> back to running");
+
+// Same for ui.custom (focus-taking component dialog).
+const customDialog = ctx.ui.custom(() => {});
+await sleep(20);
+assert(state().state === "waiting", "open custom dialog -> waiting");
+assert((await customDialog) === "picked", "custom dialog return value passes through");
+assert(state().state === "running", "custom dialog resolved -> back to running");
+
+// Nested dialogs must not drop back to running until the *last* one closes.
+const outer = ctx.ui.confirm("t", "m");
+await sleep(10);
+const inner = ctx.ui.custom(() => {});
+await sleep(10);
+assert(state().state === "waiting", "nested dialogs -> waiting");
+await outer;
+assert(state().state === "waiting", "still waiting while inner dialog is open");
+await inner;
+assert(state().state === "running", "all dialogs closed -> running");
 
 // Auto-retry: agent_start within the settle window cancels the idle write.
 await emit("agent_end", { messages: [] });

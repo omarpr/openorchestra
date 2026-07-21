@@ -3,8 +3,11 @@
  * `.harness/status.json` in the project cwd, for the harness's Rust status
  * watcher (crates/status-watch) to pick up. See docs/architecture.md §4.1.
  *
- * Verified against @mariozechner/pi-coding-agent v0.70.6 (the `pi` CLI;
+ * Verified against @mariozechner/pi-coding-agent v0.73.1 (the `pi` CLI;
  * note: the npm package `@mariozechner/pi` is the unrelated "pods" tool).
+ * The pin moved 0.70.6 -> 0.73.1 in M2; see docs/m2-pi-pin.md for the API
+ * diff that made the move safe and for the upcoming @earendil-works scope
+ * rename to watch for.
  *
  * State mapping (architecture sketch -> real pi extension events):
  *   "agent_start"            -> running   (real event, 1:1)
@@ -89,8 +92,11 @@ export default function (pi: ExtensionAPI) {
 	// share one ExtensionUIContext instance (ExtensionRunner.uiContext), so we
 	// wrap its dialog methods once; any extension (e.g. an approval gate) opening
 	// select/confirm/input/editor flips the state to "waiting" until it resolves.
+	// `custom` is included because it "shows a custom component with keyboard
+	// focus" and resolves only when the component calls done() — i.e. it blocks
+	// the agent exactly like the other four. It was missed before M2.
 	const patched = new WeakSet<object>();
-	const DIALOG_METHODS = ["select", "confirm", "input", "editor"] as const;
+	const DIALOG_METHODS = ["select", "confirm", "input", "editor", "custom"] as const;
 
 	function patchUi(ctx: ExtensionContext) {
 		let ui: Record<string, unknown>;

@@ -7,6 +7,7 @@
 		"test": "node harness-status.test.mjs"
 	},
 	"devDependencies": {
-		"@mariozechner/pi-coding-agent": "0.70.6"
+		"@mariozechner/pi-coding-agent": "0.73.1",
+		"jiti": "^2.7.0"
 	}
 }

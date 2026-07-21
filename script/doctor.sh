@@ -22,10 +22,19 @@ fi
 
 sec "Agent — needed to run pi in worktree terminals (else the terminal is a plain shell)"
 if have node; then ok "node       $(node --version 2>/dev/null)"; else warn "node       brew install node"; fi
+# The supported pin (architecture §8 R3, docs/m2-pi-pin.md). The extension's
+# state machine is re-verified against exactly this version; a drifting pi is
+# the single most likely cause of a dead agent-status pill.
+PI_PIN=0.73.1
 if have pi; then
-  ok "pi         $(command -v pi)"
+  pi_version="$(pi --version 2>&1 | tail -1 | tr -d '[:space:]')"
+  if [[ "$pi_version" == "$PI_PIN" ]]; then
+    ok "pi         $pi_version  ($(command -v pi))"
+  else
+    warn "pi         $pi_version installed, but $PI_PIN is the verified pin — re-run: bash pi-ext/testing/capture-lifecycle.sh"
+  fi
 else
-  warn "pi         npm install -g @mariozechner/pi-coding-agent@0.70.6"
+  warn "pi         npm install -g @mariozechner/pi-coding-agent@$PI_PIN"
 fi
 
 sec "Forge — PR + CI badges (optional; badges hide when absent)"
