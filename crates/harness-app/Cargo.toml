@@ -99,6 +99,7 @@ env_logger = "0.11"
 # Spike 3c: build a zed ThemeFamilyContent from HarnessTheme tokens via a JSON
 # value (every content field is Option/#[serde(default)], so a partial object
 # deserializes cleanly). serde_json is already deep in the zed cone.
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Zed's workspace [patch.crates-io] entries do NOT propagate to out-of-tree

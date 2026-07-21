@@ -1,6 +1,8 @@
-{
-	"isDraft": false,
-	"number": 128,
-	"state": "OPEN",
-	"title": "Add worktree navigation sidebar"
-}
+[
+	{
+		"isDraft": false,
+		"number": 128,
+		"state": "OPEN",
+		"title": "Add worktree navigation sidebar"
+	}
+]

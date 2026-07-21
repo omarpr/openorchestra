@@ -49,6 +49,21 @@ else
   warn "gh         brew install gh   (then: gh auth login)"
 fi
 
+sec "Editor — rust-analyzer powers the LSP indicator in ▤ files (optional)"
+if have rust-analyzer; then
+  # ~/.cargo/bin/rust-analyzer is a rustup SHIM: it exists on $PATH even when
+  # the component is not installed, and then exits 1 at runtime. Zed rejects
+  # such a binary and falls back to downloading one, which openOrchestra blocks
+  # — so "present on PATH" is not the question worth asking (N2 §4).
+  if rust-analyzer --version >/dev/null 2>&1; then
+    ok "rust-analyzer $(rust-analyzer --version 2>/dev/null | head -1)"
+  else
+    warn "rust-analyzer on \$PATH but not runnable (rustup shim without the component) — run:  rustup component add rust-analyzer"
+  fi
+else
+  warn "rust-analyzer rustup component add rust-analyzer"
+fi
+
 sec "Build — needed for make build / make app"
 if have cargo; then ok "cargo      $(cargo --version 2>/dev/null | sed 's/cargo //')"; else bad "cargo      install via https://rustup.rs"; missing_required=1; fi
 if have cmake; then ok "cmake      $(cmake --version 2>/dev/null | head -1 | sed 's/cmake version //')"; else warn "cmake      brew install cmake  (or: make setup)"; fi

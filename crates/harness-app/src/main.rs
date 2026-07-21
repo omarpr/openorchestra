@@ -118,7 +118,14 @@ fn main() {
         // Harness design tokens (§3.4). Install them as the active zed theme
         // (Spike 3c) BEFORE creating editor panes, so editor + terminal read
         // their colors — including the rust SyntaxTheme — from one palette.
-        let hx = HarnessTheme::dark();
+        // Honor the persisted palette (§12 cross-cutting): reading it here,
+        // before the zed theme is generated, means a light-theme user never
+        // sees a dark flash on launch.
+        let hx = if workspace::persisted_dark_theme() {
+            HarnessTheme::dark()
+        } else {
+            HarnessTheme::light()
+        };
         harness_zed_theme::install(&hx, cx);
 
         // Editor crate wiring (Spike 3). Safe out-of-tree: registers defensive

@@ -1,6 +1,8 @@
-{
-	"isDraft": false,
-	"number": 88,
-	"state": "CLOSED",
-	"title": "Experiment: custom rope editor"
-}
+[
+	{
+		"isDraft": false,
+		"number": 88,
+		"state": "CLOSED",
+		"title": "Experiment: custom rope editor"
+	}
+]

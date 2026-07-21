@@ -1,6 +1,8 @@
-{
-	"isDraft": true,
-	"number": 131,
-	"state": "OPEN",
-	"title": "WIP: diff panel sticky headers"
-}
+[
+	{
+		"isDraft": true,
+		"number": 131,
+		"state": "OPEN",
+		"title": "WIP: diff panel sticky headers"
+	}
+]

@@ -144,6 +144,8 @@ pub struct HarnessWorkspace {
     status_source: Option<StatusFileSource>,
     /// Where the adapters materialize their extensions and shims.
     state_dir: PathBuf,
+    prefs: Prefs,
+    prefs_path: PathBuf,
     bus: Bus,
     tools: ToolStatus,
     focus_handle: FocusHandle,
@@ -159,6 +161,8 @@ impl HarnessWorkspace {
             .unwrap_or_else(|| launch_hint.clone())
             .join(".openorchestra");
         let repos_path = data_dir.join("repos.json");
+        let prefs_path = data_dir.join("prefs.json");
+        let prefs = load_prefs(&prefs_path);
         let reg_path = data_dir.join("registry.json");
 
         let mut repo_roots = load_repos(&repos_path);
@@ -240,6 +244,8 @@ impl HarnessWorkspace {
             _poller: Some(poller),
             status_source,
             state_dir: data_dir.clone(),
+            prefs,
+            prefs_path,
             bus,
             tools: detect_tools(),
             focus_handle: cx.focus_handle(),
@@ -859,7 +865,23 @@ impl HarnessWorkspace {
 
     // ---- rendering -------------------------------------------------------
 
-    fn render_top_bar(&self, hx: &HarnessTheme) -> impl IntoElement {
+    /// Swap the palette and regenerate the zed theme from it, so editor,
+    /// terminal, and the hosted workspace follow the chrome (§3.5, D7).
+    fn save_prefs(&mut self, cx: &App) {
+        self.prefs.dark = theme(cx).is_dark();
+        save_prefs_to(&self.prefs_path, &self.prefs);
+    }
+
+    fn toggle_theme(&mut self, cx: &mut Context<Self>) {
+        let next = theme(cx).toggled();
+        crate::harness_zed_theme::install(&next, cx);
+        cx.set_global(next);
+        self.save_prefs(cx);
+        cx.refresh_windows();
+        cx.notify();
+    }
+
+    fn render_top_bar(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
         let branch = self.resolve().map(|r| r.branch).unwrap_or_else(|| "no folder".to_string());
         div()
             .flex()
@@ -880,6 +902,20 @@ impl HarnessWorkspace {
                     .child(div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx0).child("openOrchestra"))
                     .child(div().text_xs().text_color(hx.tx2).child("·"))
                     .child(div().text_xs().font_family(hx.font_mono).text_color(hx.tx1).child(branch)),
+            )
+            .child(
+                div()
+                    .id("theme-toggle")
+                    .flex_none()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .text_xs()
+                    .text_color(hx.tx2)
+                    .cursor_pointer()
+                    .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
+                    .child(if hx.is_dark() { "☾ dark" } else { "☀ light" })
+                    .on_click(cx.listener(|ws, _, _, cx| ws.toggle_theme(cx))),
             )
     }
 
@@ -909,7 +945,7 @@ impl HarnessWorkspace {
             .flex()
             .flex_col()
             .flex_none()
-            .w(px(280.0))
+            .w(px(self.prefs.sidebar_width))
             .h_full()
             .bg(hx.bg1)
             .border_r_1()
@@ -1547,7 +1583,7 @@ impl HarnessWorkspace {
                 .flex()
                 .flex_col()
                 .flex_none()
-                .w(px(340.0))
+                .w(px(self.prefs.diff_width))
                 .h_full()
                 .items_center()
                 .justify_center()
@@ -1571,7 +1607,7 @@ impl HarnessWorkspace {
             .flex()
             .flex_col()
             .flex_none()
-            .w(px(340.0))
+            .w(px(self.prefs.diff_width))
             .h_full()
             .bg(hx.bg1)
             .border_l_1()
@@ -1707,7 +1743,7 @@ impl Render for HarnessWorkspace {
             .bg(hx.bg0)
             .font_family(hx.font_ui)
             .text_color(hx.tx0)
-            .child(self.render_top_bar(&hx))
+            .child(self.render_top_bar(&hx, cx))
             .child(
                 div()
                     .flex()
@@ -1830,6 +1866,73 @@ fn tool_chip(hx: &HarnessTheme, label: &str, present: bool, required: bool) -> i
         .gap_1()
         .child(div().size(px(5.0)).rounded_full().bg(color))
         .child(div().text_color(color).child(label.to_string()))
+}
+
+/// User-interface preferences persisted across launches (§12 cross-cutting).
+///
+/// Deliberately separate from `registry.json`: that file is *project state* the
+/// training loop reads (§6.4), and mixing window chrome into it would make a
+/// theme toggle look like a change to harvestable data.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct Prefs {
+    dark: bool,
+    sidebar_width: f32,
+    diff_width: f32,
+    sidebar_open: bool,
+    diff_open: bool,
+}
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Prefs {
+            dark: true,
+            sidebar_width: 280.0,
+            diff_width: 340.0,
+            sidebar_open: true,
+            diff_open: true,
+        }
+    }
+}
+
+impl Prefs {
+    /// Clamp on load, not just on write: a hand-edited or truncated prefs file
+    /// must not be able to render a panel unusable or invisible.
+    fn sanitized(mut self) -> Self {
+        self.sidebar_width = self.sidebar_width.clamp(180.0, 640.0);
+        self.diff_width = self.diff_width.clamp(220.0, 800.0);
+        self
+    }
+}
+
+/// Whether the last session used the dark palette.
+///
+/// Read before the window exists, so `main` can install the right zed theme up
+/// front rather than flashing dark and correcting.
+pub fn persisted_dark_theme() -> bool {
+    let path = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default()
+        .join(".openorchestra")
+        .join("prefs.json");
+    load_prefs(&path).dark
+}
+
+fn load_prefs(path: &Path) -> Prefs {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Prefs>(&s).ok())
+        .unwrap_or_default()
+        .sanitized()
+}
+
+fn save_prefs_to(path: &Path, prefs: &Prefs) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(prefs) {
+        let _ = std::fs::write(path, json);
+    }
 }
 
 fn load_repos(path: &Path) -> Vec<PathBuf> {

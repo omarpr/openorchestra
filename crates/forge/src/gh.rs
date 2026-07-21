@@ -5,7 +5,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::runner::{CommandOutput, CommandRunner, SystemRunner};
-use crate::{CheckRun, CheckStatus, Forge, ForgeError, PrInfo, PrState};
+use crate::{CheckRun, CheckStatus, CreatePrRequest, Forge, ForgeError, PrInfo, PrState};
 
 /// `gh`-CLI-backed [`Forge`]. Reuses the user's `gh auth login` — zero auth
 /// work in the harness (§6.3).
@@ -40,6 +40,11 @@ impl<R: CommandRunner> GhCli<R> {
         GhCli { runner, available }
     }
 
+    /// The injected runner (tests assert on the exact argv it received).
+    pub fn runner(&self) -> &R {
+        &self.runner
+    }
+
     fn ensure_available(&self) -> Result<(), ForgeError> {
         if self.available {
             Ok(())
@@ -57,7 +62,8 @@ impl<R: CommandRunner> GhCli<R> {
     }
 }
 
-/// Wire shape of `gh pr view --json number,state,isDraft,title`.
+/// Wire shape of one element of
+/// `gh pr list --head <branch> --state all --json number,state,isDraft,title`.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GhPrView {
@@ -83,8 +89,11 @@ struct GhCheck {
     bucket: String,
 }
 
-/// gh's stderr when a branch has no PR (`gh pr view`/`gh pr checks`):
+/// gh's stderr when a branch has no PR (`gh pr checks`):
 /// `no pull requests found for branch "<name>"`.
+///
+/// Still needed for `pr checks`; `pr for_branch` no longer relies on it, since
+/// `pr list` reports "none" as an empty array.
 fn is_no_pr_error(stderr: &str) -> bool {
     stderr.contains("no pull requests found")
 }
@@ -135,9 +144,23 @@ impl<R: CommandRunner> Forge for GhCli<R> {
         branch: &str,
     ) -> Result<Option<PrInfo>, ForgeError> {
         self.ensure_available()?;
+        // `gh pr list --head` rather than `gh pr view <branch>`: the latter
+        // only resolves PRs whose head branch lives in the *base* repo, so a
+        // fork-pushed worktree branch silently shows no badge (M1 §5, verified
+        // against gh 2.95.0). `pr list` also reports "no PR" as an empty array
+        // on exit 0, so the fragile stderr-string match goes away too.
         let out = self.run_gh(
             repo_dir,
-            &["pr", "view", "--json", "number,state,isDraft,title", "--", branch],
+            &[
+                "pr",
+                "list",
+                "--head",
+                branch,
+                "--state",
+                "all",
+                "--json",
+                "number,state,isDraft,title",
+            ],
         )?;
 
         if !out.success() {
@@ -146,22 +169,81 @@ impl<R: CommandRunner> Forge for GhCli<R> {
             }
             return Err(ForgeError::CommandFailed {
                 message: format!(
-                    "gh pr view exited with {:?}: {}",
+                    "gh pr list exited with {:?}: {}",
                     out.status,
                     out.stderr.trim()
                 ),
             });
         }
 
-        let view: GhPrView =
+        let prs: Vec<GhPrView> =
             serde_json::from_str(&out.stdout).map_err(|e| ForgeError::Parse {
-                message: format!("gh pr view output: {e}"),
+                message: format!("gh pr list output: {e}"),
             })?;
+
+        // A branch can carry several PRs over its life (reopened, or closed then
+        // superseded). Prefer a live one — that is what the badge is about —
+        // and otherwise the most recent, which is the highest number.
+        let Some(chosen) = prs
+            .iter()
+            .find(|pr| pr.state == "OPEN")
+            .or_else(|| prs.iter().max_by_key(|pr| pr.number))
+        else {
+            return Ok(None);
+        };
+
         Ok(Some(PrInfo {
-            number: view.number,
-            state: map_pr_state(&view.state, view.is_draft)?,
-            title: view.title,
+            number: chosen.number,
+            state: map_pr_state(&chosen.state, chosen.is_draft)?,
+            title: chosen.title.clone(),
         }))
+    }
+
+    fn create_pr(
+        &self,
+        repo_dir: &Path,
+        req: &CreatePrRequest,
+    ) -> Result<PrInfo, ForgeError> {
+        self.ensure_available()?;
+
+        // Every user-supplied value goes through `--flag value` rather than
+        // being interpolated, and there are no positionals at all, so a branch
+        // or title beginning with `-` cannot be read as an option (the same
+        // arg-injection discipline as the `--` terminators elsewhere).
+        let mut args: Vec<&str> = vec![
+            "pr", "create",
+            "--head", &req.branch,
+            "--title", &req.title,
+            "--body", &req.body,
+        ];
+        if let Some(base) = &req.base {
+            args.extend_from_slice(&["--base", base]);
+        }
+        if req.draft {
+            args.push("--draft");
+        }
+
+        let out = self.run_gh(repo_dir, &args)?;
+        if !out.success() {
+            return Err(ForgeError::CommandFailed {
+                message: format!(
+                    "gh pr create exited with {:?}: {}",
+                    out.status,
+                    out.stderr.trim()
+                ),
+            });
+        }
+
+        // `gh pr create` prints the new PR's URL, not JSON. Rather than parse
+        // the URL, re-read the branch so the returned PrInfo comes from the
+        // same code path the badges use — one source of truth for PR state.
+        self.pr_for_branch(repo_dir, &req.branch)?
+            .ok_or_else(|| ForgeError::Parse {
+                message: format!(
+                    "gh pr create succeeded but no PR is visible for {:?}",
+                    req.branch
+                ),
+            })
     }
 
     fn checks_for_branch(

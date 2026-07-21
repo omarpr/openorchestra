@@ -102,4 +102,23 @@ pub trait Forge: Send + Sync {
     /// checks yields `Ok(vec![])`.
     fn checks_for_branch(&self, repo_dir: &Path, branch: &str)
         -> Result<Vec<CheckRun>, ForgeError>;
+
+    /// Open a pull request for `branch` (§12 cross-cutting, D3-adjacent).
+    ///
+    /// The only *mutating* forge call, so it is deliberately explicit rather
+    /// than something a poller could ever trigger: creating a PR is
+    /// outward-facing and must stay a thing the user asked for.
+    fn create_pr(&self, repo_dir: &Path, req: &CreatePrRequest)
+        -> Result<PrInfo, ForgeError>;
+}
+
+/// A request to open a pull request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatePrRequest {
+    pub branch: String,
+    pub title: String,
+    pub body: String,
+    /// Base branch; `None` lets gh pick the repo's default.
+    pub base: Option<String>,
+    pub draft: bool,
 }

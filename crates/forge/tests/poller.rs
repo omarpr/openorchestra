@@ -60,6 +60,16 @@ impl ScriptedForge {
 }
 
 impl Forge for ScriptedForge {
+    fn create_pr(
+        &self,
+        _: &std::path::Path,
+        _: &forge::CreatePrRequest,
+    ) -> Result<forge::PrInfo, ForgeError> {
+        // The poller must never mutate the forge; if it ever calls this, that
+        // is the bug worth failing loudly on.
+        panic!("the poller must not create pull requests");
+    }
+
     fn available(&self) -> bool {
         self.available
     }

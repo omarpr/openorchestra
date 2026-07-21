@@ -15,7 +15,8 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use forge::{
-    CheckStatus, CommandOutput, CommandRunner, Forge, ForgeError, GhCli, PrState,
+    CheckStatus, CommandOutput, CommandRunner, CreatePrRequest, Forge, ForgeError, GhCli,
+    PrState,
 };
 
 const PR_OPEN: &str = include_str!("../fixtures/pr_open.json");
@@ -86,7 +87,8 @@ fn repo() -> &'static Path {
     Path::new("/repos/omar-harness")
 }
 
-const VIEW_ARGS: &str = "pr view --json number,state,isDraft,title -- feat/nav";
+const VIEW_ARGS: &str =
+    "pr list --head feat/nav --state all --json number,state,isDraft,title";
 const CHECKS_ARGS: &str = "pr checks --json name,state,bucket -- feat/nav";
 
 // ---- pr_for_branch ---------------------------------------------------------
@@ -124,13 +126,9 @@ fn closed_pr_parses() {
 
 #[test]
 fn no_pr_found_is_none() {
-    // Real gh stderr for a branch without a PR, exit code 1.
-    let gh = GhCli::with_runner(FakeRunner::new(true).ok(
-        VIEW_ARGS,
-        1,
-        "",
-        "no pull requests found for branch \"feat/nav\"\n",
-    ));
+    // `gh pr list --head` reports "no PR" as an empty array on exit 0 — no
+    // stderr-string matching required, unlike `gh pr view`.
+    let gh = GhCli::with_runner(FakeRunner::new(true).ok(VIEW_ARGS, 0, "[]", ""));
     assert_eq!(gh.pr_for_branch(repo(), "feat/nav").unwrap(), None);
 }
 
@@ -241,10 +239,15 @@ fn garbage_checks_output_is_error_not_panic() {
 // Verbatim stdout from a real, authenticated gh against public repos. These
 // exist so a future gh output change breaks a test instead of a badge.
 
-const LIVE_PR_OPEN: &str = include_str!("../fixtures/live/pr_view_open.json");
-const LIVE_PR_DRAFT: &str = include_str!("../fixtures/live/pr_view_draft.json");
-const LIVE_PR_MERGED: &str = include_str!("../fixtures/live/pr_view_merged.json");
-const LIVE_PR_CLOSED: &str = include_str!("../fixtures/live/pr_view_closed.json");
+const LIVE_PR_OPEN: &str = include_str!("../fixtures/live/pr_list_head_open.json");
+const LIVE_PR_DRAFT: &str = include_str!("../fixtures/live/pr_list_head_draft.json");
+const LIVE_PR_MERGED: &str = include_str!("../fixtures/live/pr_list_head_merged.json");
+const LIVE_PR_CLOSED: &str = include_str!("../fixtures/live/pr_list_head_closed.json");
+/// A PR opened from a **fork** — the case `gh pr view <branch>` cannot see at
+/// all (M1 §5). This fixture is why `pr_for_branch` uses `gh pr list --head`.
+const LIVE_PR_FORK: &str = include_str!("../fixtures/live/pr_list_head_fork.json");
+/// `gh pr list --head` on a branch with no PR: an empty array, exit 0.
+const LIVE_PR_NONE: &str = include_str!("../fixtures/live/pr_list_head_none.json");
 const LIVE_CHECKS_MIXED: &str =
     include_str!("../fixtures/live/pr_checks_pass_fail_skipping.json");
 const LIVE_CHECKS_PENDING: &str = include_str!("../fixtures/live/pr_checks_pending.json");
@@ -262,6 +265,42 @@ fn live_checks(stdout: &str) -> Vec<CheckStatus> {
         .into_iter()
         .map(|c| c.status)
         .collect()
+}
+
+#[test]
+fn live_pr_list_output_resolves_a_fork_head_pr() {
+    // The regression this locks in: `gh pr view <branch>` returns "no pull
+    // requests found" for a PR opened from a fork, so a fork-pushed worktree
+    // branch silently showed no badge. `gh pr list --head` finds it.
+    let pr = live_pr(LIVE_PR_FORK);
+    assert_eq!(pr.number, 13927);
+    assert_eq!(pr.state, PrState::Open);
+}
+
+#[test]
+fn live_empty_pr_list_is_no_pr_not_an_error() {
+    let gh = GhCli::with_runner(FakeRunner::new(true).ok(VIEW_ARGS, 0, LIVE_PR_NONE, ""));
+    assert_eq!(gh.pr_for_branch(repo(), "feat/nav").unwrap(), None);
+}
+
+#[test]
+fn an_open_pr_wins_over_an_older_closed_one_on_the_same_branch() {
+    // A branch can carry several PRs over its life; the badge should show the
+    // live one, not whichever happens to come first.
+    let both = r#"[{"number":10,"state":"CLOSED","isDraft":false,"title":"old"},
+                   {"number":4,"state":"OPEN","isDraft":false,"title":"live"}]"#;
+    let pr = live_pr(both);
+    assert_eq!(pr.state, PrState::Open);
+    assert_eq!(pr.number, 4);
+}
+
+#[test]
+fn with_no_open_pr_the_most_recent_wins() {
+    let both = r#"[{"number":4,"state":"CLOSED","isDraft":false,"title":"older"},
+                   {"number":10,"state":"MERGED","isDraft":false,"title":"newer"}]"#;
+    let pr = live_pr(both);
+    assert_eq!(pr.number, 10);
+    assert_eq!(pr.state, PrState::Merged);
 }
 
 #[test]
@@ -286,6 +325,80 @@ fn live_pr_checks_output_covers_pass_fail_skipping_and_pending() {
     let pending = live_checks(LIVE_CHECKS_PENDING);
     assert!(pending.contains(&CheckStatus::Running));
     assert!(pending.contains(&CheckStatus::Pass));
+}
+
+// ---- create_pr (cross-cutting, D3-adjacent) --------------------------------
+
+fn create_request() -> CreatePrRequest {
+    CreatePrRequest {
+        branch: "feat/nav".into(),
+        title: "Add worktree navigation sidebar".into(),
+        body: "body".into(),
+        base: Some("main".into()),
+        draft: false,
+    }
+}
+
+const CREATE_ARGS: &str = "pr create --head feat/nav --title Add worktree navigation sidebar \
+                           --body body --base main";
+
+#[test]
+fn create_pr_reports_the_created_pr() {
+    // gh prints a URL, not JSON, so the backend re-reads the branch — that way
+    // the returned PrInfo comes from the same path the badges use.
+    let gh = GhCli::with_runner(
+        FakeRunner::new(true)
+            .ok(CREATE_ARGS, 0, "https://github.com/o/r/pull/128\n", "")
+            .ok(VIEW_ARGS, 0, PR_OPEN, ""),
+    );
+    let pr = gh.create_pr(repo(), &create_request()).unwrap();
+    assert_eq!(pr.number, 128);
+    assert_eq!(pr.state, PrState::Open);
+}
+
+#[test]
+fn create_pr_surfaces_gh_failures() {
+    let gh = GhCli::with_runner(FakeRunner::new(true).ok(
+        CREATE_ARGS,
+        1,
+        "",
+        "pull request create failed: GraphQL: No commits between main and feat/nav\n",
+    ));
+    let err = gh.create_pr(repo(), &create_request()).unwrap_err();
+    assert!(
+        matches!(&err, ForgeError::CommandFailed { message } if message.contains("No commits")),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn create_pr_passes_every_user_value_as_a_flag_argument() {
+    // Arg-injection guard: a branch or title starting with `-` must never be
+    // able to become an option. There are no positionals in this command.
+    struct Capture(std::sync::Mutex<Vec<String>>);
+    impl CommandRunner for Capture {
+        fn run(&self, _: Option<&Path>, _: &str, args: &[&str]) -> io::Result<CommandOutput> {
+            if args == ["--version"] {
+                return Ok(CommandOutput { status: Some(0), stdout: "gh 2".into(), stderr: String::new() });
+            }
+            self.0.lock().unwrap().extend(args.iter().map(|a| a.to_string()));
+            Ok(CommandOutput { status: Some(0), stdout: "[]".into(), stderr: String::new() })
+        }
+    }
+    let gh = GhCli::with_runner(Capture(std::sync::Mutex::new(Vec::new())));
+    let mut req = create_request();
+    req.branch = "--not-a-flag".into();
+    req.title = "-also-not".into();
+    req.draft = true;
+    // Errors because the follow-up read finds no PR; the arg shape is the point.
+    let _ = gh.create_pr(repo(), &req);
+
+    let gh_args = gh.runner().0.lock().unwrap().clone();
+    let head = gh_args.iter().position(|a| a == "--head").expect("--head present");
+    assert_eq!(gh_args[head + 1], "--not-a-flag", "branch is a flag *value*");
+    let title = gh_args.iter().position(|a| a == "--title").expect("--title present");
+    assert_eq!(gh_args[title + 1], "-also-not");
+    assert!(gh_args.contains(&"--draft".to_string()));
 }
 
 // ---- availability (R7) -----------------------------------------------------

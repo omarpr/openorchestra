@@ -4495,6 +4495,7 @@ dependencies = [
  "release_channel",
  "search",
  "semver",
+ "serde",
  "serde_json",
  "session",
  "settings",
