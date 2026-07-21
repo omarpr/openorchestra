@@ -44,6 +44,8 @@ enum ActiveTab {
     Editor,
     /// A real zed `Workspace` — file tree, ⌘P, ⌘⇧F (N1, §3.6).
     Files,
+    /// Native agent chat over pi's RPC mode (M8, §4.2–4.3).
+    Chat,
 }
 
 #[derive(Clone, PartialEq)]
@@ -73,6 +75,10 @@ struct PaneSet {
     /// it on every pane creation would make switching worktrees slower for the
     /// majority of visits that never open the file tree.
     files: Option<Entity<::workspace::Workspace>>,
+    /// Also lazy: each chat pane spawns its own `pi --mode rpc` sidecar, and
+    /// starting one per worktree visit would reintroduce the process sprawl
+    /// M5b's LRU cap just removed.
+    chat: Option<Entity<crate::chat_pane::ChatPane>>,
     active_tab: ActiveTab,
     /// Monotonic counter, bumped on every touch, for LRU eviction (M5b).
     last_used: u64,
@@ -456,6 +462,7 @@ impl HarnessWorkspace {
                 terminal,
                 editor,
                 files: None,
+                chat: None,
                 active_tab,
                 last_used: self.pane_clock,
             },
@@ -483,6 +490,21 @@ impl HarnessWorkspace {
                 log::warn!("could not open project for {}: {e}", r.path.display());
                 self.note = format!("could not open project: {e}");
             }
+        }
+    }
+
+    /// Build the chat pane for this entry, once (M8).
+    ///
+    /// Lazy for the same reason the Files tab is: it spawns a real
+    /// `pi --mode rpc` sidecar.
+    fn ensure_chat_pane(&mut self, r: &Resolved, cx: &mut Context<Self>) {
+        if self.panes.get(&r.key).is_some_and(|p| p.chat.is_some()) {
+            return;
+        }
+        let path = r.path.clone();
+        let chat = cx.new(|cx| crate::chat_pane::ChatPane::new(path, cx));
+        if let Some(pane) = self.panes.get_mut(&r.key) {
+            pane.chat = Some(chat);
         }
     }
 
@@ -514,6 +536,10 @@ impl HarnessWorkspace {
                 ActiveTab::Editor => p.editor.read(cx).focus_handle(cx),
                 ActiveTab::Files => match &p.files {
                     Some(ws) => ws.read(cx).focus_handle(cx),
+                    None => return,
+                },
+                ActiveTab::Chat => match &p.chat {
+                    Some(chat) => chat.read(cx).focus_handle(cx),
                     None => return,
                 },
             };
@@ -1325,6 +1351,10 @@ impl HarnessWorkspace {
         let content: AnyElement = match (pane, active_tab) {
             (Some(p), ActiveTab::Terminal) => p.terminal.clone().into_any_element(),
             (Some(p), ActiveTab::Editor) => p.editor.clone().into_any_element(),
+            (Some(p), ActiveTab::Chat) => match &p.chat {
+                Some(chat) => chat.clone().into_any_element(),
+                None => div().p_3().text_xs().text_color(hx.tx2).child("starting pi …").into_any_element(),
+            },
             (Some(p), ActiveTab::Files) => match &p.files {
                 Some(ws) => ws.clone().into_any_element(),
                 // Still being constructed on the first switch to this tab.
@@ -1358,7 +1388,12 @@ impl HarnessWorkspace {
                     .border_color(hx.border)
                     .child(self.render_tab(hx, format!("❯_ {}", r.branch), ActiveTab::Terminal, active_tab == ActiveTab::Terminal, cx))
                     .child(self.render_tab(hx, "{ } editor".to_string(), ActiveTab::Editor, active_tab == ActiveTab::Editor, cx))
-                    .child(self.render_tab(hx, "▤ files".to_string(), ActiveTab::Files, active_tab == ActiveTab::Files, cx)),
+                    .child(self.render_tab(hx, "▤ files".to_string(), ActiveTab::Files, active_tab == ActiveTab::Files, cx))
+                    // Only worktrees run an agent; the read-only `main` entry
+                    // has nothing to chat with (D8).
+                    .when(r.agent_kind.is_some(), |d| {
+                        d.child(self.render_tab(hx, "◆ chat".to_string(), ActiveTab::Chat, active_tab == ActiveTab::Chat, cx))
+                    }),
             )
             .child(div().flex_1().min_h_0().child(content))
             .child(self.render_status_bar(hx, Some(&r), cx))
@@ -1408,6 +1443,7 @@ impl HarnessWorkspace {
                 ActiveTab::Terminal => "tab-terminal",
                 ActiveTab::Editor => "tab-editor",
                 ActiveTab::Files => "tab-files",
+                ActiveTab::Chat => "tab-chat",
             })
             .flex()
             .items_center()
@@ -1427,6 +1463,9 @@ impl HarnessWorkspace {
                 }
                 if tab == ActiveTab::Files {
                     ws.ensure_files_workspace(&r, window, cx);
+                }
+                if tab == ActiveTab::Chat {
+                    ws.ensure_chat_pane(&r, cx);
                 }
                 ws.focus_active_pane(window, cx);
                 cx.notify();

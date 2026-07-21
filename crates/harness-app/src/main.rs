@@ -8,6 +8,7 @@
 // The harness-theme `json!` literal (Spike 3c) nests past the default limit.
 #![recursion_limit = "256"]
 
+mod chat_pane;
 mod data;
 mod editor_pane;
 mod harness_zed_theme;

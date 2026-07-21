@@ -390,7 +390,8 @@ openOrchestra today is a running macOS GPUI app that, against a real repo:
 - shows a **real, per-repo worktree sidebar** with live avatars, ahead/behind, `~dirty`, PR/CI badges (from `gh`), and a **live agent-status pill**;
 - runs **whichever agent a worktree records** (§4.5) in a real `terminal_view` pty — pi, opencode, claude, codex, kimi — falling back to a plain shell when the CLI is absent, plus a plain shell on the read-only `main` entry;
 - **posts a native OS notification when an agent needs input**, gated on adapter fidelity so a best-effort signal never claims more than it knows;
-- hosts a **real zed `Workspace`** per worktree behind a ▤ files tab, with the `project_panel` file tree docked left and ⌘P / ⌘⇧F / ⌘⇧E bound;
+- hosts a **real zed `Workspace`** per worktree behind a ▤ files tab, with the `project_panel` file tree docked left, ⌘P / ⌘⇧F / ⌘⇧E bound, and **rust-analyzer running**;
+- renders a **native agent chat** (◆ chat tab) over a `pi --mode rpc` sidecar, with tool cards and native approval dialogs;
 - opens **real, syntax-highlighted Rust editor tabs** with a working keymap and per-worktree tab sets;
 - renders the **merge-base diff** asynchronously, discarding results for a selection the user has left;
 - creates / archives / deletes worktrees, with optional `#branch` and `@base-ref` in the create input, and LRU-evicts pane sets so long sessions do not accumulate live agent processes;
@@ -399,7 +400,7 @@ openOrchestra today is a running macOS GPUI app that, against a real repo:
 
 Backend crates are UI-free and fully tested — **123 headless tests** across `worktrees`, `forge`, `status-watch`, `agent-runtime`, `agent-schema`, `training`, and `pi-client`, plus 7 in the app — with two `--ignored` live tests that drive real `pi` processes end to end. Everything is clippy-clean.
 
-**Known incomplete:** rust-analyzer does not yet spawn (N2, with four causes ruled out); the Phase 2 chat *panel* is unbuilt though `pi-client` is done (M8); and the cross-cutting list below is untouched.
+**Known incomplete:** the cross-cutting list below (light-theme toggle, IBM Plex bundling, panel-size persistence, `gh pr create`, fork-head PR badges, and a `make doctor` check for the rust-analyzer component).
 
 **Two bugs this session found that the doc had recorded as working:**
 
@@ -426,7 +427,9 @@ The spikes proved feasibility; this is the sequenced path from the current MVP t
 
 **M7 — `training/` — session-exhaust harvesting (§6.4). ✅ DONE (July 21, 2026).** `crates/training` + the `harvest` binary. Three things it gets deliberately right: (1) the session file is a **tree**, so it resolves the *active branch* by walking `parentId` from the last record rather than reading the file in order — otherwise forked-away branches get spliced into the transcript and the model trains on paths the user rejected; (2) outcome labels are never guessed — a live worktree with no PR is `unknown`, and a `gh` failure is treated as *no information* rather than "no PR", since a transient error must not relabel merged work as abandoned; (3) records carry both the `agent-schema` version and the pi session-format version, and an unrecognized session format is **refused** rather than parsed on a guess. Parser is tested against a real captured session, plus fork / truncation / cycle cases. See `training/README.md`.
 
-**M8 — Phase 2: RPC chat panel + `pi-client` crate (§4.2–4.3). 🟡 CRATE DONE (July 21, 2026); PANEL PENDING.** `crates/pi-client` is built and verified: protocol types checked against `rpc-types.d.ts`, strict LF-only framing, per-process reader thread with fan-out subscriptions, `SettleTracker` deriving Running/Waiting/Idle, conformance tests over verbatim recorded pi 0.73.1 JSONL, and an `--ignored` live test that drives a real `pi --mode rpc`. Building it corrected two §4.2 claims (no `agent_settled`, no `get_entries`) and showed R8's retry gap is actually closed by `auto_retry_start/end`. **Remaining:** spawn the sidecars from the agent supervisor and render the native chat tab (streaming deltas, tool cards, session tree, approval modals from `extension_ui_request`) — needs the app. Keep the Phase 1 status-file path as the fallback surface. *Deps: app build.*
+**M8 — Phase 2: RPC chat panel + `pi-client` crate (§4.2–4.3). ✅ DONE (July 21, 2026).** `crates/pi-client` is built and verified: protocol types checked against `rpc-types.d.ts`, strict LF-only framing, per-process reader thread with fan-out subscriptions, `SettleTracker` deriving Running/Waiting/Idle, conformance tests over verbatim recorded pi 0.73.1 JSONL, and an `--ignored` live test that drives a real `pi --mode rpc`. Building it corrected two §4.2 claims (no `agent_settled`, no `get_entries`) and showed R8's retry gap is actually closed by `auto_retry_start/end`. **The panel shipped too:** a fourth per-worktree tab (**◆ chat**) spawns a `pi --mode rpc` sidecar and renders the stream natively — streaming text deltas coalesced into one entry rather than one per token, tool calls with arguments, tool results (errors distinguished), and **native approve/deny for blocking `extension_ui_request` dialogs**, which is the §4.3 payoff. Typing while the agent is running sends `steer` rather than `prompt`, since a prompt would queue instead of interrupt; Esc aborts. Lazy per worktree, for the same reason the Files tab is — it starts a real process. "Agent chat — soon" is no longer soon.
+
+The terminal tab stays the default and the fallback: when `pi` cannot start, the pane says so and points at it rather than showing an empty box. The Phase 1 status-file path is untouched.
 
 ### Navigation track (N) — §3.6
 
