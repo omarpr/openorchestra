@@ -10,6 +10,7 @@
 
 mod chat_pane;
 mod data;
+mod diff_review;
 mod harness_zed_theme;
 mod markdown_preview;
 mod notifier;
@@ -38,6 +39,8 @@ actions!(
         NewEditor,
         /// New agent-chat tab.
         NewChat,
+        /// Copy the selected diff lines.
+        CopyDiffSelection,
     ]
 );
 
@@ -185,6 +188,7 @@ fn main() {
             KeyBinding::new("cmd-t", NewTerminal, None),
             KeyBinding::new("cmd-e", NewEditor, None),
             KeyBinding::new("cmd-shift-c", NewChat, None),
+            KeyBinding::new("cmd-c", CopyDiffSelection, None),
         ]);
 
         // Minimal editing keymap for zed editor panes (scoped to the "Editor"

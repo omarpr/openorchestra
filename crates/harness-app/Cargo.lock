@@ -4501,6 +4501,7 @@ dependencies = [
  "settings",
  "status-watch",
  "task",
+ "tempfile",
  "terminal",
  "terminal_view",
  "theme",

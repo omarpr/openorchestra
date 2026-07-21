@@ -106,6 +106,9 @@ serde_json = "1"
 # consumers, so we replicate the ones inside our dependency cone (from zed's
 # root Cargo.toml at the pinned rev). calloop is pinned to the rev zed's own
 # Cargo.lock resolved at v1.11.3.
+[dev-dependencies]
+tempfile = "3"
+
 [patch.crates-io]
 async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
 async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
