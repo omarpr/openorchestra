@@ -7,7 +7,9 @@ description = "Agent-agnostic runtime adapters: one AgentRuntime per vendor CLI,
 [dependencies]
 worktrees = { path = "../worktrees" }
 status-watch = { path = "../status-watch" }
+agent-schema = { path = "../agent-schema" }
 crossbeam-channel = "0.5"
 
 [dev-dependencies]
 tempfile = "3"
+serde_json = "1"

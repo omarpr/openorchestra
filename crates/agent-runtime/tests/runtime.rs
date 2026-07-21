@@ -108,14 +108,59 @@ fn pi_on_spawn_is_idempotent_and_leaves_no_temp_files() {
     let second = fs::read_to_string(pi.extension_path()).unwrap();
     assert_eq!(first, second);
 
-    let dir = pi.extension_path().parent().unwrap().to_path_buf();
-    let strays: Vec<_> = fs::read_dir(&dir)
+    // Only the materialized assets themselves — no `.tmp` residue.
+    let expected = ["harness-status.ts", "harness-tools.ts", "tools.json"];
+    let strays: Vec<_> = fs::read_dir(pi.asset_dir())
         .unwrap()
         .filter_map(|e| e.ok())
-        .map(|e| e.file_name())
-        .filter(|n| n != "harness-status.ts")
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !expected.contains(&n.as_str()))
         .collect();
     assert!(strays.is_empty(), "atomic write left {strays:?} behind");
+}
+
+#[test]
+fn pi_materializes_the_tool_contract_for_the_extension_to_read() {
+    // M6: harness-tools.ts pins pi's toolset to the contract, so the contract
+    // has to travel with it — a packaged .app has no repo to walk up from.
+    let state = tempfile::tempdir().unwrap();
+    let worktree = tempfile::tempdir().unwrap();
+    let pi = PiRuntime::new(state.path());
+    pi.on_spawn(worktree.path()).unwrap();
+
+    let contract: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(pi.schema_path()).unwrap()).unwrap();
+    assert_eq!(contract["schemaVersion"], "1.0");
+    assert!(fs::read_to_string(pi.tools_extension_path())
+        .unwrap()
+        .contains("setActiveTools"));
+}
+
+#[test]
+fn pi_command_points_the_extension_at_the_materialized_contract() {
+    let state = tempfile::tempdir().unwrap();
+    let worktree = tempfile::tempdir().unwrap();
+    let pi = PiRuntime::new(state.path());
+    let Some(cmd) = pi.command(worktree.path()) else {
+        eprintln!("pi not on PATH — skipping");
+        return;
+    };
+    // Both extensions loaded.
+    let ext_args: Vec<&String> = cmd
+        .args
+        .iter()
+        .zip(cmd.args.iter().skip(1))
+        .filter(|(flag, _)| flag.as_str() == "-e")
+        .map(|(_, path)| path)
+        .collect();
+    assert_eq!(ext_args.len(), 2, "both extensions should be passed: {:?}", cmd.args);
+
+    let schema_env = cmd
+        .env
+        .iter()
+        .find(|(k, _)| k == "HARNESS_AGENT_SCHEMA")
+        .expect("HARNESS_AGENT_SCHEMA must be set so a packaged app can find the contract");
+    assert_eq!(Path::new(&schema_env.1), pi.schema_path());
 }
 
 #[test]

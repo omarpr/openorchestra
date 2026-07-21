@@ -25,14 +25,20 @@ use crate::{
     resolve_on_path, AgentCommand, AgentKind, AgentRuntime, SignalKind, WaitFidelity,
 };
 
-/// The status extension source, baked in at compile time.
-const HARNESS_STATUS_EXT: &str = include_str!("../../../pi-ext/harness-status.ts");
-
-/// Filename the extension is materialized under, inside the state dir.
-const EXT_FILENAME: &str = "harness-status.ts";
+/// Everything materialized into the state dir, baked in at compile time.
+///
+/// `harness-status.ts` drives the sidebar pill (§4.1). `harness-tools.ts` pins
+/// pi's runtime toolset to the versioned contract (§4.4, M6) — which it reads
+/// from `tools.json`, so all three must be materialized together or the
+/// extension reports a missing schema.
+const ASSETS: &[(&str, &str)] = &[
+    ("harness-status.ts", include_str!("../../../pi-ext/harness-status.ts")),
+    ("harness-tools.ts", include_str!("../../../pi-ext/harness-tools.ts")),
+    ("tools.json", agent_schema::TOOLS_JSON),
+];
 
 pub struct PiRuntime {
-    /// Harness state root (`~/.openorchestra`), where the extension is
+    /// Harness state root (`~/.openorchestra`), where the extensions are
     /// materialized once and shared by every worktree.
     state_dir: PathBuf,
 }
@@ -44,27 +50,45 @@ impl PiRuntime {
         }
     }
 
-    /// Where the extension lives on disk once materialized.
-    pub fn extension_path(&self) -> PathBuf {
-        self.state_dir.join("pi-ext").join(EXT_FILENAME)
+    /// Directory the embedded assets are materialized into.
+    pub fn asset_dir(&self) -> PathBuf {
+        self.state_dir.join("pi-ext")
     }
 
-    /// Write the embedded extension to disk if it is missing or stale.
+    /// Where the status extension lives on disk once materialized.
+    pub fn extension_path(&self) -> PathBuf {
+        self.asset_dir().join("harness-status.ts")
+    }
+
+    /// Where the tool-contract extension lives.
+    pub fn tools_extension_path(&self) -> PathBuf {
+        self.asset_dir().join("harness-tools.ts")
+    }
+
+    /// Where the materialized tool contract lives (§4.4).
+    pub fn schema_path(&self) -> PathBuf {
+        self.asset_dir().join("tools.json")
+    }
+
+    /// Write every embedded asset that is missing or stale.
     ///
-    /// Atomic (temp + rename) for the same reason the extension's own writes
-    /// are: a pi process may be starting up and reading this file concurrently,
-    /// and a half-written extension is a load error rather than a no-op.
-    fn materialize_extension(&self) -> io::Result<PathBuf> {
-        let path = self.extension_path();
-        if fs::read_to_string(&path).is_ok_and(|existing| existing == HARNESS_STATUS_EXT) {
-            return Ok(path); // already current — the common case
+    /// Atomic (temp + rename) for the same reason the status extension's own
+    /// writes are: a pi process may be starting up and reading these files
+    /// concurrently, and a half-written extension is a load error rather than
+    /// a no-op. Content-checked first, so the steady state is a read per file.
+    fn materialize_assets(&self) -> io::Result<()> {
+        let dir = self.asset_dir();
+        for (name, contents) in ASSETS {
+            let path = dir.join(name);
+            if fs::read_to_string(&path).is_ok_and(|existing| existing == *contents) {
+                continue; // already current — the common case
+            }
+            fs::create_dir_all(&dir)?;
+            let tmp = dir.join(format!(".{name}.tmp"));
+            fs::write(&tmp, contents)?;
+            fs::rename(&tmp, &path)?;
         }
-        let dir = path.parent().expect("extension path always has a parent");
-        fs::create_dir_all(dir)?;
-        let tmp = dir.join(format!(".{EXT_FILENAME}.tmp"));
-        fs::write(&tmp, HARNESS_STATUS_EXT)?;
-        fs::rename(&tmp, &path)?;
-        Ok(path)
+        Ok(())
     }
 }
 
@@ -87,18 +111,28 @@ impl AgentRuntime for PiRuntime {
     }
 
     fn on_spawn(&self, _worktree_root: &Path) -> io::Result<()> {
-        self.materialize_extension().map(|_| ())
+        self.materialize_assets()
     }
 
     fn command(&self, _worktree_root: &Path) -> Option<AgentCommand> {
         let program = resolve_on_path("pi")?;
         // Materializing here as well as in on_spawn keeps `command` correct
-        // when called standalone; it is a no-op once the file is current.
-        let ext = self.materialize_extension().ok()?;
+        // when called standalone; it is a no-op once the files are current.
+        self.materialize_assets().ok()?;
         Some(AgentCommand {
             program,
-            args: vec!["-e".to_string(), ext.to_string_lossy().into_owned()],
-            env: Vec::new(),
+            args: vec![
+                "-e".to_string(),
+                self.extension_path().to_string_lossy().into_owned(),
+                "-e".to_string(),
+                self.tools_extension_path().to_string_lossy().into_owned(),
+            ],
+            // The packaged .app has no repo for the extension to walk up from,
+            // so point it at the materialized contract explicitly (§4.4).
+            env: vec![(
+                "HARNESS_AGENT_SCHEMA".to_string(),
+                self.schema_path().to_string_lossy().into_owned(),
+            )],
             label: "pi".to_string(),
         })
     }

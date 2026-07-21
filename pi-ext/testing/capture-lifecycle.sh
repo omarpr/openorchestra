@@ -49,7 +49,9 @@ cd "$work/project"
   done ) > "$work/states.raw" 2>/dev/null &
 sampler_pid=$!
 
-PI_CODING_AGENT_DIR="$work/agentdir" pi -p "run the probe" -e "$ext" \
+PI_CODING_AGENT_DIR="$work/agentdir" \
+HARNESS_AGENT_SCHEMA="$here/../../agent-schema/v1/tools.json" \
+  pi -p "run the probe" -e "$ext" -e "$here/../harness-tools.ts" \
   --model lmstudio/omar-agent-v1 --session-dir "$work/sessions" > "$work/pi.log" 2>&1
 pi_status=$?
 sleep 2
@@ -75,6 +77,10 @@ check "status.json carries the harvesting hook (sessionFile)" \
   "$([[ -n "$session_file" && -f "$session_file" ]] && echo true || echo false)"
 check "no temp files left behind (atomic write)" \
   "$([[ "$(find .harness -type f ! -name status.json | wc -l | tr -d ' ')" == "0" ]] && echo true || echo false)"
+# M6: harness-tools.ts loads alongside and must not disturb the run. A schema
+# it cannot parse, or a setActiveTools call pi rejects, would surface here.
+check "tool-contract extension loaded without error" \
+  "$(grep -qiE 'extension_error|harness-tools.*(error|failed)' "$work/pi.log" && echo false || echo true)"
 
 if [[ -n "$session_file" && -f "$session_file" ]]; then
   echo "==> session JSONL: $(wc -l < "$session_file" | tr -d ' ') records"
