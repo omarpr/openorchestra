@@ -28,13 +28,20 @@ use forge::{BranchKey, BranchStatus, CheckStatus, ForgeUpdate, GhCli, Poller, Po
 use worktrees::{Change, CreateRequest, GitWorktrees, Manager, Registry, SystemRunner};
 
 use crate::data::{compute_diff, WorkspaceData};
-use crate::editor_pane::EditorPane;
 use crate::terminal_pane::TerminalPane;
 use crate::theme::{theme, tint, HarnessTheme};
 
 const SWATCHES: [u32; 8] = [
     0x5b9bff, 0x4ec26b, 0xa877f5, 0xe0a83b, 0xf0616d, 0x22b8cf, 0xf27bb0, 0x8b93a0,
 ];
+/// Cap on rendered diff lines.
+///
+/// Each line is its own element, so an enormous diff would build tens of
+/// thousands of them and stall the frame. Set well above any realistic
+/// single-file hunk; when it bites, the UI says so rather than truncating
+/// silently.
+const MAX_DIFF_LINES: usize = 5000;
+
 const DIFF_ADD_TX: u32 = 0x7fdd97;
 const DIFF_DEL_TX: u32 = 0xf2868f;
 
@@ -42,8 +49,6 @@ const DIFF_DEL_TX: u32 = 0xf2868f;
 enum ActiveTab {
     Terminal,
     Editor,
-    /// A real zed `Workspace` — file tree, ⌘P, ⌘⇧F (N1, §3.6).
-    Files,
     /// Native agent chat over pi's RPC mode (M8, §4.2–4.3).
     Chat,
 }
@@ -70,11 +75,11 @@ struct CardMenu {
 
 struct PaneSet {
     terminal: Entity<TerminalPane>,
-    editor: Entity<EditorPane>,
-    /// Built lazily: a `Project::local` scans the whole worktree, so paying for
-    /// it on every pane creation would make switching worktrees slower for the
-    /// majority of visits that never open the file tree.
-    files: Option<Entity<::workspace::Workspace>>,
+    /// The editor: a real zed `Workspace`, which is what carries the file
+    /// explorer, ⌘P, ⌘⇧F, and LSP (§3.6). Built lazily — `Project::local`
+    /// scans the whole worktree, so paying for it on every pane creation would
+    /// slow every worktree switch for the visits that only want the terminal.
+    editor: Option<Entity<::workspace::Workspace>>,
     /// Also lazy: each chat pane spawns its own `pi --mode rpc` sidecar, and
     /// starting one per worktree visit would reintroduce the process sprawl
     /// M5b's LRU cap just removed.
@@ -456,7 +461,6 @@ impl HarnessWorkspace {
         let spawns_agent = agent_command.is_some();
 
         let terminal = cx.new(|cx| TerminalPane::new(r.path.clone(), agent_command, window, cx));
-        let editor = cx.new(|cx| EditorPane::new(&r.path, window, cx));
         let active_tab = if spawns_agent {
             ActiveTab::Terminal
         } else {
@@ -466,29 +470,34 @@ impl HarnessWorkspace {
             r.key.clone(),
             PaneSet {
                 terminal,
-                editor,
-                files: None,
+                editor: None,
                 chat: None,
                 active_tab,
                 last_used: self.pane_clock,
             },
         );
+        if active_tab == ActiveTab::Editor {
+            // The read-only `main` entry opens on the editor, so build it now
+            // rather than leaving "opening project …" until something is
+            // clicked.
+            self.ensure_editor_workspace(&r, window, cx);
+        }
         self.evict_stale_panes(&r.key);
     }
 
-    /// Build the hosted zed `Workspace` for this entry, once (N1, §3.6).
+    /// Build the editor — a hosted zed `Workspace` — for this entry, once.
     ///
-    /// Deferred to the first visit to the Files tab because `Project::local`
+    /// Deferred to the first visit to the editor tab because `Project::local`
     /// starts a full worktree scan; doing that for every pane creation would
-    /// tax every worktree switch to benefit only the visits that use the tree.
-    fn ensure_files_workspace(&mut self, r: &Resolved, window: &mut Window, cx: &mut Context<Self>) {
-        if self.panes.get(&r.key).is_some_and(|p| p.files.is_some()) {
+    /// tax every worktree switch to benefit only the visits that edit.
+    fn ensure_editor_workspace(&mut self, r: &Resolved, window: &mut Window, cx: &mut Context<Self>) {
+        if self.panes.get(&r.key).is_some_and(|p| p.editor.is_some()) {
             return;
         }
         match crate::workspace_host::workspace_for(&r.path, window, cx) {
             Ok(hosted) => {
                 if let Some(pane) = self.panes.get_mut(&r.key) {
-                    pane.files = Some(hosted);
+                    pane.editor = Some(hosted);
                 }
             }
             Err(e) => {
@@ -539,8 +548,7 @@ impl HarnessWorkspace {
         if let Some(p) = self.panes.get(&r.key) {
             let handle = match p.active_tab {
                 ActiveTab::Terminal => p.terminal.read(cx).focus_handle(cx),
-                ActiveTab::Editor => p.editor.read(cx).focus_handle(cx),
-                ActiveTab::Files => match &p.files {
+                ActiveTab::Editor => match &p.editor {
                     Some(ws) => ws.read(cx).focus_handle(cx),
                     None => return,
                 },
@@ -1386,20 +1394,18 @@ impl HarnessWorkspace {
         let active_tab = pane.map(|p| p.active_tab).unwrap_or(ActiveTab::Editor);
         let content: AnyElement = match (pane, active_tab) {
             (Some(p), ActiveTab::Terminal) => p.terminal.clone().into_any_element(),
-            (Some(p), ActiveTab::Editor) => p.editor.clone().into_any_element(),
-            (Some(p), ActiveTab::Chat) => match &p.chat {
-                Some(chat) => chat.clone().into_any_element(),
-                None => div().p_3().text_xs().text_color(hx.tx2).child("starting pi …").into_any_element(),
-            },
-            (Some(p), ActiveTab::Files) => match &p.files {
+            (Some(p), ActiveTab::Editor) => match &p.editor {
                 Some(ws) => ws.clone().into_any_element(),
-                // Still being constructed on the first switch to this tab.
                 None => div()
                     .p_3()
                     .text_xs()
                     .text_color(hx.tx2)
                     .child("opening project …")
                     .into_any_element(),
+            },
+            (Some(p), ActiveTab::Chat) => match &p.chat {
+                Some(chat) => chat.clone().into_any_element(),
+                None => div().p_3().text_xs().text_color(hx.tx2).child("starting pi …").into_any_element(),
             },
             (None, _) => div().into_any_element(),
         };
@@ -1424,7 +1430,6 @@ impl HarnessWorkspace {
                     .border_color(hx.border)
                     .child(self.render_tab(hx, format!("❯_ {}", r.branch), ActiveTab::Terminal, active_tab == ActiveTab::Terminal, cx))
                     .child(self.render_tab(hx, "{ } editor".to_string(), ActiveTab::Editor, active_tab == ActiveTab::Editor, cx))
-                    .child(self.render_tab(hx, "▤ files".to_string(), ActiveTab::Files, active_tab == ActiveTab::Files, cx))
                     // Only worktrees run an agent; the read-only `main` entry
                     // has nothing to chat with (D8).
                     .when(r.agent_kind.is_some(), |d| {
@@ -1478,7 +1483,6 @@ impl HarnessWorkspace {
             .id(match tab {
                 ActiveTab::Terminal => "tab-terminal",
                 ActiveTab::Editor => "tab-editor",
-                ActiveTab::Files => "tab-files",
                 ActiveTab::Chat => "tab-chat",
             })
             .flex()
@@ -1497,8 +1501,8 @@ impl HarnessWorkspace {
                 if let Some(pane) = ws.panes.get_mut(&r.key) {
                     pane.active_tab = tab;
                 }
-                if tab == ActiveTab::Files {
-                    ws.ensure_files_workspace(&r, window, cx);
+                if tab == ActiveTab::Editor {
+                    ws.ensure_editor_workspace(&r, window, cx);
                 }
                 if tab == ActiveTab::Chat {
                     ws.ensure_chat_pane(&r, cx);
@@ -1521,7 +1525,7 @@ impl HarnessWorkspace {
         // appearing means it started — not that we hope it did.
         let lsp = r
             .and_then(|r| self.panes.get(&r.key))
-            .and_then(|p| p.files.as_ref())
+            .and_then(|p| p.editor.as_ref())
             .map(|ws| {
                 let project = ws.read(cx).project().read(cx);
                 let names: Vec<String> = project
@@ -1534,7 +1538,7 @@ impl HarnessWorkspace {
                     names.join(", ")
                 }
             })
-            .unwrap_or_else(|| "LSP: open ▤ files".to_string());
+            .unwrap_or_else(|| "LSP: open the editor".to_string());
         div()
             .flex()
             .flex_none()
@@ -1651,7 +1655,18 @@ impl HarnessWorkspace {
                     ),
             );
 
-        let mut files = div().flex().flex_col().flex_none().px_2().pb_1();
+        // Scrollable and height-capped: a worktree with fifty changed files
+        // would otherwise push the diff preview off the bottom of the panel
+        // entirely, which is the same "can't see it" problem as the preview.
+        let mut files = div()
+            .id("diff-files")
+            .flex()
+            .flex_col()
+            .flex_none()
+            .max_h(px(220.0))
+            .overflow_y_scroll()
+            .px_2()
+            .pb_1();
         if self.diff.files.is_empty() {
             files = files.child(div().px_2().py_1().text_xs().text_color(hx.tx2).child("no changes vs merge-base"));
         }
@@ -1692,7 +1707,12 @@ impl HarnessWorkspace {
         }
         panel = panel.child(files);
 
+        // The diff preview scrolls. It previously used `overflow_hidden` with
+        // no scroll container, so everything past the panel height was clipped
+        // and simply unreachable — clicking a file showed only its first
+        // screenful.
         let mut preview = div()
+            .id("diff-preview")
             .flex()
             .flex_col()
             .flex_1()
@@ -1702,14 +1722,15 @@ impl HarnessWorkspace {
             .bg(hx.bg0)
             .border_1()
             .border_color(hx.border)
-            .overflow_hidden()
+            .overflow_y_scroll()
             .text_xs()
             .font_family(hx.font_mono);
         let unified = self.unified_for_selected();
         if unified.is_empty() {
             preview = preview.child(div().p_2().text_color(hx.tx2).child("—"));
         } else {
-            for line in unified.lines().take(600) {
+            let total = unified.lines().count();
+            for line in unified.lines().take(MAX_DIFF_LINES) {
                 let (fg, bg) = if line.starts_with("@@") {
                     (hx.accent, tint(hx.accent, 0.10))
                 } else if line.starts_with('+') {
@@ -1719,7 +1740,34 @@ impl HarnessWorkspace {
                 } else {
                     (hx.tx2, Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 })
                 };
-                preview = preview.child(div().flex_none().h(px(15.0)).px_2().bg(bg).text_color(fg).overflow_hidden().child(line.to_string()));
+                // Long lines scroll horizontally instead of being clipped:
+                // a minified file or a long string literal is exactly where
+                // you need to see the end of the line.
+                preview = preview.child(
+                    div()
+                        .flex_none()
+                        .h(px(15.0))
+                        .px_2()
+                        .bg(bg)
+                        .text_color(fg)
+                        .whitespace_nowrap()
+                        .child(line.to_string()),
+                );
+            }
+            if total > MAX_DIFF_LINES {
+                // Never truncate silently — a diff that just stops looks like
+                // the change is smaller than it is.
+                preview = preview.child(
+                    div()
+                        .flex_none()
+                        .h(px(15.0))
+                        .px_2()
+                        .text_color(hx.amber)
+                        .child(format!(
+                            "… {} more lines — select a single file, or view the full diff in git",
+                            total - MAX_DIFF_LINES
+                        )),
+                );
             }
         }
         panel.child(preview).into_any_element()

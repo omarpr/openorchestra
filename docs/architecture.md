@@ -112,7 +112,7 @@ The design is the source of truth for v1 chrome; key commitments:
 
 - **Single window, three columns.** Left: worktree sidebar (resizable, collapsible). Center: tab strip + content + status bar. Right: diff panel (resizable, collapsible). Top bar: panel toggles, `openOrchestra · <active-branch>` breadcrumb, theme toggle.
 - **Worktree sidebar.** Grouped by repo (multi-repo day one), each group: `main` entry (default branch, CI check) + worktree cards. Card anatomy: editable avatar (2-letter initials + color from 8-swatch palette), inline-renamable name, mono branch label, PR badge (`#N` — open/draft/merged/closed colors), ahead/behind counts, dirty indicator (`~N` files), CI status (pass/fail/running), agent status pill (**Running** pulse / **Waiting** amber / **Idle** gray), hover/right-click actions: archive, delete.
-- **Tabs are scoped per worktree** — each worktree remembers its own tab set (terminals + editors); switching worktree cards swaps the strip. Tab menu: New terminal ⌘T, New editor ⌘E, Agent chat (Phase 2).
+- **Tabs are scoped per worktree** — each worktree remembers its own tab set; switching worktree cards swaps the strip. Three tabs: `❯_` terminal, `{ }` editor, `◆` chat. **The editor *is* a hosted zed `Workspace`**, so the file explorer lives inside it (left dock) along with ⌘P / ⌘⇧F and LSP — there is no separate "files" tab, and no second, weaker editor.
 - **Diff panel.** Collapsible changed-files list (per-file status M/A/D badge, +adds/−dels, totals) above a scrollable unified diff view with sticky file header. Driven by git status/diff against the worktree's merge base.
 - **Status bar.** Agent state (mirrors the pill), branch, encoding, LSP server indicator (LSP indicator is a placeholder until Phase D).
 - **Theming.** Dark + light palettes with a configurable accent color; fonts IBM Plex Sans / IBM Plex Mono (the MVP ships Menlo for the mono/terminal slot pending Plex bundling). Design tokens (`--bg0..2`, `--surface*`, `--tx*`, `--accent`, semantic green/red/amber/purple, diff add/del tints) are the `HarnessTheme` struct; Zed editor/terminal crate themes are **generated from the same tokens** so panes match the chrome (see §3.5, R6 resolved).
@@ -390,10 +390,9 @@ openOrchestra today is a running macOS GPUI app that, against a real repo:
 - shows a **real, per-repo worktree sidebar** with live avatars, ahead/behind, `~dirty`, PR/CI badges (from `gh`), and a **live agent-status pill**;
 - runs **whichever agent a worktree records** (§4.5) in a real `terminal_view` pty — pi, opencode, claude, codex, kimi — falling back to a plain shell when the CLI is absent, plus a plain shell on the read-only `main` entry;
 - **posts a native OS notification when an agent needs input**, gated on adapter fidelity so a best-effort signal never claims more than it knows;
-- hosts a **real zed `Workspace`** per worktree behind a ▤ files tab, with the `project_panel` file tree docked left, ⌘P / ⌘⇧F / ⌘⇧E bound, and **rust-analyzer running**;
+- opens an **editor that is a real zed `Workspace`** — file explorer docked inside it, ⌘P / ⌘⇧F / ⌘⇧E bound, real project files, and **rust-analyzer running**;
 - renders a **native agent chat** (◆ chat tab) over a `pi --mode rpc` sidecar, with tool cards and native approval dialogs;
-- opens **real, syntax-highlighted Rust editor tabs** with a working keymap and per-worktree tab sets;
-- renders the **merge-base diff** asynchronously, discarding results for a selection the user has left;
+- renders the **merge-base diff** asynchronously (discarding results for a selection the user has left) in a **scrollable** panel — file list and unified view both scroll, long lines scroll horizontally, and an over-long diff says how much it elided rather than stopping silently;
 - creates / archives / deletes worktrees, with optional `#branch` and `@base-ref` in the create input, and LRU-evicts pane sets so long sessions do not accumulate live agent processes;
 - **harvests session exhaust into schema-versioned training records** (`harvest` binary), against a versioned tool contract both the agent runtime and the training generator import;
 - toggles **light/dark** from the top bar, regenerating the zed theme so editor and terminal follow, and remembers that plus panel sizes in `~/.openorchestra/prefs.json`;

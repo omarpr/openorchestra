@@ -37,14 +37,11 @@ release_channel = { git = "https://github.com/zed-industries/zed.git", rev = "95
 task = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
 util = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
 
-# Spike 3: editor pane. `editor` is the go/no-go dependency (§8 R1) — it drags
-# the workspace/project/lsp/dap/db cone. `language` gives Buffer/Language for
-# out-of-tree syntax; `grammars` embeds zed's rust config + highlight queries
-# (depended on WITHOUT the all-grammars `load-grammars` feature — we bring only
-# tree-sitter-rust ourselves, so we compile one grammar, not eighteen).
+# The editor cone (§8 R1 — retired by Spike 3). `language` gives us the
+# LanguageRegistry the hosted Workspace's Project uses; we register exactly one
+# grammar (tree-sitter-rust) into it rather than pulling zed's eighteen (§3.2).
 editor = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
 language = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
-grammars = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
 tree-sitter-rust = "0.24.2"
 
 # Spike 4: the headless worktree manager + registry (git worktree lifecycle,

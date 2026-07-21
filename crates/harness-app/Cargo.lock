@@ -4483,7 +4483,6 @@ dependencies = [
  "fs",
  "gpui",
  "gpui_platform",
- "grammars",
  "http_client",
  "language",
  "languages",

@@ -10,7 +10,6 @@
 
 mod chat_pane;
 mod data;
-mod editor_pane;
 mod harness_zed_theme;
 mod notifier;
 mod terminal_pane;
