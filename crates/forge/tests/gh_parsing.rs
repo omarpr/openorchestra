@@ -304,7 +304,7 @@ fn with_no_open_pr_the_most_recent_wins() {
 }
 
 #[test]
-fn live_pr_view_output_maps_to_every_pr_state() {
+fn live_pr_list_output_maps_to_every_pr_state() {
     assert_eq!(live_pr(LIVE_PR_OPEN).state, PrState::Open);
     assert_eq!(live_pr(LIVE_PR_DRAFT).state, PrState::Draft);
     assert_eq!(live_pr(LIVE_PR_MERGED).state, PrState::Merged);
