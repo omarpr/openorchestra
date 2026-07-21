@@ -218,6 +218,7 @@ struct Tab {
 }
 
 #[derive(Clone, PartialEq)]
+#[derive(Debug)]
 enum Selection {
     Main(String),
     Worktree(String),
@@ -484,7 +485,14 @@ impl HarnessWorkspace {
         this.ensure_pane(window, cx);
         // Test hook: open an editor tab without going through the ＋ menu, so
         // "the menu is broken" and "the editor is broken" can be told apart.
-        if std::env::var_os("HARNESS_OPEN_EDITOR").is_some() {
+        // A value naming a worktree id selects that worktree first, so the
+        // editor can be probed against a real linked worktree — the thing a
+        // user actually clicks — and not only against a repo root.
+        if let Some(v) = std::env::var_os("HARNESS_OPEN_EDITOR") {
+            let id = v.to_string_lossy();
+            if this.manager.registry.get(&id).is_some() {
+                this.selection = Selection::Worktree(id.into_owned());
+            }
             this.open_tab(TabKind::Editor, window, cx);
             log::info!(
                 "HARNESS_OPEN_EDITOR: tabs now = {:?}",
@@ -669,15 +677,7 @@ impl HarnessWorkspace {
         // you start, not a thing that starts itself: auto-spawning it burned a
         // pi session on every worktree you merely glanced at, and left no way
         // to just get a shell. Add an agent tab (or type `pi`) when you want one.
-        self.panes.insert(
-            r.key.clone(),
-            PaneSet {
-                tabs: Vec::new(),
-                active: 0,
-                next_id: 1,
-                last_used: self.pane_clock,
-            },
-        );
+        // (`open_tab` creates the pane itself now.)
         self.open_tab(TabKind::Shell, window, cx);
         self.evict_stale_panes(&r.key);
     }
@@ -776,12 +776,24 @@ impl HarnessWorkspace {
             }
         };
 
-        if let Some(pane) = self.panes.get_mut(&r.key) {
-            let id = pane.next_id;
-            pane.next_id += 1;
-            pane.tabs.push(Tab { id, title, content });
-            pane.active = id;
-        }
+        // Create the pane if it does not exist yet. This was `if let Some`,
+        // and the else case silently dropped the tab — including a fully
+        // constructed zed Workspace, whose own diagnostics all read healthy
+        // because the entity *was* healthy right up until it was released.
+        // Every state probe passed while the screen showed nothing; a tab
+        // that cannot be attached must never be discarded without a trace.
+        self.pane_clock = self.pane_clock.wrapping_add(1);
+        let pane = self.panes.entry(r.key.clone()).or_insert_with(|| PaneSet {
+            tabs: Vec::new(),
+            active: 0,
+            next_id: 1,
+            last_used: 0,
+        });
+        pane.last_used = self.pane_clock;
+        let id = pane.next_id;
+        pane.next_id += 1;
+        pane.tabs.push(Tab { id, title, content });
+        pane.active = id;
         self.focus_active_pane(window, cx);
         cx.notify();
     }
@@ -2006,7 +2018,17 @@ impl HarnessWorkspace {
             .child(label.to_string())
     }
 
-    fn render_center(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_center(&self, hx: &HarnessTheme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if std::env::var_os("HARNESS_PROBE_PAINT").is_some() {
+            log::info!(
+                "paint: center selection={:?} pane={:?}",
+                self.selection,
+                self.resolve().map(|r| {
+                    let p = self.panes.get(&r.key);
+                    (r.key.clone(), p.map(|p| p.tabs.len()), p.and_then(|p| p.active_tab()).map(|t| t.title.clone()))
+                }),
+            );
+        }
         let Some(r) = self.resolve() else {
             return self.render_empty_center(hx, cx).into_any_element();
         };
@@ -2015,7 +2037,37 @@ impl HarnessWorkspace {
         let content: AnyElement = match pane.and_then(|p| p.active_tab()) {
             Some(tab) => match &tab.content {
                 TabContent::Terminal(t) => t.clone().into_any_element(),
-                TabContent::Editor(ws) => ws.clone().into_any_element(),
+                TabContent::Editor(ws) => {
+                    if std::env::var_os("HARNESS_PROBE_PAINT").is_some() {
+                        log::info!("paint: center renders Editor tab");
+                    }
+                    // `Workspace::render` draws panes and docks but attaches
+                    // NONE of its action handlers — in zed, the *window root*
+                    // (MultiWorkspace) calls `workspace.actions(...)` on its
+                    // own wrapper and sets the "Workspace" key context there.
+                    // We are that window root here, so we carry the same
+                    // duties: without this wrapper every workspace action
+                    // (⌘P, ⌘⇧F, dock toggles, ...) dispatches into a tree
+                    // with no matching handler and no matching key context,
+                    // and dies silently.
+                    ws.update(cx, |workspace, cx| workspace.actions(div(), window, cx))
+                        .key_context("Workspace")
+                        .size_full()
+                        .child(ws.clone())
+                        .when(std::env::var_os("HARNESS_PROBE_PAINT").is_some(), |d| {
+                            d.child(
+                                gpui::canvas(
+                                    |bounds, _, _| {
+                                        log::info!("paint: editor slot bounds = {bounds:?}");
+                                    },
+                                    |_, _, _, _| {},
+                                )
+                                .absolute()
+                                .size_full(),
+                            )
+                        })
+                        .into_any_element()
+                }
                 TabContent::Chat(c) => c.clone().into_any_element(),
             },
             None => div().into_any_element(),
@@ -2952,7 +3004,7 @@ impl Focusable for HarnessWorkspace {
 }
 
 impl Render for HarnessWorkspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let hx = theme(cx).clone();
         let mut root = div()
             .relative()
@@ -2974,7 +3026,7 @@ impl Render for HarnessWorkspace {
                         d.child(self.render_sidebar(&hx, cx))
                             .child(self.splitter(&hx, Drag::Sidebar, cx))
                     })
-                    .child(self.render_center(&hx, cx))
+                    .child(self.render_center(&hx, window, cx))
                     .when(self.prefs.diff_open, |d| {
                         d.child(self.splitter(&hx, Drag::DiffPanel, cx))
                             .child(self.render_diff_panel(&hx, cx))

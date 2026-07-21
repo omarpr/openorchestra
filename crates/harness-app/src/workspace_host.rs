@@ -33,6 +33,7 @@ use gpui::{App, AppContext, Entity, Window};
 // `detach_and_log_err` lives on this gpui extension trait, not on Task.
 use gpui::TaskExt as _;
 use project::{Project, LocalProjectFlags};
+use gpui::Focusable as _;
 use settings::Settings as _;
 use workspace::{AppState, Workspace};
 
@@ -220,6 +221,9 @@ pub fn probe(hosted: &Entity<Workspace>, window: &mut Window, cx: &mut App) {
                 .timer(std::time::Duration::from_millis(1500))
                 .await;
 
+            if std::env::var_os("HARNESS_PROBE_KEYS").is_some() {
+                probe_keys(&hosted, cx).await;
+            }
             if let Some(list) = std::env::var_os("HARNESS_PROBE_OPEN") {
                 // Comma-separated, because "one file opens" and "a second file
                 // opens beside it in its own tab" are different claims and the
@@ -278,4 +282,73 @@ async fn probe_open(hosted: &Entity<Workspace>, rel: &str, cx: &mut gpui::AsyncW
         },
         _ => log::error!("HARNESS_PROBE_OPEN: no visible worktree to open against"),
     }
+}
+
+/// Drive the actions behind ⌘P and ⌘⇧F and report what they produced.
+///
+/// The bindings exist in `main.rs`, but "bound" and "working" are different
+/// claims: the action must reach the hosted `Workspace`'s handler through the
+/// focus path, and the result must actually appear (a modal, a search item).
+/// This dispatches exactly what the keystrokes dispatch, with focus set the
+/// same way clicking the editor tab sets it.
+async fn probe_keys(hosted: &Entity<Workspace>, cx: &mut gpui::AsyncWindowContext) {
+    let pause = std::time::Duration::from_millis(500);
+
+    // Re-focus the workspace pane before *each* dispatch, waiting a beat so a
+    // frame renders in between. Two reasons, both learned here: (1)
+    // `dispatch_action` resolves the focused node in the last *rendered*
+    // frame, so focusing and dispatching in one update sends the action to
+    // whatever was focused before; (2) each action moves focus (search into
+    // its query editor, the finder into its picker), so without a reset the
+    // probes poison each other and fail in whichever order they run.
+    async fn focused_dispatch(
+        hosted: &Entity<Workspace>,
+        action: Box<dyn gpui::Action>,
+        pause: std::time::Duration,
+        cx: &mut gpui::AsyncWindowContext,
+    ) {
+        let _ = hosted.update_in(cx, |ws, window, cx| {
+            let fh = ws.focus_handle(cx);
+            window.focus(&fh, cx);
+        });
+        cx.background_executor().timer(pause).await;
+        let _ = hosted.update_in(cx, |_, window, cx| {
+            window.dispatch_action(action, cx);
+        });
+        cx.background_executor().timer(pause).await;
+    }
+
+    // Control: an action registered the same way whose effect is directly
+    // observable. Separates "registration is broken" from "this action is".
+    let dock_before = hosted.update(cx, |ws, cx| ws.left_dock().read(cx).is_open());
+    focused_dispatch(hosted, Box::new(workspace::ToggleLeftDock), pause, cx).await;
+    let dock_after = hosted.update(cx, |ws, cx| ws.left_dock().read(cx).is_open());
+    log::info!("HARNESS_PROBE_KEYS: ToggleLeftDock dock open {dock_before:?} -> {dock_after:?}");
+    // Toggle it back so the probe leaves the workspace as it found it.
+    focused_dispatch(hosted, Box::new(workspace::ToggleLeftDock), pause, cx).await;
+
+    // ⌘⇧F — project search, which lands as a pane item.
+    let before = hosted.update(cx, |ws, cx| ws.active_pane().read(cx).items_len());
+    focused_dispatch(
+        hosted,
+        Box::new(workspace::pane::DeploySearch::default()),
+        pause,
+        cx,
+    )
+    .await;
+    let after = hosted.update(cx, |ws, cx| ws.active_pane().read(cx).items_len());
+    log::info!("HARNESS_PROBE_KEYS: cmd-shift-f search pane items {before:?} -> {after:?}");
+
+    // ⌘P — file finder modal.
+    focused_dispatch(
+        hosted,
+        Box::new(workspace::ToggleFileFinder::default()),
+        pause,
+        cx,
+    )
+    .await;
+    let finder = hosted.update(cx, |ws, cx| {
+        ws.active_modal::<file_finder::FileFinder>(cx).is_some()
+    });
+    log::info!("HARNESS_PROBE_KEYS: cmd-p file finder modal = {finder:?}");
 }
