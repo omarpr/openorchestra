@@ -323,9 +323,21 @@ fn main() {
                                     });
                                 println!("SPIKE5 N1: {panels} docked panel(s)");
                                 let open = hosted.update(cx, |ws, cx| {
-                                    (ws.left_dock().read(cx).is_open(), ws.panes().len())
+                                    let dock = ws.left_dock().read(cx);
+                                    (dock.is_open(), dock.active_panel_index(), ws.panes().len())
                                 });
-                                println!("SPIKE5 probe: (left dock open, pane count) = {open:?}");
+                                // Dock::render bails unless the dock is BOTH
+                                // open and has an active panel. Assert both, so
+                                // a regression shows up here rather than as a
+                                // blank editor pane nobody can explain.
+                                match open {
+                                    (true, Some(_), _) => {
+                                        println!("SPIKE5 N1: file tree is renderable {open:?}")
+                                    }
+                                    _ => println!(
+                                        "SPIKE5 FAILED: file tree registered but NOT renderable {open:?}"
+                                    ),
+                                }
                                 println!("SPIKE5 N2: language servers = {servers:?}");
                                 let langs = hosted.update(cx, |ws, cx| {
                                     ws.project()

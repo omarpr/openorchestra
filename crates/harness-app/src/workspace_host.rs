@@ -166,18 +166,25 @@ pub fn workspace_for(
                 Ok(panel) => {
                     let added = handle.update_in(cx, |workspace, window, cx| {
                         workspace.add_panel(panel, window, cx);
-                        // `add_panel` registers the panel but leaves the dock
-                        // CLOSED, so the file tree was present and invisible —
-                        // the editor tab looked empty.
+                        // `add_panel` alone is not enough to show anything:
+                        // it leaves the dock CLOSED *and* leaves
+                        // `active_panel_index` as None. `Dock::render` bails
+                        // out unless the dock is open AND has an active panel,
+                        // so the tree was registered and invisible — the
+                        // editor tab looked empty. Zed only activates on its
+                        // panel-move path, so out-of-tree callers must do it.
                         workspace.left_dock().update(cx, |dock, cx| {
                             dock.set_open(true, window, cx);
+                            let last = dock.panels_len().saturating_sub(1);
+                            dock.activate_panel(last, window, cx);
                         });
                         (
                             workspace.left_dock().read(cx).panels_len(),
                             workspace.left_dock().read(cx).is_open(),
+                            workspace.left_dock().read(cx).active_panel_index(),
                         )
                     });
-                    log::debug!("project_panel added; left dock (panels, open) = {added:?}");
+                    log::debug!("project_panel added; left dock (panels, open, active) = {added:?}");
                 }
                 Err(e) => log::error!("project_panel failed to load: {e:#}"),
             }
