@@ -353,6 +353,25 @@ fn main() {
                                         .collect::<Vec<_>>()
                                 });
                                 println!("SPIKE5 probe: open buffer languages = {langs:?}");
+                                // How much of the tree actually materialized.
+                                // A panel with no entries renders blank no
+                                // matter how correct the dock state is.
+                                for _ in 0..8 {
+                                    let counts = hosted.update(cx, |ws, cx| {
+                                        ws.project()
+                                            .read(cx)
+                                            .visible_worktrees(cx)
+                                            .map(|wt| {
+                                                let wt = wt.read(cx);
+                                                (wt.visible_entry_count(), wt.entry_count())
+                                            })
+                                            .collect::<Vec<_>>()
+                                    });
+                                    println!("SPIKE5 probe: worktree (visible, total) entries = {counts:?}");
+                                    cx.background_executor()
+                                        .timer(std::time::Duration::from_secs(2))
+                                        .await;
+                                }
                             } else {
                                 println!("SPIKE5 FAILED: workspace built but no worktree ever registered");
                             }
