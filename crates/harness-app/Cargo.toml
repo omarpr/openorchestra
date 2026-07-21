@@ -83,6 +83,13 @@ search = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac4
 # project_panel's actions live here, not in the panel crate itself.
 zed_actions = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
 
+# N2 (§12): rust-analyzer needs the language *adapters*, which live here.
+# Deliberately WITHOUT default features so `load-grammars` stays off — §3.2's
+# one-grammar discipline holds, and we keep bringing tree-sitter-rust
+# ourselves rather than compiling eighteen grammars for an editor that shows
+# Rust.
+languages = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4", default-features = false }
+
 anyhow = "1"
 semver = "1"
 log = "0.4"

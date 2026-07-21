@@ -1361,7 +1361,7 @@ impl HarnessWorkspace {
                     .child(self.render_tab(hx, "▤ files".to_string(), ActiveTab::Files, active_tab == ActiveTab::Files, cx)),
             )
             .child(div().flex_1().min_h_0().child(content))
-            .child(self.render_status_bar(hx, Some(&r)))
+            .child(self.render_status_bar(hx, Some(&r), cx))
             .into_any_element()
     }
 
@@ -1434,8 +1434,32 @@ impl HarnessWorkspace {
             .child(label)
     }
 
-    fn render_status_bar(&self, hx: &HarnessTheme, r: Option<&Resolved>) -> impl IntoElement {
+    fn render_status_bar(
+        &self,
+        hx: &HarnessTheme,
+        r: Option<&Resolved>,
+        cx: &App,
+    ) -> impl IntoElement {
         let branch = r.map(|r| r.branch.clone()).unwrap_or_default();
+        // N2: real LSP state, replacing the placeholder. Reports the language
+        // servers actually running on this worktree's Project, so "rust-analyzer"
+        // appearing means it started — not that we hope it did.
+        let lsp = r
+            .and_then(|r| self.panes.get(&r.key))
+            .and_then(|p| p.files.as_ref())
+            .map(|ws| {
+                let project = ws.read(cx).project().read(cx);
+                let names: Vec<String> = project
+                    .language_server_statuses(cx)
+                    .map(|(_, status)| status.name.to_string())
+                    .collect();
+                if names.is_empty() {
+                    "no LSP".to_string()
+                } else {
+                    names.join(", ")
+                }
+            })
+            .unwrap_or_else(|| "LSP: open ▤ files".to_string());
         div()
             .flex()
             .flex_none()
@@ -1450,6 +1474,7 @@ impl HarnessWorkspace {
             .child(div().font_family(hx.font_mono).text_color(hx.tx1).child(branch))
             .child(div().flex_1())
             .child(div().text_color(hx.tx2).child(self.note.clone()))
+            .child(div().font_family(hx.font_mono).text_color(hx.tx2).child(lsp))
             .child(tool_chip(hx, "git", self.tools.git, true))
             .child(tool_chip(hx, "gh", self.tools.gh, false))
             .child(tool_chip(hx, "pi", self.tools.pi, false))

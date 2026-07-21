@@ -130,5 +130,31 @@ pub fn workspace_for(
         // and two systems restoring layout would fight.
         Workspace::new(None, project, state, window, cx)
     });
+
+    // N1: dock the file explorer. `ProjectPanel::load` is async because it
+    // reads its serialized width from the database, so the panel appears a
+    // frame or two after the workspace does — which is why the Files tab
+    // renders the workspace immediately rather than waiting on this.
+    workspace.update(cx, |_, cx| {
+        let handle = cx.entity().downgrade();
+        cx.spawn_in(window, async move |_, cx| {
+            match project_panel::ProjectPanel::load(handle.clone(), cx.clone()).await {
+                Ok(panel) => {
+                    let added = handle.update_in(cx, |workspace, window, cx| {
+                        workspace.add_panel(panel, window, cx);
+                        (
+                            workspace.left_dock().read(cx).panels_len(),
+                            workspace.bottom_dock().read(cx).panels_len(),
+                            workspace.right_dock().read(cx).panels_len(),
+                        )
+                    });
+                    log::info!("project_panel added; docks (left,bottom,right) = {added:?}");
+                }
+                Err(e) => log::error!("project_panel failed to load: {e:#}"),
+            }
+        })
+        .detach();
+    });
+
     Ok(workspace)
 }
