@@ -41,7 +41,7 @@ fn main() {
         .map(PathBuf::from)
         .or_else(|| std::env::var("HARNESS_WORKTREE_ROOT").ok().map(PathBuf::from))
         .or_else(|| match std::env::current_dir() {
-            Ok(d) if d != PathBuf::from("/") => Some(d),
+            Ok(d) if d != *"/" => Some(d),
             _ => None,
         })
         .or_else(|| home.clone())

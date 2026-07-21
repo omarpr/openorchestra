@@ -68,7 +68,18 @@ struct PaneSet {
     terminal: Entity<TerminalPane>,
     editor: Entity<EditorPane>,
     active_tab: ActiveTab,
+    /// Monotonic counter, bumped on every touch, for LRU eviction (M5b).
+    last_used: u64,
 }
+
+/// How many worktree pane sets stay live at once.
+///
+/// Each holds a pty running a real agent process, so an uncapped cache means a
+/// long day's work leaves a dozen agents resident, all burning tokens on
+/// nothing. Evicting drops the pty and the process with it; reselecting the
+/// worktree spawns a fresh one. Sized so ordinary back-and-forth between a few
+/// tasks never evicts.
+const MAX_LIVE_PANES: usize = 6;
 
 struct Resolved {
     key: String,
@@ -96,6 +107,13 @@ pub struct HarnessWorkspace {
     panes: HashMap<String, PaneSet>,
     diff: worktrees::Diff,
     diff_file: Option<String>,
+    /// Bumped per request so a slow background diff for a since-abandoned
+    /// selection can be identified and discarded.
+    diff_gen: u64,
+    /// A diff is in flight — the panel shows this rather than stale numbers.
+    diff_pending: bool,
+    /// Monotonic tick for pane LRU ordering.
+    pane_clock: u64,
     edit: Edit,
     edit_focus: FocusHandle,
     caret_on: bool,
@@ -133,12 +151,11 @@ impl HarnessWorkspace {
 
         let mut repo_roots = load_repos(&repos_path);
         // Auto-add the launch dir if it's inside a git repo.
-        if let Ok(root) = git.repo_root(&launch_hint) {
-            if !repo_roots.contains(&root) {
+        if let Ok(root) = git.repo_root(&launch_hint)
+            && !repo_roots.contains(&root) {
                 repo_roots.push(root);
                 save_repos(&repos_path, &repo_roots);
             }
-        }
 
         let registry = Registry::load(&reg_path).unwrap_or_else(|e| {
             log::warn!("registry load failed ({e}); starting empty");
@@ -194,6 +211,9 @@ impl HarnessWorkspace {
             panes: HashMap::new(),
             diff: worktrees::Diff::default(),
             diff_file: None,
+            diff_gen: 0,
+            diff_pending: false,
+            pane_clock: 0,
             edit: Edit::None,
             edit_focus: cx.focus_handle(),
             caret_on: true,
@@ -213,7 +233,7 @@ impl HarnessWorkspace {
             focus_handle: cx.focus_handle(),
         };
         this.ensure_pane(window, cx);
-        this.recompute_diff();
+        this.recompute_diff(cx);
 
         cx.spawn(async move |view, cx| loop {
             match forge_rx.try_recv() {
@@ -381,7 +401,9 @@ impl HarnessWorkspace {
 
     fn ensure_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(r) = self.resolve() else { return };
-        if self.panes.contains_key(&r.key) {
+        self.pane_clock = self.pane_clock.wrapping_add(1);
+        if let Some(existing) = self.panes.get_mut(&r.key) {
+            existing.last_used = self.pane_clock;
             return;
         }
         // Build the adapter for whatever agent this worktree records (§4.5),
@@ -422,7 +444,36 @@ impl HarnessWorkspace {
         } else {
             ActiveTab::Editor
         };
-        self.panes.insert(r.key, PaneSet { terminal, editor, active_tab });
+        self.panes.insert(
+            r.key.clone(),
+            PaneSet {
+                terminal,
+                editor,
+                active_tab,
+                last_used: self.pane_clock,
+            },
+        );
+        self.evict_stale_panes(&r.key);
+    }
+
+    /// Drop the least-recently-used pane sets beyond [`MAX_LIVE_PANES`],
+    /// never the one just created (M5b).
+    fn evict_stale_panes(&mut self, keep: &str) {
+        while self.panes.len() > MAX_LIVE_PANES {
+            let Some(victim) = self
+                .panes
+                .iter()
+                .filter(|(key, _)| key.as_str() != keep)
+                .min_by_key(|(_, pane)| pane.last_used)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            log::info!("evicting pane {victim} (over the {MAX_LIVE_PANES}-pane cap)");
+            // Dropping the PaneSet drops the terminal entity, which closes the
+            // pty and terminates the agent process with it.
+            self.panes.remove(&victim);
+        }
     }
 
     fn focus_active_pane(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -436,12 +487,45 @@ impl HarnessWorkspace {
         }
     }
 
-    fn recompute_diff(&mut self) {
+    /// Recompute the merge-base diff **off the UI thread** (M4).
+    ///
+    /// `compute_diff` shells out to `git diff`, which on a large repo takes
+    /// long enough to visibly stall the window if run inline on selection.
+    /// Results are tagged with the worktree they were computed for and the
+    /// generation that requested them, so a slow diff for a worktree the user
+    /// has already navigated away from is dropped rather than painted over the
+    /// current one.
+    fn recompute_diff(&mut self, cx: &mut Context<Self>) {
         self.diff_file = None;
-        match self.resolve() {
-            Some(r) => self.diff = compute_diff(self.manager.git(), &r.path, &r.compare_ref),
-            None => self.diff = worktrees::Diff::default(),
-        }
+        let Some(r) = self.resolve() else {
+            self.diff = worktrees::Diff::default();
+            self.diff_pending = false;
+            cx.notify();
+            return;
+        };
+
+        self.diff_gen = self.diff_gen.wrapping_add(1);
+        let generation = self.diff_gen;
+        let (path, compare_ref) = (r.path.clone(), r.compare_ref.clone());
+        self.diff_pending = true;
+
+        cx.spawn(async move |view, cx| {
+            let computed = cx
+                .background_spawn(async move {
+                    compute_diff(&GitWorktrees::new(SystemRunner), &path, &compare_ref)
+                })
+                .await;
+            let _ = view.update(cx, |ws, cx| {
+                // Stale result: the user moved on while git was working.
+                if ws.diff_gen != generation {
+                    return;
+                }
+                ws.diff = computed;
+                ws.diff_pending = false;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn select(&mut self, sel: Selection, window: &mut Window, cx: &mut Context<Self>) {
@@ -450,7 +534,7 @@ impl HarnessWorkspace {
         self.menu = None;
         self.edit = Edit::None;
         self.ensure_pane(window, cx);
-        self.recompute_diff();
+        self.recompute_diff(cx);
         self.focus_active_pane(window, cx);
         cx.notify();
     }
@@ -491,7 +575,7 @@ impl HarnessWorkspace {
         }
 
         self.ensure_pane(window, cx);
-        self.recompute_diff();
+        self.recompute_diff(cx);
         cx.notify();
     }
 
@@ -505,11 +589,10 @@ impl HarnessWorkspace {
             prompt: Some("Open".into()),
         });
         cx.spawn_in(window, async move |view, cx| {
-            if let Ok(Ok(Some(paths))) = rx.await {
-                if let Some(path) = paths.into_iter().next() {
+            if let Ok(Ok(Some(paths))) = rx.await
+                && let Some(path) = paths.into_iter().next() {
                     let _ = view.update_in(cx, |ws, window, cx| ws.add_repo(path, window, cx));
                 }
-            }
         })
         .detach();
     }
@@ -591,15 +674,14 @@ impl HarnessWorkspace {
             }
             _ => {
                 let m = &event.keystroke.modifiers;
-                if let Some(ch) = event.keystroke.key_char.clone() {
-                    if !ch.is_empty() && !m.control && !m.platform {
+                if let Some(ch) = event.keystroke.key_char.clone()
+                    && !ch.is_empty() && !m.control && !m.platform {
                         if let Some(t) = self.edit_text_mut() {
                             t.push_str(&ch);
                         }
                         self.caret_on = true;
                         cx.notify();
                     }
-                }
             }
         }
         cx.stop_propagation();
@@ -625,8 +707,8 @@ impl HarnessWorkspace {
             }
             Edit::Avatar(id, text) => {
                 let initials = text.trim().to_uppercase();
-                if !initials.is_empty() {
-                    if let Some(e) = self.manager.registry.get(&id) {
+                if !initials.is_empty()
+                    && let Some(e) = self.manager.registry.get(&id) {
                         let color = e.avatar.color;
                         let _ = self
                             .manager
@@ -634,27 +716,29 @@ impl HarnessWorkspace {
                             .set_avatar(&id, worktrees::Avatar { initials, color });
                         let _ = self.manager.registry.save();
                     }
-                }
                 self.refresh(window, cx);
             }
             Edit::None => {}
         }
     }
 
-    fn create_named(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// Also fix the note so it names the branch and base actually used.
+    fn create_named(&mut self, input: &str, window: &mut Window, cx: &mut Context<Self>) {
         let target = self.new_target_repo.clone();
         let Some(repo) = self.data.repos.iter().find(|r| r.name == target).or_else(|| self.data.repos.first()) else {
             self.note = "add a folder first".to_string();
             cx.notify();
             return;
         };
+        let spec = NewWorktree::parse(input, &repo.compare_ref);
+        let name = spec.name.as_str();
         let slug = slugify(name);
         let req = CreateRequest {
             repo: repo.name.clone(),
             repo_root: repo.repo_root.clone(),
             task_slug: slug.clone(),
-            branch: format!("feat/{slug}"),
-            base_ref: Some(repo.compare_ref.clone()),
+            branch: spec.branch.clone().unwrap_or_else(|| format!("feat/{slug}")),
+            base_ref: Some(spec.base_ref.clone()),
             created_at: now_stamp(),
             // pi is the reference runtime and the default (§4.4). Choosing a
             // peer per worktree is the natural next step in the create dialog.
@@ -869,11 +953,20 @@ impl HarnessWorkspace {
                 .border_l_1()
                 .border_color(hx.border);
             body = body.child(self.render_main_entry(hx, repo, cx));
-            if let Edit::NewName(text) = &self.edit {
-                if self.new_target_repo == repo.name {
-                    body = body.child(div().mx_1().my_0p5().child(self.render_input(hx, text, cx)));
+            if let Edit::NewName(text) = &self.edit
+                && self.new_target_repo == repo.name {
+                    body = body
+                        .child(div().mx_1().my_0p5().child(self.render_input(hx, text, cx)))
+                        // The optional syntax is invisible otherwise (M5a).
+                        .child(
+                            div()
+                                .mx_2()
+                                .mb_1()
+                                .text_color(hx.tx2)
+                                .text_size(px(10.0))
+                                .child("name  ·  #branch  ·  @base-ref"),
+                        );
                 }
-            }
             for card in &repo.worktrees {
                 body = body.child(self.render_card(hx, card, cx));
             }
@@ -1332,7 +1425,7 @@ impl HarnessWorkspace {
         }
         blocks
             .into_iter()
-            .find(|b| b.lines().next().map_or(false, |h| h.contains(&format!("b/{path}")) || h.ends_with(path)))
+            .find(|b| b.lines().next().is_some_and(|h| h.contains(&format!("b/{path}")) || h.ends_with(path)))
             .unwrap_or_else(|| self.diff.unified.clone())
     }
 
@@ -1392,7 +1485,13 @@ impl HarnessWorkspace {
                     .justify_between()
                     .px_3()
                     .py_2()
-                    .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx0).child(format!("Changed files  {}", self.diff.files.len())))
+                    .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx0).child(
+                        if self.diff_pending {
+                            "Changed files  …".to_string()
+                        } else {
+                            format!("Changed files  {}", self.diff.files.len())
+                        },
+                    ))
                     .child(
                         div()
                             .flex()
@@ -1664,4 +1763,88 @@ fn now_stamp() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!("{secs}")
+}
+
+/// What the new-worktree input asked for (M5a).
+///
+/// The plain case stays plain — typing a name is all most tasks need, and it
+/// behaves exactly as before. Two optional suffixes cover the cases the
+/// auto-derived branch and base could not express:
+///
+/// ```text
+///   fix login bug                     -> branch feat/fix-login-bug, base = compare ref
+///   fix login bug #hotfix/login       -> explicit branch
+///   fix login bug @v2.1               -> explicit base ref
+///   fix login bug #hotfix/login @v2.1 -> both
+/// ```
+///
+/// Chosen over a bespoke modal deliberately: it delivers the same capability
+/// against far less unstable GPUI surface, and the sidebar input already
+/// exists and is already focused when you press `+`.
+#[derive(Debug, PartialEq)]
+struct NewWorktree {
+    name: String,
+    branch: Option<String>,
+    base_ref: String,
+}
+
+impl NewWorktree {
+    fn parse(input: &str, default_base: &str) -> NewWorktree {
+        let mut name_parts: Vec<&str> = Vec::new();
+        let mut branch = None;
+        let mut base_ref = None;
+
+        for token in input.split_whitespace() {
+            match token.split_at_checked(1) {
+                // A bare "#" or "@" carries no value; treat it as part of the
+                // name rather than silently swallowing it.
+                Some(("#", rest)) if !rest.is_empty() => branch = Some(rest.to_string()),
+                Some(("@", rest)) if !rest.is_empty() => base_ref = Some(rest.to_string()),
+                _ => name_parts.push(token),
+            }
+        }
+
+        NewWorktree {
+            name: name_parts.join(" "),
+            branch,
+            base_ref: base_ref.unwrap_or_else(|| default_base.to_string()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod new_worktree_tests {
+    use super::NewWorktree;
+
+    #[test]
+    fn a_plain_name_keeps_the_previous_behavior() {
+        let spec = NewWorktree::parse("fix login bug", "origin/main");
+        assert_eq!(spec.name, "fix login bug");
+        assert_eq!(spec.branch, None, "branch stays auto-derived");
+        assert_eq!(spec.base_ref, "origin/main");
+    }
+
+    #[test]
+    fn an_explicit_branch_and_base_are_picked_up_in_any_order() {
+        let spec = NewWorktree::parse("fix login @v2.1 #hotfix/login bug", "origin/main");
+        assert_eq!(spec.name, "fix login bug");
+        assert_eq!(spec.branch.as_deref(), Some("hotfix/login"));
+        assert_eq!(spec.base_ref, "v2.1");
+    }
+
+    #[test]
+    fn bare_markers_stay_part_of_the_name() {
+        // Otherwise a name containing a stray "#" would silently vanish.
+        let spec = NewWorktree::parse("issue # 42 @", "origin/main");
+        assert_eq!(spec.name, "issue # 42 @");
+        assert_eq!(spec.branch, None);
+        assert_eq!(spec.base_ref, "origin/main");
+    }
+
+    #[test]
+    fn the_last_marker_of_each_kind_wins() {
+        let spec = NewWorktree::parse("x #a #b @c @d", "origin/main");
+        assert_eq!(spec.branch.as_deref(), Some("b"));
+        assert_eq!(spec.base_ref, "d");
+    }
 }
