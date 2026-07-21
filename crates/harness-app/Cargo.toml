@@ -66,6 +66,23 @@ terminal_view = { git = "https://github.com/zed-industries/zed.git", rev = "952d
 workspace = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
 project = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
 
+# Spike 5 (§3.6, R10): hosting a real zed Workspace inside our own chrome.
+# These are the pieces AppState/Workspace::new need constructed directly, plus
+# the navigation crates the N-track hangs off.
+fs = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+client = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+clock = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+http_client = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+node_runtime = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+# `test-support` only to reach `Session::test()` — see workspace_host.rs for
+# why a fresh, history-less session is the semantically correct choice here.
+session = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4", features = ["test-support"] }
+project_panel = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+file_finder = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+search = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+# project_panel's actions live here, not in the panel crate itself.
+zed_actions = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+
 anyhow = "1"
 semver = "1"
 log = "0.4"

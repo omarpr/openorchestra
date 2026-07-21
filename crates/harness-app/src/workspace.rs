@@ -42,6 +42,8 @@ const DIFF_DEL_TX: u32 = 0xf2868f;
 enum ActiveTab {
     Terminal,
     Editor,
+    /// A real zed `Workspace` — file tree, ⌘P, ⌘⇧F (N1, §3.6).
+    Files,
 }
 
 #[derive(Clone, PartialEq)]
@@ -67,6 +69,10 @@ struct CardMenu {
 struct PaneSet {
     terminal: Entity<TerminalPane>,
     editor: Entity<EditorPane>,
+    /// Built lazily: a `Project::local` scans the whole worktree, so paying for
+    /// it on every pane creation would make switching worktrees slower for the
+    /// majority of visits that never open the file tree.
+    files: Option<Entity<::workspace::Workspace>>,
     active_tab: ActiveTab,
     /// Monotonic counter, bumped on every touch, for LRU eviction (M5b).
     last_used: u64,
@@ -449,11 +455,35 @@ impl HarnessWorkspace {
             PaneSet {
                 terminal,
                 editor,
+                files: None,
                 active_tab,
                 last_used: self.pane_clock,
             },
         );
         self.evict_stale_panes(&r.key);
+    }
+
+    /// Build the hosted zed `Workspace` for this entry, once (N1, §3.6).
+    ///
+    /// Deferred to the first visit to the Files tab because `Project::local`
+    /// starts a full worktree scan; doing that for every pane creation would
+    /// tax every worktree switch to benefit only the visits that use the tree.
+    fn ensure_files_workspace(&mut self, r: &Resolved, window: &mut Window, cx: &mut Context<Self>) {
+        if self.panes.get(&r.key).is_some_and(|p| p.files.is_some()) {
+            return;
+        }
+        match crate::workspace_host::workspace_for(&r.path, window, cx) {
+            Ok(hosted) => {
+                if let Some(pane) = self.panes.get_mut(&r.key) {
+                    pane.files = Some(hosted);
+                }
+            }
+            Err(e) => {
+                // Never fatal: the terminal and editor tabs still work.
+                log::warn!("could not open project for {}: {e}", r.path.display());
+                self.note = format!("could not open project: {e}");
+            }
+        }
     }
 
     /// Drop the least-recently-used pane sets beyond [`MAX_LIVE_PANES`],
@@ -482,6 +512,10 @@ impl HarnessWorkspace {
             let handle = match p.active_tab {
                 ActiveTab::Terminal => p.terminal.read(cx).focus_handle(cx),
                 ActiveTab::Editor => p.editor.read(cx).focus_handle(cx),
+                ActiveTab::Files => match &p.files {
+                    Some(ws) => ws.read(cx).focus_handle(cx),
+                    None => return,
+                },
             };
             window.focus(&handle, cx);
         }
@@ -1291,6 +1325,16 @@ impl HarnessWorkspace {
         let content: AnyElement = match (pane, active_tab) {
             (Some(p), ActiveTab::Terminal) => p.terminal.clone().into_any_element(),
             (Some(p), ActiveTab::Editor) => p.editor.clone().into_any_element(),
+            (Some(p), ActiveTab::Files) => match &p.files {
+                Some(ws) => ws.clone().into_any_element(),
+                // Still being constructed on the first switch to this tab.
+                None => div()
+                    .p_3()
+                    .text_xs()
+                    .text_color(hx.tx2)
+                    .child("opening project …")
+                    .into_any_element(),
+            },
             (None, _) => div().into_any_element(),
         };
 
@@ -1313,7 +1357,8 @@ impl HarnessWorkspace {
                     .border_b_1()
                     .border_color(hx.border)
                     .child(self.render_tab(hx, format!("❯_ {}", r.branch), ActiveTab::Terminal, active_tab == ActiveTab::Terminal, cx))
-                    .child(self.render_tab(hx, "{ } editor".to_string(), ActiveTab::Editor, active_tab == ActiveTab::Editor, cx)),
+                    .child(self.render_tab(hx, "{ } editor".to_string(), ActiveTab::Editor, active_tab == ActiveTab::Editor, cx))
+                    .child(self.render_tab(hx, "▤ files".to_string(), ActiveTab::Files, active_tab == ActiveTab::Files, cx)),
             )
             .child(div().flex_1().min_h_0().child(content))
             .child(self.render_status_bar(hx, Some(&r)))
@@ -1362,6 +1407,7 @@ impl HarnessWorkspace {
             .id(match tab {
                 ActiveTab::Terminal => "tab-terminal",
                 ActiveTab::Editor => "tab-editor",
+                ActiveTab::Files => "tab-files",
             })
             .flex()
             .items_center()
@@ -1375,13 +1421,15 @@ impl HarnessWorkspace {
             .cursor_pointer()
             .hover(|d| d.text_color(hx.tx1))
             .on_click(cx.listener(move |ws, _, window, cx| {
-                if let Some(key) = ws.resolve().map(|r| r.key) {
-                    if let Some(pane) = ws.panes.get_mut(&key) {
-                        pane.active_tab = tab;
-                    }
-                    ws.focus_active_pane(window, cx);
-                    cx.notify();
+                let Some(r) = ws.resolve() else { return };
+                if let Some(pane) = ws.panes.get_mut(&r.key) {
+                    pane.active_tab = tab;
                 }
+                if tab == ActiveTab::Files {
+                    ws.ensure_files_workspace(&r, window, cx);
+                }
+                ws.focus_active_pane(window, cx);
+                cx.notify();
             }))
             .child(label)
     }

@@ -15,6 +15,7 @@ mod notifier;
 mod terminal_pane;
 mod theme;
 mod workspace;
+mod workspace_host;
 
 use std::path::PathBuf;
 
@@ -77,6 +78,17 @@ fn main() {
         // but calling it keeps parity with zed's own init order.
         editor::init(cx);
 
+        // Navigation crates (N1, §3.6). Each registers its actions and its
+        // Workspace hooks; without these, `project_panel` has no panel to
+        // deploy and the ⌘P / ⌘⇧F actions do not exist to bind to.
+        // NOTE the leading `::` — this crate has its own `workspace` module,
+        // which otherwise shadows zed's crate of the same name.
+        let app_state = workspace_host::app_state(cx);
+        ::workspace::init(app_state, cx);
+        project_panel::init(cx);
+        file_finder::init(cx);
+        search::init(cx);
+
         cx.set_global(hx);
 
         cx.on_action(|_: &Quit, cx| cx.quit());
@@ -88,6 +100,33 @@ fn main() {
         // Minimal editing keymap for zed editor panes (scoped to the "Editor"
         // key context). Without this, only IME text entry works — Enter,
         // Backspace, and arrows would do nothing. Full keymap is an MVP item.
+        // Navigation keybindings (D14). Bound in the "Workspace" context so
+        // they only fire inside a hosted workspace, not over the sidebar.
+        // Action paths confirmed against zed v1.11.3's own default-macos keymap
+        // and crate sources (Spike 5). The keymap *names* differ from the Rust
+        // paths in every case here, which is exactly the sort of thing the
+        // spike existed to pin down:
+        //   "file_finder::Toggle"      -> ::workspace::ToggleFileFinder
+        //   "pane::DeploySearch"       -> ::workspace::pane::DeploySearch
+        //   "project_panel::ToggleFocus" -> zed_actions::project_panel::ToggleFocus
+        cx.bind_keys([
+            KeyBinding::new(
+                "cmd-p",
+                ::workspace::ToggleFileFinder::default(),
+                Some("Workspace"),
+            ),
+            KeyBinding::new(
+                "cmd-shift-f",
+                ::workspace::pane::DeploySearch::default(),
+                Some("Workspace"),
+            ),
+            KeyBinding::new(
+                "cmd-shift-e",
+                zed_actions::project_panel::ToggleFocus,
+                Some("Workspace"),
+            ),
+        ]);
+
         use editor::actions::{Backspace, Delete, MoveLeft, MoveRight, Newline, Tab};
         cx.bind_keys([
             KeyBinding::new("enter", Newline, Some("Editor")),
@@ -97,6 +136,53 @@ fn main() {
             KeyBinding::new("right", MoveRight, Some("Editor")),
             KeyBinding::new("tab", Tab, Some("Editor")),
         ]);
+
+        // Spike 5 self-check (R10). The Files tab builds its Workspace lazily on
+        // first click, so an ordinary headless run never exercises
+        // `Workspace::new` — the one thing the spike exists to prove. This flag
+        // forces the construction at startup, reports it, and quits, so the
+        // gate is verifiable without a human clicking a tab.
+        if std::env::var_os("HARNESS_SPIKE5").is_some() {
+            let probe_root = worktree_root.clone();
+            cx.open_window(WindowOptions::default(), move |window, cx| {
+                match workspace_host::workspace_for(&probe_root, window, cx) {
+                    Ok(hosted) => {
+                        // The worktree registers asynchronously (Project::local
+                        // kicks off a scan), so poll briefly rather than
+                        // reading a count that is guaranteed to be 0.
+                        let root = probe_root.clone();
+                        cx.spawn(async move |cx| {
+                            let mut worktrees = 0;
+                            for _ in 0..50 {
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_millis(100))
+                                    .await;
+                                worktrees = hosted.update(cx, |ws, cx| {
+                                    ws.project().read(cx).visible_worktrees(cx).count()
+                                });
+                                if worktrees > 0 {
+                                    break;
+                                }
+                            }
+                            if worktrees > 0 {
+                                println!(
+                                    "SPIKE5 OK: hosted zed Workspace built for {} ({worktrees} visible worktree(s) scanned)",
+                                    root.display()
+                                );
+                            } else {
+                                println!("SPIKE5 FAILED: workspace built but no worktree ever registered");
+                            }
+                            cx.update(|cx| cx.quit());
+                        })
+                        .detach();
+                    }
+                    Err(e) => println!("SPIKE5 FAILED: {e:#}"),
+                }
+                cx.new(|cx| HarnessWorkspace::new(probe_root.clone(), window, cx))
+            })
+            .expect("probe window");
+            return;
+        }
 
         let bounds = Bounds::centered(None, size(px(1400.0), px(880.0)), cx);
         cx.open_window(
