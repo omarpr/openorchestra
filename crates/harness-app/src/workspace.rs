@@ -121,12 +121,34 @@ const MAX_DIFF_LINES: usize = 5000;
 const DIFF_ADD_TX: u32 = 0x7fdd97;
 const DIFF_DEL_TX: u32 = 0xf2868f;
 
-#[derive(Clone, Copy, PartialEq)]
-enum ActiveTab {
-    Terminal,
-    Editor,
+/// What a tab can hold. Tab sets are per worktree and fully dynamic (§3.4):
+/// a worktree can carry any number of terminals, editors, and chats.
+enum TabContent {
+    Terminal(Entity<TerminalPane>),
+    /// A real zed `Workspace` — this is what carries the file explorer, ⌘P,
+    /// ⌘⇧F, and LSP (§3.6).
+    Editor(Entity<::workspace::Workspace>),
     /// Native agent chat over pi's RPC mode (M8, §4.2–4.3).
+    Chat(Entity<crate::chat_pane::ChatPane>),
+}
+
+/// What to open, before the entity exists.
+#[derive(Clone, Copy, PartialEq)]
+enum TabKind {
+    /// A plain `$SHELL`. What a worktree opens with.
+    Shell,
+    /// The worktree's recorded agent CLI (§4.5).
+    Agent,
+    Editor,
     Chat,
+}
+
+struct Tab {
+    /// Stable per-pane-set id, so closing a tab cannot renumber the others out
+    /// from under a click handler.
+    id: u64,
+    title: String,
+    content: TabContent,
 }
 
 #[derive(Clone, PartialEq)]
@@ -173,19 +195,18 @@ struct CardMenu {
 }
 
 struct PaneSet {
-    terminal: Entity<TerminalPane>,
-    /// The editor: a real zed `Workspace`, which is what carries the file
-    /// explorer, ⌘P, ⌘⇧F, and LSP (§3.6). Built lazily — `Project::local`
-    /// scans the whole worktree, so paying for it on every pane creation would
-    /// slow every worktree switch for the visits that only want the terminal.
-    editor: Option<Entity<::workspace::Workspace>>,
-    /// Also lazy: each chat pane spawns its own `pi --mode rpc` sidecar, and
-    /// starting one per worktree visit would reintroduce the process sprawl
-    /// M5b's LRU cap just removed.
-    chat: Option<Entity<crate::chat_pane::ChatPane>>,
-    active_tab: ActiveTab,
+    tabs: Vec<Tab>,
+    /// Id of the active tab, not an index — indices shift when a tab closes.
+    active: u64,
+    next_id: u64,
     /// Monotonic counter, bumped on every touch, for LRU eviction (M5b).
     last_used: u64,
+}
+
+impl PaneSet {
+    fn active_tab(&self) -> Option<&Tab> {
+        self.tabs.iter().find(|t| t.id == self.active)
+    }
 }
 
 /// How many worktree pane sets stay live at once.
@@ -534,109 +555,148 @@ impl HarnessWorkspace {
             existing.last_used = self.pane_clock;
             return;
         }
-        // Build the adapter for whatever agent this worktree records (§4.5),
-        // let it drop in its config, then run the command it names. A failing
-        // on_spawn costs the status signal, never the terminal.
-        let agent_command = r.agent_kind.as_ref().and_then(|kind| {
-            let runtime = runtime_for(kind, &r.path, &self.state_dir);
-            if let Err(e) = runtime.on_spawn(&r.path) {
-                log::warn!("{kind} setup failed for {}: {e}", r.path.display());
-            }
-            // The harness runs inside the user's own repository, so anything it
-            // drops there would otherwise show up as uncommitted changes in
-            // their project. Exclude locally (.git/info/exclude) rather than
-            // touching their tracked .gitignore.
-            if let Err(e) = self
-                .manager
-                .git()
-                .exclude_locally(&r.path, runtime.ignored_paths())
-            {
-                log::warn!("could not add local git excludes for {}: {e}", r.path.display());
-            }
-            self.agent_fidelity.insert(r.path.clone(), runtime.fidelity());
-            // Adapters that stream their own signals (OpenCode's SSE) publish
-            // straight onto the shared bus; file-based ones are already served
-            // by StatusFileSource.
-            if let Some(rx) = runtime.subscribe() {
-                let bus = self.bus.clone();
-                std::thread::Builder::new()
-                    .name("agent-signal-forward".into())
-                    .spawn(move || {
-                        for signal in rx {
-                            bus.publish(signal);
-                        }
-                    })
-                    .ok();
-            }
-            let command = runtime.command(&r.path);
-            if command.is_none() {
-                log::info!("{kind} not on PATH — falling back to a plain shell");
-            }
-            command
-        });
-        let spawns_agent = agent_command.is_some();
 
-        let terminal = cx.new(|cx| TerminalPane::new(r.path.clone(), agent_command, window, cx));
-        let active_tab = if spawns_agent {
-            ActiveTab::Terminal
-        } else {
-            ActiveTab::Editor
-        };
+        // A worktree opens with a single PLAIN terminal. The agent is a thing
+        // you start, not a thing that starts itself: auto-spawning it burned a
+        // pi session on every worktree you merely glanced at, and left no way
+        // to just get a shell. Add an agent tab (or type `pi`) when you want one.
         self.panes.insert(
             r.key.clone(),
             PaneSet {
-                terminal,
-                editor: None,
-                chat: None,
-                active_tab,
+                tabs: Vec::new(),
+                active: 0,
+                next_id: 1,
                 last_used: self.pane_clock,
             },
         );
-        if active_tab == ActiveTab::Editor {
-            // The read-only `main` entry opens on the editor, so build it now
-            // rather than leaving "opening project …" until something is
-            // clicked.
-            self.ensure_editor_workspace(&r, window, cx);
-        }
+        self.open_tab(TabKind::Shell, window, cx);
         self.evict_stale_panes(&r.key);
     }
 
-    /// Build the editor — a hosted zed `Workspace` — for this entry, once.
+    /// Prepare the worktree's agent adapter and return the command to run.
     ///
-    /// Deferred to the first visit to the editor tab because `Project::local`
-    /// starts a full worktree scan; doing that for every pane creation would
-    /// tax every worktree switch to benefit only the visits that edit.
-    fn ensure_editor_workspace(&mut self, r: &Resolved, window: &mut Window, cx: &mut Context<Self>) {
-        if self.panes.get(&r.key).is_some_and(|p| p.editor.is_some()) {
-            return;
+    /// Separate from tab creation because it also wires up the status signal
+    /// and the local git excludes, which are per-worktree, not per-tab.
+    fn agent_command(&mut self, r: &Resolved) -> Option<agent_runtime::AgentCommand> {
+        let kind = r.agent_kind.as_ref()?;
+        let runtime = runtime_for(kind, &r.path, &self.state_dir);
+        if let Err(e) = runtime.on_spawn(&r.path) {
+            log::warn!("{kind} setup failed for {}: {e}", r.path.display());
         }
-        match crate::workspace_host::workspace_for(&r.path, window, cx) {
-            Ok(hosted) => {
-                if let Some(pane) = self.panes.get_mut(&r.key) {
-                    pane.editor = Some(hosted);
-                }
-            }
-            Err(e) => {
-                // Never fatal: the terminal and editor tabs still work.
-                log::warn!("could not open project for {}: {e}", r.path.display());
-                self.note = format!("could not open project: {e}");
-            }
+        // The harness runs inside the user's own repository, so anything it
+        // drops there would otherwise show up as uncommitted changes in their
+        // project. Exclude locally rather than touching their .gitignore.
+        if let Err(e) = self
+            .manager
+            .git()
+            .exclude_locally(&r.path, runtime.ignored_paths())
+        {
+            log::warn!("could not add local git excludes for {}: {e}", r.path.display());
         }
+        self.agent_fidelity.insert(r.path.clone(), runtime.fidelity());
+        // Adapters that stream their own signals (OpenCode's SSE) publish
+        // straight onto the shared bus; file-based ones are served by
+        // StatusFileSource.
+        if let Some(rx) = runtime.subscribe() {
+            let bus = self.bus.clone();
+            std::thread::Builder::new()
+                .name("agent-signal-forward".into())
+                .spawn(move || {
+                    for signal in rx {
+                        bus.publish(signal);
+                    }
+                })
+                .ok();
+        }
+        let command = runtime.command(&r.path);
+        if command.is_none() {
+            log::info!("{kind} not on PATH — falling back to a plain shell");
+        }
+        command
     }
 
-    /// Build the chat pane for this entry, once (M8).
-    ///
-    /// Lazy for the same reason the Files tab is: it spawns a real
-    /// `pi --mode rpc` sidecar.
-    fn ensure_chat_pane(&mut self, r: &Resolved, cx: &mut Context<Self>) {
-        if self.panes.get(&r.key).is_some_and(|p| p.chat.is_some()) {
+    /// Open a new tab in the active worktree's set and focus it.
+    fn open_tab(&mut self, kind: TabKind, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(r) = self.resolve() else { return };
+        // `main` is a read-only checkout with no agent (D8).
+        if matches!(kind, TabKind::Agent | TabKind::Chat) && r.agent_kind.is_none() {
+            self.note = "the main checkout does not run an agent".to_string();
+            cx.notify();
             return;
         }
-        let path = r.path.clone();
-        let chat = cx.new(|cx| crate::chat_pane::ChatPane::new(path, cx));
+
+        let (content, title) = match kind {
+            TabKind::Shell => (
+                TabContent::Terminal(
+                    cx.new(|cx| TerminalPane::new(r.path.clone(), None, window, cx)),
+                ),
+                "❯_ shell".to_string(),
+            ),
+            TabKind::Agent => {
+                let command = self.agent_command(&r);
+                let label = command
+                    .as_ref()
+                    .map(|c| c.label.clone())
+                    .unwrap_or_else(|| "shell".to_string());
+                (
+                    TabContent::Terminal(
+                        cx.new(|cx| TerminalPane::new(r.path.clone(), command, window, cx)),
+                    ),
+                    format!("❯_ {label}"),
+                )
+            }
+            TabKind::Editor => match crate::workspace_host::workspace_for(&r.path, window, cx) {
+                Ok(hosted) => (TabContent::Editor(hosted), "{ } editor".to_string()),
+                Err(e) => {
+                    // Never fatal: the other tabs still work.
+                    log::warn!("could not open project for {}: {e}", r.path.display());
+                    self.note = format!("could not open project: {e}");
+                    cx.notify();
+                    return;
+                }
+            },
+            TabKind::Chat => {
+                let path = r.path.clone();
+                (
+                    TabContent::Chat(cx.new(|cx| crate::chat_pane::ChatPane::new(path, cx))),
+                    "◆ chat".to_string(),
+                )
+            }
+        };
+
         if let Some(pane) = self.panes.get_mut(&r.key) {
-            pane.chat = Some(chat);
+            let id = pane.next_id;
+            pane.next_id += 1;
+            pane.tabs.push(Tab { id, title, content });
+            pane.active = id;
         }
+        self.focus_active_pane(window, cx);
+        cx.notify();
+    }
+
+    /// Close a tab, dropping whatever it held — a terminal's pty and its
+    /// process, or a chat's `pi --mode rpc` sidecar.
+    fn close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(r) = self.resolve() else { return };
+        let Some(pane) = self.panes.get_mut(&r.key) else { return };
+        let Some(ix) = pane.tabs.iter().position(|t| t.id == id) else { return };
+        pane.tabs.remove(ix);
+        if pane.active == id {
+            // Prefer the tab to the left, which is where the eye already is.
+            pane.active = pane
+                .tabs
+                .get(ix.saturating_sub(1))
+                .or_else(|| pane.tabs.last())
+                .map(|t| t.id)
+                .unwrap_or(0);
+        }
+        // A worktree with no tabs is a dead end; give it a shell back.
+        if pane.tabs.is_empty() {
+            self.open_tab(TabKind::Shell, window, cx);
+            return;
+        }
+        self.focus_active_pane(window, cx);
+        cx.notify();
     }
 
     /// Drop the least-recently-used pane sets beyond [`MAX_LIVE_PANES`],
@@ -662,16 +722,11 @@ impl HarnessWorkspace {
     fn focus_active_pane(&self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(r) = self.resolve() else { return };
         if let Some(p) = self.panes.get(&r.key) {
-            let handle = match p.active_tab {
-                ActiveTab::Terminal => p.terminal.read(cx).focus_handle(cx),
-                ActiveTab::Editor => match &p.editor {
-                    Some(ws) => ws.read(cx).focus_handle(cx),
-                    None => return,
-                },
-                ActiveTab::Chat => match &p.chat {
-                    Some(chat) => chat.read(cx).focus_handle(cx),
-                    None => return,
-                },
+            let Some(tab) = p.active_tab() else { return };
+            let handle = match &tab.content {
+                TabContent::Terminal(t) => t.read(cx).focus_handle(cx),
+                TabContent::Editor(ws) => ws.read(cx).focus_handle(cx),
+                TabContent::Chat(c) => c.read(cx).focus_handle(cx),
             };
             window.focus(&handle, cx);
         }
@@ -1606,24 +1661,36 @@ impl HarnessWorkspace {
             return self.render_empty_center(hx, cx).into_any_element();
         };
         let pane = self.panes.get(&r.key);
-        let active_tab = pane.map(|p| p.active_tab).unwrap_or(ActiveTab::Editor);
-        let content: AnyElement = match (pane, active_tab) {
-            (Some(p), ActiveTab::Terminal) => p.terminal.clone().into_any_element(),
-            (Some(p), ActiveTab::Editor) => match &p.editor {
-                Some(ws) => ws.clone().into_any_element(),
-                None => div()
-                    .p_3()
-                    .text_xs()
-                    .text_color(hx.tx2)
-                    .child("opening project …")
-                    .into_any_element(),
+
+        let content: AnyElement = match pane.and_then(|p| p.active_tab()) {
+            Some(tab) => match &tab.content {
+                TabContent::Terminal(t) => t.clone().into_any_element(),
+                TabContent::Editor(ws) => ws.clone().into_any_element(),
+                TabContent::Chat(c) => c.clone().into_any_element(),
             },
-            (Some(p), ActiveTab::Chat) => match &p.chat {
-                Some(chat) => chat.clone().into_any_element(),
-                None => div().p_3().text_xs().text_color(hx.tx2).child("starting pi …").into_any_element(),
-            },
-            (None, _) => div().into_any_element(),
+            None => div().into_any_element(),
         };
+
+        // The tab strip scrolls: a worktree can carry many tabs now, and
+        // without this the `+` buttons would be pushed out of reach.
+        let mut strip = div()
+            .id("tab-strip")
+            .flex()
+            .flex_none()
+            .items_center()
+            .h(px(34.0))
+            .px_2()
+            .gap_1()
+            .bg(hx.bg1)
+            .border_b_1()
+            .border_color(hx.border)
+            .overflow_x_scroll();
+        if let Some(p) = pane {
+            for tab in &p.tabs {
+                strip = strip.child(self.render_tab(hx, tab, tab.id == p.active, cx));
+            }
+        }
+        strip = strip.child(self.render_new_tab_buttons(hx, &r, cx));
 
         div()
             .flex()
@@ -1632,25 +1699,7 @@ impl HarnessWorkspace {
             .h_full()
             .min_w_0()
             .bg(hx.bg0)
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .h(px(34.0))
-                    .px_2()
-                    .gap_1()
-                    .bg(hx.bg1)
-                    .border_b_1()
-                    .border_color(hx.border)
-                    .child(self.render_tab(hx, format!("❯_ {}", r.branch), ActiveTab::Terminal, active_tab == ActiveTab::Terminal, cx))
-                    .child(self.render_tab(hx, "{ } editor".to_string(), ActiveTab::Editor, active_tab == ActiveTab::Editor, cx))
-                    // Only worktrees run an agent; the read-only `main` entry
-                    // has nothing to chat with (D8).
-                    .when(r.agent_kind.is_some(), |d| {
-                        d.child(self.render_tab(hx, "◆ chat".to_string(), ActiveTab::Chat, active_tab == ActiveTab::Chat, cx))
-                    }),
-            )
+            .child(strip)
             .child(div().flex_1().min_h_0().child(content))
             .child(self.render_status_bar(hx, Some(&r), cx))
             .into_any_element()
@@ -1686,24 +1735,24 @@ impl HarnessWorkspace {
             )
     }
 
+    /// One tab button, with a close affordance.
     fn render_tab(
         &self,
         hx: &HarnessTheme,
-        label: String,
-        tab: ActiveTab,
+        tab: &Tab,
         active: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let id = tab.id;
+        let close_id = tab.id;
         div()
-            .id(match tab {
-                ActiveTab::Terminal => "tab-terminal",
-                ActiveTab::Editor => "tab-editor",
-                ActiveTab::Chat => "tab-chat",
-            })
+            .id(("tab", tab.id as usize))
             .flex()
             .items_center()
+            .gap_1()
             .h(px(26.0))
-            .px_3()
+            .pl_3()
+            .pr_1p5()
             .rounded_md()
             .when(active, |d| d.bg(hx.bg0).border_1().border_color(hx.border))
             .text_xs()
@@ -1714,18 +1763,78 @@ impl HarnessWorkspace {
             .on_click(cx.listener(move |ws, _, window, cx| {
                 let Some(r) = ws.resolve() else { return };
                 if let Some(pane) = ws.panes.get_mut(&r.key) {
-                    pane.active_tab = tab;
-                }
-                if tab == ActiveTab::Editor {
-                    ws.ensure_editor_workspace(&r, window, cx);
-                }
-                if tab == ActiveTab::Chat {
-                    ws.ensure_chat_pane(&r, cx);
+                    pane.active = id;
                 }
                 ws.focus_active_pane(window, cx);
                 cx.notify();
             }))
-            .child(label)
+            .child(tab.title.clone())
+            .child(
+                div()
+                    .id(("tab-close", tab.id as usize))
+                    .px_1()
+                    .rounded_sm()
+                    .text_color(hx.tx2)
+                    .hover(|d| d.bg(hx.surface).text_color(hx.red))
+                    .child("×")
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        ws.close_tab(close_id, window, cx);
+                        // Otherwise the click also selects the tab being closed.
+                        cx.stop_propagation();
+                    })),
+            )
+    }
+
+    /// The `+` menu: what you can add to a worktree (§3.4).
+    fn render_new_tab_buttons(
+        &self,
+        hx: &HarnessTheme,
+        r: &Resolved,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let agent_label = r
+            .agent_kind
+            .as_ref()
+            .map(|k| format!("＋{k}"))
+            .unwrap_or_default();
+        let has_agent = r.agent_kind.is_some();
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .ml_1()
+            .child(self.new_tab_button(hx, "new-shell", "＋❯_", TabKind::Shell, cx))
+            .when(has_agent, |d| {
+                d.child(self.new_tab_button(hx, "new-agent", &agent_label, TabKind::Agent, cx))
+            })
+            .child(self.new_tab_button(hx, "new-editor", "＋{ }", TabKind::Editor, cx))
+            .when(has_agent, |d| {
+                d.child(self.new_tab_button(hx, "new-chat", "＋◆", TabKind::Chat, cx))
+            })
+    }
+
+    fn new_tab_button(
+        &self,
+        hx: &HarnessTheme,
+        id: &'static str,
+        label: &str,
+        kind: TabKind,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .h(px(22.0))
+            .px_1p5()
+            .rounded_md()
+            .text_xs()
+            .font_family(hx.font_mono)
+            .text_color(hx.tx2)
+            .cursor_pointer()
+            .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
+            .child(label.to_string())
+            .on_click(cx.listener(move |ws, _, window, cx| ws.open_tab(kind, window, cx)))
     }
 
     fn render_status_bar(
@@ -1740,7 +1849,12 @@ impl HarnessWorkspace {
         // appearing means it started — not that we hope it did.
         let lsp = r
             .and_then(|r| self.panes.get(&r.key))
-            .and_then(|p| p.editor.as_ref())
+            .and_then(|p| {
+                p.tabs.iter().find_map(|t| match &t.content {
+                    TabContent::Editor(ws) => Some(ws),
+                    _ => None,
+                })
+            })
             .map(|ws| {
                 let project = ws.read(cx).project().read(cx);
                 let names: Vec<String> = project
@@ -1753,7 +1867,7 @@ impl HarnessWorkspace {
                     names.join(", ")
                 }
             })
-            .unwrap_or_else(|| "LSP: open the editor".to_string());
+            .unwrap_or_else(|| "LSP: open an editor tab".to_string());
         div()
             .flex()
             .flex_none()
@@ -2063,6 +2177,15 @@ impl Render for HarnessWorkspace {
             )
             // Drag tracking lives on the root so the pointer can leave the
             // 6px handle mid-drag without the resize stopping.
+            .on_action(cx.listener(|ws, _: &crate::NewTerminal, window, cx| {
+                ws.open_tab(TabKind::Shell, window, cx)
+            }))
+            .on_action(cx.listener(|ws, _: &crate::NewEditor, window, cx| {
+                ws.open_tab(TabKind::Editor, window, cx)
+            }))
+            .on_action(cx.listener(|ws, _: &crate::NewChat, window, cx| {
+                ws.open_tab(TabKind::Chat, window, cx)
+            }))
             .on_mouse_move(cx.listener(|ws, ev: &MouseMoveEvent, _, cx| ws.drag_move(ev, cx)))
             .on_mouse_up(
                 MouseButton::Left,

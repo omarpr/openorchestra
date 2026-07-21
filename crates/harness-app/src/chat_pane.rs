@@ -86,17 +86,25 @@ impl ChatPane {
                 self.rpc = Some(rpc);
                 self.entries.push(Entry::Notice("pi session started".into()));
 
-                // Pump the record stream onto the UI thread. The channel is
-                // closed when the sidecar dies, which ends the loop.
-                cx.spawn(async move |view, cx| {
-                    loop {
-                        let Ok(record) = records.recv() else { break };
-                        if view
-                            .update(cx, |pane, cx| pane.apply(record, cx))
-                            .is_err()
-                        {
-                            break; // pane went away
+                // Poll, never block. `cx.spawn` runs on the FOREGROUND
+                // executor, so a blocking `recv()` here wedges the UI thread
+                // for as long as pi has nothing to say — which is most of the
+                // time, and looked exactly like the app hanging on tab click.
+                // Same try_recv + timer shape the forge and status channels use.
+                cx.spawn(async move |view, cx| loop {
+                    match records.try_recv() {
+                        Ok(record) => {
+                            if view.update(cx, |pane, cx| pane.apply(record, cx)).is_err() {
+                                break; // pane went away
+                            }
                         }
+                        Err(e) if e.is_empty() => {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(60))
+                                .await
+                        }
+                        // Sidecar exited and closed the channel.
+                        Err(_) => break,
                     }
                 })
                 .detach();

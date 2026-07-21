@@ -166,13 +166,18 @@ pub fn workspace_for(
                 Ok(panel) => {
                     let added = handle.update_in(cx, |workspace, window, cx| {
                         workspace.add_panel(panel, window, cx);
+                        // `add_panel` registers the panel but leaves the dock
+                        // CLOSED, so the file tree was present and invisible —
+                        // the editor tab looked empty.
+                        workspace.left_dock().update(cx, |dock, cx| {
+                            dock.set_open(true, window, cx);
+                        });
                         (
                             workspace.left_dock().read(cx).panels_len(),
-                            workspace.bottom_dock().read(cx).panels_len(),
-                            workspace.right_dock().read(cx).panels_len(),
+                            workspace.left_dock().read(cx).is_open(),
                         )
                     });
-                    log::debug!("project_panel added; docks (left,bottom,right) = {added:?}");
+                    log::debug!("project_panel added; left dock (panels, open) = {added:?}");
                 }
                 Err(e) => log::error!("project_panel failed to load: {e:#}"),
             }

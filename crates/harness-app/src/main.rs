@@ -28,7 +28,18 @@ use gpui::{
 use crate::theme::HarnessTheme;
 use crate::workspace::HarnessWorkspace;
 
-actions!(harness, [Quit]);
+actions!(
+    harness,
+    [
+        Quit,
+        /// New plain-shell tab in the active worktree (§3.4).
+        NewTerminal,
+        /// New editor tab (a hosted zed Workspace).
+        NewEditor,
+        /// New agent-chat tab.
+        NewChat,
+    ]
+);
 
 /// First `.rs` file under `root`, for the Spike 5 probe to open so a language
 /// server has a reason to start.
@@ -168,6 +179,12 @@ fn main() {
         cx.bind_keys([
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("ctrl-q", Quit, None),
+            // §3.4's tab menu. Bound globally rather than in the "Workspace"
+            // context: they act on the harness's own tab strip, and must work
+            // while focus is inside a terminal or a hosted workspace.
+            KeyBinding::new("cmd-t", NewTerminal, None),
+            KeyBinding::new("cmd-e", NewEditor, None),
+            KeyBinding::new("cmd-shift-c", NewChat, None),
         ]);
 
         // Minimal editing keymap for zed editor panes (scoped to the "Editor"
@@ -305,6 +322,10 @@ fn main() {
                                         )
                                     });
                                 println!("SPIKE5 N1: {panels} docked panel(s)");
+                                let open = hosted.update(cx, |ws, cx| {
+                                    (ws.left_dock().read(cx).is_open(), ws.panes().len())
+                                });
+                                println!("SPIKE5 probe: (left dock open, pane count) = {open:?}");
                                 println!("SPIKE5 N2: language servers = {servers:?}");
                                 let langs = hosted.update(cx, |ws, cx| {
                                     ws.project()
