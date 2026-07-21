@@ -253,6 +253,16 @@ struct DragState {
     start_value: f32,
 }
 
+/// An in-progress inline comment, plus where to anchor its popover.
+#[derive(Clone)]
+struct CommentDraft {
+    file: String,
+    line: u32,
+    body: String,
+    /// Window coordinates of the gutter cell that opened it.
+    at: gpui::Point<Pixels>,
+}
+
 struct CardMenu {
     id: String,
     x: Pixels,
@@ -322,7 +332,7 @@ pub struct HarnessWorkspace {
     review: crate::diff_review::ReviewNotes,
     review_path: PathBuf,
     /// The `(file, line)` currently being commented on, and the draft text.
-    comment_draft: Option<(String, u32, String)>,
+    comment_draft: Option<CommentDraft>,
     /// First click of the two-click "clear all comments" confirm.
     clearing_review: bool,
     /// Rendered-markdown preview of the selected `.md` file, when the user has
@@ -901,13 +911,25 @@ impl HarnessWorkspace {
     }
 
     /// Open the comment editor for a diff line, seeded with any existing note.
-    fn begin_comment(&mut self, file: String, line: u32, window: &mut Window, cx: &mut Context<Self>) {
+    fn begin_comment(
+        &mut self,
+        file: String,
+        line: u32,
+        at: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let existing = self
             .resolve()
             .and_then(|r| self.review.get(&r.key, &file, line))
             .map(|c| c.body.clone())
             .unwrap_or_default();
-        self.comment_draft = Some((file, line, existing));
+        self.comment_draft = Some(CommentDraft {
+            file,
+            line,
+            body: existing,
+            at,
+        });
         window.focus(&self.edit_focus, cx);
         cx.notify();
     }
@@ -920,8 +942,8 @@ impl HarnessWorkspace {
             }
             "enter" => self.commit_comment(cx),
             "backspace" => {
-                if let Some((_, _, text)) = self.comment_draft.as_mut() {
-                    text.pop();
+                if let Some(draft) = self.comment_draft.as_mut() {
+                    draft.body.pop();
                 }
                 cx.notify();
             }
@@ -931,9 +953,9 @@ impl HarnessWorkspace {
                     && !ch.is_empty()
                     && !m.control
                     && !m.platform
-                    && let Some((_, _, text)) = self.comment_draft.as_mut()
+                    && let Some(draft) = self.comment_draft.as_mut()
                 {
-                    text.push_str(&ch);
+                    draft.body.push_str(&ch);
                     cx.notify();
                 }
             }
@@ -942,9 +964,9 @@ impl HarnessWorkspace {
     }
 
     fn commit_comment(&mut self, cx: &mut Context<Self>) {
-        let Some((file, line, body)) = self.comment_draft.take() else { return };
+        let Some(draft) = self.comment_draft.take() else { return };
         if let Some(r) = self.resolve() {
-            self.review.set(&r.key, &file, line, &body);
+            self.review.set(&r.key, &draft.file, draft.line, &draft.body);
             self.review.save(&self.review_path);
         }
         cx.notify();
@@ -2054,6 +2076,66 @@ impl HarnessWorkspace {
             }))
     }
 
+    /// The inline-comment popover, anchored beside the line it belongs to.
+    ///
+    /// A popover rather than a panel at the bottom: a comment is about one
+    /// line, and reading it fifty rows away from that line makes you hunt for
+    /// what it refers to.
+    fn render_comment_popover(
+        &self,
+        hx: &HarnessTheme,
+        draft: &CommentDraft,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        const W: f32 = 300.0;
+        // Open to the LEFT of the gutter: the gutter sits in the right-hand
+        // panel, so anchoring rightwards would push the popover off-window.
+        let left = (f32::from(draft.at.x) - W - 12.0).max(8.0);
+        let top = (f32::from(draft.at.y) - 10.0).max(48.0);
+
+        div()
+            .absolute()
+            .left(px(left))
+            .top(px(top))
+            .w(px(W))
+            .p_2()
+            .rounded_md()
+            .bg(hx.surface2)
+            .border_1()
+            .border_color(hx.amber)
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .gap_2()
+                    .text_xs()
+                    .font_family(hx.font_mono)
+                    .text_color(hx.tx2)
+                    .child(format!("{}:{}", draft.file, draft.line))
+                    .child("⏎ save · esc cancel"),
+            )
+            .child(
+                div()
+                    .id("comment-input")
+                    .track_focus(&self.edit_focus)
+                    .on_key_down(cx.listener(Self::comment_key))
+                    .min_h(px(34.0))
+                    .p_1()
+                    .rounded_md()
+                    .bg(hx.bg0)
+                    .text_xs()
+                    .text_color(if draft.body.is_empty() { hx.tx2 } else { hx.tx0 })
+                    .child(if draft.body.is_empty() {
+                        "leave a comment for the agent…".to_string()
+                    } else {
+                        draft.body.clone()
+                    }),
+            )
+    }
+
     /// The popup listing what can be opened in this worktree.
     fn render_tab_menu(
         &self,
@@ -2371,64 +2453,6 @@ impl HarnessWorkspace {
         }
         panel = panel.child(files).child(self.splitter(hx, Drag::DiffSplit, cx));
 
-        if let Some((file, line, text)) = self.comment_draft.clone() {
-            panel = panel.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_none()
-                    .gap_1()
-                    .mx_2()
-                    .mb_1()
-                    .p_2()
-                    .rounded_md()
-                    .bg(hx.bg0)
-                    .border_1()
-                    .border_color(hx.amber)
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_family(hx.font_mono)
-                            .text_color(hx.tx2)
-                            .child(format!("{file}:{line}")),
-                    )
-                    .child(
-                        div()
-                            .id("comment-input")
-                            .track_focus(&self.edit_focus)
-                            .on_key_down(cx.listener(Self::comment_key))
-                            .min_h(px(20.0))
-                            .text_xs()
-                            .text_color(hx.tx0)
-                            .child(if text.is_empty() {
-                                "type a comment · enter saves · esc cancels".to_string()
-                            } else {
-                                text
-                            }),
-                    ),
-            );
-        }
-
-        // The diff preview scrolls. It previously used `overflow_hidden` with
-        // no scroll container, so everything past the panel height was clipped
-        // and simply unreachable — clicking a file showed only its first
-        // screenful.
-        if let Some(md) = &self.md_preview {
-            return panel
-                .child(
-                    div()
-                        .flex_1()
-                        .min_h_0()
-                        .m_2()
-                        .rounded_md()
-                        .bg(hx.bg0)
-                        .border_1()
-                        .border_color(hx.border)
-                        .child(md.clone()),
-                )
-                .into_any_element();
-        }
-
         let mut preview = div()
             .id("diff-preview")
             .flex()
@@ -2440,9 +2464,12 @@ impl HarnessWorkspace {
             .bg(hx.bg0)
             .border_1()
             .border_color(hx.border)
-            // Both axes: vertical for the diff's length, horizontal because
-            // lines are `whitespace_nowrap` and a long one would otherwise be
-            // unreachable rather than merely clipped.
+            // Both axes. `overflow_scroll` alone was not enough: in a flex
+            // column, children stretch to the container's cross-axis size, so
+            // every row was exactly as wide as the panel and the content never
+            // exceeded it — nothing to scroll horizontally, however long the
+            // line. `items_start` lets rows size to their content instead.
+            .items_start()
             .overflow_scroll()
             .text_xs()
             .font_family(hx.font_mono);
@@ -2555,19 +2582,40 @@ impl HarnessWorkspace {
                                 .flex_none()
                                 .w(px(46.0))
                                 .pr_1()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .when(has_comment, |d| d.bg(tint(hx.amber, 0.18)))
                                 .text_color(if has_comment { hx.amber } else { hx.tx2 })
                                 .hover(|d| d.bg(hx.surface).text_color(hx.accent))
-                                .child(if has_comment {
-                                    format!("● {}", line_no.map(|n| n.to_string()).unwrap_or_default())
-                                } else {
-                                    line_no.map(|n| n.to_string()).unwrap_or_default()
-                                })
-                                .on_click(cx.listener(move |ws, _, window, cx| {
-                                    cx.stop_propagation();
-                                    if let Some(line) = comment_key.1 {
-                                        ws.begin_comment(comment_key.0.clone(), line, window, cx);
-                                    }
-                                })),
+                                // The marker sits in a fixed slot rather than
+                                // being prefixed to the number, so commented
+                                // lines do not shift their digits sideways.
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .w(px(8.0))
+                                        .child(if has_comment { "▸" } else { "" }),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .child(line_no.map(|n| n.to_string()).unwrap_or_default()),
+                                )
+                                .on_click(cx.listener(
+                                    move |ws, ev: &gpui::ClickEvent, window, cx| {
+                                        cx.stop_propagation();
+                                        if let Some(line) = comment_key.1 {
+                                            ws.begin_comment(
+                                                comment_key.0.clone(),
+                                                line,
+                                                ev.position(),
+                                                window,
+                                                cx,
+                                            );
+                                        }
+                                    },
+                                )),
                         )
                         .child(div().flex_none().w(px(10.0)).text_color(fg).child(marker))
                         .child(
@@ -2692,6 +2740,25 @@ impl Render for HarnessWorkspace {
                     ),
             );
             root = root.child(self.render_context_menu(&hx, &menu, cx));
+        }
+
+        if let Some(draft) = self.comment_draft.clone() {
+            root = root
+                .child(
+                    // Click outside saves and closes, so a comment is never
+                    // lost by clicking away — the common accident.
+                    div()
+                        .id("comment-backdrop")
+                        .absolute()
+                        .top(px(0.0))
+                        .left(px(0.0))
+                        .size_full()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|ws, _, _, cx| ws.commit_comment(cx)),
+                        ),
+                )
+                .child(self.render_comment_popover(&hx, &draft, cx));
         }
 
         if let Some(x) = self.tab_menu {
