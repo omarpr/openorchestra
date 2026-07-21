@@ -317,9 +317,13 @@ pub struct HarnessWorkspace {
     collapsed: HashMap<String, bool>,
     panes: HashMap<String, PaneSet>,
     diff: worktrees::Diff,
-    diff_file: Option<String>,
-    /// Selected diff rows, as an inclusive index range into the rendered rows.
-    diff_selection: Option<(usize, usize)>,
+    /// Files whose diff is expanded. A set, not a single selection: reviewing
+    /// usually means comparing two files, and collapsing one to look at
+    /// another loses your place in the first.
+    expanded: std::collections::HashSet<String>,
+    /// Selected diff rows: which file, and an inclusive row range within that
+    /// file's body. Scoped per file because indices restart in each body.
+    diff_selection: Option<(String, usize, usize)>,
     /// True while dragging a selection.
     diff_selecting: bool,
     /// Inline review comments, keyed by worktree (§3.4).
@@ -331,7 +335,7 @@ pub struct HarnessWorkspace {
     clearing_review: bool,
     /// Rendered-markdown preview of the selected `.md` file, when the user has
     /// switched to it. Rebuilt on selection, since it snapshots file contents.
-    md_preview: Option<Entity<crate::markdown_preview::MarkdownPreview>>,
+    md_preview: Option<(String, Entity<crate::markdown_preview::MarkdownPreview>)>,
     /// Bumped per request so a slow background diff for a since-abandoned
     /// selection can be identified and discarded.
     diff_gen: u64,
@@ -442,7 +446,7 @@ impl HarnessWorkspace {
             collapsed: HashMap::new(),
             panes: HashMap::new(),
             diff: worktrees::Diff::default(),
-            diff_file: None,
+            expanded: std::collections::HashSet::new(),
             diff_selection: None,
             diff_selecting: false,
             review: crate::diff_review::ReviewNotes::load(
@@ -879,8 +883,8 @@ impl HarnessWorkspace {
     /// Copies the *code*, not the diff decoration: no gutter numbers and no
     /// +/- markers, so a pasted selection compiles.
     fn copy_diff_selection(&mut self, cx: &mut Context<Self>) {
-        let Some((from, to)) = self.diff_selection else { return };
-        let rows = readable_diff_lines(&self.unified_for_selected());
+        let Some((file, from, to)) = self.diff_selection.clone() else { return };
+        let rows = readable_diff_lines(&self.unified_for_file(&file));
         let text: Vec<String> = rows
             .iter()
             .enumerate()
@@ -896,19 +900,24 @@ impl HarnessWorkspace {
         cx.notify();
     }
 
-    /// Begin, extend, or clear a row selection.
-    fn select_diff_row(&mut self, row: usize, extend: bool, cx: &mut Context<Self>) {
-        self.diff_selection = match (self.diff_selection, extend) {
-            // Shift-click extends from the existing anchor.
-            (Some((from, _)), true) => Some((from.min(row), from.max(row))),
-            _ => Some((row, row)),
+    /// Begin, extend, or clear a row selection within one file's diff.
+    fn select_diff_row(&mut self, file: &str, row: usize, extend: bool, cx: &mut Context<Self>) {
+        self.diff_selection = match (self.diff_selection.take(), extend) {
+            // Shift-click extends, but only within the same file — a range
+            // spanning two bodies would have no meaning.
+            (Some((f, from, _)), true) if f == file => {
+                Some((f, from.min(row), from.max(row)))
+            }
+            _ => Some((file.to_string(), row, row)),
         };
         cx.notify();
     }
 
-    fn extend_diff_selection(&mut self, row: usize, cx: &mut Context<Self>) {
-        if let Some((from, _)) = self.diff_selection {
-            self.diff_selection = Some((from.min(row), from.max(row)));
+    fn extend_diff_selection(&mut self, file: &str, row: usize, cx: &mut Context<Self>) {
+        if let Some((f, from, _)) = self.diff_selection.clone()
+            && f == file
+        {
+            self.diff_selection = Some((f, from.min(row), from.max(row)));
             cx.notify();
         }
     }
@@ -1031,22 +1040,23 @@ impl HarnessWorkspace {
 
     /// Toggle between the raw diff and a rendered preview of the selected
     /// markdown file.
-    fn toggle_md_preview(&mut self, cx: &mut Context<Self>) {
-        if self.md_preview.is_some() {
+    fn toggle_md_preview(&mut self, file: &str, cx: &mut Context<Self>) {
+        if self.md_preview.as_ref().is_some_and(|(f, _)| f == file) {
             self.md_preview = None;
             cx.notify();
             return;
         }
-        let (Some(rel), Some(r)) = (self.diff_file.clone(), self.resolve()) else {
-            return;
-        };
-        let abs = r.path.join(&rel);
-        self.md_preview = Some(cx.new(|cx| crate::markdown_preview::MarkdownPreview::new(abs, cx)));
+        let Some(r) = self.resolve() else { return };
+        let abs = r.path.join(file);
+        self.md_preview = Some((
+            file.to_string(),
+            cx.new(|cx| crate::markdown_preview::MarkdownPreview::new(abs, cx)),
+        ));
         cx.notify();
     }
 
     fn recompute_diff(&mut self, cx: &mut Context<Self>) {
-        self.diff_file = None;
+        self.expanded.clear();
         self.md_preview = None;
         let Some(r) = self.resolve() else {
             self.diff = worktrees::Diff::default();
@@ -2418,10 +2428,8 @@ impl HarnessWorkspace {
             .child(tool_chip(hx, "pi", self.tools.pi, false))
     }
 
-    fn unified_for_selected(&self) -> String {
-        let Some(path) = &self.diff_file else {
-            return self.diff.unified.clone();
-        };
+    /// The unified-diff block for one file.
+    fn unified_for_file(&self, path: &str) -> String {
         let mut blocks: Vec<String> = Vec::new();
         let mut cur = String::new();
         for line in self.diff.unified.lines() {
@@ -2437,7 +2445,7 @@ impl HarnessWorkspace {
         blocks
             .into_iter()
             .find(|b| b.lines().next().is_some_and(|h| h.contains(&format!("b/{path}")) || h.ends_with(path)))
-            .unwrap_or_else(|| self.diff.unified.clone())
+            .unwrap_or_default()
     }
 
     /// The review toolbar above the file list: how many comments there are,
@@ -2501,7 +2509,7 @@ impl HarnessWorkspace {
 
     /// The unified diff body, rendered inline beneath the file it belongs
     /// to (or beneath the whole list when no single file is selected).
-    fn render_diff_body(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_diff_body(&self, hx: &HarnessTheme, file: &str, cx: &mut Context<Self>) -> AnyElement {
         let mut preview = div()
             .id("diff-preview")
             .flex()
@@ -2515,7 +2523,7 @@ impl HarnessWorkspace {
             .items_start()
             .text_xs()
             .font_family(hx.font_mono);
-        let unified = self.unified_for_selected();
+        let unified = self.unified_for_file(file);
         if unified.is_empty() {
             preview = preview.child(div().p_2().text_color(hx.tx2).child("—"));
         } else {
@@ -2525,11 +2533,8 @@ impl HarnessWorkspace {
             // Comments hang off (file, line); with no file selected the rows
             // span several files, so fall back to each row's own header.
             let worktree_key = self.resolve().map(|r| r.key);
-            let mut file_for_comments = self.diff_file.clone().unwrap_or_default();
+            let file_for_comments = file.to_string();
             for (ix, r) in shown.iter().enumerate().take(MAX_DIFF_LINES) {
-                if r.kind == DiffLineKind::FileHeader {
-                    file_for_comments = r.text.clone();
-                }
                 // A hunk boundary is a thin rule plus git's section text (the
                 // enclosing function or heading). The old `@@ -a,b +c,d @@`
                 // coordinates are gone: the gutter shows the real line numbers,
@@ -2567,7 +2572,8 @@ impl HarnessWorkspace {
 
                 let selected = self
                     .diff_selection
-                    .is_some_and(|(from, to)| ix >= from && ix <= to);
+                    .as_ref()
+                    .is_some_and(|(f, from, to)| f == file && ix >= *from && ix <= *to);
                 let row_bg = if selected { tint(hx.accent, 0.22) } else { bg };
 
                 if r.kind == DiffLineKind::FileHeader {
@@ -2587,6 +2593,8 @@ impl HarnessWorkspace {
 
                 let line_no = r.number;
                 let comment_key = (file_for_comments.clone(), line_no);
+                let row_file = file_for_comments.clone();
+                let move_file = file_for_comments.clone();
                 let has_comment = line_no.is_some_and(|n| {
                     worktree_key
                         .as_deref()
@@ -2605,14 +2613,14 @@ impl HarnessWorkspace {
                             MouseButton::Left,
                             cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
                                 ws.diff_selecting = true;
-                                ws.select_diff_row(ix, ev.modifiers.shift, cx);
+                                ws.select_diff_row(&row_file, ix, ev.modifiers.shift, cx);
                             }),
                         )
                         // Dragging over rows extends the selection, which is
                         // what "highlight some lines" means with a mouse.
                         .on_mouse_move(cx.listener(move |ws, _: &MouseMoveEvent, _, cx| {
                             if ws.diff_selecting {
-                                ws.extend_diff_selection(ix, cx);
+                                ws.extend_diff_selection(&move_file, ix, cx);
                             }
                         }))
                         .child(
@@ -2758,29 +2766,7 @@ impl HarnessWorkspace {
                     .border_color(hx.border)
                     .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx2).child("DIFF"))
                     .child(div().flex_1().min_w_0().text_xs().font_family(hx.font_mono).text_color(hx.tx1).overflow_hidden().child(r.branch.clone()))
-                    // Markdown is the one case where the diff is usually the
-                    // wrong view: wrapped prose becomes long `+` lines with no
-                    // structure. Offer the rendered document instead, like the
-                    // editor does.
-                    .when(
-                        self.diff_file.as_deref().is_some_and(crate::markdown_preview::is_markdown),
-                        |d| {
-                            let previewing = self.md_preview.is_some();
-                            d.child(
-                                div()
-                                    .id("md-preview-toggle")
-                                    .flex_none()
-                                    .px_1p5()
-                                    .rounded_md()
-                                    .text_xs()
-                                    .text_color(if previewing { hx.accent } else { hx.tx2 })
-                                    .cursor_pointer()
-                                    .hover(|h| h.bg(hx.surface))
-                                    .child(if previewing { "◨ diff" } else { "◧ preview" })
-                                    .on_click(cx.listener(|ws, _, _, cx| ws.toggle_md_preview(cx))),
-                            )
-                        },
-                    ),
+                    ,
             )
             .child(
                 div()
@@ -2794,7 +2780,18 @@ impl HarnessWorkspace {
                         if self.diff_pending {
                             "Changed files  …".to_string()
                         } else {
-                            format!("Changed files  {}", self.diff.files.len())
+                            let total = self.diff.files.len();
+                            let done = self.resolve().map_or(0, |r| {
+                                self.review.reviewed_count(
+                                    &r.key,
+                                    self.diff.files.iter().map(|f| f.path.as_str()),
+                                )
+                            });
+                            if done > 0 {
+                                format!("Changed files  {done}/{total} reviewed")
+                            } else {
+                                format!("Changed files  {total}")
+                            }
                         },
                     ))
                     .child(
@@ -2812,6 +2809,7 @@ impl HarnessWorkspace {
         // One scroller holding the file list, with the selected file's diff
         // expanded directly beneath its row — so the diff is next to the name
         // it belongs to instead of in a separate pane you have to look away to.
+        let worktree_key = self.resolve().map(|r| r.key);
         let mut files = div()
             .id("diff-files")
             .flex()
@@ -2827,51 +2825,133 @@ impl HarnessWorkspace {
         }
         for (i, file) in self.diff.files.iter().enumerate() {
             let path = file.path.clone();
-            let is_sel = self.diff_file.as_deref() == Some(file.path.as_str());
+            let expanded = self.expanded.contains(&file.path);
+            let reviewed = worktree_key
+                .as_deref()
+                .is_some_and(|k| self.review.is_reviewed(k, &file.path));
             let badge_color = match file.change {
                 Change::Added => hx.green,
                 Change::Deleted => hx.red,
                 Change::Renamed => hx.accent,
                 _ => hx.amber,
             };
+            let check_path = path.clone();
+            let toggle_path = path.clone();
+            let md_path = path.clone();
+
             files = files.child(
                 div()
                     .id(("difffile", i))
                     .flex()
+                    .w_full()
                     .items_center()
                     .gap_2()
                     .px_2()
                     .py_1()
                     .rounded_md()
-                    .when(is_sel, |d| d.bg(hx.surface))
+                    .when(expanded, |d| d.bg(hx.surface))
                     .cursor_pointer()
                     .hover(|d| d.bg(hx.surface))
                     .on_click(cx.listener(move |ws, _, _, cx| {
-                        ws.diff_file = if ws.diff_file.as_deref() == Some(path.as_str()) {
-                            None
-                        } else {
-                            Some(path.clone())
-                        };
-                        // The preview and the editor both snapshot content, so
-                        // they belong to one selection and must not survive
-                        // into the next.
-                        ws.md_preview = None;
+                        if !ws.expanded.remove(&toggle_path) {
+                            ws.expanded.insert(toggle_path.clone());
+                        }
                         cx.notify();
                     }))
+                    // Reviewed checkbox. Ticking it collapses the file: the
+                    // point of marking it is to get it out of the way, and
+                    // leaving it open would defeat that.
+                    .child(
+                        div()
+                            .id(("reviewed", i))
+                            .flex_none()
+                            .w(px(14.0))
+                            .text_xs()
+                            .font_family(hx.font_mono)
+                            .text_color(if reviewed { hx.green } else { hx.tx2 })
+                            .hover(|d| d.text_color(hx.green))
+                            .child(if reviewed { "☑" } else { "☐" })
+                            .on_click(cx.listener(move |ws, _, _, cx| {
+                                cx.stop_propagation();
+                                let Some(r) = ws.resolve() else { return };
+                                let now = !ws.review.is_reviewed(&r.key, &check_path);
+                                ws.review.set_reviewed(&r.key, &check_path, now);
+                                ws.review.save(&ws.review_path);
+                                if now {
+                                    ws.expanded.remove(&check_path);
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    // Disclosure marker, so expanded state reads without
+                    // relying on the row background alone.
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(8.0))
+                            .text_xs()
+                            .text_color(hx.tx2)
+                            .child(if expanded { "▾" } else { "▸" }),
+                    )
                     .child(div().flex_none().w(px(12.0)).text_xs().font_family(hx.font_mono).text_color(badge_color).child(file.change.badge().to_string()))
-                    .child(div().flex_1().min_w_0().text_xs().font_family(hx.font_mono).text_color(hx.tx1).overflow_hidden().child(file.path.clone()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .font_family(hx.font_mono)
+                            // Reviewed files recede rather than vanish — still
+                            // findable, visibly done.
+                            .text_color(if reviewed { hx.tx2 } else { hx.tx1 })
+                            .overflow_hidden()
+                            .child(file.path.clone()),
+                    )
+                    // The markdown preview belongs to a file, so its toggle
+                    // lives on that file's row, not the panel header.
+                    .when(expanded && crate::markdown_preview::is_markdown(&file.path), |d| {
+                        let previewing =
+                            self.md_preview.as_ref().is_some_and(|(f, _)| f == &md_path);
+                        let p = md_path.clone();
+                        d.child(
+                            div()
+                                .id(("md-toggle", i))
+                                .flex_none()
+                                .px_1()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(if previewing { hx.accent } else { hx.tx2 })
+                                .hover(|h| h.bg(hx.surface_hover))
+                                .child(if previewing { "◨" } else { "◧" })
+                                .on_click(cx.listener(move |ws, _, _, cx| {
+                                    cx.stop_propagation();
+                                    ws.toggle_md_preview(&p, cx);
+                                })),
+                        )
+                    })
                     .child(div().flex_none().text_xs().font_family(hx.font_mono).text_color(hx.green).child(format!("+{}", file.adds)))
                     .child(div().flex_none().text_xs().font_family(hx.font_mono).text_color(hx.red).child(format!("−{}", file.dels))),
             );
-            // The diff for the file you just clicked, directly under its name.
-            if is_sel {
-                files = files.child(self.render_diff_body(hx, cx));
+
+            if expanded {
+                match self.md_preview.as_ref().filter(|(f, _)| f == &path) {
+                    Some((_, md)) => {
+                        files = files.child(
+                            div()
+                                .w_full()
+                                .h(px(360.0))
+                                .my_1()
+                                .rounded_md()
+                                .bg(hx.bg0)
+                                .border_1()
+                                .border_color(hx.border)
+                                .child(md.clone()),
+                        );
+                    }
+                    None => files = files.child(self.render_diff_body(hx, &path, cx)),
+                }
             }
         }
-        // Nothing selected: show the whole diff below the list, as before.
-        if self.diff_file.is_none() && !self.diff.files.is_empty() {
-            files = files.child(self.render_diff_body(hx, cx));
-        }
+
         if review_count > 0 {
             panel = panel.child(self.render_review_bar(hx, review_count, cx));
         }

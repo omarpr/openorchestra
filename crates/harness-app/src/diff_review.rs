@@ -10,7 +10,7 @@
 //! same reason the adapters' files are excluded from git: review-in-progress is
 //! the user's working state, not a change to their project.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -25,11 +25,16 @@ pub struct Comment {
     pub body: String,
 }
 
-/// All review notes, keyed by worktree id.
+/// All review state, keyed by worktree id: the comments, and which files have
+/// been signed off.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReviewNotes {
     #[serde(default)]
     by_worktree: HashMap<String, Vec<Comment>>,
+    /// Files marked reviewed. A `BTreeSet` so the persisted file has stable
+    /// ordering and diffs of it stay readable.
+    #[serde(default)]
+    reviewed: HashMap<String, BTreeSet<String>>,
 }
 
 impl ReviewNotes {
@@ -105,8 +110,43 @@ impl ReviewNotes {
     }
 
     /// Drop every note for a worktree — after the review has been handed off.
+    ///
+    /// Also clears the reviewed marks: they describe a pass over a particular
+    /// set of changes, and keeping them after discarding the comments would
+    /// claim a review that no longer exists.
     pub fn clear(&mut self, worktree: &str) {
         self.by_worktree.remove(worktree);
+        self.reviewed.remove(worktree);
+    }
+
+    /// Whether `file` has been marked reviewed in this worktree.
+    pub fn is_reviewed(&self, worktree: &str, file: &str) -> bool {
+        self.reviewed
+            .get(worktree)
+            .is_some_and(|files| files.contains(file))
+    }
+
+    pub fn set_reviewed(&mut self, worktree: &str, file: &str, reviewed: bool) {
+        let files = self.reviewed.entry(worktree.to_string()).or_default();
+        if reviewed {
+            files.insert(file.to_string());
+        } else {
+            files.remove(file);
+        }
+    }
+
+    /// How many of `files` are marked reviewed — for the "3 of 8" counter.
+    pub fn reviewed_count<'a>(
+        &self,
+        worktree: &str,
+        files: impl IntoIterator<Item = &'a str>,
+    ) -> usize {
+        let Some(marked) = self.reviewed.get(worktree) else {
+            return 0;
+        };
+        // Counted against the files actually in the diff, so a mark left over
+        // from a file that has since stopped changing does not inflate it.
+        files.into_iter().filter(|f| marked.contains(*f)).count()
     }
 
     /// Render the notes as a markdown document, for saving alongside a PR or
@@ -276,6 +316,47 @@ mod tests {
         n.clear("app/nav");
         n.save(&notes_path);
         assert_eq!(ReviewNotes::load(&notes_path).count("app/nav"), 0);
+    }
+
+    #[test]
+    fn files_can_be_marked_reviewed_and_unmarked() {
+        let mut n = notes();
+        assert!(!n.is_reviewed("app/nav", "src/a.rs"));
+        n.set_reviewed("app/nav", "src/a.rs", true);
+        assert!(n.is_reviewed("app/nav", "src/a.rs"));
+        assert!(!n.is_reviewed("app/other", "src/a.rs"), "scoped per worktree");
+        n.set_reviewed("app/nav", "src/a.rs", false);
+        assert!(!n.is_reviewed("app/nav", "src/a.rs"));
+    }
+
+    #[test]
+    fn reviewed_count_only_counts_files_still_in_the_diff() {
+        // A file marked reviewed and then reverted should not keep inflating
+        // "N of M reviewed" for changes that no longer exist.
+        let mut n = notes();
+        n.set_reviewed("app/nav", "src/a.rs", true);
+        n.set_reviewed("app/nav", "gone.rs", true);
+        assert_eq!(n.reviewed_count("app/nav", ["src/a.rs", "src/b.rs"]), 1);
+    }
+
+    #[test]
+    fn reviewed_marks_survive_a_save_load_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = ReviewNotes::path_in(dir.path());
+        let mut n = notes();
+        n.set_reviewed("app/nav", "src/a.rs", true);
+        n.save(&path);
+        assert!(ReviewNotes::load(&path).is_reviewed("app/nav", "src/a.rs"));
+    }
+
+    #[test]
+    fn clearing_a_review_also_clears_its_reviewed_marks() {
+        // The marks describe a pass over a particular set of changes; keeping
+        // them after discarding the comments claims a review that is gone.
+        let mut n = notes();
+        n.set_reviewed("app/nav", "src/a.rs", true);
+        n.clear("app/nav");
+        assert!(!n.is_reviewed("app/nav", "src/a.rs"));
     }
 
     #[test]
