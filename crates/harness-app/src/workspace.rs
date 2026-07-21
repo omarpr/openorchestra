@@ -1275,9 +1275,18 @@ impl HarnessWorkspace {
             branch: spec.branch.clone().unwrap_or_else(|| format!("feat/{slug}")),
             base_ref: Some(spec.base_ref.clone()),
             created_at: now_stamp(),
-            // pi is the reference runtime and the default (§4.4). Choosing a
-            // peer per worktree is the natural next step in the create dialog.
-            agent_kind: AgentKind::Pi,
+            // OpenCode is the default (§4.5). It has the best signal of any
+            // adapter we have: `permission.updated` over its local SSE stream
+            // is a real, out-of-band "blocked on you" event, so its fidelity is
+            // Exact and it may raise notifications — where pi's is BestEffort,
+            // approximated from a status file an extension has to write. Less
+            // machinery and a truer answer.
+            //
+            // pi stays a first-class peer rather than the default because what
+            // it uniquely offers is the training loop (§4.4), not the signal.
+            // Choosing per worktree is the natural next step in the create
+            // dialog; until then this is the one that works with no setup.
+            agent_kind: AgentKind::OpenCode,
         };
         match self.manager.create(req) {
             Ok(id) => {

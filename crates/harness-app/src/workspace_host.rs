@@ -33,6 +33,7 @@ use gpui::{App, AppContext, Entity, Window};
 // `detach_and_log_err` lives on this gpui extension trait, not on Task.
 use gpui::TaskExt as _;
 use project::{Project, LocalProjectFlags};
+use settings::Settings as _;
 use workspace::{AppState, Workspace};
 
 /// The harness state root (`~/.openorchestra`), matching `workspace.rs`.
@@ -219,8 +220,13 @@ pub fn probe(hosted: &Entity<Workspace>, window: &mut Window, cx: &mut App) {
                 .timer(std::time::Duration::from_millis(1500))
                 .await;
 
-            if let Some(rel) = std::env::var_os("HARNESS_PROBE_OPEN") {
-                probe_open(&hosted, &rel.to_string_lossy(), cx).await;
+            if let Some(list) = std::env::var_os("HARNESS_PROBE_OPEN") {
+                // Comma-separated, because "one file opens" and "a second file
+                // opens beside it in its own tab" are different claims and the
+                // second is the one a tab bar depends on.
+                for rel in list.to_string_lossy().split(',') {
+                    probe_open(&hosted, rel.trim(), cx).await;
+                }
             }
 
             hosted.update(cx, |ws, cx| {
@@ -231,11 +237,14 @@ pub fn probe(hosted: &Entity<Workspace>, window: &mut Window, cx: &mut App) {
                     .visible_worktrees(cx)
                     .map(|wt| wt.read(cx).visible_entry_count())
                     .sum();
+                let tab_bar = workspace::TabBarSettings::get_global(cx).show;
                 log::info!(
-                    "editor tab: dock panels={} open={} active={:?} tree_entries={entries}",
+                    "editor tab: dock panels={} open={} active={:?} \
+                     tree_entries={entries} pane_items={} tab_bar={tab_bar}",
                     dock.panels_len(),
                     dock.is_open(),
                     dock.active_panel_index(),
+                    ws.active_pane().read(cx).items_len(),
                 );
             });
         })
