@@ -83,7 +83,7 @@ fn main() {
         // terminal glyphs). Pin a real macOS monospace so editor + terminal read
         // correctly.
         settings::SettingsStore::update_global(cx, |store, cx| {
-            let _ = store.set_user_settings(
+            let applied = store.set_user_settings(
                 r#"{ "buffer_font_family": "Menlo", "buffer_font_size": 13,
                      "terminal": { "font_family": "Menlo", "font_size": 13 },
                      "project_panel": { "dock": "left" },
@@ -94,9 +94,24 @@ fn main() {
                      // buffer even though the adapter is registered.
                      "languages": {
                        "Rust": { "language_servers": ["rust-analyzer"] }
-                     } }"#,
+                     },
+                     // N2 root cause: `start_language_server` blocks on
+                     // `wait_until_worktree_trust`, and Spike 3's
+                     // `init_worktree_trust: false` — which avoids the *startup*
+                     // stall — leaves the worktree untrusted, so LSP waits
+                     // forever on a prompt our chrome has no way to answer.
+                     // Trusting is correct here: worktrees are created by the
+                     // harness from repos the user explicitly added (§6.1).
+                     "session": { "trust_all_worktrees": true } }"#,
                 cx,
             );
+            // NOT `let _ =`: a settings string that fails to parse silently
+            // reverts *every* setting in it, which is indistinguishable from
+            // the settings having no effect.
+            // Not discarded: a settings string that fails to parse silently
+            // reverts *every* setting in it, which looks identical to the
+            // settings simply having no effect — an hour-costing failure mode.
+            log::debug!("harness settings parse status: {:?}", applied.parse_status);
         });
 
         // Harness design tokens (§3.4). Install them as the active zed theme

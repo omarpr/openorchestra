@@ -434,19 +434,16 @@ The spikes proved feasibility; this is the sequenced path from the current MVP t
 
 **N1 — File explorer + ⌘P + ⌘⇧F. ✅ DONE (July 21, 2026).** `project_panel` docks into the hosted workspace and the three keybindings are bound in the `"Workspace"` context. Two findings worth keeping: the panel's dock comes from `ProjectPanelSettings`, and because we never load zed's *default settings file*, the struct default applies — which put it on the **right**, not the left §3.6 assumes; `"project_panel": { "dock": "left" }` is now set explicitly. And the action paths are not the keymap names (§3.6). Verified by probe: `SPIKE5 N1: 1 docked panel(s)`, with a real file opened from the worktree.
 
-**N2 — LSP on the same Project (absorbs M3). 🟡 PARTIAL (July 21, 2026).** Wired and verified: `languages` is in the graph (deliberately **without** `load-grammars`, preserving §3.2's one-grammar rule), `languages::init` registers the adapters, the Rust grammar is registered into the shared `LanguageRegistry`, an opened worktree file resolves to **`["Rust"]`**, `lsp_store` is live, `rust-analyzer` is on `$PATH`, and the status bar reports real `language_server_statuses` rather than a placeholder.
+**N2 — LSP on the same Project (absorbs M3). ✅ DONE (July 21, 2026).** rust-analyzer starts against the hosted workspace's `Project`: the probe reports `language servers = ["rust-analyzer"]`, and the status bar shows real `language_server_statuses` rather than a placeholder. `languages` is in the graph **without** `load-grammars`, preserving §3.2's one-grammar rule.
 
-**What does not work yet: the server never spawns** — `language servers = []`, and no `rust-analyzer` process appears.
+Getting there required **four** separate fixes, none of which produced an error message until the last two — the whole path failed silently, which is worth recording:
 
-Ruled out so far, each tested rather than assumed:
+1. **Register the Rust grammar in the shared `LanguageRegistry`.** `languages::init` registers language definitions and LSP adapters, but `register_native_grammars` sits behind `load-grammars`. Without a grammar the buffer never resolves to `rust`, so no adapter could ever match. One grammar registered by hand keeps §3.2 intact.
+2. **Pass a real environment to `Project::local`, not `None`.** With `None`, `ProjectEnvironment::worktree_environment` spawns a **login shell per worktree** to discover the environment, and `LspAdapterDelegate::shell_env().await` blocks on it. In this host that never resolves, so `start_language_server` logged "attempting to start" and then stalled forever — no error, no process. `Some(std::env::vars().collect())` short-circuits it via `get_cli_environment`, and is more correct anyway: the harness already decides what environment its tools run in.
+3. **Set `set_language_server_download_dir`.** Consulted even when nothing is downloaded; without it the start fails with `no language server download dir defined`. Pointed at `~/.openorchestra/language-servers` so openOrchestra owns everything it writes.
+4. **Environment, not code:** `~/.cargo/bin/rust-analyzer` is a rustup *shim*, and the `rust-analyzer` **component was not installed**. The shim exits 1 with "no default is configured", zed's adapter correctly rejects the binary (it explicitly guards against broken shims), and falls through to a GitHub download that the harness's blocked HTTP client refuses. `rustup component add rust-analyzer` fixes it. **`make doctor` should check this** — see cross-cutting.
 
-- *not* a missing grammar — the buffer resolves to `["Rust"]` (registering the grammar was a real fix; before it, no adapter could ever have matched);
-- *not* a missing adapter — `languages::init` runs and registers `RustLspAdapter`;
-- *not* a missing binary — `rust-analyzer` is on `$PATH` and zed's adapter also resolves it via `rustup which`;
-- *not* the per-language `language_servers` list — setting `"languages": { "Rust": { "language_servers": ["rust-analyzer"] } }` explicitly changed nothing;
-- *not* the worktree-trust stall — `init_worktree_trust: false` is set, and the worktree scans.
-
-Four hypotheses tested and rejected, so the next move is **not** a fifth guess: instrument `project::lsp_store`'s server-start path directly (it already logs at `debug`) to see what decision it makes for the opened buffer, or compare against a minimal zed build that does start the server. Everything else on the N-track works, so this is an isolated, well-bounded gap rather than a structural problem.
+*Testing note:* running the app under an isolated `HOME` (as the probe does) breaks rustup resolution, since rustup reads `~/.rustup`. That is a harness artifact, not a product bug, but it cost a debugging cycle.
 
 ### Agent track (A) — §4.5–4.6
 
@@ -462,7 +459,7 @@ Four hypotheses tested and rejected, so the next move is **not** a fifth guess: 
 
 **A5 — Notification bus + native OS notifications. ✅ DONE (July 21, 2026).** The bus landed with A1; `harness-app/src/notifier.rs` posts a native notification on any *transition* into `Waiting`, titled `<worktree> — <repo>` with the `WaitReason` as the body. Suppressed when the user is already viewing that worktree, and gated on `should_notify(fidelity)` so a best-effort adapter's turn-complete can never be dressed up as "input needed" (R11). **Delivery uses `osascript`, not `UNUserNotificationCenter`.** The native API requires a registered bundle — true for `openOrchestra.app` but *not* for `cargo run`, so the documented route would silently do nothing exactly when a developer tries to test it. `osascript` works in both with no new dependency, and AppleScript literals are escaped (a branch named `feat/"x"` would otherwise change what gets executed). Linux uses `notify-send` with `--` arg-injection hardening. *Remaining:* click-to-focus, and the D9 per-repo approval scope.
 
-**Cross-cutting, any time:** light-theme toggle (design exists), IBM Plex bundling (Menlo is interim), resizable/collapsible panel persistence, `gh pr create` from the harness (v1.x candidate, D3-adjacent), and fork-head PR badges (`gh pr list --head <branch>` instead of `gh pr view <branch>` — M1 §5).
+**Cross-cutting, any time:** light-theme toggle (design exists), IBM Plex bundling (Menlo is interim), resizable/collapsible panel persistence, `gh pr create` from the harness (v1.x candidate, D3-adjacent), fork-head PR badges (`gh pr list --head <branch>` instead of `gh pr view <branch>` — M1 §5), and a `make doctor` check for the **`rust-analyzer` rustup component** (N2 §4: the shim exists on `$PATH` even when the component does not, so "it's installed" is misleading).
 
 ---
 

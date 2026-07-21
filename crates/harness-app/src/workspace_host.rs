@@ -35,6 +35,14 @@ use gpui::TaskExt as _;
 use project::{Project, LocalProjectFlags};
 use workspace::{AppState, Workspace};
 
+/// The harness state root (`~/.openorchestra`), matching `workspace.rs`.
+fn harness_state_dir() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
+        .join(".openorchestra")
+}
+
 /// Build the minimal real `AppState` a `Workspace` needs.
 ///
 /// Called once and cached as a gpui global, because every hosted workspace
@@ -46,9 +54,15 @@ pub fn app_state(cx: &mut App) -> Arc<AppState> {
     }
 
     let fs = Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
-    let languages = Arc::new(language::LanguageRegistry::new(
-        cx.background_executor().clone(),
-    ));
+    let mut registry = language::LanguageRegistry::new(cx.background_executor().clone());
+    // Language servers need somewhere to live even when they are NOT
+    // downloaded: the adapter consults this directory before falling back to a
+    // user-installed binary, and without it `start_language_server` fails with
+    // "no language server download dir defined". Kept under the harness state
+    // root (§6.1) rather than zed's, so openOrchestra owns everything it
+    // writes.
+    registry.set_language_server_download_dir(harness_state_dir().join("language-servers"));
+    let languages = Arc::new(registry);
     let clock = Arc::new(clock::RealSystemClock);
     // The harness is offline by design: it drives local agents and shells out
     // to `gh` for forge data. A blocked HTTP client keeps zed's collab/telemetry
@@ -95,7 +109,17 @@ pub fn project_for(worktree_root: &Path, cx: &mut App) -> Entity<Project> {
         state.user_store.clone(),
         state.languages.clone(),
         state.fs.clone(),
-        None,
+        // Pass our environment explicitly rather than `None`.
+        //
+        // With `None`, `ProjectEnvironment::worktree_environment` falls through
+        // to spawning a *login shell* per worktree to discover the environment,
+        // and `LspAdapterDelegate::shell_env().await` blocks on that. In this
+        // host that never resolves, so `start_language_server` logs "attempting
+        // to start" and then silently stalls — no error, no process. Supplying
+        // a CLI environment short-circuits it (`get_cli_environment`), and is
+        // also simply more correct: the harness already decides what
+        // environment its agents and tools run in.
+        Some(std::env::vars().collect()),
         LocalProjectFlags {
             // Spike 3's finding: the default `true` stalls on a trust prompt
             // that nothing in our chrome can answer, which silently wedges LSP
@@ -148,7 +172,7 @@ pub fn workspace_for(
                             workspace.right_dock().read(cx).panels_len(),
                         )
                     });
-                    log::info!("project_panel added; docks (left,bottom,right) = {added:?}");
+                    log::debug!("project_panel added; docks (left,bottom,right) = {added:?}");
                 }
                 Err(e) => log::error!("project_panel failed to load: {e:#}"),
             }
