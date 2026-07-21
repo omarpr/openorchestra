@@ -422,7 +422,17 @@ The spikes proved feasibility; this is the sequenced path from the current MVP t
 
 **N2 — LSP on the same Project (absorbs M3). 🟡 PARTIAL (July 21, 2026).** Wired and verified: `languages` is in the graph (deliberately **without** `load-grammars`, preserving §3.2's one-grammar rule), `languages::init` registers the adapters, the Rust grammar is registered into the shared `LanguageRegistry`, an opened worktree file resolves to **`["Rust"]`**, `lsp_store` is live, `rust-analyzer` is on `$PATH`, and the status bar reports real `language_server_statuses` rather than a placeholder.
 
-**What does not work yet: the server never spawns** (`language servers = []`, no `rust-analyzer` process). The buffer is correctly typed and the adapter is registered, so the gap is in what triggers a server launch — most likely a project/LSP setting that zed's default settings file supplies and we do not, mirroring exactly the `project_panel` dock finding above. Next step is to diff the LSP-relevant defaults in zed's `assets/settings/default.json` against our minimal settings, rather than guessing further.
+**What does not work yet: the server never spawns** — `language servers = []`, and no `rust-analyzer` process appears.
+
+Ruled out so far, each tested rather than assumed:
+
+- *not* a missing grammar — the buffer resolves to `["Rust"]` (registering the grammar was a real fix; before it, no adapter could ever have matched);
+- *not* a missing adapter — `languages::init` runs and registers `RustLspAdapter`;
+- *not* a missing binary — `rust-analyzer` is on `$PATH` and zed's adapter also resolves it via `rustup which`;
+- *not* the per-language `language_servers` list — setting `"languages": { "Rust": { "language_servers": ["rust-analyzer"] } }` explicitly changed nothing;
+- *not* the worktree-trust stall — `init_worktree_trust: false` is set, and the worktree scans.
+
+Four hypotheses tested and rejected, so the next move is **not** a fifth guess: instrument `project::lsp_store`'s server-start path directly (it already logs at `debug`) to see what decision it makes for the opened buffer, or compare against a minimal zed build that does start the server. Everything else on the N-track works, so this is an isolated, well-bounded gap rather than a structural problem.
 
 ### Agent track (A) — §4.5–4.6
 

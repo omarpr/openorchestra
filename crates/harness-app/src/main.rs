@@ -86,7 +86,15 @@ fn main() {
             let _ = store.set_user_settings(
                 r#"{ "buffer_font_family": "Menlo", "buffer_font_size": 13,
                      "terminal": { "font_family": "Menlo", "font_size": 13 },
-                     "project_panel": { "dock": "left" } }"#,
+                     "project_panel": { "dock": "left" },
+                     // N2: zed's *default settings file* is what normally
+                     // supplies per-language server lists, and we load a
+                     // minimal settings set rather than that file — so
+                     // without this, no server is ever selected for a Rust
+                     // buffer even though the adapter is registered.
+                     "languages": {
+                       "Rust": { "language_servers": ["rust-analyzer"] }
+                     } }"#,
                 cx,
             );
         });
