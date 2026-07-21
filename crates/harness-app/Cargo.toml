@@ -41,6 +41,8 @@ util = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a
 # LanguageRegistry the hosted Workspace's Project uses; we register exactly one
 # grammar (tree-sitter-rust) into it rather than pulling zed's eighteen (§3.2).
 editor = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+# Anchor -> Point for mapping the diff editor's cursor back to a file line.
+multi_buffer = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
 language = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
 tree-sitter-rust = "0.24.2"
 

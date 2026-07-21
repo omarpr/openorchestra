@@ -95,6 +95,26 @@ impl ReviewNotes {
         self.by_worktree.remove(worktree);
     }
 
+    /// Render the notes as a markdown document, for saving alongside a PR or
+    /// pasting somewhere that renders it.
+    pub fn as_markdown(&self, worktree: &str, branch: &str) -> String {
+        let Some(notes) = self.by_worktree.get(worktree).filter(|n| !n.is_empty()) else {
+            return String::new();
+        };
+        let mut out = format!("# Review — {branch}\n");
+        let mut current_file: Option<&str> = None;
+        for note in notes {
+            if current_file != Some(note.file.as_str()) {
+                out.push_str(&format!("\n## `{}`\n\n", note.file));
+                current_file = Some(&note.file);
+            }
+            // A list item per note, line number bolded so it survives being
+            // skimmed in a rendered view.
+            out.push_str(&format!("- **line {}** — {}\n", note.line, note.body));
+        }
+        out
+    }
+
     /// Render the notes as feedback to hand to the agent.
     ///
     /// Grouped by file with explicit line numbers, because that is what an
@@ -178,6 +198,17 @@ mod tests {
     #[test]
     fn an_empty_review_is_empty_not_a_header_with_nothing_under_it() {
         assert!(ReviewNotes::default().as_review("app/nav").is_empty());
+        assert!(ReviewNotes::default().as_markdown("app/nav", "feat/x").is_empty());
+    }
+
+    #[test]
+    fn markdown_groups_by_file_under_headings() {
+        let md = notes().as_markdown("app/nav", "feat/nav");
+        assert!(md.starts_with("# Review — feat/nav"), "{md}");
+        assert_eq!(md.matches("## `src/a.rs`").count(), 1, "{md}");
+        assert!(md.contains("- **line 4** — earlier line"));
+        // Ordering matches the plain-text review and therefore the diff.
+        assert!(md.find("src/a.rs").unwrap() < md.find("src/b.rs").unwrap());
     }
 
     #[test]
