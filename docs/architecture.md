@@ -382,17 +382,31 @@ Architecture-level questions from v1–v3 are closed. v3.1's two new directions 
 
 ## 11. Current built state (what runs today)
 
-openOrchestra today is a running macOS/Linux GPUI app that, against a real repo:
+*Updated July 21, 2026 — first session on a real macOS machine rather than the Linux build container.*
 
-- draws the three-column chrome from generated design tokens (dark theme; light theme design exists, not yet toggled), with a native folder picker and an empty state before any repo is added;
-- shows a **real, per-repo worktree sidebar** with live avatars, ahead/behind, `~dirty`, PR/CI badges (from `gh`), and a **live agent-status pill** (from the status extension → watcher);
-- runs **pi's TUI in a real `terminal_view` pty** per worktree (selections/scrollback/IME), plus a plain shell on the read-only `main` entry;
-- opens **real, syntax-highlighted Rust editor tabs** (no LSP yet) with a working keymap, per-worktree tab sets;
-- renders the **real merge-base diff** (file list + M/A/D badges + unified preview) for the selected worktree;
-- creates / archives / deletes worktrees through the real `Manager` (name input; two-click delete confirm);
-- ships with `make doctor`, a macOS `.app` bundler + icon, and a cargo-audit CI workflow.
+openOrchestra today is a running macOS GPUI app that, against a real repo:
 
-The backend crates (`worktrees`, `forge`, `status-watch`) are UI-free and fully tested (41 passing); the app links them live.
+- draws the three-column chrome from generated design tokens, with a native folder picker and an empty state;
+- shows a **real, per-repo worktree sidebar** with live avatars, ahead/behind, `~dirty`, PR/CI badges (from `gh`), and a **live agent-status pill**;
+- runs **whichever agent a worktree records** (§4.5) in a real `terminal_view` pty — pi, opencode, claude, codex, kimi — falling back to a plain shell when the CLI is absent, plus a plain shell on the read-only `main` entry;
+- **posts a native OS notification when an agent needs input**, gated on adapter fidelity so a best-effort signal never claims more than it knows;
+- hosts a **real zed `Workspace`** per worktree behind a ▤ files tab, with the `project_panel` file tree docked left and ⌘P / ⌘⇧F / ⌘⇧E bound;
+- opens **real, syntax-highlighted Rust editor tabs** with a working keymap and per-worktree tab sets;
+- renders the **merge-base diff** asynchronously, discarding results for a selection the user has left;
+- creates / archives / deletes worktrees, with optional `#branch` and `@base-ref` in the create input, and LRU-evicts pane sets so long sessions do not accumulate live agent processes;
+- **harvests session exhaust into schema-versioned training records** (`harvest` binary), against a versioned tool contract both the agent runtime and the training generator import;
+- ships with `make doctor` (now version-checking the pi pin), a macOS `.app` bundler + icon, and a cargo-audit CI workflow.
+
+Backend crates are UI-free and fully tested — **123 headless tests** across `worktrees`, `forge`, `status-watch`, `agent-runtime`, `agent-schema`, `training`, and `pi-client`, plus 7 in the app — with two `--ignored` live tests that drive real `pi` processes end to end. Everything is clippy-clean.
+
+**Known incomplete:** rust-analyzer does not yet spawn (N2, with four causes ruled out); the Phase 2 chat *panel* is unbuilt though `pi-client` is done (M8); and the cross-cutting list below is untouched.
+
+**Two bugs this session found that the doc had recorded as working:**
+
+1. **The agent status pill could never have worked.** §4.1 states the harness installs `harness-status.ts` per worktree; nothing in `harness-app` ever did, so `.harness/status.json` was never written in a real run. Fixed in A1 and proven by a live end-to-end test.
+2. **The status watcher never routed a single event on macOS.** `notify`'s FSEvents backend returns canonicalized paths while the registry was keyed by the caller's path, so every event was dropped. Invisible on Linux/inotify, which is where the suite had only ever run.
+
+Both are the same lesson: the spike-era suites tested the pieces, and the pieces were fine. What had never been tested was that they were connected.
 
 ## 12. MVP → 1.0 roadmap
 
