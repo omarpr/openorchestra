@@ -1,8 +1,13 @@
 //! Parsing tests for the GhCli backend against recorded gh output fixtures.
 //!
 //! gh is NOT installed in CI for these tests — a `FakeRunner` plays back
-//! canned stdout/stderr/exit codes whose shapes were taken from the gh manual
-//! (`gh pr view --json`, `gh pr checks --json`; see docs/spike2-notes.md).
+//! canned stdout/stderr/exit codes.
+//!
+//! `fixtures/` holds hand-authored output covering every branch of the parser;
+//! `fixtures/live/` holds *verbatim* output captured from gh 2.95.0 against
+//! public repos, which is what retires the "fixture-verified only" half of R7
+//! (see docs/m1-gh-verification.md). The hand-authored shapes were confirmed
+//! byte-for-byte compatible with the live capture during that pass.
 
 use std::collections::HashMap;
 use std::io;
@@ -185,7 +190,10 @@ fn mixed_checks_parse_with_bucket_mapping() {
 
 #[test]
 fn passing_checks_parse_even_with_pending_exit_code_8() {
-    // gh pr checks exits 8 while checks are pending; stdout still parses.
+    // gh's human output exits 8 while checks are pending (and 1 when any check
+    // fails). With `--json` it exits 0 either way — verified against gh 2.95.0,
+    // docs/m1-gh-verification.md §4 — but the parser must not depend on either
+    // convention, so feed it the pessimistic case.
     let gh = GhCli::with_runner(FakeRunner::new(true).ok(CHECKS_ARGS, 8, CHECKS_PASS, ""));
     let checks = gh.checks_for_branch(repo(), "feat/nav").unwrap();
     assert_eq!(checks.len(), 2);
@@ -226,6 +234,58 @@ fn no_pr_for_checks_is_empty() {
 fn garbage_checks_output_is_error_not_panic() {
     let gh = GhCli::with_runner(FakeRunner::new(true).ok(CHECKS_ARGS, 0, GARBAGE, ""));
     assert!(gh.checks_for_branch(repo(), "feat/nav").is_err());
+}
+
+// ---- live capture from gh 2.95.0 (M1 / R7) ---------------------------------
+//
+// Verbatim stdout from a real, authenticated gh against public repos. These
+// exist so a future gh output change breaks a test instead of a badge.
+
+const LIVE_PR_OPEN: &str = include_str!("../fixtures/live/pr_view_open.json");
+const LIVE_PR_DRAFT: &str = include_str!("../fixtures/live/pr_view_draft.json");
+const LIVE_PR_MERGED: &str = include_str!("../fixtures/live/pr_view_merged.json");
+const LIVE_PR_CLOSED: &str = include_str!("../fixtures/live/pr_view_closed.json");
+const LIVE_CHECKS_MIXED: &str =
+    include_str!("../fixtures/live/pr_checks_pass_fail_skipping.json");
+const LIVE_CHECKS_PENDING: &str = include_str!("../fixtures/live/pr_checks_pending.json");
+
+fn live_pr(stdout: &str) -> forge::PrInfo {
+    let gh = GhCli::with_runner(FakeRunner::new(true).ok(VIEW_ARGS, 0, stdout, ""));
+    gh.pr_for_branch(repo(), "feat/nav").unwrap().unwrap()
+}
+
+fn live_checks(stdout: &str) -> Vec<CheckStatus> {
+    // gh exits 0 for --json regardless of check outcome (verification §4).
+    let gh = GhCli::with_runner(FakeRunner::new(true).ok(CHECKS_ARGS, 0, stdout, ""));
+    gh.checks_for_branch(repo(), "feat/nav")
+        .unwrap()
+        .into_iter()
+        .map(|c| c.status)
+        .collect()
+}
+
+#[test]
+fn live_pr_view_output_maps_to_every_pr_state() {
+    assert_eq!(live_pr(LIVE_PR_OPEN).state, PrState::Open);
+    assert_eq!(live_pr(LIVE_PR_DRAFT).state, PrState::Draft);
+    assert_eq!(live_pr(LIVE_PR_MERGED).state, PrState::Merged);
+    assert_eq!(live_pr(LIVE_PR_CLOSED).state, PrState::Closed);
+    // Numbers and titles survive too, not just the state discriminant.
+    let open = live_pr(LIVE_PR_OPEN);
+    assert_eq!(open.number, 13894);
+    assert!(!open.title.is_empty());
+}
+
+#[test]
+fn live_pr_checks_output_covers_pass_fail_skipping_and_pending() {
+    let mixed = live_checks(LIVE_CHECKS_MIXED);
+    assert!(mixed.contains(&CheckStatus::Pass));
+    assert!(mixed.contains(&CheckStatus::Fail));
+    assert!(mixed.contains(&CheckStatus::Skipped));
+
+    let pending = live_checks(LIVE_CHECKS_PENDING);
+    assert!(pending.contains(&CheckStatus::Running));
+    assert!(pending.contains(&CheckStatus::Pass));
 }
 
 // ---- availability (R7) -----------------------------------------------------

@@ -145,6 +145,36 @@ fn multiple_roots_are_keyed_correctly() {
 }
 
 #[test]
+fn events_arrive_when_the_root_is_reached_through_a_symlink() {
+    // Regression: the macOS FSEvents backend reports *canonicalized* paths, so
+    // routing an event by `starts_with(<caller-supplied dir>)` silently matched
+    // nothing whenever any path component was a symlink — and `/var` -> is
+    // exactly that on macOS, which is where tempdirs live. Linux/inotify does
+    // not canonicalize, so CI never saw it. Watch through a deliberate symlink
+    // so the bug reproduces on every platform, not just macOS.
+    let real = tempfile::tempdir().unwrap();
+    let link_parent = tempfile::tempdir().unwrap();
+    let link = link_parent.path().join("worktree-link");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(real.path(), &link).unwrap();
+
+    let (mut watcher, rx) = StatusWatcher::new().unwrap();
+    watcher.watch(&link).unwrap();
+    expect_state(&rx, AgentState::Unknown);
+
+    // Write through the *real* path; the watch was registered on the symlink.
+    write_atomic(real.path(), &status_json("running"));
+    let event = expect_state(&rx, AgentState::Running);
+    // Events are reported under the path the caller registered, not the
+    // resolved one — the registry key is an implementation detail.
+    assert_eq!(event.worktree_root, link);
+
+    // ...and unwatch must resolve identically, or it would leak the watch.
+    watcher.unwatch(&link).unwrap();
+    assert!(watcher.watched().is_empty());
+}
+
+#[test]
 fn unwatch_stops_delivery() {
     let dir = tempfile::tempdir().unwrap();
     let (mut watcher, rx) = StatusWatcher::new().unwrap();

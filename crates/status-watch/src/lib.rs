@@ -116,7 +116,27 @@ impl From<notify::Error> for WatchError {
     }
 }
 
+/// Resolve a `.harness` directory to the form the notify backend reports.
+///
+/// macOS's FSEvents backend emits **canonicalized** paths, so an event for a
+/// worktree under `/var/...` arrives as `/private/var/...`. Routing events by
+/// prefix against the caller-supplied path therefore matched nothing whenever
+/// any component was a symlink. We canonicalize once, at `watch()` time, and
+/// use the result both as the path handed to notify (so the Linux/inotify
+/// backend echoes the same prefix back) and as the registry key.
+///
+/// Falls back to the path as given when it cannot be resolved — that is the
+/// pre-existing behavior, and no worse than it was.
+fn resolve_harness_dir(harness_dir: &Path) -> PathBuf {
+    harness_dir
+        .canonicalize()
+        .unwrap_or_else(|_| harness_dir.to_path_buf())
+}
+
 struct WatchEntry {
+    /// The root **as the caller passed it**. Events are reported under this
+    /// path so callers can match against their own keys; the registry key is
+    /// the resolved form and is an implementation detail.
     worktree_root: PathBuf,
     /// Last status delivered on the channel; used to suppress duplicate
     /// deliveries when the OS reports several events per atomic write.
@@ -175,7 +195,10 @@ impl StatusWatcher {
     /// delivers the current status (or `Unknown` if no file) on the channel.
     pub fn watch(&mut self, worktree_root: impl AsRef<Path>) -> Result<(), WatchError> {
         let root = worktree_root.as_ref().to_path_buf();
-        let harness_dir = root.join(".harness");
+        // Must exist before it can be resolved or watched. The pi extension
+        // creates it too — whichever side gets there first wins.
+        std::fs::create_dir_all(root.join(".harness"))?;
+        let harness_dir = resolve_harness_dir(&root.join(".harness"));
 
         {
             let registry = self.registry.lock().unwrap();
@@ -184,7 +207,6 @@ impl StatusWatcher {
             }
         }
 
-        std::fs::create_dir_all(&harness_dir)?;
         // Watch the directory (not the file): atomic temp+rename replaces the
         // inode, which would silently detach a file-level watch.
         self.watcher
@@ -219,7 +241,9 @@ impl StatusWatcher {
     /// Stop watching `worktree_root`.
     pub fn unwatch(&mut self, worktree_root: impl AsRef<Path>) -> Result<(), WatchError> {
         let root = worktree_root.as_ref().to_path_buf();
-        let harness_dir = root.join(".harness");
+        // Resolve the same way `watch` did, or we would fail to find the entry
+        // (and leak the underlying watch) for any symlinked root.
+        let harness_dir = resolve_harness_dir(&root.join(".harness"));
         let removed = self.registry.lock().unwrap().remove(&harness_dir);
         if removed.is_none() {
             return Err(WatchError::NotWatched(root));

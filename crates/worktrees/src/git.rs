@@ -352,7 +352,7 @@ fn merge_diff(numstat: &str, name_status: &str) -> Vec<DiffFile> {
             _ => continue,
         };
         // For renames (R100 old new) the new path is the last column.
-        let path = match cols.clone().last() {
+        let path = match cols.next_back() {
             Some(p) => p.to_string(),
             None => continue,
         };

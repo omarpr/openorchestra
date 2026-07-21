@@ -175,8 +175,11 @@ impl<R: CommandRunner> Forge for GhCli<R> {
             &["pr", "checks", "--json", "name,state,bucket", "--", branch],
         )?;
 
-        // `gh pr checks` uses exit codes as signal (8 = pending, non-zero on
-        // failing checks), so prefer parsing stdout whenever it is JSON.
+        // Parse stdout first whenever it is JSON. Verified against gh 2.95.0
+        // (docs/m1-gh-verification.md §4): with `--json`, gh exits 0 regardless
+        // of check outcome — its 1-means-failing / 8-means-pending convention
+        // applies to the *human* output only. So the status tells us nothing
+        // about the checks, and a non-zero status here means a real error.
         if let Ok(checks) = serde_json::from_str::<Vec<GhCheck>>(&out.stdout) {
             return Ok(checks
                 .iter()
