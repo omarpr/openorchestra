@@ -42,6 +42,14 @@ util = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a
 # grammar (tree-sitter-rust) into it rather than pulling zed's eighteen (§3.2).
 editor = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
 language = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+# Language configs + highlight queries as embedded assets. Small and data-only:
+# depending on it does NOT pull the eighteen native grammars (that is the
+# languages crate's load-grammars feature, which stays off — §3.2).
+grammars = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+# zed's embedded asset tree (SVG icons, fonts). Without an asset source every
+# ui::Icon inside the hosted workspace — file-type icons, chevrons, search bar
+# buttons — silently draws nothing.
+assets = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
 tree-sitter-rust = "0.24.2"
 
 # Spike 4: the headless worktree manager + registry (git worktree lifecycle,
@@ -124,3 +132,21 @@ incremental = false
 
 [profile.release]
 debug = 0
+
+# zed's own dev profile carries these same four overrides, and they are
+# load-bearing, not a speed nicety: zed's `with_parser` attaches a
+# `WasmStore` to every parser it creates, and the store's construction
+# compiles tree-sitter's wasm stdlib with cranelift ON FIRST PARSE — on a
+# gpui background (GCD) thread with a 512KB stack. Cranelift's egraph
+# optimizer recurses deeply; at opt-level 0 its frames are large enough to
+# blow that stack, so a debug build without these lines crashes (SIGILL,
+# stack-probe guard) the first time any buffer parses — i.e. the first
+# time a file opens with a real grammar attached.
+[profile.dev.package.wasmtime]
+opt-level = 3
+[profile.dev.package.cranelift-codegen]
+opt-level = 3
+[profile.dev.package.wasmtime-environ]
+opt-level = 3
+[profile.dev.package.wasmtime-internal-cranelift]
+opt-level = 3

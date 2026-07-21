@@ -86,7 +86,30 @@ fn main() {
         .or_else(|| home.clone())
         .unwrap_or_else(|| PathBuf::from("."));
 
-    gpui_platform::application().run(move |cx: &mut App| {
+    // zed's embedded assets (SVG icons, fonts). The hosted workspace resolves
+    // every ui::Icon — file-type icons, folder chevrons, search-bar buttons —
+    // through the app's AssetSource at paint time, and gpui's default source
+    // is empty: without this the file tree renders as bare text with
+    // invisible, unclickable disclosure arrows.
+    gpui_platform::application().with_assets(assets::Assets).run(move |cx: &mut App| {
+        // Fonts ship inside the same asset tree but are NOT auto-loaded;
+        // zed's main.rs does this same walk. Without it the default ui font
+        // ("Zed Plex Sans", from the default settings we DO load) resolves to
+        // a fallback face and the workspace chrome typesets slightly off.
+        {
+            use gpui::AssetSource as _;
+            let mut fonts = Vec::new();
+            for path in assets::Assets.list("fonts").unwrap_or_default() {
+                if path.ends_with(".ttf")
+                    && let Ok(Some(bytes)) = assets::Assets.load(&path)
+                {
+                    fonts.push(bytes);
+                }
+            }
+            if let Err(e) = cx.text_system().add_fonts(fonts) {
+                log::warn!("could not load embedded fonts: {e}");
+            }
+        }
         // Globals required by zed's `terminal` + `editor` crates (settings
         // store, base theme, app version), in dependency order.
         release_channel::init(semver::Version::new(0, 1, 0), cx);
@@ -158,21 +181,31 @@ fn main() {
         // N2: register the language adapters, which is what makes
         // rust-analyzer available to a Project's LspStore. Grammars are still
         // ours (one, not eighteen — §3.2); this brings the LSP side only.
-        // `languages::init` registers the language *definitions* and their LSP
-        // adapters, but `register_native_grammars` is behind its
-        // `load-grammars` feature — which we deliberately leave off (§3.2).
-        // Without a grammar the buffer never resolves to the "rust" language,
-        // so `rust-analyzer` never matches and LSP silently does nothing.
-        // Register exactly the one grammar we already carry.
-        ::workspace::AppState::global(cx)
-            .languages
-            .register_native_grammars([("rust", tree_sitter_rust::LANGUAGE)]);
+        // `languages::init` registers language definitions and LSP adapters,
+        // but with its `load-grammars` feature off (§3.2 — one grammar, not
+        // eighteen) it strips `grammar` from every config it registers. A
+        // grammar registered separately in the registry never re-attaches to
+        // those languages, so buffers resolved to a Rust with grammar=None:
+        // detection and rust-analyzer worked, parsing never happened, and
+        // syntax highlighting silently stayed off.
         languages::init(
             ::workspace::AppState::global(cx).languages.clone(),
             ::workspace::AppState::global(cx).fs.clone(),
             ::workspace::AppState::global(cx).node_runtime.clone(),
             cx,
         );
+        // Then add OUR Rust: the full unstripped config with the grammar
+        // attached and the highlight queries compiled. Added after init so it
+        // takes precedence for *.rs, while keeping init's adapter and
+        // settings registrations (they key on the language name, "Rust").
+        ::workspace::AppState::global(cx).languages.add(std::sync::Arc::new(
+            language::Language::new(
+                grammars::load_config("rust"),
+                Some(tree_sitter_rust::LANGUAGE.into()),
+            )
+            .with_queries(grammars::load_queries("rust"))
+            .expect("rust queries compile against the shipped grammar"),
+        ));
         file_finder::init(cx);
         search::init(cx);
 

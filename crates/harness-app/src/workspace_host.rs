@@ -277,6 +277,43 @@ async fn probe_open(hosted: &Entity<Workspace>, rel: &str, cx: &mut gpui::AsyncW
             Ok(_) => {
                 let items = hosted.update(cx, |ws, cx| ws.active_pane().read(cx).items_len());
                 log::info!("HARNESS_PROBE_OPEN: opened; pane items = {items:?}");
+                // Highlighting has three prerequisites — a resolved language,
+                // a registered grammar, and a parsed syntax layer. Report all
+                // three so "no colors" is attributable on sight.
+                let lang = hosted.update(cx, |ws, cx| {
+                    let editor = ws
+                        .active_item(cx)
+                        .and_then(|item| item.act_as::<editor::Editor>(cx))?;
+                    let buffer = editor.read(cx).buffer().read(cx).as_singleton()?;
+                    let buffer = buffer.read(cx);
+                    let lang = buffer.language().map(|l| l.name().to_string());
+                    let grammar = buffer
+                        .language()
+                        .and_then(|l| l.grammar())
+                        .is_some();
+                    let parsed = buffer.snapshot().syntax_layers().count();
+                    Some((lang, grammar, parsed))
+                });
+                log::info!("HARNESS_PROBE_OPEN: language/grammar/layers = {lang:?}");
+                // Language assignment is async (registry load → set_language),
+                // so a read racing the open can see None that resolves a beat
+                // later. Read again after a settle to tell "slow" from "never".
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(1500))
+                    .await;
+                let lang = hosted.update(cx, |ws, cx| {
+                    let editor = ws
+                        .active_item(cx)
+                        .and_then(|item| item.act_as::<editor::Editor>(cx))?;
+                    let buffer = editor.read(cx).buffer().read(cx).as_singleton()?;
+                    let buffer = buffer.read(cx);
+                    Some((
+                        buffer.language().map(|l| l.name().to_string()),
+                        buffer.language().and_then(|l| l.grammar()).is_some(),
+                        buffer.snapshot().syntax_layers().count(),
+                    ))
+                });
+                log::info!("HARNESS_PROBE_OPEN: after settle = {lang:?}");
             }
             Err(e) => log::error!("HARNESS_PROBE_OPEN: open failed: {e:#}"),
         },
