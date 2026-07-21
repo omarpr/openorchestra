@@ -236,6 +236,7 @@ fn claude_code_maps_to_the_claude_binary() {
 fn unknown_agent_kinds_still_get_a_runnable_adapter() {
     let rt = agent_runtime::runtime_for(
         &AgentKind::Other("future-agent".into()),
+        Path::new("/tmp/worktree"),
         Path::new("/tmp/state"),
     );
     assert_eq!(rt.fidelity(), WaitFidelity::TerminalOnly);

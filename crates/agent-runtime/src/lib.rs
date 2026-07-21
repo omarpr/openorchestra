@@ -19,10 +19,17 @@
 //! drive batch evals with no window.
 
 mod bus;
+mod claude_code;
+mod codex;
+mod opencode;
 mod pi;
+pub mod sse;
 mod status_file;
 
 pub use bus::Bus;
+pub use claude_code::ClaudeCodeRuntime;
+pub use codex::{CodexRuntime, KimiRuntime};
+pub use opencode::OpenCodeRuntime;
 pub use pi::PiRuntime;
 pub use status_file::StatusFileSource;
 
@@ -173,11 +180,17 @@ fn is_executable(path: &Path) -> bool {
 /// Unknown kinds (a registry written by a newer build) fall back to a
 /// terminal-only adapter that runs the kind's own name as the command — the
 /// honest behavior: we can still launch it, we just have no signal.
-pub fn runtime_for(kind: &AgentKind, state_dir: &Path) -> Box<dyn AgentRuntime> {
+pub fn runtime_for(
+    kind: &AgentKind,
+    worktree_root: &Path,
+    state_dir: &Path,
+) -> Box<dyn AgentRuntime> {
     match kind {
         AgentKind::Pi => Box::new(PiRuntime::new(state_dir)),
-        // A2–A4 land the peer adapters here. Until then every peer is
-        // terminal-only, which is a supported first-class case (§4.5).
+        AgentKind::OpenCode => Box::new(OpenCodeRuntime::new(worktree_root)),
+        AgentKind::ClaudeCode => Box::new(ClaudeCodeRuntime::new(state_dir)),
+        AgentKind::Codex => Box::new(CodexRuntime::new(state_dir)),
+        AgentKind::Kimi => Box::new(KimiRuntime),
         other => Box::new(TerminalOnlyRuntime::new(other.clone())),
     }
 }
@@ -228,3 +241,7 @@ impl AgentRuntime for TerminalOnlyRuntime {
         })
     }
 }
+
+/// Re-export of the OpenCode event classifier, so the mapping table in §4.5
+/// can be asserted directly without exposing the whole module.
+pub use opencode::classify as opencode_classify;
