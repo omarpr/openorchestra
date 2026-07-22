@@ -109,6 +109,12 @@ fn main() {
                     fonts.push(bytes);
                 }
             }
+            // Fira Code ships with the app (OFL — license vendored beside
+            // the TTFs). Bundled rather than a candidate-if-installed: the
+            // user asked for it by name, and a font picker offering a font
+            // most machines lack is a chip that never appears.
+            fonts.push(std::borrow::Cow::Borrowed(&include_bytes!("../fonts/FiraCode-Regular.ttf")[..]));
+            fonts.push(std::borrow::Cow::Borrowed(&include_bytes!("../fonts/FiraCode-Bold.ttf")[..]));
             if let Err(e) = cx.text_system().add_fonts(fonts) {
                 log::warn!("could not load embedded fonts: {e}");
             }
@@ -129,7 +135,7 @@ fn main() {
         // changed from the settings screen; apply_zed_settings is the single
         // place the zed settings JSON is built, so runtime font changes go
         // through exactly the same path as startup.
-        apply_zed_settings(cx, "Zed Plex Sans", "Menlo");
+        apply_zed_settings(cx, "Zed Plex Sans", "Menlo", 13.0);
 
         // Harness design tokens (§3.4). Install them as the active zed theme
         // (Spike 3c) BEFORE creating editor panes, so editor + terminal read
@@ -411,11 +417,11 @@ fn main() {
 /// Build and apply the zed user-settings JSON. The one place it is built:
 /// startup and every runtime settings change call this, so the two can never
 /// disagree about anything but the fonts they pass.
-pub fn apply_zed_settings(cx: &mut gpui::App, ui_font: &str, mono_font: &str) {
+pub fn apply_zed_settings(cx: &mut gpui::App, ui_font: &str, mono_font: &str, font_size: f32) {
     let json = format!(
-        r#"{{ "buffer_font_family": "{mono_font}", "buffer_font_size": 13,
+        r#"{{ "buffer_font_family": "{mono_font}", "buffer_font_size": {font_size},
              "ui_font_family": "{ui_font}",
-             "terminal": {{ "font_family": "{mono_font}", "font_size": 13 }},
+             "terminal": {{ "font_family": "{mono_font}", "font_size": {font_size} }},
              "project_panel": {{ "dock": "left" }},
              "languages": {{
                "Rust": {{ "language_servers": ["rust-analyzer"] }}

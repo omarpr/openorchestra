@@ -93,9 +93,24 @@ pub fn app_state(cx: &mut App) -> Arc<AppState> {
         workspace_store,
         fs,
         build_window_options: |_, _| Default::default(),
-        // Node is resolved per agent from $PATH (§4.5/R12); zed's managed
-        // runtime would download its own, which we neither want nor need.
-        node_runtime: node_runtime::NodeRuntime::unavailable(),
+        // A REAL node runtime, pointed at the system node (already a hard
+        // requirement for pi and the hook shims, R4). This is what brings the
+        // node-based language servers to life — vtsls/typescript, pyright,
+        // eslint, yaml — for anyone who has them installed. Downloads stay
+        // off: the harness is offline by design (the Blocked http client
+        // above), so adapters use PATH lookups and user installs only.
+        node_runtime: {
+            let (_tx, options_rx) = watch::channel(Some(node_runtime::NodeBinaryOptions {
+                allow_path_lookup: true,
+                allow_binary_download: false,
+                use_paths: None,
+            }));
+            node_runtime::NodeRuntime::new(
+                Arc::new(http_client::BlockedHttpClient),
+                None,
+                options_rx,
+            )
+        },
         session,
     });
     AppState::set_global(state.clone(), cx);
@@ -223,6 +238,13 @@ pub fn probe(hosted: &Entity<Workspace>, window: &mut Window, cx: &mut App) {
 
             if std::env::var_os("HARNESS_PROBE_KEYS").is_some() {
                 probe_keys(&hosted, cx).await;
+            }
+            if std::env::var_os("HARNESS_PROBE_FONTS").is_some() {
+                hosted.update(cx, |_, cx| {
+                    let names = cx.text_system().all_font_names();
+                    let fira = names.iter().any(|n| n == "Fira Code");
+                    log::info!("HARNESS_PROBE_FONTS: fira_code_available = {fira}");
+                });
             }
             if let Some(list) = std::env::var_os("HARNESS_PROBE_OPEN") {
                 // Comma-separated, because "one file opens" and "a second file

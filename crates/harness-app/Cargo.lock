@@ -4520,6 +4520,7 @@ dependencies = [
  "tree-sitter-typescript",
  "tree-sitter-yaml",
  "util",
+ "watch",
  "workspace",
  "worktrees",
  "zed_actions",

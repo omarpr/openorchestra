@@ -529,6 +529,7 @@ impl HarnessWorkspace {
         if this.prefs.zed_theme.is_some()
             || this.prefs.font_ui.is_some()
             || this.prefs.font_mono.is_some()
+            || this.prefs.font_size.is_some()
         {
             this.apply_appearance(cx);
         }
@@ -1723,7 +1724,7 @@ impl HarnessWorkspace {
                 cx.set_global(hx);
             }
         }
-        crate::apply_zed_settings(cx, font_ui, font_mono);
+        crate::apply_zed_settings(cx, font_ui, font_mono, self.prefs.font_size.unwrap_or(13.0));
     }
 
     fn render_top_bar(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1958,6 +1959,53 @@ impl HarnessWorkspace {
                 );
             }
             body = body.child(section_title(title)).child(row);
+        }
+        {
+            let size = self.prefs.font_size.unwrap_or(13.0);
+            let step = |delta: f32| {
+                move |ws: &mut Self, _: &gpui::ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
+                    let cur = ws.prefs.font_size.unwrap_or(13.0);
+                    let next = (cur + delta).clamp(9.0, 24.0);
+                    ws.prefs.font_size = if next == 13.0 { None } else { Some(next) };
+                    ws.apply_appearance(cx);
+                    ws.save_prefs(cx);
+                    cx.refresh_windows();
+                    cx.notify();
+                }
+            };
+            let size_chip = |label: &str| {
+                div()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(hx.border)
+                    .bg(hx.surface)
+                    .text_xs()
+                    .font_family(hx.font_mono)
+                    .text_color(hx.tx0)
+                    .cursor_pointer()
+                    .hover(|d| d.bg(hx.surface_hover))
+                    .child(label.to_string())
+            };
+            body = body.child(section_title("Font size")).child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .pb_1()
+                    .child(div().id("fs-minus").child(size_chip("−")).on_click(cx.listener(step(-1.0))))
+                    .child(
+                        div()
+                            .w(px(44.0))
+                            .text_center()
+                            .text_xs()
+                            .font_family(hx.font_mono)
+                            .text_color(hx.tx0)
+                            .child(format!("{size:.0} px")),
+                    )
+                    .child(div().id("fs-plus").child(size_chip("+")).on_click(cx.listener(step(1.0)))),
+            );
         }
 
         // ---- Agents: enable/disable + launch-command override -------------
@@ -4029,6 +4077,9 @@ struct Prefs {
     /// enabled, default command.
     #[serde(default)]
     agents: std::collections::BTreeMap<String, AgentPref>,
+    /// Editor + terminal font size in px. `None` = 13.
+    #[serde(default)]
+    font_size: Option<f32>,
     /// Shortcut rebindings, keyed by `shortcuts::key_id`. Value is the gpui
     /// chord string; missing = the catalog default.
     #[serde(default)]
@@ -4047,6 +4098,7 @@ impl Default for Prefs {
             font_ui: None,
             font_mono: None,
             agents: Default::default(),
+            font_size: None,
             shortcuts: Default::default(),
             sidebar_width: 280.0,
             diff_width: 340.0,
