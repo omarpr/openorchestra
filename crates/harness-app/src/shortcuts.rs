@@ -29,7 +29,13 @@ pub enum Scope {
 impl Scope {
     fn context(self) -> Option<&'static str> {
         match self {
-            Scope::Global => None,
+            // "Harness" is the app root's key context, present in every focus
+            // path — but at the SHALLOWEST depth. Truly context-less bindings
+            // get maximum depth in gpui and would beat every scoped binding
+            // (that is how the global ⌘W swallowed the editor's close-file),
+            // so "global" here means "the root handles it unless someone
+            // deeper claims the chord".
+            Scope::Global => Some("Harness"),
             Scope::Workspace => Some("Workspace"),
             Scope::Editor => Some("Editor"),
             Scope::Picker => Some("Picker"),
@@ -134,6 +140,11 @@ pub fn entries() -> Vec<Entry> {
             crate::CopyDiffSelection,
         ),
         Entry::new(s("cmd-,"), Scope::Global, "Open settings", crate::OpenSettings),
+        // ⌘W layers by context depth: this global binding closes the harness
+        // tab (terminal, agent, chat); the Workspace-scoped one below closes
+        // the active FILE when focus is inside an editor tab, which is what
+        // ⌘W means in an editor.
+        Entry::new(s("cmd-w"), Scope::Global, "Close tab", crate::CloseTab),
         Entry::new(s("cmd-q"), Scope::Global, "Quit", crate::Quit),
 
         // ---- Editor tab (hosted zed workspace) ---------------------------
@@ -160,6 +171,12 @@ pub fn entries() -> Vec<Entry> {
             Scope::Workspace,
             "Save file",
             ::workspace::Save { save_intent: None },
+        ),
+        Entry::new(
+            s("cmd-w"),
+            Scope::Workspace,
+            "Close file",
+            ::workspace::pane::CloseActiveItem::default(),
         ),
 
         // ---- Text editing -------------------------------------------------

@@ -44,6 +44,9 @@ actions!(
         CopyDiffSelection,
         /// Open the settings screen (⌘,).
         OpenSettings,
+        /// Close the active tab in the current worktree pane (⌘W outside an
+        /// editor; inside one, the Workspace-scoped binding closes the file).
+        CloseTab,
     ]
 );
 

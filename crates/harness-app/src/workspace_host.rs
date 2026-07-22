@@ -344,6 +344,27 @@ async fn probe_editor_keys(hosted: &Entity<Workspace>, cx: &mut gpui::AsyncWindo
         restored == original,
     );
 
+    // ⌘S first: the typing/undo above leaves the buffer DIRTY (undo is an
+    // edit; the version advances even though the content matches), and
+    // closing a dirty buffer opens a native save prompt no probe can answer.
+    // This is also the ⌘S verification.
+    let save = gpui::Keystroke::parse("cmd-s").expect("parses");
+    let _ = cx.update(|window, cx| window.dispatch_keystroke(save, cx));
+    cx.background_executor().timer(pause).await;
+    cx.background_executor().timer(pause).await;
+
+    // ⌘W — with a file open and editor focus, this must close the FILE
+    // (Workspace-scoped CloseActiveItem), not the harness tab: item count
+    // drops by one and the workspace survives.
+    let items_before = hosted.update(cx, |ws, cx| ws.active_pane().read(cx).items_len());
+    let w = gpui::Keystroke::parse("cmd-w").expect("parses");
+    let _ = cx.update(|window, cx| window.dispatch_keystroke(w, cx));
+    cx.background_executor().timer(pause).await;
+    let items_after = hosted.update(cx, |ws, cx| ws.active_pane().read(cx).items_len());
+    log::info!(
+        "HARNESS_PROBE_EDITOR_KEYS: cmd-w file close, pane items {items_before:?} -> {items_after:?}"
+    );
+
     // ⌘, — the settings screen. With HARNESS_PROBE_PAINT set, the overlay
     // carries a canvas that logs its painted bounds, so this proves the
     // screen actually reaches pixels (it once opened *underneath* the

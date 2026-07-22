@@ -3835,6 +3835,7 @@ impl Render for HarnessWorkspace {
         let hx = theme(cx).clone();
         let mut root = div()
             .relative()
+            .key_context("Harness")
             .flex()
             .flex_col()
             .size_full()
@@ -3884,6 +3885,14 @@ impl Render for HarnessWorkspace {
             }))
             .on_action(cx.listener(|ws, _: &crate::NewEditor, window, cx| {
                 ws.open_tab(TabKind::Editor, window, cx)
+            }))
+            .on_action(cx.listener(|ws, _: &crate::CloseTab, window, cx| {
+                log::debug!("CloseTab (root ⌘W)");
+                let Some(r) = ws.resolve() else { return };
+                let Some(active) = ws.panes.get(&r.key).map(|p| p.active) else {
+                    return;
+                };
+                ws.close_tab(active, window, cx);
             }))
             .on_action(cx.listener(|ws, _: &crate::OpenSettings, _, cx| {
                 ws.settings_open = !ws.settings_open;
