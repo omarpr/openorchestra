@@ -914,6 +914,10 @@ impl HarnessWorkspace {
             TabKind::Editor => match crate::workspace_host::workspace_for(&r.path, window, cx) {
                 Ok(hosted) => {
                     crate::workspace_host::probe(&hosted, window, cx);
+                    // Our render tree hosts the modal overlay, so our render
+                    // must re-run when the workspace's modal state changes —
+                    // a child view's notify does not re-render the parent.
+                    cx.observe(&hosted, |_, _, cx| cx.notify()).detach();
                     (TabContent::Editor(hosted), "{ } editor".to_string())
                 }
                 Err(e) => {
@@ -2130,7 +2134,11 @@ impl HarnessWorkspace {
                     .text_color(hx.tx2)
                     .child(scope.label().to_uppercase()),
             );
-            for e in entries.iter().filter(|e| e.scope == scope) {
+            for e in entries.iter().filter(|e| {
+                e.scope == scope
+                    || (scope == crate::shortcuts::Scope::Editor
+                        && e.scope == crate::shortcuts::Scope::EditorFull)
+            }) {
                 let id = crate::shortcuts::key_id(e.scope, e.what);
                 let arming = self.rebinding.as_deref() == Some(id.as_str());
                 let overridden = self.prefs.shortcuts.contains_key(&id);
@@ -2778,6 +2786,20 @@ impl HarnessWorkspace {
                     // (⌘P, ⌘⇧F, dock toggles, ...) dispatches into a tree
                     // with no matching handler and no matching key context,
                     // and dies silently.
+                    // zed's modal layer (file finder, pickers) is rendered by
+                    // the WINDOW ROOT in zed (MultiWorkspace), not by the
+                    // Workspace itself — the third window-root duty this embed
+                    // has had to adopt, after action wiring and key context.
+                    // Without this host the finder "opens" with perfect state
+                    // and zero pixels, and typing goes nowhere because the
+                    // never-painted query editor never registers the input
+                    // handler.
+                    let modal: Option<gpui::AnyView> = ws
+                        .read(cx)
+                        .active_modal::<file_finder::FileFinder>(cx)
+                        .map(|m| m.into())
+                        ;
+                    let ws_for_dismiss = ws.clone();
                     ws.update(cx, |workspace, cx| workspace.actions(div(), window, cx))
                         .key_context("Workspace")
                         // `.flex()`, because gpui divs default to `display:
@@ -2792,6 +2814,38 @@ impl HarnessWorkspace {
                         .flex()
                         .size_full()
                         .child(ws.clone())
+                        .when_some(modal, |d, view| {
+                            d.child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .on_mouse_down(
+                                        gpui::MouseButton::Left,
+                                        cx.listener(move |_, _, window, cx| {
+                                            ws_for_dismiss.update(cx, |ws, cx| {
+                                                ws.hide_modal(window, cx);
+                                            });
+                                        }),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .h(px(0.0))
+                                            .mt_20()
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .occlude()
+                                                    .on_mouse_down(
+                                                        gpui::MouseButton::Left,
+                                                        |_, _, cx| cx.stop_propagation(),
+                                                    )
+                                                    .child(view),
+                                            ),
+                                    ),
+                            )
+                        })
                         .when(std::env::var_os("HARNESS_PROBE_PAINT").is_some(), |d| {
                             d.child(
                                 gpui::canvas(
@@ -3832,6 +3886,14 @@ impl Focusable for HarnessWorkspace {
 
 impl Render for HarnessWorkspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The font-size pref scales the whole app, not only the code
+        // surfaces: chrome text is rem-based (text_xs/text_sm), so scaling
+        // the window's rem size rescales it all — the same mechanism zed's
+        // setup_ui_font uses inside the hosted workspace. 13px ↦ the 16px
+        // default rem. Fixed px dimensions (bar heights, panel widths) stay
+        // fixed on purpose; text is what legibility needs.
+        let scale = self.prefs.font_size.unwrap_or(13.0) / 13.0;
+        window.set_rem_size(px(16.0 * scale));
         let hx = theme(cx).clone();
         let mut root = div()
             .relative()

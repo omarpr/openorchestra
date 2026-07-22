@@ -22,6 +22,11 @@ pub enum Scope {
     Workspace,
     /// When focus is in a text editor buffer.
     Editor,
+    /// Only FULL editors (buffers), not single-line inputs. zed's own keymap
+    /// makes this split: enter must insert a newline in a buffer but must
+    /// CONFIRM in a search box or picker — a Newline bound to all Editors
+    /// swallows enter in every single-line input, which broke search submit.
+    EditorFull,
     /// Inside a modal picker (file finder). zed's own context name.
     Picker,
 }
@@ -38,7 +43,13 @@ impl Scope {
             Scope::Global => Some("Harness"),
             Scope::Workspace => Some("Workspace"),
             Scope::Editor => Some("Editor"),
-            Scope::Picker => Some("Picker"),
+            Scope::EditorFull => Some("Editor && mode == full"),
+            // "Picker > Editor", zed's own predicate: the picker's query box
+            // IS an editor, so a plain "Picker" context matches at the picker
+            // node — SHALLOWER than the query editor — and the Editor-scoped
+            // enter→Newline wins. This predicate matches at the editor node
+            // itself (deepest), and catalog order breaks the tie our way.
+            Scope::Picker => Some("Picker > Editor"),
         }
     }
 
@@ -47,6 +58,7 @@ impl Scope {
             Scope::Global => "Global",
             Scope::Workspace => "Editor tab",
             Scope::Editor => "Text editing",
+            Scope::EditorFull => "Text editing (buffers)",
             Scope::Picker => "File finder",
         }
     }
@@ -146,6 +158,9 @@ pub fn entries() -> Vec<Entry> {
         // ⌘W means in an editor.
         Entry::new(s("cmd-w"), Scope::Global, "Close tab", crate::CloseTab),
         Entry::new(s("cmd-q"), Scope::Global, "Quit", crate::Quit),
+        // The root-level enter: submits search, confirms menus — anything
+        // deeper (a full buffer's Newline, a picker's Confirm) outranks it.
+        Entry::new(s("enter"), Scope::Global, "Confirm / submit search", menu::Confirm),
 
         // ---- Editor tab (hosted zed workspace) ---------------------------
         Entry::new(
@@ -189,7 +204,7 @@ pub fn entries() -> Vec<Entry> {
         Entry::new(s("cmd-shift-z"), Scope::Editor, "Redo", ed::Redo),
         Entry::new(s("cmd-a"), Scope::Editor, "Select all", ed::SelectAll),
         Entry::new(s("escape"), Scope::Editor, "Clear selection", ed::Cancel),
-        Entry::new(s("enter"), Scope::Editor, "New line", ed::Newline),
+        Entry::new(s("enter"), Scope::EditorFull, "New line", ed::Newline),
         Entry::new(s("backspace"), Scope::Editor, "Delete backwards", ed::Backspace),
         Entry::new(s("delete"), Scope::Editor, "Delete forwards", ed::Delete),
         Entry::new(s("tab"), Scope::Editor, "Indent / accept", ed::Tab),

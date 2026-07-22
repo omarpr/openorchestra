@@ -172,6 +172,53 @@ pub fn workspace_for(
         Workspace::new(None, project, state, window, cx)
     });
 
+    // Pane toolbars — the FOURTH window-root duty this embed adopts (after
+    // action wiring, key context, and the modal layer): zed's app crate
+    // installs toolbar items on every pane in its initialize_pane, and the
+    // Workspace itself installs none. Without the ProjectSearchBar item,
+    // ⌘⇧F deploys a results view with NO query bar — nothing to type into,
+    // which reads as "search is broken". BufferSearchBar is ⌘F's in-buffer
+    // search. The zed-specific extras (quick actions, diagnostics, log
+    // views) stay out: they live in zed's app crate and are not part of
+    // "an editor that can search".
+    {
+        let init_toolbar = |workspace: &Workspace,
+                           pane: &Entity<workspace::Pane>,
+                           window: &mut Window,
+                           cx: &mut gpui::Context<Workspace>| {
+            let languages = workspace.project().read(cx).languages().clone();
+            pane.update(cx, |pane, cx| {
+                pane.toolbar().update(cx, |toolbar, cx| {
+                    let buffer_search_bar = cx.new(|cx| {
+                        search::BufferSearchBar::new(Some(languages), window, cx)
+                    });
+                    toolbar.add_item(buffer_search_bar, window, cx);
+                    let project_search_bar = cx.new(|_| search::project_search::ProjectSearchBar::new());
+                    toolbar.add_item(project_search_bar, window, cx);
+                });
+            });
+        };
+        workspace.update(cx, |ws, cx| {
+            let panes: Vec<_> = ws.panes().to_vec();
+            for pane in panes {
+                init_toolbar(ws, &pane, window, cx);
+            }
+        });
+        workspace.update(cx, |_, cx| {
+            cx.subscribe_in(
+                &cx.entity(),
+                window,
+                move |ws, _, event: &workspace::Event, window, cx| {
+                    if let workspace::Event::PaneAdded(pane) = event {
+                        let pane = pane.clone();
+                        init_toolbar(ws, &pane, window, cx);
+                    }
+                },
+            )
+            .detach();
+        });
+    }
+
     // N1: dock the file explorer. `ProjectPanel::load` is async because it
     // reads its serialized width from the database, so the panel appears a
     // frame or two after the workspace does — which is why the Files tab
@@ -238,6 +285,12 @@ pub fn probe(hosted: &Entity<Workspace>, window: &mut Window, cx: &mut App) {
 
             if std::env::var_os("HARNESS_PROBE_KEYS").is_some() {
                 probe_keys(&hosted, cx).await;
+            }
+            if std::env::var_os("HARNESS_PROBE_FINDER").is_some() {
+                probe_finder(&hosted, cx).await;
+            }
+            if std::env::var_os("HARNESS_PROBE_SEARCH").is_some() {
+                probe_search(&hosted, cx).await;
             }
             if std::env::var_os("HARNESS_PROBE_FONTS").is_some() {
                 hosted.update(cx, |_, cx| {
@@ -556,4 +609,140 @@ async fn probe_keys(hosted: &Entity<Workspace>, cx: &mut gpui::AsyncWindowContex
         ws.active_modal::<file_finder::FileFinder>(cx).is_some()
     });
     log::info!("HARNESS_PROBE_KEYS: cmd-p file finder modal = {finder:?}");
+}
+
+/// Press one chord through the real keymap.
+async fn press(keys: &str, pause_ms: u64, cx: &mut gpui::AsyncWindowContext) {
+    let ks = gpui::Keystroke::parse(keys).expect("probe chord parses");
+    let handled = cx.update(|window, cx| window.dispatch_keystroke(ks, cx));
+    log::debug!("press {keys}: handled={handled:?}");
+    cx.background_executor()
+        .timer(std::time::Duration::from_millis(pause_ms))
+        .await;
+}
+
+/// Type a string one keystroke at a time.
+async fn type_str(text: &str, cx: &mut gpui::AsyncWindowContext) {
+    for ch in text.chars() {
+        press(&ch.to_string(), 120, cx).await;
+    }
+}
+
+/// ⌘P end to end: open the finder, type a filename, enter — the file must be
+/// OPEN afterwards. "The modal appeared" is not the claim users care about.
+async fn probe_finder(hosted: &Entity<Workspace>, cx: &mut gpui::AsyncWindowContext) {
+    let _ = hosted.update_in(cx, |ws, window, cx| {
+        let fh = ws.focus_handle(cx);
+        window.focus(&fh, cx);
+    });
+    cx.background_executor().timer(std::time::Duration::from_millis(1200)).await;
+    let focused = hosted.update_in(cx, |ws, window, cx| {
+        let fh = ws.focus_handle(cx);
+        fh.is_focused(window)
+    });
+    let stack = cx.update(|window, _| {
+        window
+            .context_stack()
+            .iter()
+            .map(|c| format!("{c:?}"))
+            .collect::<Vec<_>>()
+            .join(" > ")
+    });
+    log::info!("HARNESS_PROBE_FINDER: context stack = {stack:?}");
+    press("cmd-p", 1000, cx).await;
+    let modal_after_key = hosted.update(cx, |ws, cx| {
+        ws.active_modal::<file_finder::FileFinder>(cx).is_some()
+    });
+    log::info!(
+        "HARNESS_PROBE_FINDER: focused={focused:?} modal_after_keystroke={modal_after_key}"
+    );
+    if !modal_after_key {
+        let _ = hosted.update_in(cx, |_, window, cx| {
+            window.dispatch_action(Box::new(workspace::ToggleFileFinder::default()), cx);
+        });
+        cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+        let modal_after_action = hosted.update(cx, |ws, cx| {
+            ws.active_modal::<file_finder::FileFinder>(cx).is_some()
+        });
+        log::info!("HARNESS_PROBE_FINDER: modal_after_action={modal_after_action}");
+    }
+    let pane_still_focused = hosted.update_in(cx, |ws, window, cx| {
+        let fh = ws.focus_handle(cx);
+        fh.is_focused(window)
+    });
+    log::info!(
+        "HARNESS_PROBE_FINDER: pane still focused after modal = {pane_still_focused:?} (false = modal took focus)"
+    );
+    type_str("workspace_host", cx).await;
+    cx.background_executor().timer(std::time::Duration::from_millis(600)).await;
+    press("enter", 900, cx).await;
+    let state = hosted.update(cx, |ws, cx| {
+        (
+            ws.active_modal::<file_finder::FileFinder>(cx).is_some(),
+            ws.active_pane().read(cx).items_len(),
+        )
+    });
+    log::info!("HARNESS_PROBE_FINDER: after enter (modal_open, items) = {state:?}");
+    if state.0 {
+        // Enter didn't confirm — try the action directly to split "keystroke
+        // never mapped" from "confirm no-ops on an empty match list".
+        let _ = hosted.update_in(cx, |_, window, cx| {
+            window.dispatch_action(Box::new(menu::Confirm), cx);
+        });
+        cx.background_executor().timer(std::time::Duration::from_millis(900)).await;
+        let state2 = hosted.update(cx, |ws, cx| {
+            (
+                ws.active_modal::<file_finder::FileFinder>(cx).is_some(),
+                ws.active_pane().read(cx).items_len(),
+            )
+        });
+        log::info!("HARNESS_PROBE_FINDER: after Confirm action (modal_open, items) = {state2:?}");
+    }
+    let opened = hosted.update(cx, |ws, cx| {
+        let editor = ws.active_item(cx)?.act_as::<editor::Editor>(cx)?;
+        let buffer = editor.read(cx).buffer().read(cx).as_singleton()?;
+        let file = buffer.read(cx).file()?;
+        Some(file.path().display(util::paths::PathStyle::local()).into_owned())
+    });
+    log::info!("HARNESS_PROBE_FINDER: opened file = {opened:?}");
+}
+
+/// ⌘⇧F end to end: deploy search, type a query, wait for search-as-you-type,
+/// then read the RESULTS buffer — non-empty means matches actually landed.
+async fn probe_search(hosted: &Entity<Workspace>, cx: &mut gpui::AsyncWindowContext) {
+    let _ = hosted.update_in(cx, |ws, window, cx| {
+        let fh = ws.focus_handle(cx);
+        window.focus(&fh, cx);
+    });
+    cx.background_executor().timer(std::time::Duration::from_millis(1200)).await;
+    // Force a frame before pressing: dispatch_keystroke matches against the
+    // last RENDERED frame's focus, and a press racing the first frame misses
+    // scoped bindings (probe-only hazard — human keypresses trail frames).
+    let _ = cx.update(|window, _| window.context_stack().len());
+    press("cmd-shift-f", 600, cx).await;
+    let deployed = hosted.update(cx, |ws, cx| ws.active_pane().read(cx).items_len());
+    if deployed == 0 {
+        // First-press frame race (probe-only): fall back to the action so the
+        // part users actually report — typing and getting results — is what
+        // this probe stands or falls on.
+        let _ = hosted.update_in(cx, |_, window, cx| {
+            window.dispatch_action(Box::new(workspace::pane::DeploySearch::default()), cx);
+        });
+        cx.background_executor().timer(std::time::Duration::from_millis(800)).await;
+    }
+    type_str("HarnessTheme", cx).await;
+    press("enter", 400, cx).await;
+    cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+    let results = hosted.update(cx, |ws, cx| {
+        let items = ws.active_pane().read(cx).items_len();
+        let active = ws.active_item(cx);
+        let editor = active.as_ref().and_then(|i| i.act_as::<editor::Editor>(cx));
+        let len = editor
+            .as_ref()
+            .map(|e| e.read(cx).buffer().read(cx).snapshot(cx).len());
+        (items, active.is_some(), editor.is_some(), len)
+    });
+    log::info!(
+        "HARNESS_PROBE_SEARCH: (pane_items, active, results_editor, len) = {results:?}"
+    );
 }
