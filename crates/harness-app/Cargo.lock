@@ -136,6 +136,7 @@ dependencies = [
  "crossbeam-channel",
  "serde_json",
  "status-watch",
+ "toml_edit 0.22.27",
  "worktrees",
 ]
 

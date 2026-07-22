@@ -241,6 +241,12 @@ mod mac {
         content.setTitle(&NSString::from_str(title));
         content.setBody(&NSString::from_str(body));
         content.setCategoryIdentifier(&NSString::from_str(CATEGORY));
+        // The uh-oh chirp (an original two-tone homage to ICQ's — the real
+        // sample is copyrighted). Ships in Contents/Resources; soundNamed
+        // resolves bundle resources by filename.
+        content.setSound(Some(&objc2_user_notifications::UNNotificationSound::soundNamed(
+            &NSString::from_str("uh-oh.wav"),
+        )));
         // Unique per posting (nanos suffix) or macOS replaces the previous
         // banner for the same identifier.
         let id = format!(
@@ -274,7 +280,7 @@ fn post(title: &str, body: &str) {
     // anything else in a branch or repo name would break the script, so escape
     // rather than interpolate raw.
     let script = format!(
-        "display notification \"{}\" with title \"{}\"",
+        "display notification \"{}\" with title \"{}\" sound name \"Funk\"",
         escape(body),
         escape(title)
     );

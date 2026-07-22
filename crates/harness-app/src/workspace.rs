@@ -1916,7 +1916,7 @@ impl HarnessWorkspace {
                             .text_sm()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(hx.tx0)
-                            .child("Settings — Keyboard Shortcuts"),
+                            .child("Settings"),
                     )
                     .child(
                         div()
@@ -2207,6 +2207,19 @@ impl HarnessWorkspace {
             )
             .child(agents);
 
+        // The shortcuts get their own heading now that the screen holds
+        // appearance, fonts, and agents above them.
+        body = body.child(
+            div()
+                .mt_2()
+                .pt_2()
+                .border_t_1()
+                .border_color(hx.border)
+                .text_sm()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(hx.tx0)
+                .child("Keyboard Shortcuts"),
+        );
         let entries = crate::shortcuts::entries_with(&self.prefs.shortcuts);
         let scopes = [
             crate::shortcuts::Scope::Global,

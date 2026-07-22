@@ -80,6 +80,26 @@ impl CodexRuntime {
     }
 }
 
+/// Remove `notify` keys pointing at our shim from every table EXCEPT the
+/// root (`allow` is true only at root, where the key belongs and will be
+/// rewritten anyway). Cleans up configs damaged by the line-append bug.
+fn repair_stray_notify(table: &mut toml_edit::Table, marker: &str, root: bool) {
+    if !root
+        && table
+            .get("notify")
+            .map(|v| v.to_string().contains(marker))
+            .unwrap_or(false)
+    {
+        table.remove("notify");
+    }
+    let keys: Vec<String> = table.iter().map(|(k, _)| k.to_string()).collect();
+    for key in keys {
+        if let Some(child) = table.get_mut(&key).and_then(|i| i.as_table_mut()) {
+            repair_stray_notify(child, marker, false);
+        }
+    }
+}
+
 impl AgentRuntime for CodexRuntime {
     fn kind(&self) -> AgentKind {
         AgentKind::Codex
@@ -101,37 +121,36 @@ impl AgentRuntime for CodexRuntime {
     fn on_spawn(&self, _worktree_root: &Path) -> io::Result<()> {
         let shim = self.materialize_shim()?;
         // Codex reads ONE config: $CODEX_HOME/config.toml (default ~/.codex).
-        // The project-local .codex/config.toml this adapter used to write was
-        // never read by codex at all — the notify hook was dead on arrival.
-        // Editing the user's global config is a bigger footprint, so two
-        // guards keep it honest: the merge below preserves everything else in
-        // the file, and the shim exits unless HARNESS_MANAGED=1 is in its
-        // environment (set on the pty we spawn), so codex runs outside the
-        // harness never write status files into random directories.
+        // Editing the user's global config demands a real TOML editor: the
+        // previous line-based append landed `notify` inside whatever [table]
+        // happened to end the file — one user's config gained
+        // `mcp_servers.node_repl.env.notify` and codex refused to start.
+        // toml_edit assigns at the ROOT table and preserves formatting and
+        // comments; the repair pass below also removes any stray notify keys
+        // that bug left inside nested tables.
         let dir = self.codex_home();
         let path = dir.join("config.toml");
 
-        // Preserve whatever else is in config.toml; replace only our own
-        // notify line so repeated spawns stay idempotent.
         let existing = fs::read_to_string(&path).unwrap_or_default();
-        let marker = shim.display().to_string();
-        let mut kept: Vec<&str> = existing
-            .lines()
-            .filter(|l| !(l.trim_start().starts_with("notify") && l.contains(&marker)))
-            .collect();
-        // Drop a foreign `notify` too — Codex honors one, and ours must win or
-        // the status pill silently never updates.
-        kept.retain(|l| !l.trim_start().starts_with("notify"));
+        let mut doc: toml_edit::DocumentMut = existing.parse().map_err(|e| {
+            // A config we cannot parse is one we must not rewrite.
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("codex config.toml does not parse; refusing to edit it: {e}"),
+            )
+        })?;
 
-        let mut out = kept.join("\n");
-        if !out.is_empty() && !out.ends_with('\n') {
-            out.push('\n');
-        }
-        out.push_str(&Self::notify_line(&shim));
+        let marker = shim.display().to_string();
+        repair_stray_notify(doc.as_table_mut(), &marker, true);
+
+        let mut arr = toml_edit::Array::new();
+        arr.push("node");
+        arr.push(marker.as_str());
+        doc["notify"] = toml_edit::value(arr);
 
         fs::create_dir_all(&dir)?;
         let tmp = dir.join(".config.toml.tmp");
-        fs::write(&tmp, out)?;
+        fs::write(&tmp, doc.to_string())?;
         fs::rename(&tmp, &path)
     }
 

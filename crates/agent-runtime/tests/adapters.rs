@@ -314,6 +314,52 @@ fn claude_code_on_spawn_is_idempotent() {
     }
 }
 
+#[test]
+fn codex_notify_lands_at_root_even_when_tables_end_the_file() {
+    // The regression that corrupted a real user config: a line-based append
+    // put `notify` inside the [mcp_servers.x.env] table that happened to end
+    // the file, and codex refused to start ("invalid type: sequence").
+    let _guard = CODEX_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let codex_home = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("HARNESS_CODEX_HOME", codex_home.path()) };
+    let state = tempfile::tempdir().unwrap();
+    let wt = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(codex_home.path()).unwrap();
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        "model = \"gpt-5\"\n\n[mcp_servers.node_repl.env]\nPATH = \"/usr/bin\"\n",
+    )
+    .unwrap();
+
+    let rt = CodexRuntime::new(state.path());
+    rt.on_spawn(wt.path()).unwrap();
+
+    let text = std::fs::read_to_string(codex_home.path().join("config.toml")).unwrap();
+    let doc: toml::Value = toml::from_str(&text).expect("config must stay parseable");
+    assert!(doc.get("notify").is_some(), "notify must exist at the ROOT");
+    assert!(
+        doc["mcp_servers"]["node_repl"]["env"].get("notify").is_none(),
+        "notify must NOT leak into nested tables"
+    );
+    // And the repair path: run again on a config damaged the old way.
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        format!(
+            "model = \"gpt-5\"\n\n[mcp_servers.node_repl.env]\nPATH = \"/usr/bin\"\nnotify = [\"node\", \"{}\"]\n",
+            rt.shim_path().display()
+        ),
+    )
+    .unwrap();
+    rt.on_spawn(wt.path()).unwrap();
+    let text = std::fs::read_to_string(codex_home.path().join("config.toml")).unwrap();
+    let doc: toml::Value = toml::from_str(&text).unwrap();
+    assert!(
+        doc["mcp_servers"]["node_repl"]["env"].get("notify").is_none(),
+        "repair must remove the stray notify the old bug left behind"
+    );
+    assert!(doc.get("notify").is_some());
+}
+
 // ---- Codex + Kimi: honest degradation (R11) --------------------------------
 
 #[test]
@@ -408,7 +454,12 @@ fn runtime_for_dispatches_every_known_agent_to_its_adapter() {
 #[test]
 fn every_adapters_on_spawn_is_safe_to_call() {
     // on_spawn runs on every spawn and must never be the reason an agent
-    // fails to start.
+    // fails to start. Codex's on_spawn edits $HARNESS_CODEX_HOME — hold the
+    // lock and point it at a tempdir, or this test races the other codex
+    // tests and, unset, would edit the REAL ~/.codex.
+    let _guard = CODEX_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let codex_home = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("HARNESS_CODEX_HOME", codex_home.path()) };
     let state = tempfile::tempdir().unwrap();
     for kind in AgentKind::known() {
         let wt = tempfile::tempdir().unwrap();
@@ -421,6 +472,9 @@ fn every_adapters_on_spawn_is_safe_to_call() {
 // parse — a syntax error would only surface as a silently dead status pill.
 #[test]
 fn shims_are_syntactically_valid_javascript() {
+    let _guard = CODEX_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let codex_home = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("HARNESS_CODEX_HOME", codex_home.path()) };
     let state = tempfile::tempdir().unwrap();
     let wt = tempfile::tempdir().unwrap();
     ClaudeCodeRuntime::new(state.path()).on_spawn(wt.path()).unwrap();

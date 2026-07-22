@@ -25,6 +25,8 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/$APP_NAME"
 chmod +x "$APP/Contents/MacOS/$APP_NAME"
 cp "$ROOT/assets/openOrchestra.icns" "$APP/Contents/Resources/$APP_NAME.icns"
+# Notification sound (UNNotificationSound resolves bundle resources by name).
+cp "$ROOT/crates/harness-app/sounds/uh-oh.wav" "$APP/Contents/Resources/uh-oh.wav"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
