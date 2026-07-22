@@ -89,6 +89,8 @@ file_finder = { git = "https://github.com/zed-industries/zed.git", rev = "952d71
 search = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
 # project_panel's actions live here, not in the panel crate itself.
 zed_actions = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+# For menu::Cancel — escape must close pickers (file finder) or ⌘P traps you.
+menu = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
 # Rendered .md preview in the diff panel — zed's own renderer, so previews
 # match the editor rather than a hand-rolled approximation.
 markdown = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }

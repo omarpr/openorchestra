@@ -255,6 +255,74 @@ pub fn probe(hosted: &Entity<Workspace>, window: &mut Window, cx: &mut App) {
         .detach();
 }
 
+/// Press real keystrokes against a focused editor and report their effects.
+///
+/// This is the strictest probe in the file: it goes through
+/// `Window::dispatch_keystroke`, i.e. the actual keymap — context matching,
+/// precedence, the catalog bindings — not `dispatch_action`. What it proves is
+/// exactly what a user's fingers get.
+async fn probe_editor_keys(hosted: &Entity<Workspace>, cx: &mut gpui::AsyncWindowContext) {
+    let pause = std::time::Duration::from_millis(400);
+    // Focus the open editor item directly, as a click into the buffer would.
+    let _ = hosted.update_in(cx, |ws, window, cx| {
+        if let Some(editor) = ws.active_item(cx).and_then(|i| i.act_as::<editor::Editor>(cx)) {
+            editor.update(cx, |_, cx| cx.focus_self(window));
+        }
+    });
+    cx.background_executor().timer(pause).await;
+
+    let text_of = |hosted: &Entity<Workspace>, cx: &mut gpui::AsyncWindowContext| {
+        hosted
+            .update(cx, |ws, cx| {
+                let editor = ws.active_item(cx).and_then(|i| i.act_as::<editor::Editor>(cx))?;
+                let buffer = editor.read(cx).buffer().read(cx).as_singleton()?;
+                Some(buffer.read(cx).text())
+            })
+            .unwrap_or_default()
+    };
+
+    let original = text_of(hosted, cx);
+
+    // ⌘A then ⌘C: select-all + copy through the keymap, then read the
+    // clipboard back. Proves the Editor-scoped ⌘C wins over the global
+    // diff-copy ⌘C — the exact shadowing this session's bindings must get
+    // right — because the clipboard fills with buffer text.
+    for keys in ["cmd-a", "cmd-c"] {
+        let ks = gpui::Keystroke::parse(keys).expect("parses");
+        let _ = cx.update(|window, cx| window.dispatch_keystroke(ks, cx));
+        cx.background_executor().timer(pause).await;
+    }
+    let copied = cx
+        .update(|_, cx| {
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    log::info!(
+        "HARNESS_PROBE_EDITOR_KEYS: cmd-a/cmd-c copied {} of {} chars ({})",
+        copied.len(),
+        original.len(),
+        if copied == original { "MATCH" } else { "MISMATCH" },
+    );
+
+    // Type over the selection, then ⌘Z: the buffer must return to its
+    // original text. Undo through the keymap, not the action.
+    let x = gpui::Keystroke::parse("x").expect("parses");
+    let _ = cx.update(|window, cx| window.dispatch_keystroke(x, cx));
+    cx.background_executor().timer(pause).await;
+    let replaced = text_of(hosted, cx);
+    let z = gpui::Keystroke::parse("cmd-z").expect("parses");
+    let _ = cx.update(|window, cx| window.dispatch_keystroke(z, cx));
+    cx.background_executor().timer(pause).await;
+    let restored = text_of(hosted, cx);
+    log::info!(
+        "HARNESS_PROBE_EDITOR_KEYS: typed-over={} chars, cmd-z restored={}",
+        replaced.len(),
+        restored == original,
+    );
+}
+
 /// Open one file in a hosted workspace and report the pane's item count.
 async fn probe_open(hosted: &Entity<Workspace>, rel: &str, cx: &mut gpui::AsyncWindowContext) {
     let Ok(rel) = util::rel_path::RelPath::new(Path::new(rel), util::paths::PathStyle::local())
@@ -314,6 +382,9 @@ async fn probe_open(hosted: &Entity<Workspace>, rel: &str, cx: &mut gpui::AsyncW
                     ))
                 });
                 log::info!("HARNESS_PROBE_OPEN: after settle = {lang:?}");
+                if std::env::var_os("HARNESS_PROBE_EDITOR_KEYS").is_some() {
+                    probe_editor_keys(&hosted, cx).await;
+                }
             }
             Err(e) => log::error!("HARNESS_PROBE_OPEN: open failed: {e:#}"),
         },

@@ -334,6 +334,8 @@ pub struct HarnessWorkspace {
     comment_draft: Option<CommentDraft>,
     /// First click of the two-click "clear all comments" confirm.
     clearing_review: bool,
+    /// The settings screen (⌘, or the gear). Transient, never persisted.
+    settings_open: bool,
     /// Rendered-markdown preview of the selected `.md` file, when the user has
     /// switched to it. Rebuilt on selection, since it snapshots file contents.
     md_preview: Option<(String, Entity<crate::markdown_preview::MarkdownPreview>)>,
@@ -456,6 +458,7 @@ impl HarnessWorkspace {
             review_path: crate::diff_review::ReviewNotes::path_in(&data_dir),
             comment_draft: None,
             clearing_review: false,
+            settings_open: false,
             md_preview: None,
             diff_gen: 0,
             diff_pending: false,
@@ -1522,6 +1525,147 @@ impl HarnessWorkspace {
                     .child(if hx.is_dark() { "☾ dark" } else { "☀ light" })
                     .on_click(cx.listener(|ws, _, _, cx| ws.toggle_theme(cx))),
             )
+            .child(
+                div()
+                    .id("open-settings")
+                    .flex_none()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .text_xs()
+                    .text_color(if self.settings_open { hx.tx0 } else { hx.tx2 })
+                    .cursor_pointer()
+                    .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
+                    .child("⚙ settings")
+                    .on_click(cx.listener(|ws, _, _, cx| {
+                        ws.settings_open = !ws.settings_open;
+                        cx.notify();
+                    })),
+            )
+    }
+
+    /// The settings screen: an overlay, not a tab — settings are a glance,
+    /// not a workspace. v1 is the shortcut catalog; the section structure is
+    /// where future settings (theme, agent defaults) slot in.
+    ///
+    /// Rendered from `shortcuts::entries()` — the same table `main.rs` binds
+    /// from — so this screen structurally cannot claim a shortcut that is not
+    /// actually bound.
+    fn render_settings(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
+        let mut card = div()
+            .id("settings-card")
+            .flex()
+            .flex_col()
+            .w(px(520.0))
+            .max_h(px(600.0))
+            .rounded_lg()
+            .bg(hx.bg1)
+            .border_1()
+            .border_color(hx.border)
+            .shadow_lg()
+            .overflow_hidden()
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_between()
+                    .px_4()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(hx.border)
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(hx.tx0)
+                            .child("Settings — Keyboard Shortcuts"),
+                    )
+                    .child(
+                        div()
+                            .id("settings-close")
+                            .px_2()
+                            .rounded_md()
+                            .text_sm()
+                            .text_color(hx.tx2)
+                            .cursor_pointer()
+                            .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
+                            .child("✕")
+                            .on_click(cx.listener(|ws, _, _, cx| {
+                                ws.settings_open = false;
+                                cx.notify();
+                            })),
+                    ),
+            );
+
+        let mut body = div().id("settings-body").flex_1().min_h_0().overflow_y_scroll().px_4().py_2();
+        let entries = crate::shortcuts::entries();
+        let scopes = [
+            crate::shortcuts::Scope::Global,
+            crate::shortcuts::Scope::Workspace,
+            crate::shortcuts::Scope::Editor,
+            crate::shortcuts::Scope::Picker,
+        ];
+        for scope in scopes {
+            let mut section = div().flex().flex_col().pb_2().child(
+                div()
+                    .pt_3()
+                    .pb_1()
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(hx.tx2)
+                    .child(scope.label().to_uppercase()),
+            );
+            for e in entries.iter().filter(|e| e.scope == scope) {
+                section = section.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .py_1()
+                        .child(
+                            // Keystroke chip. ⌘-ified for display; the raw
+                            // binding syntax stays an implementation detail.
+                            div()
+                                .flex_none()
+                                .w(px(120.0))
+                                .px_2()
+                                .py_0p5()
+                                .rounded_md()
+                                .bg(hx.surface)
+                                .border_1()
+                                .border_color(hx.border)
+                                .text_xs()
+                                .font_family(hx.font_mono)
+                                .text_color(hx.tx0)
+                                .text_center()
+                                .child(crate::shortcuts::display_keys(e.keys)),
+                        )
+                        .child(div().text_sm().text_color(hx.tx1).child(e.what)),
+                );
+            }
+            body = body.child(section);
+        }
+        card = card.child(body);
+
+        // Full-window backdrop. Swallows mouse-down (the ＋-menu lesson: a
+        // backdrop that closes on mouse-down eats the click before any child
+        // on_click can fire on mouse-up) and closes on click outside the card.
+        div()
+            .id("settings-backdrop")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|ws, _, _, cx| {
+                ws.settings_open = false;
+                cx.notify();
+            }))
+            .child(card.on_click(|_, _, cx| cx.stop_propagation()))
+            .into_any_element()
     }
 
     /// The sidebar footer: the only way in when nothing is open, so it gets
@@ -3025,6 +3169,7 @@ impl Render for HarnessWorkspace {
             .font_family(hx.font_ui)
             .text_color(hx.tx0)
             .child(self.render_top_bar(&hx, cx))
+            .when(self.settings_open, |d| d.child(self.render_settings(&hx, cx)))
             .child(
                 div()
                     .flex()
@@ -3061,6 +3206,10 @@ impl Render for HarnessWorkspace {
             }))
             .on_action(cx.listener(|ws, _: &crate::NewEditor, window, cx| {
                 ws.open_tab(TabKind::Editor, window, cx)
+            }))
+            .on_action(cx.listener(|ws, _: &crate::OpenSettings, _, cx| {
+                ws.settings_open = !ws.settings_open;
+                cx.notify();
             }))
             .on_action(cx.listener(|ws, _: &crate::NewChat, window, cx| {
                 ws.open_tab(TabKind::Chat, window, cx)

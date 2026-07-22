@@ -14,6 +14,7 @@ mod diff_review;
 mod harness_zed_theme;
 mod markdown_preview;
 mod notifier;
+mod shortcuts;
 mod terminal_pane;
 mod theme;
 mod workspace;
@@ -41,6 +42,8 @@ actions!(
         NewChat,
         /// Copy the selected diff lines.
         CopyDiffSelection,
+        /// Open the settings screen (⌘,).
+        OpenSettings,
     ]
 );
 
@@ -212,57 +215,16 @@ fn main() {
         cx.set_global(hx);
 
         cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.bind_keys([
-            KeyBinding::new("cmd-q", Quit, None),
-            KeyBinding::new("ctrl-q", Quit, None),
-            // §3.4's tab menu. Bound globally rather than in the "Workspace"
-            // context: they act on the harness's own tab strip, and must work
-            // while focus is inside a terminal or a hosted workspace.
-            KeyBinding::new("cmd-t", NewTerminal, None),
-            KeyBinding::new("cmd-e", NewEditor, None),
-            KeyBinding::new("cmd-shift-c", NewChat, None),
-            KeyBinding::new("cmd-c", CopyDiffSelection, None),
-        ]);
-
-        // Minimal editing keymap for zed editor panes (scoped to the "Editor"
-        // key context). Without this, only IME text entry works — Enter,
-        // Backspace, and arrows would do nothing. Full keymap is an MVP item.
-        // Navigation keybindings (D14). Bound in the "Workspace" context so
-        // they only fire inside a hosted workspace, not over the sidebar.
-        // Action paths confirmed against zed v1.11.3's own default-macos keymap
-        // and crate sources (Spike 5). The keymap *names* differ from the Rust
-        // paths in every case here, which is exactly the sort of thing the
-        // spike existed to pin down:
-        //   "file_finder::Toggle"      -> ::workspace::ToggleFileFinder
-        //   "pane::DeploySearch"       -> ::workspace::pane::DeploySearch
-        //   "project_panel::ToggleFocus" -> zed_actions::project_panel::ToggleFocus
-        cx.bind_keys([
-            KeyBinding::new(
-                "cmd-p",
-                ::workspace::ToggleFileFinder::default(),
-                Some("Workspace"),
-            ),
-            KeyBinding::new(
-                "cmd-shift-f",
-                ::workspace::pane::DeploySearch::default(),
-                Some("Workspace"),
-            ),
-            KeyBinding::new(
-                "cmd-shift-e",
-                zed_actions::project_panel::ToggleFocus,
-                Some("Workspace"),
-            ),
-        ]);
-
-        use editor::actions::{Backspace, Delete, MoveLeft, MoveRight, Newline, Tab};
-        cx.bind_keys([
-            KeyBinding::new("enter", Newline, Some("Editor")),
-            KeyBinding::new("backspace", Backspace, Some("Editor")),
-            KeyBinding::new("delete", Delete, Some("Editor")),
-            KeyBinding::new("left", MoveLeft, Some("Editor")),
-            KeyBinding::new("right", MoveRight, Some("Editor")),
-            KeyBinding::new("tab", Tab, Some("Editor")),
-        ]);
+        // Every shortcut in the app binds from one catalog (shortcuts.rs);
+        // the settings screen renders the same catalog, so the two cannot
+        // drift. Context scoping does the disambiguation: gpui ranks matches
+        // by context depth, so the Editor-scoped ⌘C wins over the global
+        // diff-copy ⌘C while focus is in a buffer — verified against
+        // gpui's bindings_for_input (depth-descending sort).
+        cx.bind_keys(shortcuts::entries().into_iter().filter_map(|e| e.binding));
+        // ctrl-q as a second quit chord, deliberately not in the catalog:
+        // listing both quit bindings on the settings screen is noise.
+        cx.bind_keys([KeyBinding::new("ctrl-q", Quit, None)]);
 
         // Spike 5 self-check (R10). The Files tab builds its Workspace lazily on
         // first click, so an ordinary headless run never exercises

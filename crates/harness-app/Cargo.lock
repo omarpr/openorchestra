@@ -4490,6 +4490,7 @@ dependencies = [
  "languages",
  "log",
  "markdown",
+ "menu",
  "node_runtime",
  "pi-client",
  "project",
