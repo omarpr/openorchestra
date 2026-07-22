@@ -48,6 +48,12 @@ export function writeStatus(cwd, state) {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
+	// The notify hook sits in the user's GLOBAL codex config, so this shim
+	// runs for every codex everywhere. Only harness-spawned codex processes
+	// carry this marker (set on the pty env and inherited); without it,
+	// exit before touching the filesystem — a codex run in a random repo
+	// must not grow a .harness directory.
+	if (process.env.HARNESS_MANAGED !== "1") process.exit(0);
 	let payload = {};
 	try {
 		// Codex passes the event as a single JSON argument.
@@ -55,6 +61,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 	} catch {
 		/* unparseable — fall through to "running" */
 	}
+	// Attribution: codex spawns notify with its own cwd — the worktree the
+	// harness launched it in.
 	writeStatus(CWD, classify(payload));
 	process.exit(0);
 }

@@ -220,55 +220,12 @@ fn main() {
         cx.set_global(hx);
 
         cx.on_action(|_: &Quit, cx| cx.quit());
-        // Every shortcut in the app binds from one catalog (shortcuts.rs);
-        // the settings screen renders the same catalog, so the two cannot
-        // drift. Context scoping does the disambiguation: gpui ranks matches
-        // by context depth, so the Editor-scoped ⌘C wins over the global
-        // diff-copy ⌘C while focus is in a buffer — verified against
-        // gpui's bindings_for_input (depth-descending sort).
-        cx.bind_keys(shortcuts::entries().into_iter().filter_map(|e| e.binding));
-        // ctrl-q as a second quit chord, deliberately not in the catalog:
-        // listing both quit bindings on the settings screen is noise.
-        cx.bind_keys([KeyBinding::new("ctrl-q", Quit, None)]);
+        // Every shortcut binds from one catalog (shortcuts.rs) plus the
+        // user's persisted rebindings; the settings screen renders and edits
+        // the same data, so the three cannot drift.
+        install_keymap(&workspace::persisted_shortcut_overrides(), cx);
 
-        // The native macOS menu bar. Set AFTER bind_keys: gpui reads the
-        // keymap when building the menus, which is how "Settings…" shows ⌘,
-        // as its key equivalent without restating it here.
-        //
-        // The Edit menu uses os_action so macOS treats the items as the
-        // standard editing verbs (Services integration, correct enablement).
-        // macOS enables an item only when a handler exists on the current
-        // focus path — Edit items grey out outside an editor, which is the
-        // correct native behavior, not a bug to fix.
-        cx.set_menus(vec![
-            gpui::Menu {
-                name: "openOrchestra".into(),
-                disabled: false,
-                items: vec![
-                    gpui::MenuItem::action("Settings…", OpenSettings),
-                    gpui::MenuItem::separator(),
-                    gpui::MenuItem::action("Quit openOrchestra", Quit),
-                ],
-            },
-            gpui::Menu {
-                name: "Edit".into(),
-                disabled: false,
-                items: vec![
-                    gpui::MenuItem::os_action("Undo", editor::actions::Undo, gpui::OsAction::Undo),
-                    gpui::MenuItem::os_action("Redo", editor::actions::Redo, gpui::OsAction::Redo),
-                    gpui::MenuItem::separator(),
-                    gpui::MenuItem::os_action("Cut", editor::actions::Cut, gpui::OsAction::Cut),
-                    gpui::MenuItem::os_action("Copy", editor::actions::Copy, gpui::OsAction::Copy),
-                    gpui::MenuItem::os_action("Paste", editor::actions::Paste, gpui::OsAction::Paste),
-                    gpui::MenuItem::separator(),
-                    gpui::MenuItem::os_action(
-                        "Select All",
-                        editor::actions::SelectAll,
-                        gpui::OsAction::SelectAll,
-                    ),
-                ],
-            },
-        ]);
+        install_menus(cx);
 
         // Spike 5 self-check (R10). The Files tab builds its Workspace lazily on
         // first click, so an ordinary headless run never exercises
@@ -433,7 +390,10 @@ fn main() {
         let bounds = Bounds::centered(None, size(px(1400.0), px(880.0)), cx);
         cx.open_window(
             WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                // Maximized, deliberately not Fullscreen: a macOS fullscreen
+                // Space hides the menu bar, and the menu is now where
+                // Settings lives. The bounds are the restore size.
+                window_bounds: Some(WindowBounds::Maximized(bounds)),
                 titlebar: Some(TitlebarOptions {
                     title: Some("omar-harness".into()),
                     ..Default::default()
@@ -469,4 +429,58 @@ pub fn apply_zed_settings(cx: &mut gpui::App, ui_font: &str, mono_font: &str) {
         // settings simply having no effect — an hour-costing failure mode.
         log::debug!("harness settings parse status: {:?}", applied.parse_status);
     });
+}
+
+/// Bind the whole keymap: catalog + user rebindings + the uncataloged
+/// ctrl-q quit chord. `main` calls it at startup; the settings screen calls
+/// it again (after clear_key_bindings) whenever a chord changes.
+pub fn install_keymap(
+    overrides: &std::collections::BTreeMap<String, String>,
+    cx: &mut gpui::App,
+) {
+    cx.bind_keys(shortcuts::entries_with(overrides).into_iter().filter_map(|e| e.binding));
+    cx.bind_keys([KeyBinding::new("ctrl-q", Quit, None)]);
+}
+
+/// (Re)build the native menu bar. Called after every keymap install because
+/// the menus read their key equivalents from the keymap at set_menus time.
+pub fn install_menus(cx: &mut gpui::App) {
+    // The native macOS menu bar. Set AFTER bind_keys: gpui reads the
+    // keymap when building the menus, which is how "Settings…" shows ⌘,
+    // as its key equivalent without restating it here.
+    //
+    // The Edit menu uses os_action so macOS treats the items as the
+    // standard editing verbs (Services integration, correct enablement).
+    // macOS enables an item only when a handler exists on the current
+    // focus path — Edit items grey out outside an editor, which is the
+    // correct native behavior, not a bug to fix.
+    cx.set_menus(vec![
+        gpui::Menu {
+            name: "openOrchestra".into(),
+            disabled: false,
+            items: vec![
+                gpui::MenuItem::action("Settings…", OpenSettings),
+                gpui::MenuItem::separator(),
+                gpui::MenuItem::action("Quit openOrchestra", Quit),
+            ],
+        },
+        gpui::Menu {
+            name: "Edit".into(),
+            disabled: false,
+            items: vec![
+                gpui::MenuItem::os_action("Undo", editor::actions::Undo, gpui::OsAction::Undo),
+                gpui::MenuItem::os_action("Redo", editor::actions::Redo, gpui::OsAction::Redo),
+                gpui::MenuItem::separator(),
+                gpui::MenuItem::os_action("Cut", editor::actions::Cut, gpui::OsAction::Cut),
+                gpui::MenuItem::os_action("Copy", editor::actions::Copy, gpui::OsAction::Copy),
+                gpui::MenuItem::os_action("Paste", editor::actions::Paste, gpui::OsAction::Paste),
+                gpui::MenuItem::separator(),
+                gpui::MenuItem::os_action(
+                    "Select All",
+                    editor::actions::SelectAll,
+                    gpui::OsAction::SelectAll,
+                ),
+            ],
+        },
+    ]);
 }

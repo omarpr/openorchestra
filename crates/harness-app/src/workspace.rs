@@ -211,6 +211,9 @@ enum TabKind {
 }
 
 struct Tab {
+    /// When this tab hosts an agent CLI, its kind — the tab strip renders the
+    /// agent's colored mark so five agent tabs stay tellable at a glance.
+    agent: Option<AgentKind>,
     /// Stable per-pane-set id, so closing a tab cannot renumber the others out
     /// from under a click handler.
     id: u64,
@@ -364,6 +367,10 @@ pub struct HarnessWorkspace {
     clearing_review: bool,
     /// The settings screen (⌘, or the gear). Transient, never persisted.
     settings_open: bool,
+    /// A shortcut row waiting for its new chord (`shortcuts::key_id`).
+    rebinding: Option<String>,
+    /// Focus target while capturing a chord.
+    rebind_focus: FocusHandle,
     /// Rendered-markdown preview of the selected `.md` file, when the user has
     /// switched to it. Rebuilt on selection, since it snapshots file contents.
     md_preview: Option<(String, Entity<crate::markdown_preview::MarkdownPreview>)>,
@@ -487,6 +494,8 @@ impl HarnessWorkspace {
             comment_draft: None,
             clearing_review: false,
             settings_open: false,
+            rebinding: None,
+            rebind_focus: cx.focus_handle(),
             md_preview: None,
             diff_gen: 0,
             diff_pending: false,
@@ -522,6 +531,32 @@ impl HarnessWorkspace {
             || this.prefs.font_mono.is_some()
         {
             this.apply_appearance(cx);
+        }
+        // Test hook: drive the whole notification chain with no agent
+        // installed — write real status.json transitions into the first
+        // registered worktree and let the watcher, bus, policy, and notifier
+        // react. Expect a "NOTIFY posting" log for the Running→Idle edge.
+        if std::env::var_os("HARNESS_PROBE_NOTIFY").is_some()
+            && let Some(entry) = this.manager.registry.entries().first().cloned()
+        {
+            cx.spawn(async move |_, cx| {
+                let write = |state: &str| {
+                    let dir = entry.path.join(".harness");
+                    let _ = std::fs::create_dir_all(&dir);
+                    let body = format!(
+                        "{{\n\t\"state\": \"{state}\",\n\t\"timestamp\": \"2026-01-01T00:00:00Z\",\n\t\"sessionFile\": null\n}}\n",
+                    );
+                    let tmp = dir.join(".probe.tmp");
+                    let _ = std::fs::write(&tmp, body);
+                    let _ = std::fs::rename(&tmp, dir.join("status.json"));
+                };
+                cx.background_executor().timer(Duration::from_secs(3)).await;
+                write("running");
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+                write("idle");
+                log::info!("HARNESS_PROBE_NOTIFY: wrote running→idle transitions");
+            })
+            .detach();
         }
         // Test hook: apply a zed theme by name at startup, reporting what the
         // registry holds and what the chrome derived — the settings screen's
@@ -628,11 +663,16 @@ impl HarnessWorkspace {
         // Notify on any *transition* into Waiting, and only when the adapter's
         // signal is exact (R11) — a best-effort turn-complete dressed up as
         // "input needed" is the one thing that would make this noise.
+        // The cache holds the fidelity of whatever adapter this session
+        // spawned; signals for worktrees whose tab was never opened (app
+        // restart, hooks left by an earlier session) fall back to the KIND's
+        // declared fidelity — defaulting to TerminalOnly here silently
+        // swallowed every notification after a restart.
         let fidelity = self
             .agent_fidelity
             .get(&signal.worktree_root)
             .copied()
-            .unwrap_or(WaitFidelity::TerminalOnly);
+            .unwrap_or_else(|| agent_runtime::fidelity_for(&signal.kind));
         if previous != Some(signal.state) && signal.should_notify(fidelity) {
             self.notify_needs_input(&signal);
         }
@@ -840,8 +880,12 @@ impl HarnessWorkspace {
     fn open_tab(&mut self, kind: TabKind, window: &mut Window, cx: &mut Context<Self>) {
         let Some(r) = self.resolve() else { return };
         // `main` is a read-only checkout with no agent (D8).
-        if matches!(kind, TabKind::Agent(_) | TabKind::Chat) && r.agent_kind.is_none() {
-            self.note = "the main checkout does not run an agent".to_string();
+        // D8 revised (July 22, 2026): agents may run on main too — it is the
+        // user's repo and their call. Worktrees remain the *recommended*
+        // isolation, and the chat pane stays worktree-only (it is pi's RPC
+        // surface, wired to a worktree session).
+        if matches!(kind, TabKind::Chat) && r.agent_kind.is_none() {
+            self.note = "agent chat needs a worktree".to_string();
             cx.notify();
             return;
         }
@@ -853,8 +897,8 @@ impl HarnessWorkspace {
                 ),
                 "❯_ shell".to_string(),
             ),
-            TabKind::Agent(agent) => {
-                let command = self.agent_command_for(&agent, &r);
+            TabKind::Agent(ref agent) => {
+                let command = self.agent_command_for(agent, &r);
                 let label = command
                     .as_ref()
                     .map(|c| c.label.clone())
@@ -863,7 +907,7 @@ impl HarnessWorkspace {
                     TabContent::Terminal(
                         cx.new(|cx| TerminalPane::new(r.path.clone(), command, window, cx)),
                     ),
-                    format!("❯_ {label}"),
+                    label,
                 )
             }
             TabKind::Editor => match crate::workspace_host::workspace_for(&r.path, window, cx) {
@@ -888,6 +932,10 @@ impl HarnessWorkspace {
             }
         };
 
+        let agent_of_kind = match &kind {
+            TabKind::Agent(a) => Some(a.clone()),
+            _ => None,
+        };
         // Create the pane if it does not exist yet. This was `if let Some`,
         // and the else case silently dropped the tab — including a fully
         // constructed zed Workspace, whose own diagnostics all read healthy
@@ -904,7 +952,7 @@ impl HarnessWorkspace {
         pane.last_used = self.pane_clock;
         let id = pane.next_id;
         pane.next_id += 1;
-        pane.tabs.push(Tab { id, title, content });
+        pane.tabs.push(Tab { id, title, content, agent: agent_of_kind });
         pane.active = id;
         self.focus_active_pane(window, cx);
         cx.notify();
@@ -1562,6 +1610,52 @@ impl HarnessWorkspace {
         save_prefs_to(&self.prefs_path, &self.prefs);
     }
 
+    /// Re-install the whole keymap and menus from the catalog + overrides.
+    /// Clear-then-bind, not bind-on-top: gpui breaks precedence ties by
+    /// recency, so stale chords would keep firing their old actions.
+    fn apply_shortcuts(&self, cx: &mut Context<Self>) {
+        cx.clear_key_bindings();
+        crate::install_keymap(&self.prefs.shortcuts, cx);
+        crate::install_menus(cx);
+    }
+
+    /// One captured chord while a shortcut row is armed.
+    fn rebind_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.rebinding.clone() else { return };
+        let ks = &event.keystroke;
+        if ks.key == "escape" && !ks.modifiers.modified() {
+            self.rebinding = None;
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
+        // A bare modifier press is the chord being formed, not the chord.
+        if ["shift", "ctrl", "alt", "cmd", "platform", "function"].contains(&ks.key.as_str()) {
+            cx.stop_propagation();
+            return;
+        }
+        let mut chord = String::new();
+        if ks.modifiers.control {
+            chord.push_str("ctrl-");
+        }
+        if ks.modifiers.alt {
+            chord.push_str("alt-");
+        }
+        if ks.modifiers.shift {
+            chord.push_str("shift-");
+        }
+        if ks.modifiers.platform {
+            chord.push_str("cmd-");
+        }
+        chord.push_str(&ks.key);
+        self.prefs.shortcuts.insert(id, chord);
+        save_prefs_to(&self.prefs_path, &self.prefs);
+        self.rebinding = None;
+        self.apply_shortcuts(cx);
+        cx.notify();
+        cx.stop_propagation();
+    }
+
     /// Apply a zed theme by registry name (`None` = the harness pair).
     fn set_zed_theme(&mut self, name: Option<String>, cx: &mut Context<Self>) {
         self.prefs.zed_theme = name;
@@ -1882,7 +1976,10 @@ impl HarnessWorkspace {
 
             let toggle_key = key.clone();
             let edit_key_ = key.clone();
-            let prefill = pref.command.clone().unwrap_or_default();
+            // Prefill what the user SEES — the override if set, else the
+            // default — so editing refines the current command instead of
+            // starting from a blank line.
+            let prefill = pref.command.clone().unwrap_or_else(|| default_cmd.to_string());
             let cmd_display = pref.command.clone().unwrap_or_else(|| default_cmd.to_string());
             let edit_text = match &self.edit {
                 Edit::AgentCmd(k, t) if *k == key => t.clone(),
@@ -1968,7 +2065,7 @@ impl HarnessWorkspace {
             )
             .child(agents);
 
-        let entries = crate::shortcuts::entries();
+        let entries = crate::shortcuts::entries_with(&self.prefs.shortcuts);
         let scopes = [
             crate::shortcuts::Scope::Global,
             crate::shortcuts::Scope::Workspace,
@@ -1986,34 +2083,90 @@ impl HarnessWorkspace {
                     .child(scope.label().to_uppercase()),
             );
             for e in entries.iter().filter(|e| e.scope == scope) {
+                let id = crate::shortcuts::key_id(e.scope, e.what);
+                let arming = self.rebinding.as_deref() == Some(id.as_str());
+                let overridden = self.prefs.shortcuts.contains_key(&id);
+                let arm_id = id.clone();
+                let chip_label = if arming {
+                    "press keys…".to_string()
+                } else {
+                    crate::shortcuts::display_keys(&e.keys)
+                };
+                let mut chipd = div()
+                    .id(gpui::SharedString::from(format!("sc-{id}")))
+                    .flex_none()
+                    .w(px(120.0))
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .bg(if arming { tint(hx.accent, 0.16) } else { hx.surface })
+                    .border_1()
+                    .border_color(if arming {
+                        hx.accent
+                    } else if overridden {
+                        hx.amber
+                    } else {
+                        hx.border
+                    })
+                    .text_xs()
+                    .font_family(hx.font_mono)
+                    .text_color(if arming { hx.accent } else { hx.tx0 })
+                    .text_center()
+                    .cursor_pointer()
+                    .hover(|d| d.bg(hx.surface_hover))
+                    .child(chip_label)
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        cx.stop_propagation();
+                        ws.rebinding = Some(arm_id.clone());
+                        window.focus(&ws.rebind_focus, cx);
+                        cx.notify();
+                    }));
+                if arming {
+                    // The armed chip owns the keyboard until a chord lands
+                    // or escape cancels.
+                    chipd = chipd
+                        .track_focus(&self.rebind_focus)
+                        .on_key_down(cx.listener(Self::rebind_key));
+                }
                 section = section.child(
                     div()
                         .flex()
                         .items_center()
                         .gap_3()
                         .py_1()
-                        .child(
-                            // Keystroke chip. ⌘-ified for display; the raw
-                            // binding syntax stays an implementation detail.
-                            div()
-                                .flex_none()
-                                .w(px(120.0))
-                                .px_2()
-                                .py_0p5()
-                                .rounded_md()
-                                .bg(hx.surface)
-                                .border_1()
-                                .border_color(hx.border)
-                                .text_xs()
-                                .font_family(hx.font_mono)
-                                .text_color(hx.tx0)
-                                .text_center()
-                                .child(crate::shortcuts::display_keys(e.keys)),
-                        )
+                        .child(chipd)
                         .child(div().text_sm().text_color(hx.tx1).child(e.what)),
                 );
             }
             body = body.child(section);
+        }
+        // Reset appears only once something is rebound — a button that
+        // undoes nothing is clutter.
+        if !self.prefs.shortcuts.is_empty() {
+            body = body.child(
+                div()
+                    .id("sc-reset")
+                    .mt_2()
+                    .mb_3()
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(hx.border)
+                    .bg(hx.surface)
+                    .text_xs()
+                    .text_color(hx.tx1)
+                    .cursor_pointer()
+                    .hover(|d| d.bg(hx.surface_hover).text_color(hx.tx0))
+                    .child("Reset shortcuts to defaults")
+                    .on_click(cx.listener(|ws, _, _, cx| {
+                        cx.stop_propagation();
+                        ws.prefs.shortcuts.clear();
+                        save_prefs_to(&ws.prefs_path, &ws.prefs);
+                        ws.apply_shortcuts(cx);
+                        cx.notify();
+                    })),
+            );
         }
         card = card.child(body);
 
@@ -2697,6 +2850,16 @@ impl HarnessWorkspace {
             .text_xs()
             .font_family(hx.font_mono)
             .text_color(if active { hx.tx0 } else { hx.tx2 })
+            .when_some(tab.agent.clone(), |d, kind| {
+                let (glyph, color) = agent_mark(&kind);
+                d.child(
+                    div()
+                        .mr_1()
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(color)
+                        .child(glyph),
+                )
+            })
             .cursor_pointer()
             .hover(|d| d.text_color(hx.tx1))
             .on_click(cx.listener(move |ws, _, window, cx| {
@@ -2910,10 +3073,10 @@ impl HarnessWorkspace {
             )
             .child(self.tab_menu_item(hx, "❯_  Terminal", "⌘T", TabKind::Shell, cx))
             .child(self.tab_menu_item(hx, "{ }  Editor", "⌘E", TabKind::Editor, cx));
-        // `main` is a read-only checkout and runs no agent (D8). A worktree
-        // offers every *enabled* agent, not only its recorded default — the
-        // default merely decides which one the status pill trusts first.
-        if agent.is_some() {
+        // Every enabled agent, on any selection (D8 revised: main included) —
+        // a worktree's recorded default merely decides which signal the
+        // status pill trusts first.
+        {
             for kind in AgentKind::known() {
                 let disabled = self
                     .prefs
@@ -2934,7 +3097,17 @@ impl HarnessWorkspace {
                     cx,
                 ));
             }
-            menu = menu.child(self.tab_menu_item(hx, "◆  Agent chat", "⌘⇧C", TabKind::Chat, cx));
+        }
+        // The chat tab is pi's RPC surface specifically — approvals as UI,
+        // session capture for training (§4.4) — so it appears only for
+        // worktrees and only while pi is enabled.
+        let pi_enabled = !self
+            .prefs
+            .agents
+            .get(AgentKind::Pi.as_str())
+            .is_some_and(|p| p.disabled);
+        if agent.is_some() && pi_enabled {
+            menu = menu.child(self.tab_menu_item(hx, "π  pi chat", "⌘⇧C", TabKind::Chat, cx));
         }
         menu
     }
@@ -3856,6 +4029,10 @@ struct Prefs {
     /// enabled, default command.
     #[serde(default)]
     agents: std::collections::BTreeMap<String, AgentPref>,
+    /// Shortcut rebindings, keyed by `shortcuts::key_id`. Value is the gpui
+    /// chord string; missing = the catalog default.
+    #[serde(default)]
+    shortcuts: std::collections::BTreeMap<String, String>,
     sidebar_width: f32,
     diff_width: f32,
     sidebar_open: bool,
@@ -3870,6 +4047,7 @@ impl Default for Prefs {
             font_ui: None,
             font_mono: None,
             agents: Default::default(),
+            shortcuts: Default::default(),
             sidebar_width: 280.0,
             diff_width: 340.0,
             sidebar_open: true,
@@ -3892,6 +4070,17 @@ impl Prefs {
 ///
 /// Read before the window exists, so `main` can install the right zed theme up
 /// front rather than flashing dark and correcting.
+/// The persisted shortcut rebindings, for `main` to bind before any window
+/// exists. Same file the settings screen writes.
+pub fn persisted_shortcut_overrides() -> std::collections::BTreeMap<String, String> {
+    let path = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default()
+        .join(".openorchestra")
+        .join("prefs.json");
+    load_prefs(&path).shortcuts
+}
+
 pub fn persisted_dark_theme() -> bool {
     let path = std::env::var_os("HOME")
         .map(PathBuf::from)

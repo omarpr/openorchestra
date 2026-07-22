@@ -48,7 +48,7 @@ impl Scope {
 
 pub struct Entry {
     /// gpui keystroke syntax (`cmd-shift-z`). Also parsed for display.
-    pub keys: &'static str,
+    pub keys: String,
     pub scope: Scope,
     pub what: &'static str,
     /// `None` for shortcuts that reach the user another way (documented-only
@@ -58,59 +58,105 @@ pub struct Entry {
 
 impl Entry {
     fn new(
-        keys: &'static str,
+        keys: String,
         scope: Scope,
         what: &'static str,
         action: impl gpui::Action,
     ) -> Self {
         Entry {
+            binding: Some(KeyBinding::new(&keys, action, scope.context())),
             keys,
             scope,
             what,
-            binding: Some(KeyBinding::new(keys, action, scope.context())),
         }
     }
 }
 
-/// The catalog. Order within a scope is display order.
+/// The stable identity a rebinding is stored under. Scope + description,
+/// because the same chord legitimately exists in several scopes (⌘C).
+pub fn key_id(scope: Scope, what: &str) -> String {
+    format!("{}/{}", scope.label(), what)
+}
+
+/// The catalog with the user's rebindings applied. An override replaces the
+/// chord, never the action or scope — the settings screen can move a command
+/// to a new key but cannot detach the key from what it does.
+pub fn entries_with(overrides: &std::collections::BTreeMap<String, String>) -> Vec<Entry> {
+    let mut all = entries();
+    for e in &mut all {
+        if let Some(keys) = overrides.get(&key_id(e.scope, e.what)) {
+            // Re-parse under the new chord. An invalid stored chord falls
+            // back to the default rather than panicking at startup.
+            if let Some(binding) = e.binding.take() {
+                let predicate = e.scope.context().map(|c| {
+                    std::rc::Rc::new(
+                        gpui::KeyBindingContextPredicate::parse(c).expect("catalog context parses"),
+                    )
+                });
+                match KeyBinding::load(
+                    keys,
+                    binding.action().boxed_clone(),
+                    predicate,
+                    false,
+                    None,
+                    &gpui::DummyKeyboardMapper,
+                ) {
+                    Ok(b) => {
+                        e.keys = keys.clone();
+                        e.binding = Some(b);
+                    }
+                    // An invalid stored chord keeps the default binding.
+                    Err(_) => e.binding = Some(binding),
+                }
+            }
+        }
+    }
+    all
+}
+
+/// The default catalog. Order within a scope is display order.
 pub fn entries() -> Vec<Entry> {
     use editor::actions as ed;
 
+    fn s(v: &str) -> String {
+        v.to_string()
+    }
+
     vec![
         // ---- Global ------------------------------------------------------
-        Entry::new("cmd-t", Scope::Global, "New terminal tab", crate::NewTerminal),
-        Entry::new("cmd-e", Scope::Global, "New editor tab", crate::NewEditor),
-        Entry::new("cmd-shift-c", Scope::Global, "New agent chat tab", crate::NewChat),
+        Entry::new(s("cmd-t"), Scope::Global, "New terminal tab", crate::NewTerminal),
+        Entry::new(s("cmd-e"), Scope::Global, "New editor tab", crate::NewEditor),
+        Entry::new(s("cmd-shift-c"), Scope::Global, "New agent chat tab", crate::NewChat),
         Entry::new(
-            "cmd-c",
+            s("cmd-c"),
             Scope::Global,
             "Copy selected diff lines (in the diff panel)",
             crate::CopyDiffSelection,
         ),
-        Entry::new("cmd-,", Scope::Global, "Open settings", crate::OpenSettings),
-        Entry::new("cmd-q", Scope::Global, "Quit", crate::Quit),
+        Entry::new(s("cmd-,"), Scope::Global, "Open settings", crate::OpenSettings),
+        Entry::new(s("cmd-q"), Scope::Global, "Quit", crate::Quit),
 
         // ---- Editor tab (hosted zed workspace) ---------------------------
         Entry::new(
-            "cmd-p",
+            s("cmd-p"),
             Scope::Workspace,
             "Find file by name",
             ::workspace::ToggleFileFinder::default(),
         ),
         Entry::new(
-            "cmd-shift-f",
+            s("cmd-shift-f"),
             Scope::Workspace,
             "Find in files (project search)",
             ::workspace::pane::DeploySearch::default(),
         ),
         Entry::new(
-            "cmd-shift-e",
+            s("cmd-shift-e"),
             Scope::Workspace,
             "Focus the file tree",
             zed_actions::project_panel::ToggleFocus,
         ),
         Entry::new(
-            "cmd-s",
+            s("cmd-s"),
             Scope::Workspace,
             "Save file",
             ::workspace::Save { save_intent: None },
@@ -119,27 +165,27 @@ pub fn entries() -> Vec<Entry> {
         // ---- Text editing -------------------------------------------------
         // ⌘C here deliberately shadows the global diff-copy: context depth
         // wins, so inside a buffer ⌘C copies editor text.
-        Entry::new("cmd-c", Scope::Editor, "Copy", ed::Copy),
-        Entry::new("cmd-x", Scope::Editor, "Cut", ed::Cut),
-        Entry::new("cmd-v", Scope::Editor, "Paste", ed::Paste),
-        Entry::new("cmd-z", Scope::Editor, "Undo", ed::Undo),
-        Entry::new("cmd-shift-z", Scope::Editor, "Redo", ed::Redo),
-        Entry::new("cmd-a", Scope::Editor, "Select all", ed::SelectAll),
-        Entry::new("escape", Scope::Editor, "Clear selection", ed::Cancel),
-        Entry::new("enter", Scope::Editor, "New line", ed::Newline),
-        Entry::new("backspace", Scope::Editor, "Delete backwards", ed::Backspace),
-        Entry::new("delete", Scope::Editor, "Delete forwards", ed::Delete),
-        Entry::new("tab", Scope::Editor, "Indent / accept", ed::Tab),
-        Entry::new("up", Scope::Editor, "Move up", zed_actions::editor::MoveUp),
-        Entry::new("down", Scope::Editor, "Move down", zed_actions::editor::MoveDown),
-        Entry::new("left", Scope::Editor, "Move left", ed::MoveLeft),
-        Entry::new("right", Scope::Editor, "Move right", ed::MoveRight),
-        Entry::new("shift-up", Scope::Editor, "Select up", ed::SelectUp),
-        Entry::new("shift-down", Scope::Editor, "Select down", ed::SelectDown),
-        Entry::new("shift-left", Scope::Editor, "Select left", ed::SelectLeft),
-        Entry::new("shift-right", Scope::Editor, "Select right", ed::SelectRight),
+        Entry::new(s("cmd-c"), Scope::Editor, "Copy", ed::Copy),
+        Entry::new(s("cmd-x"), Scope::Editor, "Cut", ed::Cut),
+        Entry::new(s("cmd-v"), Scope::Editor, "Paste", ed::Paste),
+        Entry::new(s("cmd-z"), Scope::Editor, "Undo", ed::Undo),
+        Entry::new(s("cmd-shift-z"), Scope::Editor, "Redo", ed::Redo),
+        Entry::new(s("cmd-a"), Scope::Editor, "Select all", ed::SelectAll),
+        Entry::new(s("escape"), Scope::Editor, "Clear selection", ed::Cancel),
+        Entry::new(s("enter"), Scope::Editor, "New line", ed::Newline),
+        Entry::new(s("backspace"), Scope::Editor, "Delete backwards", ed::Backspace),
+        Entry::new(s("delete"), Scope::Editor, "Delete forwards", ed::Delete),
+        Entry::new(s("tab"), Scope::Editor, "Indent / accept", ed::Tab),
+        Entry::new(s("up"), Scope::Editor, "Move up", zed_actions::editor::MoveUp),
+        Entry::new(s("down"), Scope::Editor, "Move down", zed_actions::editor::MoveDown),
+        Entry::new(s("left"), Scope::Editor, "Move left", ed::MoveLeft),
+        Entry::new(s("right"), Scope::Editor, "Move right", ed::MoveRight),
+        Entry::new(s("shift-up"), Scope::Editor, "Select up", ed::SelectUp),
+        Entry::new(s("shift-down"), Scope::Editor, "Select down", ed::SelectDown),
+        Entry::new(s("shift-left"), Scope::Editor, "Select left", ed::SelectLeft),
+        Entry::new(s("shift-right"), Scope::Editor, "Select right", ed::SelectRight),
         Entry::new(
-            "cmd-left",
+            s("cmd-left"),
             Scope::Editor,
             "Start of line",
             ed::MoveToBeginningOfLine {
@@ -148,27 +194,27 @@ pub fn entries() -> Vec<Entry> {
             },
         ),
         Entry::new(
-            "cmd-right",
+            s("cmd-right"),
             Scope::Editor,
             "End of line",
             ed::MoveToEndOfLine {
                 stop_at_soft_wraps: true,
             },
         ),
-        Entry::new("cmd-up", Scope::Editor, "Start of file", ed::MoveToBeginning),
-        Entry::new("cmd-down", Scope::Editor, "End of file", ed::MoveToEnd),
+        Entry::new(s("cmd-up"), Scope::Editor, "Start of file", ed::MoveToBeginning),
+        Entry::new(s("cmd-down"), Scope::Editor, "End of file", ed::MoveToEnd),
         // Inline blame is on by default (current line, after the code); these
         // control it when it gets loud.
-        Entry::new("cmd-alt-b", Scope::Editor, "Toggle inline git blame", ed::ToggleGitBlameInline),
-        Entry::new("cmd-alt-g", Scope::Editor, "Toggle git blame gutter", ::git::Blame),
+        Entry::new(s("cmd-alt-b"), Scope::Editor, "Toggle inline git blame", ed::ToggleGitBlameInline),
+        Entry::new(s("cmd-alt-g"), Scope::Editor, "Toggle git blame gutter", ::git::Blame),
 
         // ---- Pickers ------------------------------------------------------
         // Without this, ⌘P opens the file finder and only ⌘P closes it again —
         // escape inside the picker's text box would hit the Editor binding.
-        Entry::new("escape", Scope::Picker, "Close the file finder", menu::Cancel),
-        Entry::new("enter", Scope::Picker, "Open selected file", menu::Confirm),
-        Entry::new("up", Scope::Picker, "Previous match", menu::SelectPrevious),
-        Entry::new("down", Scope::Picker, "Next match", menu::SelectNext),
+        Entry::new(s("escape"), Scope::Picker, "Close the file finder", menu::Cancel),
+        Entry::new(s("enter"), Scope::Picker, "Open selected file", menu::Confirm),
+        Entry::new(s("up"), Scope::Picker, "Previous match", menu::SelectPrevious),
+        Entry::new(s("down"), Scope::Picker, "Next match", menu::SelectNext),
     ]
 }
 
@@ -229,6 +275,27 @@ mod tests {
         assert_eq!(display_keys("cmd-,"), "⌘,");
         assert_eq!(display_keys("escape"), "Esc");
         assert_eq!(display_keys("cmd-left"), "⌘←");
+    }
+
+    #[test]
+    fn overrides_rebind_and_bad_chords_fall_back() {
+        let mut ov = std::collections::BTreeMap::new();
+        ov.insert(key_id(Scope::Global, "New terminal tab"), "cmd-y".to_string());
+        // Note: Keystroke::parse is lenient enough that almost any string
+        // parses (words become key sequences), so the invalid-chord fallback
+        // in entries_with is belt-and-braces, not a testable path.
+        let all = entries_with(&ov);
+        let term = all
+            .iter()
+            .find(|e| e.what == "New terminal tab")
+            .unwrap();
+        assert_eq!(term.keys, "cmd-y", "override must rebind");
+        assert!(term.binding.is_some());
+        let undo = all
+            .iter()
+            .find(|e| e.what == "Undo" && e.scope == Scope::Editor)
+            .unwrap();
+        assert_eq!(undo.keys, "cmd-z", "unrelated entries keep their defaults");
     }
 
     #[test]

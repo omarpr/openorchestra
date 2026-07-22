@@ -9,6 +9,10 @@ use std::net::TcpListener;
 use std::path::Path;
 use std::time::Duration;
 
+/// Both codex tests point HARNESS_CODEX_HOME at their own tempdir; the
+/// variable is process-global, so they must not run concurrently.
+static CODEX_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 use agent_runtime::sse::SseStream;
 use agent_runtime::{
     AgentKind, AgentRuntime, AgentState, ClaudeCodeRuntime, CodexRuntime, KimiRuntime,
@@ -333,13 +337,16 @@ fn codex_is_best_effort_and_may_not_claim_input_is_needed() {
 
 #[test]
 fn codex_writes_a_notify_line_and_stays_idempotent() {
+    let _guard = CODEX_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let codex_home = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("HARNESS_CODEX_HOME", codex_home.path()) };
     let state = tempfile::tempdir().unwrap();
     let wt = tempfile::tempdir().unwrap();
     let rt = CodexRuntime::new(state.path());
     rt.on_spawn(wt.path()).unwrap();
     rt.on_spawn(wt.path()).unwrap();
 
-    let config = std::fs::read_to_string(wt.path().join(".codex/config.toml")).unwrap();
+    let config = std::fs::read_to_string(codex_home.path().join("config.toml")).unwrap();
     assert_eq!(
         notify_lines(&config),
         1,
@@ -351,20 +358,23 @@ fn codex_writes_a_notify_line_and_stays_idempotent() {
 
 #[test]
 fn codex_preserves_unrelated_config_but_takes_over_notify() {
+    let _guard = CODEX_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let codex_home = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("HARNESS_CODEX_HOME", codex_home.path()) };
     // Codex honors a single `notify`, so ours has to win or the pill silently
     // never updates — but everything else in the file must survive.
     let state = tempfile::tempdir().unwrap();
     let wt = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(wt.path().join(".codex")).unwrap();
+    std::fs::create_dir_all(codex_home.path()).unwrap();
     std::fs::write(
-        wt.path().join(".codex/config.toml"),
+        codex_home.path().join("config.toml"),
         "model = \"gpt-5\"\nnotify = [\"/usr/bin/say\", \"done\"]\napproval_policy = \"on-request\"\n",
     )
     .unwrap();
 
     CodexRuntime::new(state.path()).on_spawn(wt.path()).unwrap();
 
-    let config = std::fs::read_to_string(wt.path().join(".codex/config.toml")).unwrap();
+    let config = std::fs::read_to_string(codex_home.path().join("config.toml")).unwrap();
     assert!(config.contains("model = \"gpt-5\""));
     assert!(config.contains("approval_policy"));
     assert!(!config.contains("/usr/bin/say"), "the foreign notify must be replaced");

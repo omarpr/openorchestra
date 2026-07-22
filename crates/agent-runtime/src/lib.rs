@@ -118,6 +118,22 @@ impl AgentSignal {
     }
 }
 
+/// The fidelity an adapter of this kind declares, without building one.
+///
+/// The signal path needs this when a status file changes for a worktree
+/// whose agent tab was never opened this session: the per-worktree fidelity
+/// cache only fills on spawn, and defaulting to `TerminalOnly` silently
+/// swallowed every notification after an app restart.
+pub fn fidelity_for(kind: &AgentKind) -> WaitFidelity {
+    match kind {
+        AgentKind::Pi => WaitFidelity::BestEffort,
+        AgentKind::OpenCode => WaitFidelity::Exact,
+        AgentKind::Codex => WaitFidelity::BestEffort,
+        AgentKind::ClaudeCode => WaitFidelity::Exact,
+        AgentKind::Kimi | AgentKind::Other(_) => WaitFidelity::TerminalOnly,
+    }
+}
+
 /// The command to run in the worktree's pty.
 ///
 /// Deliberately data, not a `std::process::Command`: the terminal pane builds

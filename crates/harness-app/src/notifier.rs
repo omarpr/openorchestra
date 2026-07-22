@@ -33,6 +33,10 @@ use std::process::{Command, Stdio};
 pub fn notify_needs_input(worktree_name: &str, repo: &str, reason: &str) {
     let title = format!("{worktree_name} — {repo}");
     let body = reason.to_string();
+    // The one observable line in the chain: adapters, watcher, bus, policy
+    // all converge here, so a probe (or a user log) can see exactly what
+    // would have been posted and why.
+    log::info!("NOTIFY posting: {title}: {body}");
     post(&title, &body);
 }
 

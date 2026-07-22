@@ -63,6 +63,21 @@ impl CodexRuntime {
     pub fn notify_line(shim: &Path) -> String {
         format!("notify = [\"node\", \"{}\"]\n", shim.display())
     }
+
+    /// Where codex actually reads its config: `$CODEX_HOME`, else `~/.codex`.
+    /// Overridable for tests via `HARNESS_CODEX_HOME`.
+    fn codex_home(&self) -> PathBuf {
+        if let Some(test) = std::env::var_os("HARNESS_CODEX_HOME") {
+            return PathBuf::from(test);
+        }
+        if let Some(home) = std::env::var_os("CODEX_HOME") {
+            return PathBuf::from(home);
+        }
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default()
+            .join(".codex")
+    }
 }
 
 impl AgentRuntime for CodexRuntime {
@@ -83,9 +98,17 @@ impl AgentRuntime for CodexRuntime {
         &[".harness/", ".codex/"]
     }
 
-    fn on_spawn(&self, worktree_root: &Path) -> io::Result<()> {
+    fn on_spawn(&self, _worktree_root: &Path) -> io::Result<()> {
         let shim = self.materialize_shim()?;
-        let dir = worktree_root.join(".codex");
+        // Codex reads ONE config: $CODEX_HOME/config.toml (default ~/.codex).
+        // The project-local .codex/config.toml this adapter used to write was
+        // never read by codex at all — the notify hook was dead on arrival.
+        // Editing the user's global config is a bigger footprint, so two
+        // guards keep it honest: the merge below preserves everything else in
+        // the file, and the shim exits unless HARNESS_MANAGED=1 is in its
+        // environment (set on the pty we spawn), so codex runs outside the
+        // harness never write status files into random directories.
+        let dir = self.codex_home();
         let path = dir.join("config.toml");
 
         // Preserve whatever else is in config.toml; replace only our own
@@ -116,7 +139,10 @@ impl AgentRuntime for CodexRuntime {
         Some(AgentCommand {
             program: resolve_on_path("codex")?,
             args: Vec::new(),
-            env: Vec::new(),
+            // The notify hook lives in the user's GLOBAL codex config; this
+            // marker is what scopes it — the shim exits without writing
+            // unless it inherits this from a harness-spawned codex.
+            env: vec![("HARNESS_MANAGED".to_string(), "1".to_string())],
             label: "codex".to_string(),
         })
     }
