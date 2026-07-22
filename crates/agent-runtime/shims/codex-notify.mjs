@@ -37,7 +37,7 @@ export function writeStatus(cwd, state) {
 		const dir = path.join(cwd, ".harness");
 		fs.mkdirSync(dir, { recursive: true });
 		const payload =
-			JSON.stringify({ state, timestamp: new Date().toISOString(), sessionFile: null }, null, "\t") +
+			JSON.stringify({ state, agent: "codex", timestamp: new Date().toISOString(), sessionFile: null }, null, "\t") +
 			"\n";
 		const tmp = path.join(dir, `.status-${process.pid}-${crypto.randomBytes(4).toString("hex")}.tmp`);
 		fs.writeFileSync(tmp, payload, "utf8");

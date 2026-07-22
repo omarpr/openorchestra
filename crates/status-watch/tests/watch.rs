@@ -209,3 +209,18 @@ fn duplicate_content_is_not_redelivered() {
         "identical content must not be redelivered"
     );
 }
+
+#[test]
+fn the_agent_field_identifies_the_writer_and_is_optional() {
+    // Every agent shares one status.json per worktree; the agent field is
+    // what stops claude's work being announced as pi (the registered kind).
+    let with: status_watch::AgentStatus = serde_json::from_str(
+        r#"{"state":"idle","agent":"claude-code","timestamp":"t","sessionFile":null}"#,
+    )
+    .unwrap();
+    assert_eq!(with.agent.as_deref(), Some("claude-code"));
+
+    let without: status_watch::AgentStatus =
+        serde_json::from_str(r#"{"state":"idle","timestamp":"t","sessionFile":null}"#).unwrap();
+    assert!(without.agent.is_none(), "old files must keep parsing");
+}

@@ -68,7 +68,7 @@ export function writeStatus(cwd, state, sessionFile) {
 		fs.mkdirSync(dir, { recursive: true });
 		const payload =
 			JSON.stringify(
-				{ state, timestamp: new Date().toISOString(), sessionFile: sessionFile ?? null },
+				{ state, agent: "claude-code", timestamp: new Date().toISOString(), sessionFile: sessionFile ?? null },
 				null,
 				"\t",
 			) + "\n";

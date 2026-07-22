@@ -38,12 +38,19 @@ impl StatusFileSource {
             .spawn(move || {
                 // Ends when the watcher is dropped and the channel closes.
                 for event in rx {
-                    let kind = pump_kinds
-                        .lock()
-                        .unwrap()
-                        .get(&event.worktree_root)
-                        .cloned()
-                        .unwrap_or_default();
+                    // The file's own claim beats the registered kind: every
+                    // agent writes the same status.json, and the registered
+                    // kind is only the worktree's DEFAULT — a claude launched
+                    // in a pi worktree must not be announced as pi.
+                    let kind = match event.status.agent.as_deref() {
+                        Some(agent) => AgentKind::from(agent),
+                        None => pump_kinds
+                            .lock()
+                            .unwrap()
+                            .get(&event.worktree_root)
+                            .cloned()
+                            .unwrap_or_default(),
+                    };
                     pump_bus.publish(AgentSignal {
                         worktree_root: event.worktree_root,
                         kind,

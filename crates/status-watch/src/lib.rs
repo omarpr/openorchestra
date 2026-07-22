@@ -57,6 +57,12 @@ impl std::fmt::Display for AgentState {
 #[serde(rename_all = "camelCase")]
 pub struct AgentStatus {
     pub state: AgentState,
+    /// Which agent wrote this file. Every agent shares the one status.json
+    /// per worktree, so without self-identification the watcher can only
+    /// attribute changes to the worktree's *registered* kind — which labeled
+    /// Claude Code's work as "pi". Optional for old files.
+    #[serde(default)]
+    pub agent: Option<String>,
     #[serde(default)]
     pub timestamp: Option<String>,
     #[serde(default)]
@@ -68,6 +74,7 @@ impl AgentStatus {
     pub fn unknown() -> Self {
         AgentStatus {
             state: AgentState::Unknown,
+            agent: None,
             timestamp: None,
             session_file: None,
         }

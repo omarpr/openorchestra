@@ -40,6 +40,7 @@ import * as path from "node:path";
 type HarnessState = "running" | "waiting" | "idle";
 
 interface HarnessStatus {
+	agent?: string;
 	state: HarnessState;
 	timestamp: string; // ISO-8601
 	sessionFile: string | null;
@@ -67,6 +68,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		const status: HarnessStatus = {
 			state: override ?? currentState(),
+			agent: "pi",
 			timestamp: new Date().toISOString(),
 			sessionFile,
 		};

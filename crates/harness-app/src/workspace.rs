@@ -379,6 +379,10 @@ pub struct HarnessWorkspace {
     clearing_review: bool,
     /// The settings screen (⌘, or the gear). Transient, never persisted.
     settings_open: bool,
+    /// The conductor pet: message shown, expiry, and which beat of the
+    /// two-pose arm cycle it is on.
+    pet: Option<(String, std::time::Instant)>,
+    pet_pose: bool,
     /// A shortcut row waiting for its new chord (`shortcuts::key_id`).
     rebinding: Option<String>,
     /// Focus target while capturing a chord.
@@ -506,6 +510,8 @@ impl HarnessWorkspace {
             comment_draft: None,
             clearing_review: false,
             settings_open: false,
+            pet: None,
+            pet_pose: false,
             rebinding: None,
             rebind_focus: cx.focus_handle(),
             md_preview: None,
@@ -556,8 +562,10 @@ impl HarnessWorkspace {
                 let write = |state: &str| {
                     let dir = entry.path.join(".harness");
                     let _ = std::fs::create_dir_all(&dir);
+                    // Claims claude-code so the probe also proves the writer
+                    // beats the registered kind (the "pi finished" mixup).
                     let body = format!(
-                        "{{\n\t\"state\": \"{state}\",\n\t\"timestamp\": \"2026-01-01T00:00:00Z\",\n\t\"sessionFile\": null\n}}\n",
+                        "{{\n\t\"state\": \"{state}\",\n\t\"agent\": \"claude-code\",\n\t\"timestamp\": \"2026-01-01T00:00:00Z\",\n\t\"sessionFile\": null\n}}\n",
                     );
                     let tmp = dir.join(".probe.tmp");
                     let _ = std::fs::write(&tmp, body);
@@ -713,7 +721,7 @@ impl HarnessWorkspace {
             .copied()
             .unwrap_or_else(|| agent_runtime::fidelity_for(&signal.kind));
         if previous != Some(signal.state) && signal.should_notify(fidelity) {
-            self.notify_needs_input(&signal);
+            self.notify_needs_input(&signal, cx);
         }
         // "Finished — your turn" is a different claim with a different bar:
         // best-effort adapters may make it (it is exactly what turn-complete
@@ -721,15 +729,52 @@ impl HarnessWorkspace {
         // notification the user reaches for when they leave a worktree tab
         // and ask an agent to work: silence here made the app feel deaf.
         if signal.should_notify_finished(previous, fidelity) {
-            self.notify_finished(&signal);
+            self.notify_finished(&signal, cx);
         }
         cx.notify();
+    }
+
+    /// Wake the conductor: show the pet card with the message, and keep its
+    /// arms moving until it expires or is closed. A fresh notification while
+    /// visible just replaces the message and extends the performance.
+    fn show_pet(&mut self, message: String, cx: &mut Context<Self>) {
+        if !self.prefs.pet_enabled {
+            return;
+        }
+        let until = std::time::Instant::now() + Duration::from_secs(8);
+        let animating = self.pet.is_some();
+        self.pet = Some((message, until));
+        cx.notify();
+        if animating {
+            return; // the running loop picks up the new expiry
+        }
+        cx.spawn(async move |view, cx| loop {
+            cx.background_executor().timer(Duration::from_millis(350)).await;
+            let done = view.update(cx, |ws, cx| {
+                match &ws.pet {
+                    Some((_, until)) if *until > std::time::Instant::now() => {
+                        ws.pet_pose = !ws.pet_pose;
+                        cx.notify();
+                        false
+                    }
+                    _ => {
+                        ws.pet = None;
+                        cx.notify();
+                        true
+                    }
+                }
+            });
+            if done.unwrap_or(true) {
+                break;
+            }
+        })
+        .detach();
     }
 
     /// Post a native "needs input" notification, unless the user is already
     /// looking at that worktree — telling someone about the prompt they are
     /// staring at is pure noise (§4.6).
-    fn notify_needs_input(&self, signal: &AgentSignal) {
+    fn notify_needs_input(&mut self, signal: &AgentSignal, cx: &mut Context<Self>) {
         if self
             .resolve()
             .is_some_and(|active| active.path == signal.worktree_root)
@@ -747,6 +792,10 @@ impl HarnessWorkspace {
             None => (String::new(), String::new()),
         };
         let id = self.worktree_id_for_path(&signal.worktree_root).unwrap_or_default();
+        self.show_pet(
+            format!("{} needs your attention!", agent_display(&signal.kind)),
+            cx,
+        );
         crate::notifier::notify_agent(
             agent_display(&signal.kind),
             &crate::notifier::label_for(&name, &signal.worktree_root),
@@ -758,7 +807,7 @@ impl HarnessWorkspace {
 
     /// Post a "finished" notification, with the same view-suppression rule
     /// as needs-input: never narrate the screen the user is looking at.
-    fn notify_finished(&self, signal: &AgentSignal) {
+    fn notify_finished(&mut self, signal: &AgentSignal, cx: &mut Context<Self>) {
         if self
             .resolve()
             .is_some_and(|active| active.path == signal.worktree_root)
@@ -776,6 +825,10 @@ impl HarnessWorkspace {
             None => (String::new(), String::new()),
         };
         let id = self.worktree_id_for_path(&signal.worktree_root).unwrap_or_default();
+        self.show_pet(
+            format!("{} finished — your turn", agent_display(&signal.kind)),
+            cx,
+        );
         crate::notifier::notify_agent(
             agent_display(&signal.kind),
             &crate::notifier::label_for(&name, &signal.worktree_root),
@@ -1831,6 +1884,120 @@ impl HarnessWorkspace {
             )
     }
 
+    /// The conductor pet: a small maestro who appears with each notification
+    /// and conducts until dismissed or done. Divs only — head, tapering robe,
+    /// and two arms whose geometry flips between beats, plus alternating
+    /// notes. Clippy walked so this little one could wave.
+    fn render_pet(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (message, _) = self.pet.clone()?;
+        let up = self.pet_pose;
+        let arm = |left: bool| {
+            let d = div().absolute().rounded_full().bg(hx.accent);
+            match (left, up) {
+                // Beat up: arms vertical, raised high.
+                (true, true) => d.w(px(7.0)).h(px(26.0)).top(px(18.0)).left(px(14.0)),
+                (false, true) => d.w(px(7.0)).h(px(26.0)).top(px(18.0)).left(px(67.0)),
+                // Beat down: arms swing out sideways.
+                (true, false) => d.w(px(24.0)).h(px(7.0)).top(px(40.0)).left(px(2.0)),
+                (false, false) => d.w(px(24.0)).h(px(7.0)).top(px(40.0)).left(px(62.0)),
+            }
+        };
+        Some(
+            div()
+                .absolute()
+                .bottom(px(52.0))
+                .right(px(16.0))
+                .w(px(232.0))
+                .rounded_lg()
+                .bg(hx.surface2)
+                .border_1()
+                .border_color(hx.border2)
+                .shadow_lg()
+                .p_2()
+                .flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    // The stage: 88×72, everything positioned in it.
+                    div()
+                        .relative()
+                        .flex_none()
+                        .w(px(88.0))
+                        .h(px(72.0))
+                        .child(
+                            div()
+                                .absolute()
+                                .top(px(4.0))
+                                .left(px(33.0))
+                                .w(px(22.0))
+                                .h(px(22.0))
+                                .rounded_full()
+                                .bg(hx.tx0),
+                        )
+                        .child(
+                            // The robe: wide-bottomed via border radius.
+                            div()
+                                .absolute()
+                                .top(px(28.0))
+                                .left(px(26.0))
+                                .w(px(36.0))
+                                .h(px(40.0))
+                                .rounded_t_full()
+                                .rounded_b_md()
+                                .bg(hx.accent),
+                        )
+                        .child(arm(true))
+                        .child(arm(false))
+                        .child(
+                            // The baton, only visible on the upbeat.
+                            div()
+                                .absolute()
+                                .w(px(3.0))
+                                .h(px(16.0))
+                                .rounded_full()
+                                .bg(hx.tx0)
+                                .top(if up { px(2.0) } else { px(36.0) })
+                                .left(if up { px(16.0) } else { px(-4.0) }),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .top(if up { px(0.0) } else { px(10.0) })
+                                .right(px(2.0))
+                                .text_sm()
+                                .text_color(hx.amber)
+                                .child(if up { "♪" } else { "♫" }),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_xs()
+                        .text_color(hx.tx0)
+                        .child(message),
+                )
+                .child(
+                    div()
+                        .id("pet-close")
+                        .flex_none()
+                        .px_1()
+                        .rounded_md()
+                        .text_xs()
+                        .text_color(hx.tx2)
+                        .cursor_pointer()
+                        .hover(|d| d.bg(hx.surface_hover).text_color(hx.tx0))
+                        .child("✕")
+                        .on_click(cx.listener(|ws, _, _, cx| {
+                            cx.stop_propagation();
+                            ws.pet = None;
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// zed's modal layer (file finder, pickers) rendered as OUR window-root
     /// child — the third window-root duty this embed adopts (after action
     /// wiring and key context). At the root rather than inside the editor
@@ -2099,6 +2266,42 @@ impl HarnessWorkspace {
                             .child(format!("{size:.0} px")),
                     )
                     .child(div().id("fs-plus").child(size_chip("+")).on_click(cx.listener(step(1.0)))),
+            );
+        }
+
+        // ---- Extras --------------------------------------------------------
+        {
+            let enabled = self.prefs.pet_enabled;
+            body = body.child(section_title("Extras")).child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .pb_1()
+                    .child(
+                        div()
+                            .id("pet-toggle")
+                            .child(chip(
+                                if enabled { "on".into() } else { "off".into() },
+                                enabled,
+                                hx,
+                            ))
+                            .on_click(cx.listener(|ws, _, _, cx| {
+                                cx.stop_propagation();
+                                ws.prefs.pet_enabled = !ws.prefs.pet_enabled;
+                                if !ws.prefs.pet_enabled {
+                                    ws.pet = None;
+                                }
+                                save_prefs_to(&ws.prefs_path, &ws.prefs);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(hx.tx1)
+                            .child("Conductor pet on notifications"),
+                    ),
             );
         }
 
@@ -3989,6 +4192,7 @@ impl Render for HarnessWorkspace {
                     }),
             )
             .children(self.render_zed_modal(cx))
+            .children(self.render_pet(&hx, cx))
             // The settings overlay is the LAST child on purpose: gpui paints
             // siblings in order, so an overlay added before the content row
             // renders underneath it — "settings don't open" while the state
@@ -4209,6 +4413,10 @@ struct Prefs {
     /// Editor + terminal font size in px. `None` = 13.
     #[serde(default)]
     font_size: Option<f32>,
+    /// The conductor pet (Clippy's grandchild): a small animated maestro in
+    /// the corner whenever a notification posts.
+    #[serde(default = "default_true")]
+    pet_enabled: bool,
     /// Shortcut rebindings, keyed by `shortcuts::key_id`. Value is the gpui
     /// chord string; missing = the catalog default.
     #[serde(default)]
@@ -4217,6 +4425,10 @@ struct Prefs {
     diff_width: f32,
     sidebar_open: bool,
     diff_open: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Prefs {
@@ -4228,6 +4440,7 @@ impl Default for Prefs {
             font_mono: None,
             agents: Default::default(),
             font_size: None,
+            pet_enabled: true,
             shortcuts: Default::default(),
             sidebar_width: 280.0,
             diff_width: 340.0,
