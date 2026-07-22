@@ -238,6 +238,18 @@ enum Edit {
     AgentCmd(String, String),
 }
 
+/// The name an agent goes by in front of users — notification titles, rows.
+fn agent_display(kind: &AgentKind) -> &'static str {
+    match kind {
+        AgentKind::Pi => "pi",
+        AgentKind::ClaudeCode => "Claude Code",
+        AgentKind::Codex => "Codex",
+        AgentKind::Kimi => "Kimi",
+        AgentKind::OpenCode => "OpenCode",
+        AgentKind::Other(_) => "Agent",
+    }
+}
+
 /// An agent's monogram mark and brand-adjacent color, shared by the ＋ menu
 /// and the settings screen.
 fn agent_mark(kind: &AgentKind) -> (&'static str, Rgba) {
@@ -591,6 +603,32 @@ impl HarnessWorkspace {
         }
         this.recompute_diff(cx);
 
+        // Notification "View" clicks: the platform delegate pushes worktree
+        // ids; select them and front the app. Foreground actions activate the
+        // app at the OS level already — cx.activate makes the dev-fallback
+        // path behave the same.
+        let nav_rx = crate::notifier::nav_rx();
+        cx.spawn_in(window, async move |view, cx| loop {
+            match nav_rx.try_recv() {
+                Ok(id) => {
+                    let ok = view.update_in(cx, |ws, window, cx| {
+                        ws.select(Selection::Worktree(id.clone()), window, cx);
+                        cx.activate(true);
+                    });
+                    if ok.is_err() {
+                        break;
+                    }
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(250))
+                        .await;
+                }
+                Err(crossbeam_channel::TryRecvError::Disconnected) => break,
+            }
+        })
+        .detach();
+
         cx.spawn(async move |view, cx| loop {
             match forge_rx.try_recv() {
                 Ok(update) => {
@@ -708,14 +746,13 @@ impl HarnessWorkspace {
             Some(e) => (e.name.clone(), e.repo.clone()),
             None => (String::new(), String::new()),
         };
-        crate::notifier::notify_needs_input(
+        let id = self.worktree_id_for_path(&signal.worktree_root).unwrap_or_default();
+        crate::notifier::notify_agent(
+            agent_display(&signal.kind),
             &crate::notifier::label_for(&name, &signal.worktree_root),
             &repo,
-            match signal.reason {
-                agent_runtime::WaitReason::PermissionPrompt => "waiting for approval",
-                agent_runtime::WaitReason::IdlePrompt => "waiting for your next instruction",
-                _ => "needs input",
-            },
+            &id,
+            crate::notifier::AgentAlert::NeedsAttention,
         );
     }
 
@@ -738,10 +775,13 @@ impl HarnessWorkspace {
             Some(e) => (e.name.clone(), e.repo.clone()),
             None => (String::new(), String::new()),
         };
-        crate::notifier::notify_needs_input(
+        let id = self.worktree_id_for_path(&signal.worktree_root).unwrap_or_default();
+        crate::notifier::notify_agent(
+            agent_display(&signal.kind),
             &crate::notifier::label_for(&name, &signal.worktree_root),
             &repo,
-            "agent finished — your turn",
+            &id,
+            crate::notifier::AgentAlert::Finished,
         );
     }
 

@@ -23,6 +23,7 @@ license = "GPL-3.0-or-later"
 # not try to attach it to the repo root workspace.
 
 [dependencies]
+crossbeam-channel = "0.5"
 gpui = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
 # Platform entry point (Application constructor) — new split at v1.11.x; the
 # features mirror what zed's own gpui examples enable.
@@ -152,6 +153,16 @@ incremental = false
 
 [profile.release]
 debug = 0
+
+# Native macOS notifications with action buttons (UNUserNotificationCenter).
+# osascript can neither add buttons nor carry a response back; these bindings
+# can. Only a real bundle may use the framework — the dev binary falls back
+# to osascript.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-user-notifications = "0.3"
+block2 = "0.6"
 
 # zed's own dev profile carries these same four overrides, and they are
 # load-bearing, not a speed nicety: zed's `with_parser` attaches a

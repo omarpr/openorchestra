@@ -26,20 +26,248 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-/// Post a native "needs input" notification.
+/// What kind of attention an agent wants — drives the message wording.
+#[derive(Clone, Copy)]
+pub enum AgentAlert {
+    NeedsAttention,
+    Finished,
+}
+
+/// Post an agent notification.
 ///
-/// Fire-and-forget: a failure to notify must never disturb the app, so every
-/// error path is swallowed after being logged.
-pub fn notify_needs_input(worktree_name: &str, repo: &str, reason: &str) {
-    let title = format!("{worktree_name} — {repo}");
-    let body = reason.to_string();
-    // The one observable line in the chain: adapters, watcher, bus, policy
-    // all converge here, so a probe (or a user log) can see exactly what
-    // would have been posted and why.
+/// On macOS, when running as a real bundle, this goes through
+/// `UNUserNotificationCenter`: the banner names the agent, carries a **View**
+/// button (activates the app and navigates to the worktree) and a **Dismiss**
+/// button, and clicking the body acts like View. The worktree id rides in the
+/// notification request identifier, so the response handler needs no other
+/// state. Everywhere else — dev binaries, other OSes — it falls back to the
+/// buttonless system path (osascript / notify-send).
+pub fn notify_agent(
+    agent: &str,
+    worktree_name: &str,
+    repo: &str,
+    worktree_id: &str,
+    alert: AgentAlert,
+) {
+    let (title, body) = match alert {
+        AgentAlert::NeedsAttention => (
+            format!("{agent} needs your attention!"),
+            format!("{worktree_name} ({repo}) is waiting on you"),
+        ),
+        AgentAlert::Finished => (
+            format!("{agent} finished — your turn"),
+            format!("{worktree_name} ({repo}) is ready for review"),
+        ),
+    };
     log::info!("NOTIFY posting: {title}: {body}");
+    #[cfg(target_os = "macos")]
+    {
+        if mac::post(&title, &body, worktree_id) {
+            return;
+        }
+    }
+    let _ = worktree_id;
     post(&title, &body);
 }
 
+/// The navigation channel: the platform delegate pushes a worktree id when
+/// the user clicks View (or the banner body); the workspace polls and
+/// selects that worktree.
+static NAV: std::sync::OnceLock<(
+    crossbeam_channel::Sender<String>,
+    crossbeam_channel::Receiver<String>,
+)> = std::sync::OnceLock::new();
+
+fn nav() -> &'static (
+    crossbeam_channel::Sender<String>,
+    crossbeam_channel::Receiver<String>,
+) {
+    NAV.get_or_init(crossbeam_channel::unbounded)
+}
+
+/// The receiver the workspace polls for View clicks.
+pub fn nav_rx() -> crossbeam_channel::Receiver<String> {
+    nav().1.clone()
+}
+
+/// One-time platform setup. Call from the main thread at app start.
+pub fn init() {
+    #[cfg(target_os = "macos")]
+    mac::init(nav().0.clone());
+}
+
+#[cfg(target_os = "macos")]
+mod mac {
+    use std::sync::OnceLock;
+
+    use block2::{DynBlock, RcBlock};
+    use crossbeam_channel::Sender;
+    use objc2::rc::Retained;
+    use objc2::runtime::ProtocolObject;
+    use objc2::{define_class, msg_send, AllocAnyThread, DefinedClass};
+    use objc2_foundation::{NSBundle, NSObject, NSObjectProtocol, NSSet, NSString};
+    use objc2_user_notifications::{
+        UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,
+        UNNotificationAction, UNNotificationActionOptions, UNNotificationCategory,
+        UNNotificationCategoryOptions, UNNotificationDefaultActionIdentifier,
+        UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
+        UNUserNotificationCenter, UNUserNotificationCenterDelegate,
+    };
+
+    const CATEGORY: &str = "harness-agent-attention";
+    const ACTION_VIEW: &str = "harness-view";
+    const ACTION_DISMISS: &str = "harness-dismiss";
+    const ID_PREFIX: &str = "harness-wt:";
+
+    struct Ivars {
+        nav: Sender<String>,
+    }
+
+    define_class!(
+        #[unsafe(super(NSObject))]
+        #[name = "HarnessNotificationDelegate"]
+        #[ivars = Ivars]
+        struct Delegate;
+
+        unsafe impl NSObjectProtocol for Delegate {}
+
+        unsafe impl UNUserNotificationCenterDelegate for Delegate {
+            #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
+            fn did_receive(
+                &self,
+                _center: &UNUserNotificationCenter,
+                response: &UNNotificationResponse,
+                completion: &DynBlock<dyn Fn()>,
+            ) {
+                let action = response.actionIdentifier();
+                let is_view = action.isEqualToString(&NSString::from_str(ACTION_VIEW))
+                    || action.isEqualToString(unsafe { UNNotificationDefaultActionIdentifier });
+                if is_view {
+                    let id = response.notification().request().identifier().to_string();
+                    if let Some(worktree) = id.strip_prefix(ID_PREFIX) {
+                        // The id carries a uuid suffix after '#' so repeated
+                        // notifications for one worktree do not coalesce.
+                        let worktree = worktree.split('#').next().unwrap_or(worktree);
+                        let _ = self.ivars().nav.send(worktree.to_string());
+                    }
+                }
+                completion.call(());
+            }
+
+            #[unsafe(method(userNotificationCenter:willPresentNotification:withCompletionHandler:))]
+            fn will_present(
+                &self,
+                _center: &UNUserNotificationCenter,
+                _notification: &UNNotification,
+                completion: &DynBlock<dyn Fn(UNNotificationPresentationOptions)>,
+            ) {
+                // Show even while the app is frontmost: the user may be in a
+                // different worktree tab, which is exactly the case that
+                // needs the banner.
+                completion.call((UNNotificationPresentationOptions::Banner,));
+            }
+        }
+    );
+
+    impl Delegate {
+        fn new(nav: Sender<String>) -> Retained<Self> {
+            let this = Self::alloc().set_ivars(Ivars { nav });
+            unsafe { msg_send![super(this), init] }
+        }
+    }
+
+    static DELEGATE: OnceLock<Retained<Delegate>> = OnceLock::new();
+    static READY: OnceLock<bool> = OnceLock::new();
+
+    // Retained<Delegate> is not Send/Sync by default; the delegate is only
+    // touched from init (main thread) and by the system afterwards.
+    unsafe impl Send for Ivars {}
+    unsafe impl Sync for Ivars {}
+
+    fn bundled() -> bool {
+        NSBundle::mainBundle().bundleIdentifier().is_some()
+    }
+
+    pub fn init(nav: Sender<String>) {
+        if !bundled() {
+            // The framework requires a real bundle; the dev binary keeps the
+            // osascript fallback.
+            let _ = READY.set(false);
+            return;
+        }
+        let center = UNUserNotificationCenter::currentNotificationCenter();
+        let delegate = DELEGATE.get_or_init(|| Delegate::new(nav));
+        center.setDelegate(Some(ProtocolObject::from_ref(&**delegate)));
+
+        let view = UNNotificationAction::actionWithIdentifier_title_options(
+            &NSString::from_str(ACTION_VIEW),
+            &NSString::from_str("View"),
+            UNNotificationActionOptions::Foreground,
+        );
+        let dismiss = UNNotificationAction::actionWithIdentifier_title_options(
+            &NSString::from_str(ACTION_DISMISS),
+            &NSString::from_str("Dismiss"),
+            UNNotificationActionOptions::empty(),
+        );
+        let category =
+            UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
+                &NSString::from_str(CATEGORY),
+                &objc2_foundation::NSArray::from_retained_slice(&[view, dismiss]),
+                &objc2_foundation::NSArray::new(),
+                UNNotificationCategoryOptions::empty(),
+            );
+        center.setNotificationCategories(&NSSet::from_retained_slice(&[category]));
+
+        let done = RcBlock::new(
+            |granted: objc2::runtime::Bool, _err: *mut objc2_foundation::NSError| {
+                log::info!("notification authorization granted = {}", granted.as_bool());
+            },
+        );
+        center.requestAuthorizationWithOptions_completionHandler(
+            UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
+            &done,
+        );
+        let _ = READY.set(true);
+    }
+
+    /// Post through the notification center. Returns false when unavailable
+    /// (unbundled dev run) so the caller can fall back.
+    pub fn post(title: &str, body: &str, worktree_id: &str) -> bool {
+        if !READY.get().copied().unwrap_or(false) {
+            return false;
+        }
+        let center = UNUserNotificationCenter::currentNotificationCenter();
+        let content = UNMutableNotificationContent::new();
+        content.setTitle(&NSString::from_str(title));
+        content.setBody(&NSString::from_str(body));
+        content.setCategoryIdentifier(&NSString::from_str(CATEGORY));
+        // Unique per posting (nanos suffix) or macOS replaces the previous
+        // banner for the same identifier.
+        let id = format!(
+            "{ID_PREFIX}{worktree_id}#{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        );
+        let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
+            &NSString::from_str(&id),
+            &content,
+            None,
+        );
+        let done = RcBlock::new(|err: *mut objc2_foundation::NSError| {
+            if !err.is_null() {
+                log::warn!("notification post failed");
+            }
+        });
+        center.addNotificationRequest_withCompletionHandler(&request, Some(&done));
+        true
+    }
+}
+
+// The buttonless fallback (dev binaries, other OSes). Fire-and-forget: a
+// failure to notify must never disturb the app, so every error path is
+// swallowed after being logged.
 #[cfg(target_os = "macos")]
 fn post(title: &str, body: &str) {
     // AppleScript string literals take double quotes and backslash escapes;

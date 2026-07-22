@@ -122,6 +122,9 @@ fn main() {
                 log::warn!("could not load embedded fonts: {e}");
             }
         }
+        // Native notification wiring (delegate, category with View/Dismiss,
+        // authorization request). Main thread, before anything can post.
+        notifier::init();
         // Globals required by zed's `terminal` + `editor` crates (settings
         // store, base theme, app version), in dependency order.
         release_channel::init(semver::Version::new(0, 1, 0), cx);

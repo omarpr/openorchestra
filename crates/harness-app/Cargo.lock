@@ -4475,8 +4475,10 @@ dependencies = [
  "agent-runtime",
  "anyhow",
  "assets",
+ "block2 0.6.2",
  "client",
  "clock",
+ "crossbeam-channel",
  "editor",
  "env_logger 0.11.11",
  "file_finder",
@@ -4493,6 +4495,9 @@ dependencies = [
  "markdown",
  "menu",
  "node_runtime",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "objc2-user-notifications",
  "pi-client",
  "project",
  "project_panel",
@@ -6983,6 +6988,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-core-location"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca347214e24bc973fc025fd0d36ebb179ff30536ed1f80252706db19ee452009"
+dependencies = [
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
 name = "objc2-core-services"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7017,6 +7032,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3e0adef53c21f888deb4fa59fc59f7eb17404926ee8a6f59f5df0fd7f9f3272"
 dependencies = [
  "bitflags 2.13.1",
+ "block2 0.6.2",
+ "libc",
  "objc2 0.6.4",
  "objc2-core-foundation",
 ]
@@ -7079,6 +7096,19 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
  "objc2-metal 0.3.2",
+]
+
+[[package]]
+name = "objc2-user-notifications"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9df9128cbbfef73cda168416ccf7f837b62737d748333bfe9ab71c245d76613e"
+dependencies = [
+ "bitflags 2.13.1",
+ "block2 0.6.2",
+ "objc2 0.6.4",
+ "objc2-core-location",
+ "objc2-foundation 0.3.2",
 ]
 
 [[package]]
