@@ -57,53 +57,41 @@ glow = glow.filter(ImageFilter.GaussianBlur(18))
 img.alpha_composite(glow)
 img.putalpha(mask)  # keep within tile
 
-# --- the conductor ----------------------------------------------------------
-# A single figure that still reads at 16px: round head, tapered tux torso,
-# two raised arms, a baton with a teal tip, one floating note. Replaced the
-# five-bar equalizer, which smeared into colorful noise at small sizes.
-fig = Image.new('RGBA', (S, S), (0, 0, 0, 0))
-fd = ImageDraw.Draw(fig)
+# --- conductor's baton sweep (arc above the bars) ---
+arc = Image.new('RGBA', (S, S), (0, 0, 0, 0))
+ad = ImageDraw.Draw(arc)
+pts = []
+p0, p1, p2 = (196, 452), (512, 176), (852, 356)
+for i in range(101):
+    t = i / 100
+    x = (1 - t) ** 2 * p0[0] + 2 * (1 - t) * t * p1[0] + t ** 2 * p2[0]
+    y = (1 - t) ** 2 * p0[1] + 2 * (1 - t) * t * p1[1] + t ** 2 * p2[1]
+    pts.append((x, y))
+ad.line(pts, fill=(207, 224, 255, 235), width=22, joint='curve')
+# rounded caps + baton tip
+ad.ellipse([p0[0] - 11, p0[1] - 11, p0[0] + 11, p0[1] + 11], fill=(207, 224, 255, 235))
+ad.ellipse([p2[0] - 30, p2[1] - 30, p2[0] + 30, p2[1] + 30], fill=TEAL + (255,))
+img.alpha_composite(arc)
 
-def quad(p0, p1, p2, n=40):
-    return [
-        ((1 - t) ** 2 * p0[0] + 2 * (1 - t) * t * p1[0] + t ** 2 * p2[0],
-         (1 - t) ** 2 * p0[1] + 2 * (1 - t) * t * p1[1] + t ** 2 * p2[1])
-        for t in (i / n for i in range(n + 1))
-    ]
-
-# torso: two outward-bowing curves down to a soft-cornered base
-left = quad((452, 448), (394, 560), (356, 764))
-right = quad((572, 448), (630, 560), (668, 764))
-torso_pts = left + [(360, 792), (388, 806)] + [(636, 806), (664, 792)] + right[::-1]
-fd.polygon(torso_pts, fill=(255, 255, 255, 255))
-# shirt V + button dot, punched out of the torso
-fd.polygon([(478, 452), (512, 560), (546, 452)], fill=(0, 0, 0, 0))
-
-# arms: thick round-capped strokes, raised mid-beat
-fd.line([(470, 480), (330, 332)], fill=(255, 255, 255, 255), width=46)
-fd.line([(556, 480), (700, 356)], fill=(255, 255, 255, 255), width=46)
-for hx_, hy in [(330, 332), (700, 356)]:
-    fd.ellipse([hx_ - 23, hy - 23, hx_ + 23, hy + 23], fill=(255, 255, 255, 255))
-
-# clip an accent gradient onto everything drawn so far (torso + arms)
-body_mask = fig.split()[3]
-body = Image.new('RGBA', (S, S), (0, 0, 0, 0))
-body.paste(hgrad3(S, S, ACCENT, VIOLET, TEAL), (0, 0))
-body.putalpha(body_mask)
-img.alpha_composite(body)
-
-# head: warm off-white circle
-hd = ImageDraw.Draw(img)
-hd.ellipse([512 - 78, 268 - 78, 512 + 78, 268 + 78], fill=(232, 236, 244, 255))
-
-# baton from the left hand, teal tip
-hd.line([(322, 322), (216, 200)], fill=(232, 236, 244, 255), width=16)
-hd.ellipse([216 - 20, 200 - 20, 216 + 20, 200 + 20], fill=TEAL + (255,))
-
-# one floating note, upper right
-hd.ellipse([760 - 26, 232 - 16, 760 + 26, 232 + 16], fill=(232, 236, 244, 235))
-hd.line([(782, 224), (782, 120)], fill=(232, 236, 244, 235), width=14)
-hd.line([(782, 120), (836, 148)], fill=(232, 236, 244, 235), width=14)
+# --- equalizer / orchestra bars (heights swell to a peak) ---
+bars = Image.new('RGBA', (S, S), (0, 0, 0, 0))
+bd = ImageDraw.Draw(bars)
+grad = hgrad3(640, S, ACCENT, VIOLET, TEAL)
+gx0 = 192
+bottom = 726
+heights = [188, 322, 430, 322, 188]
+bw, gap = 96, 40
+x = gx0
+for hgt in heights:
+    top = bottom - hgt
+    bd.rounded_rectangle([x, top, x + bw, bottom], radius=48, fill=(255, 255, 255, 255))
+    x += bw + gap
+# clip the horizontal gradient to the bar shapes
+bar_mask = bars.split()[3]
+bars_grad = Image.new('RGBA', (S, S), (0, 0, 0, 0))
+bars_grad.paste(grad, (gx0, 0))
+bars_grad.putalpha(bar_mask)
+img.alpha_composite(bars_grad)
 
 img.putalpha(mask)
 master = os.path.join(OUT, 'openorchestra_1024.png')
