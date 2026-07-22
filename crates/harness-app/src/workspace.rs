@@ -1653,6 +1653,16 @@ impl HarnessWorkspace {
         // on_click can fire on mouse-up) and closes on click outside the card.
         div()
             .id("settings-backdrop")
+            .when(std::env::var_os("HARNESS_PROBE_PAINT").is_some(), |d| {
+                d.child(
+                    gpui::canvas(
+                        |b, _, _| log::info!("paint: settings overlay bounds = {b:?}"),
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .size_full(),
+                )
+            })
             .absolute()
             .inset_0()
             .flex()
@@ -3169,7 +3179,6 @@ impl Render for HarnessWorkspace {
             .font_family(hx.font_ui)
             .text_color(hx.tx0)
             .child(self.render_top_bar(&hx, cx))
-            .when(self.settings_open, |d| d.child(self.render_settings(&hx, cx)))
             .child(
                 div()
                     .flex()
@@ -3196,6 +3205,12 @@ impl Render for HarnessWorkspace {
                             .child(self.render_diff_panel(&hx, cx))
                     }),
             )
+            // The settings overlay is the LAST child on purpose: gpui paints
+            // siblings in order, so an overlay added before the content row
+            // renders underneath it — "settings don't open" while the state
+            // toggles perfectly. Absolute positioning takes it out of flow;
+            // being last takes it to the top.
+            .when(self.settings_open, |d| d.child(self.render_settings(&hx, cx)))
             // Drag tracking lives on the root so the pointer can leave the
             // 6px handle mid-drag without the resize stopping.
             .on_action(cx.listener(|ws, _: &crate::CopyDiffSelection, _, cx| {

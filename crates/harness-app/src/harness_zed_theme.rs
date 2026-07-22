@@ -41,6 +41,15 @@ pub fn install(hx: &HarnessTheme, cx: &mut App) -> Arc<Theme> {
         .expect("harness theme registered above");
 
     GlobalTheme::update_theme(cx, theme.clone());
+    // zed's main.rs does this after every theme change, and it is load-bearing
+    // for syntax highlighting: each Language maps tree-sitter captures to
+    // styles through a HighlightMap built by set_theme. Without this call the
+    // map is empty — buffers parse (syntax layers exist) and no color ever
+    // reaches the screen. Guarded because the first install() runs before the
+    // AppState exists; main.rs covers that window with an explicit set_theme.
+    if let Some(state) = workspace::AppState::try_global(cx) {
+        state.languages.set_theme(theme.clone());
+    }
     theme
 }
 

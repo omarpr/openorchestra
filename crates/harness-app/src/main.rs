@@ -209,6 +209,16 @@ fn main() {
             .with_queries(grammars::load_queries("rust"))
             .expect("rust queries compile against the shipped grammar"),
         ));
+        // The initial install() ran before AppState existed, so its set_theme
+        // guard skipped — push the theme into the registry now that both
+        // exist, or every HighlightMap stays empty and highlighting is
+        // silently colorless. (Toggles are covered inside install itself.)
+        {
+            use ::theme::ActiveTheme as _;
+            ::workspace::AppState::global(cx)
+                .languages
+                .set_theme(cx.theme().clone());
+        }
         file_finder::init(cx);
         search::init(cx);
 

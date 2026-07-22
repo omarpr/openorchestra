@@ -321,6 +321,14 @@ async fn probe_editor_keys(hosted: &Entity<Workspace>, cx: &mut gpui::AsyncWindo
         replaced.len(),
         restored == original,
     );
+
+    // ⌘, — the settings screen. With HARNESS_PROBE_PAINT set, the overlay
+    // carries a canvas that logs its painted bounds, so this proves the
+    // screen actually reaches pixels (it once opened *underneath* the
+    // content row: state toggled perfectly, nothing showed).
+    let comma = gpui::Keystroke::parse("cmd-,").expect("parses");
+    let _ = cx.update(|window, cx| window.dispatch_keystroke(comma, cx));
+    cx.background_executor().timer(pause).await;
 }
 
 /// Open one file in a hosted workspace and report the pane's item count.
@@ -382,8 +390,32 @@ async fn probe_open(hosted: &Entity<Workspace>, rel: &str, cx: &mut gpui::AsyncW
                     ))
                 });
                 log::info!("HARNESS_PROBE_OPEN: after settle = {lang:?}");
+                // Layers prove parsing; this proves *coloring*. Chunks carry a
+                // highlight id only if the capture resolved through the
+                // language's HighlightMap — which is exactly what stays empty
+                // when nobody pushes the theme into the registry.
+                let styled = hosted.update(cx, |ws, cx| {
+                    let editor = ws
+                        .active_item(cx)
+                        .and_then(|item| item.act_as::<editor::Editor>(cx))?;
+                    let buffer = editor.read(cx).buffer().read(cx).as_singleton()?;
+                    let snap = buffer.read(cx).snapshot();
+                    let upto = snap.len().min(4000);
+                    let styled = snap
+                        .chunks(
+                            0..upto,
+                            language::LanguageAwareStyling {
+                                tree_sitter: true,
+                                diagnostics: false,
+                            },
+                        )
+                        .filter(|c| c.syntax_highlight_id.is_some())
+                        .count();
+                    Some(styled)
+                });
+                log::info!("HARNESS_PROBE_OPEN: styled chunks in first 4k = {styled:?}");
                 if std::env::var_os("HARNESS_PROBE_EDITOR_KEYS").is_some() {
-                    probe_editor_keys(&hosted, cx).await;
+                    probe_editor_keys(hosted, cx).await;
                 }
             }
             Err(e) => log::error!("HARNESS_PROBE_OPEN: open failed: {e:#}"),
