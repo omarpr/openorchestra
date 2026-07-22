@@ -1791,6 +1791,56 @@ impl HarnessWorkspace {
             )
     }
 
+    /// zed's modal layer (file finder, pickers) rendered as OUR window-root
+    /// child — the third window-root duty this embed adopts (after action
+    /// wiring and key context). At the root rather than inside the editor
+    /// tab's wrapper: an overlay hosted in the wrapper centers over the tab
+    /// content area, which sits visibly right of the window's center the
+    /// title bar establishes. zed centers modals over the window; so do we.
+    fn render_zed_modal(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let r = self.resolve()?;
+        let pane = self.panes.get(&r.key)?;
+        let ws = match &pane.active_tab()?.content {
+            TabContent::Editor(ws) => ws.clone(),
+            _ => return None,
+        };
+        let view: gpui::AnyView = ws
+            .read(cx)
+            .active_modal::<file_finder::FileFinder>(cx)?
+            .into();
+        let ws_for_dismiss = ws.clone();
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |_, _, window, cx| {
+                        ws_for_dismiss.update(cx, |ws, cx| {
+                            ws.hide_modal(window, cx);
+                        });
+                    }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .h(px(0.0))
+                        .mt_20()
+                        .items_center()
+                        .child(
+                            div()
+                                .occlude()
+                                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation()
+                                })
+                                .child(view),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// The settings screen: an overlay, not a tab — settings are a glance,
     /// not a workspace. v1 is the shortcut catalog; the section structure is
     /// where future settings (theme, agent defaults) slot in.
@@ -2786,20 +2836,6 @@ impl HarnessWorkspace {
                     // (⌘P, ⌘⇧F, dock toggles, ...) dispatches into a tree
                     // with no matching handler and no matching key context,
                     // and dies silently.
-                    // zed's modal layer (file finder, pickers) is rendered by
-                    // the WINDOW ROOT in zed (MultiWorkspace), not by the
-                    // Workspace itself — the third window-root duty this embed
-                    // has had to adopt, after action wiring and key context.
-                    // Without this host the finder "opens" with perfect state
-                    // and zero pixels, and typing goes nowhere because the
-                    // never-painted query editor never registers the input
-                    // handler.
-                    let modal: Option<gpui::AnyView> = ws
-                        .read(cx)
-                        .active_modal::<file_finder::FileFinder>(cx)
-                        .map(|m| m.into())
-                        ;
-                    let ws_for_dismiss = ws.clone();
                     ws.update(cx, |workspace, cx| workspace.actions(div(), window, cx))
                         .key_context("Workspace")
                         // `.flex()`, because gpui divs default to `display:
@@ -2814,38 +2850,6 @@ impl HarnessWorkspace {
                         .flex()
                         .size_full()
                         .child(ws.clone())
-                        .when_some(modal, |d, view| {
-                            d.child(
-                                div()
-                                    .absolute()
-                                    .inset_0()
-                                    .on_mouse_down(
-                                        gpui::MouseButton::Left,
-                                        cx.listener(move |_, _, window, cx| {
-                                            ws_for_dismiss.update(cx, |ws, cx| {
-                                                ws.hide_modal(window, cx);
-                                            });
-                                        }),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .h(px(0.0))
-                                            .mt_20()
-                                            .items_center()
-                                            .child(
-                                                div()
-                                                    .occlude()
-                                                    .on_mouse_down(
-                                                        gpui::MouseButton::Left,
-                                                        |_, _, cx| cx.stop_propagation(),
-                                                    )
-                                                    .child(view),
-                                            ),
-                                    ),
-                            )
-                        })
                         .when(std::env::var_os("HARNESS_PROBE_PAINT").is_some(), |d| {
                             d.child(
                                 gpui::canvas(
@@ -3931,6 +3935,7 @@ impl Render for HarnessWorkspace {
                             .child(self.render_diff_panel(&hx, cx))
                     }),
             )
+            .children(self.render_zed_modal(cx))
             // The settings overlay is the LAST child on purpose: gpui paints
             // siblings in order, so an overlay added before the content row
             // renders underneath it — "settings don't open" while the state
