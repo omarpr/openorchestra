@@ -486,6 +486,29 @@ impl HarnessWorkspace {
             focus_handle: cx.focus_handle(),
         };
         this.ensure_pane(window, cx);
+        // Restore persisted appearance (zed theme + fonts). main.rs already
+        // installed the harness pair pre-window to avoid a theme flash; this
+        // only does further work when prefs carry overrides.
+        if this.prefs.zed_theme.is_some()
+            || this.prefs.font_ui.is_some()
+            || this.prefs.font_mono.is_some()
+        {
+            this.apply_appearance(cx);
+        }
+        // Test hook: apply a zed theme by name at startup, reporting what the
+        // registry holds and what the chrome derived — the settings screen's
+        // theme chips drive exactly this path.
+        if let Some(name) = std::env::var_os("HARNESS_PROBE_THEME") {
+            let name = name.to_string_lossy().into_owned();
+            let count = ::theme::ThemeRegistry::global(cx).list_names().len();
+            this.prefs.zed_theme = Some(name.clone());
+            this.apply_appearance(cx);
+            log::info!(
+                "HARNESS_PROBE_THEME: registry={count} themes; applied {name:?}; bg0={:?} accent={:?}",
+                theme(cx).bg0,
+                theme(cx).accent,
+            );
+        }
         // Test hook: open an editor tab without going through the ＋ menu, so
         // "the menu is broken" and "the editor is broken" can be told apart.
         // A value naming a worktree id selects that worktree first, so the
@@ -1445,12 +1468,85 @@ impl HarnessWorkspace {
     }
 
     fn toggle_theme(&mut self, cx: &mut Context<Self>) {
+        // The ☾/☀ button toggles the harness pair; if a zed theme was active,
+        // toggling means "back to the built-ins", so the override clears.
+        self.prefs.zed_theme = None;
         let next = theme(cx).toggled(cx);
         crate::harness_zed_theme::install(&next, cx);
         cx.set_global(next);
         self.save_prefs(cx);
         cx.refresh_windows();
         cx.notify();
+    }
+
+    /// Apply a zed theme by registry name (`None` = the harness pair).
+    fn set_zed_theme(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        self.prefs.zed_theme = name;
+        self.apply_appearance(cx);
+        self.save_prefs(cx);
+        cx.refresh_windows();
+        cx.notify();
+    }
+
+    /// Set a font override. `mono` covers the buffer, the terminal, and the
+    /// chrome's monospace; `!mono` is the interface font.
+    fn set_font(&mut self, mono: bool, name: String, cx: &mut Context<Self>) {
+        if mono {
+            self.prefs.font_mono = Some(name);
+        } else {
+            self.prefs.font_ui = Some(name);
+        }
+        self.apply_appearance(cx);
+        self.save_prefs(cx);
+        cx.refresh_windows();
+        cx.notify();
+    }
+
+    /// Re-derive every appearance global from prefs: theme (harness pair or a
+    /// zed registry theme), chrome tokens, fonts, and the zed settings JSON.
+    /// One function on purpose — called at startup and after every settings
+    /// change, so "restored" and "just picked" cannot diverge.
+    fn apply_appearance(&mut self, cx: &mut Context<Self>) {
+        // Fonts first: leaked to &'static str, matching HarnessTheme's fields
+        // and theme.rs's own resolve_font. Bounded by the number of font
+        // changes in a session.
+        let cur = theme(cx).clone();
+        let font_ui: &'static str = match &self.prefs.font_ui {
+            Some(name) => Box::leak(name.clone().into_boxed_str()),
+            None => cur.font_ui,
+        };
+        let font_mono: &'static str = match &self.prefs.font_mono {
+            Some(name) => Box::leak(name.clone().into_boxed_str()),
+            None => cur.font_mono,
+        };
+
+        let zed_theme = self
+            .prefs
+            .zed_theme
+            .as_ref()
+            .and_then(|name| ::theme::ThemeRegistry::global(cx).get(name).ok());
+        match zed_theme {
+            Some(zed) => {
+                ::theme::GlobalTheme::update_theme(cx, zed.clone());
+                // Parsing is not coloring (see harness_zed_theme::install):
+                // the registry's HighlightMaps rebuild from the new theme.
+                ::workspace::AppState::global(cx).languages.set_theme(zed.clone());
+                let hx = crate::harness_zed_theme::harness_from_zed(&zed, font_ui, font_mono);
+                cx.set_global(hx);
+            }
+            None => {
+                let mut hx = if self.prefs.dark {
+                    HarnessTheme::dark(cx)
+                } else {
+                    HarnessTheme::light(cx)
+                };
+                hx.font_ui = font_ui;
+                hx.font_mono = font_mono;
+                crate::harness_zed_theme::install(&hx, cx);
+                cx.set_global(hx);
+            }
+        }
+        crate::apply_zed_settings(cx, font_ui, font_mono);
     }
 
     fn render_top_bar(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1599,6 +1695,105 @@ impl HarnessWorkspace {
             );
 
         let mut body = div().id("settings-body").flex_1().min_h_0().overflow_y_scroll().px_4().py_2();
+
+        // ---- Appearance: the harness pair plus every bundled zed theme ----
+        let section_title = |label: &str| {
+            div()
+                .pt_3()
+                .pb_1()
+                .text_xs()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(hx.tx2)
+                .child(label.to_uppercase())
+        };
+        let chip = |label: String, selected: bool, hx: &HarnessTheme| {
+            div()
+                .px_2()
+                .py_0p5()
+                .rounded_md()
+                .text_xs()
+                .cursor_pointer()
+                .border_1()
+                .border_color(if selected { hx.accent } else { hx.border })
+                .bg(if selected { tint(hx.accent, 0.16) } else { hx.surface })
+                .text_color(if selected { hx.accent } else { hx.tx1 })
+                .hover(|d| d.bg(hx.surface_hover))
+                .child(label)
+        };
+
+        let mut themes = div().flex().flex_wrap().gap_1p5().pb_1();
+        let active_zed = self.prefs.zed_theme.clone();
+        for (label, value) in [("Harness Dark", None), ("Harness Light", None)]
+            .iter()
+            .map(|(l, _): &(&str, Option<()>)| (l.to_string(), None::<String>))
+            .chain(
+                ::theme::ThemeRegistry::global(cx)
+                    .list_names()
+                    .into_iter()
+                    .map(|n| (n.to_string(), Some(n.to_string()))),
+            )
+        {
+            let selected = match (&active_zed, &value) {
+                (Some(a), Some(v)) => a == v,
+                (None, None) => {
+                    // Which of the two harness chips is the active one.
+                    (label == "Harness Dark") == self.prefs.dark
+                }
+                _ => false,
+            };
+            let value2 = value.clone();
+            themes = themes.child(
+                div()
+                    .id(gpui::SharedString::from(format!("theme-{label}")))
+                    .child(chip(label.clone(), selected, hx))
+                    .on_click(cx.listener(move |ws, _, _, cx| {
+                        cx.stop_propagation();
+                        match &value2 {
+                            Some(name) => ws.set_zed_theme(Some(name.clone()), cx),
+                            None => {
+                                ws.prefs.dark = label == "Harness Dark";
+                                ws.set_zed_theme(None, cx);
+                            }
+                        }
+                    })),
+            );
+        }
+        body = body.child(section_title("Theme")).child(themes);
+
+        // ---- Fonts: curated candidates that are actually installed --------
+        let installed = cx.text_system().all_font_names();
+        let has = |name: &str| installed.iter().any(|f| f == name);
+        for (title, mono) in [("Code font", true), ("Interface font", false)] {
+            let candidates: &[&str] = if mono {
+                &["Menlo", "Monaco", "SF Mono", "Courier New", "JetBrains Mono",
+                  "Fira Code", "Source Code Pro", "IBM Plex Mono", "Zed Plex Mono", "Hack"]
+            } else {
+                &["Zed Plex Sans", "Helvetica Neue", "Arial", "Inter",
+                  "IBM Plex Sans", "Avenir Next", "Seravek", "Verdana"]
+            };
+            let current = if mono {
+                self.prefs.font_mono.clone().unwrap_or_else(|| hx.font_mono.to_string())
+            } else {
+                self.prefs.font_ui.clone().unwrap_or_else(|| hx.font_ui.to_string())
+            };
+            let mut row = div().flex().flex_wrap().gap_1p5().pb_1();
+            for name in candidates.iter().filter(|n| has(n)) {
+                let name = name.to_string();
+                let selected = name == current;
+                let pick = name.clone();
+                row = row.child(
+                    div()
+                        .id(gpui::SharedString::from(format!("font-{title}-{name}")))
+                        .child(chip(name, selected, hx))
+                        .on_click(cx.listener(move |ws, _, _, cx| {
+                            cx.stop_propagation();
+                            ws.set_font(mono, pick.clone(), cx);
+                        })),
+                );
+            }
+            body = body.child(section_title(title)).child(row);
+        }
+
         let entries = crate::shortcuts::entries();
         let scopes = [
             crate::shortcuts::Scope::Global,
@@ -1670,6 +1865,10 @@ impl HarnessWorkspace {
             .justify_center()
             .bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            // A modal owns the wheel. Scroll events bubble past the card's
+            // own scroll region, and anything the backdrop lets through
+            // reaches the editor underneath — both were scrolling at once.
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(|ws, _, _, cx| {
                 ws.settings_open = false;
                 cx.notify();
@@ -3401,6 +3600,15 @@ fn tool_chip(hx: &HarnessTheme, label: &str, present: bool, required: bool) -> i
 #[serde(default)]
 struct Prefs {
     dark: bool,
+    /// A zed theme name overriding the harness dark/light pair. `None` means
+    /// the built-in pair selected by `dark`.
+    #[serde(default)]
+    zed_theme: Option<String>,
+    /// Font overrides; `None` means the resolved defaults.
+    #[serde(default)]
+    font_ui: Option<String>,
+    #[serde(default)]
+    font_mono: Option<String>,
     sidebar_width: f32,
     diff_width: f32,
     sidebar_open: bool,
@@ -3411,6 +3619,9 @@ impl Default for Prefs {
     fn default() -> Self {
         Prefs {
             dark: true,
+            zed_theme: None,
+            font_ui: None,
+            font_mono: None,
             sidebar_width: 280.0,
             diff_width: 340.0,
             sidebar_open: true,

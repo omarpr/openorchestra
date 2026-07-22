@@ -414,6 +414,28 @@ async fn probe_open(hosted: &Entity<Workspace>, rel: &str, cx: &mut gpui::AsyncW
                     Some(styled)
                 });
                 log::info!("HARNESS_PROBE_OPEN: styled chunks in first 4k = {styled:?}");
+                // Inline git blame: zed's defaults enable it, but the editor
+                // only *starts* it in full mode with a repo behind the buffer.
+                // has_blame_entries answers whether data actually arrived.
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(1500))
+                    .await;
+                let blame = hosted.update(cx, |ws, cx| {
+                    let editor = ws
+                        .active_item(cx)
+                        .and_then(|item| item.act_as::<editor::Editor>(cx))?;
+                    let (inline, started) = {
+                        let editor = editor.read(cx);
+                        (editor.git_blame_inline_enabled(), editor.blame().is_some())
+                    };
+                    let author = editor
+                        .update(cx, |editor, cx| editor.active_git_blame_entry(cx))
+                        .and_then(|e| e.author.map(|a| a.to_string()));
+                    Some((inline, started, author))
+                });
+                log::info!(
+                    "HARNESS_PROBE_OPEN: blame (inline_enabled, started, entry_author) = {blame:?}"
+                );
                 if std::env::var_os("HARNESS_PROBE_EDITOR_KEYS").is_some() {
                     probe_editor_keys(hosted, cx).await;
                 }

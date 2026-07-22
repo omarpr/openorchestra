@@ -157,6 +157,10 @@ pub fn entries() -> Vec<Entry> {
         ),
         Entry::new("cmd-up", Scope::Editor, "Start of file", ed::MoveToBeginning),
         Entry::new("cmd-down", Scope::Editor, "End of file", ed::MoveToEnd),
+        // Inline blame is on by default (current line, after the code); these
+        // control it when it gets loud.
+        Entry::new("cmd-alt-b", Scope::Editor, "Toggle inline git blame", ed::ToggleGitBlameInline),
+        Entry::new("cmd-alt-g", Scope::Editor, "Toggle git blame gutter", ::git::Blame),
 
         // ---- Pickers ------------------------------------------------------
         // Without this, ⌘P opens the file finder and only ⌘P closes it again —

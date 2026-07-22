@@ -126,6 +126,40 @@ fn hex(c: Rgba) -> String {
     format!("#{:02x}{:02x}{:02x}", to(c.r), to(c.g), to(c.b))
 }
 
+/// Derive the harness chrome tokens from an arbitrary zed theme, so picking
+/// "One Dark" recolors the sidebar and diff panel too — a chrome that keeps
+/// its own palette next to a themed editor looks broken, not customized.
+///
+/// Fonts pass through untouched: theme and typography are separate choices.
+pub fn harness_from_zed(
+    theme: &Theme,
+    font_ui: &'static str,
+    font_mono: &'static str,
+) -> HarnessTheme {
+    let c = theme.colors();
+    let st = theme.status();
+    let rgba = |h: gpui::Hsla| -> gpui::Rgba { h.into() };
+    HarnessTheme {
+        bg0: rgba(c.editor_background),
+        bg1: rgba(c.surface_background),
+        bg2: rgba(c.elevated_surface_background),
+        surface: rgba(c.elevated_surface_background),
+        surface_hover: rgba(c.element_hover),
+        surface2: rgba(c.elevated_surface_background),
+        tx0: rgba(c.text),
+        tx1: rgba(c.text_muted),
+        tx2: rgba(c.text_disabled),
+        accent: rgba(c.text_accent),
+        green: rgba(st.created),
+        red: rgba(st.deleted),
+        amber: rgba(st.modified),
+        border: rgba(c.border_variant),
+        border2: rgba(c.border),
+        font_ui,
+        font_mono,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

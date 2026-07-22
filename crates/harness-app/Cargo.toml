@@ -91,6 +91,8 @@ search = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac4
 zed_actions = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
 # For menu::Cancel — escape must close pickers (file finder) or ⌘P traps you.
 menu = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+# For git::Blame — the gutter-blame toggle action lives in the git crate.
+git = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
 # Rendered .md preview in the diff panel — zed's own renderer, so previews
 # match the editor rather than a hand-rolled approximation.
 markdown = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }

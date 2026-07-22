@@ -117,43 +117,19 @@ fn main() {
         // store, base theme, app version), in dependency order.
         release_channel::init(semver::Version::new(0, 1, 0), cx);
         settings::init(cx);
-        theme_settings::init(::theme::LoadThemes::JustBase, cx);
+        // All bundled zed themes, not just the base: the settings screen lists
+        // them, and the asset source is already embedded for icons/fonts.
+        theme_settings::init(::theme::LoadThemes::All(Box::new(assets::Assets)), cx);
 
         // Zed's default buffer/terminal font is a bundled font not present on the
         // user's machine, which falls back to a proportional face (spaced-out
         // terminal glyphs). Pin a real macOS monospace so editor + terminal read
         // correctly.
-        settings::SettingsStore::update_global(cx, |store, cx| {
-            let applied = store.set_user_settings(
-                r#"{ "buffer_font_family": "Menlo", "buffer_font_size": 13,
-                     "terminal": { "font_family": "Menlo", "font_size": 13 },
-                     "project_panel": { "dock": "left" },
-                     // N2: zed's *default settings file* is what normally
-                     // supplies per-language server lists, and we load a
-                     // minimal settings set rather than that file — so
-                     // without this, no server is ever selected for a Rust
-                     // buffer even though the adapter is registered.
-                     "languages": {
-                       "Rust": { "language_servers": ["rust-analyzer"] }
-                     },
-                     // N2 root cause: `start_language_server` blocks on
-                     // `wait_until_worktree_trust`, and Spike 3's
-                     // `init_worktree_trust: false` — which avoids the *startup*
-                     // stall — leaves the worktree untrusted, so LSP waits
-                     // forever on a prompt our chrome has no way to answer.
-                     // Trusting is correct here: worktrees are created by the
-                     // harness from repos the user explicitly added (§6.1).
-                     "session": { "trust_all_worktrees": true } }"#,
-                cx,
-            );
-            // NOT `let _ =`: a settings string that fails to parse silently
-            // reverts *every* setting in it, which is indistinguishable from
-            // the settings having no effect.
-            // Not discarded: a settings string that fails to parse silently
-            // reverts *every* setting in it, which looks identical to the
-            // settings simply having no effect — an hour-costing failure mode.
-            log::debug!("harness settings parse status: {:?}", applied.parse_status);
-        });
+        // Fonts start as Menlo (a guaranteed macOS monospace) and can be
+        // changed from the settings screen; apply_zed_settings is the single
+        // place the zed settings JSON is built, so runtime font changes go
+        // through exactly the same path as startup.
+        apply_zed_settings(cx, "Zed Plex Sans", "Menlo");
 
         // Harness design tokens (§3.4). Install them as the active zed theme
         // (Spike 3c) BEFORE creating editor panes, so editor + terminal read
@@ -450,5 +426,28 @@ fn main() {
         .expect("failed to open window");
 
         cx.activate(true);
+    });
+}
+
+/// Build and apply the zed user-settings JSON. The one place it is built:
+/// startup and every runtime settings change call this, so the two can never
+/// disagree about anything but the fonts they pass.
+pub fn apply_zed_settings(cx: &mut gpui::App, ui_font: &str, mono_font: &str) {
+    let json = format!(
+        r#"{{ "buffer_font_family": "{mono_font}", "buffer_font_size": 13,
+             "ui_font_family": "{ui_font}",
+             "terminal": {{ "font_family": "{mono_font}", "font_size": 13 }},
+             "project_panel": {{ "dock": "left" }},
+             "languages": {{
+               "Rust": {{ "language_servers": ["rust-analyzer"] }}
+             }},
+             "session": {{ "trust_all_worktrees": true }} }}"#,
+    );
+    settings::SettingsStore::update_global(cx, |store, cx| {
+        let applied = store.set_user_settings(&json, cx);
+        // Not discarded: a settings string that fails to parse silently
+        // reverts *every* setting in it, which looks identical to the
+        // settings simply having no effect — an hour-costing failure mode.
+        log::debug!("harness settings parse status: {:?}", applied.parse_status);
     });
 }
