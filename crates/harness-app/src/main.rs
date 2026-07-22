@@ -236,6 +236,45 @@ fn main() {
         // listing both quit bindings on the settings screen is noise.
         cx.bind_keys([KeyBinding::new("ctrl-q", Quit, None)]);
 
+        // The native macOS menu bar. Set AFTER bind_keys: gpui reads the
+        // keymap when building the menus, which is how "Settings…" shows ⌘,
+        // as its key equivalent without restating it here.
+        //
+        // The Edit menu uses os_action so macOS treats the items as the
+        // standard editing verbs (Services integration, correct enablement).
+        // macOS enables an item only when a handler exists on the current
+        // focus path — Edit items grey out outside an editor, which is the
+        // correct native behavior, not a bug to fix.
+        cx.set_menus(vec![
+            gpui::Menu {
+                name: "openOrchestra".into(),
+                disabled: false,
+                items: vec![
+                    gpui::MenuItem::action("Settings…", OpenSettings),
+                    gpui::MenuItem::separator(),
+                    gpui::MenuItem::action("Quit openOrchestra", Quit),
+                ],
+            },
+            gpui::Menu {
+                name: "Edit".into(),
+                disabled: false,
+                items: vec![
+                    gpui::MenuItem::os_action("Undo", editor::actions::Undo, gpui::OsAction::Undo),
+                    gpui::MenuItem::os_action("Redo", editor::actions::Redo, gpui::OsAction::Redo),
+                    gpui::MenuItem::separator(),
+                    gpui::MenuItem::os_action("Cut", editor::actions::Cut, gpui::OsAction::Cut),
+                    gpui::MenuItem::os_action("Copy", editor::actions::Copy, gpui::OsAction::Copy),
+                    gpui::MenuItem::os_action("Paste", editor::actions::Paste, gpui::OsAction::Paste),
+                    gpui::MenuItem::separator(),
+                    gpui::MenuItem::os_action(
+                        "Select All",
+                        editor::actions::SelectAll,
+                        gpui::OsAction::SelectAll,
+                    ),
+                ],
+            },
+        ]);
+
         // Spike 5 self-check (R10). The Files tab builds its Workspace lazily on
         // first click, so an ordinary headless run never exercises
         // `Workspace::new` — the one thing the spike exists to prove. This flag
