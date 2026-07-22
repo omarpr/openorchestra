@@ -98,6 +98,24 @@ impl AgentSignal {
     pub fn should_notify(&self, fidelity: WaitFidelity) -> bool {
         self.state == AgentState::Waiting && fidelity == WaitFidelity::Exact
     }
+
+    /// Whether this signal warrants a "finished — your turn" notification.
+    ///
+    /// Distinct from [`should_notify`] and deliberately more permissive on
+    /// fidelity: R11 forbids dressing a best-effort signal up as "input
+    /// needed", but "the turn ended" is *exactly* what a best-effort adapter
+    /// (Codex's notify, pi's status file) actually knows. Only the edge
+    /// counts — Running → Idle — so an agent that idles at startup stays
+    /// quiet.
+    pub fn should_notify_finished(
+        &self,
+        previous: Option<AgentState>,
+        fidelity: WaitFidelity,
+    ) -> bool {
+        previous == Some(AgentState::Running)
+            && self.state == AgentState::Idle
+            && fidelity != WaitFidelity::TerminalOnly
+    }
 }
 
 /// The command to run in the worktree's pty.

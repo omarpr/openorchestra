@@ -173,18 +173,37 @@ fn main() {
             ::workspace::AppState::global(cx).node_runtime.clone(),
             cx,
         );
-        // Then add OUR Rust: the full unstripped config with the grammar
-        // attached and the highlight queries compiled. Added after init so it
-        // takes precedence for *.rs, while keeping init's adapter and
-        // settings registrations (they key on the language name, "Rust").
-        ::workspace::AppState::global(cx).languages.add(std::sync::Arc::new(
-            language::Language::new(
-                grammars::load_config("rust"),
-                Some(tree_sitter_rust::LANGUAGE.into()),
-            )
-            .with_queries(grammars::load_queries("rust"))
-            .expect("rust queries compile against the shipped grammar"),
-        ));
+        // Then add OUR languages: full unstripped configs with grammars
+        // attached and queries compiled. Added after init so they take
+        // precedence for their extensions, while keeping init's adapter and
+        // settings registrations (those key on the language name).
+        //
+        // A curated set, not one, not eighteen (§3.2 revised): the languages
+        // this project and its worktrees actually meet. Each tuple is (config
+        // name in the grammars crate, grammar) — javascript deliberately uses
+        // the TSX grammar, exactly as zed's own config.toml declares.
+        let langs: &[(&str, tree_sitter_language::LanguageFn)] = &[
+            ("rust", tree_sitter_rust::LANGUAGE),
+            ("javascript", tree_sitter_typescript::LANGUAGE_TSX),
+            ("typescript", tree_sitter_typescript::LANGUAGE_TYPESCRIPT),
+            ("tsx", tree_sitter_typescript::LANGUAGE_TSX),
+            ("go", tree_sitter_go::LANGUAGE),
+            ("json", tree_sitter_json::LANGUAGE),
+            ("python", tree_sitter_python::LANGUAGE),
+            ("yaml", tree_sitter_yaml::LANGUAGE),
+            ("css", tree_sitter_css::LANGUAGE),
+            ("bash", tree_sitter_bash::LANGUAGE),
+        ];
+        for (name, grammar) in langs {
+            ::workspace::AppState::global(cx).languages.add(std::sync::Arc::new(
+                language::Language::new(
+                    grammars::load_config(name),
+                    Some((*grammar).into()),
+                )
+                .with_queries(grammars::load_queries(name))
+                .unwrap_or_else(|e| panic!("{name} queries compile against the shipped grammar: {e}")),
+            ));
+        }
         // The initial install() ran before AppState existed, so its set_theme
         // guard skipped — push the theme into the registry now that both
         // exist, or every HighlightMap stays empty and highlighting is

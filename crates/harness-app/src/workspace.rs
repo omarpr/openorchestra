@@ -199,12 +199,13 @@ enum TabContent {
 }
 
 /// What to open, before the entity exists.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 enum TabKind {
     /// A plain `$SHELL`. What a worktree opens with.
     Shell,
-    /// The worktree's recorded agent CLI (§4.5).
-    Agent,
+    /// A specific agent CLI (§4.5) — any of the five, not only the
+    /// worktree's recorded default.
+    Agent(AgentKind),
     Editor,
     Chat,
 }
@@ -230,6 +231,33 @@ enum Edit {
     NewName(String),
     Rename(String, String),
     Avatar(String, String),
+    /// Editing an agent's launch command in settings (kind string, text).
+    AgentCmd(String, String),
+}
+
+/// An agent's monogram mark and brand-adjacent color, shared by the ＋ menu
+/// and the settings screen.
+fn agent_mark(kind: &AgentKind) -> (&'static str, Rgba) {
+    match kind {
+        AgentKind::Pi => ("π", rgb(0x8b7cf6)),
+        AgentKind::ClaudeCode => ("✱", rgb(0xd97757)),
+        AgentKind::Codex => ("⬡", rgb(0x10a37f)),
+        AgentKind::Kimi => ("K", rgb(0x4f9cf9)),
+        AgentKind::OpenCode => ("⟡", rgb(0x3fb950)),
+        AgentKind::Other(_) => ("◇", rgb(0x9aa3af)),
+    }
+}
+
+/// Per-agent user preferences (settings screen). Both fields default to the
+/// permissive state so a missing entry behaves like a fresh install.
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, Default)]
+struct AgentPref {
+    #[serde(default)]
+    disabled: bool,
+    /// Launch-command override, run verbatim via `$SHELL -lc`. `None` = the
+    /// adapter's own resolved command.
+    #[serde(default)]
+    command: Option<String>,
 }
 
 /// Which splitter is currently being dragged (§3.4: panels are resizable).
@@ -608,6 +636,14 @@ impl HarnessWorkspace {
         if previous != Some(signal.state) && signal.should_notify(fidelity) {
             self.notify_needs_input(&signal);
         }
+        // "Finished — your turn" is a different claim with a different bar:
+        // best-effort adapters may make it (it is exactly what turn-complete
+        // means), and it only fires on the Running → Idle edge. This is the
+        // notification the user reaches for when they leave a worktree tab
+        // and ask an agent to work: silence here made the app feel deaf.
+        if signal.should_notify_finished(previous, fidelity) {
+            self.notify_finished(&signal);
+        }
         cx.notify();
     }
 
@@ -639,6 +675,32 @@ impl HarnessWorkspace {
                 agent_runtime::WaitReason::IdlePrompt => "waiting for your next instruction",
                 _ => "needs input",
             },
+        );
+    }
+
+    /// Post a "finished" notification, with the same view-suppression rule
+    /// as needs-input: never narrate the screen the user is looking at.
+    fn notify_finished(&self, signal: &AgentSignal) {
+        if self
+            .resolve()
+            .is_some_and(|active| active.path == signal.worktree_root)
+        {
+            return;
+        }
+        let entry = self
+            .manager
+            .registry
+            .entries()
+            .iter()
+            .find(|e| e.path == signal.worktree_root);
+        let (name, repo) = match entry {
+            Some(e) => (e.name.clone(), e.repo.clone()),
+            None => (String::new(), String::new()),
+        };
+        crate::notifier::notify_needs_input(
+            &crate::notifier::label_for(&name, &signal.worktree_root),
+            &repo,
+            "agent finished — your turn",
         );
     }
 
@@ -712,8 +774,18 @@ impl HarnessWorkspace {
     ///
     /// Separate from tab creation because it also wires up the status signal
     /// and the local git excludes, which are per-worktree, not per-tab.
-    fn agent_command(&mut self, r: &Resolved) -> Option<agent_runtime::AgentCommand> {
-        let kind = r.agent_kind.as_ref()?;
+    /// Prepare an adapter and command for a *specific* agent kind — the ＋
+    /// menu offers all enabled agents, not only the worktree's default.
+    ///
+    /// A user command override replaces the launch command but NOT the
+    /// adapter wiring: hooks, excludes, and the status watch still belong to
+    /// the kind, or an overridden Claude Code would silently lose its status
+    /// pill and notifications.
+    fn agent_command_for(
+        &mut self,
+        kind: &AgentKind,
+        r: &Resolved,
+    ) -> Option<agent_runtime::AgentCommand> {
         let runtime = runtime_for(kind, &r.path, &self.state_dir);
         if let Err(e) = runtime.on_spawn(&r.path) {
             log::warn!("{kind} setup failed for {}: {e}", r.path.display());
@@ -743,6 +815,20 @@ impl HarnessWorkspace {
                 })
                 .ok();
         }
+        if let Some(cmd) = self
+            .prefs
+            .agents
+            .get(kind.as_str())
+            .and_then(|p| p.command.clone())
+        {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+            return Some(agent_runtime::AgentCommand {
+                program: shell.into(),
+                args: vec!["-lc".into(), cmd],
+                env: Vec::new(),
+                label: kind.as_str().to_string(),
+            });
+        }
         let command = runtime.command(&r.path);
         if command.is_none() {
             log::info!("{kind} not on PATH — falling back to a plain shell");
@@ -754,7 +840,7 @@ impl HarnessWorkspace {
     fn open_tab(&mut self, kind: TabKind, window: &mut Window, cx: &mut Context<Self>) {
         let Some(r) = self.resolve() else { return };
         // `main` is a read-only checkout with no agent (D8).
-        if matches!(kind, TabKind::Agent | TabKind::Chat) && r.agent_kind.is_none() {
+        if matches!(kind, TabKind::Agent(_) | TabKind::Chat) && r.agent_kind.is_none() {
             self.note = "the main checkout does not run an agent".to_string();
             cx.notify();
             return;
@@ -767,8 +853,8 @@ impl HarnessWorkspace {
                 ),
                 "❯_ shell".to_string(),
             ),
-            TabKind::Agent => {
-                let command = self.agent_command(&r);
+            TabKind::Agent(agent) => {
+                let command = self.agent_command_for(&agent, &r);
                 let label = command
                     .as_ref()
                     .map(|c| c.label.clone())
@@ -1226,7 +1312,9 @@ impl HarnessWorkspace {
 
     fn edit_text_mut(&mut self) -> Option<&mut String> {
         match &mut self.edit {
-            Edit::NewName(t) | Edit::Rename(_, t) | Edit::Avatar(_, t) => Some(t),
+            Edit::NewName(t) | Edit::Rename(_, t) | Edit::Avatar(_, t) | Edit::AgentCmd(_, t) => {
+                Some(t)
+            }
             Edit::None => None,
         }
     }
@@ -1290,6 +1378,13 @@ impl HarnessWorkspace {
                         let _ = self.manager.registry.save();
                     }
                 self.refresh(window, cx);
+            }
+            Edit::AgentCmd(kind, text) => {
+                let cmd = text.trim().to_string();
+                let entry = self.prefs.agents.entry(kind).or_default();
+                entry.command = if cmd.is_empty() { None } else { Some(cmd) };
+                save_prefs_to(&self.prefs_path, &self.prefs);
+                cx.notify();
             }
             Edit::None => {}
         }
@@ -1793,6 +1888,108 @@ impl HarnessWorkspace {
             }
             body = body.child(section_title(title)).child(row);
         }
+
+        // ---- Agents: enable/disable + launch-command override -------------
+        let mut agents = div().flex().flex_col().gap_1().pb_1();
+        for kind in AgentKind::known() {
+            let key = kind.as_str().to_string();
+            let pref = self.prefs.agents.get(&key).cloned().unwrap_or_default();
+            let (glyph, color) = agent_mark(&kind);
+            // The binary each adapter actually launches; claude-code's is
+            // `claude`, everyone else matches their kind string.
+            let default_cmd = match kind {
+                AgentKind::ClaudeCode => "claude",
+                _ => kind.as_str(),
+            };
+            let editing = matches!(&self.edit, Edit::AgentCmd(k, _) if *k == key);
+
+            let toggle_key = key.clone();
+            let edit_key_ = key.clone();
+            let prefill = pref.command.clone().unwrap_or_default();
+            let cmd_display = pref.command.clone().unwrap_or_else(|| default_cmd.to_string());
+            let edit_text = match &self.edit {
+                Edit::AgentCmd(k, t) if *k == key => t.clone(),
+                _ => String::new(),
+            };
+
+            let mut row = div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .py_1()
+                .child(
+                    div()
+                        .w(px(18.0))
+                        .text_center()
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(color)
+                        .child(glyph),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(110.0))
+                        .text_sm()
+                        .text_color(if pref.disabled { hx.tx2 } else { hx.tx0 })
+                        .child(kind.to_string()),
+                )
+                .child(
+                    div()
+                        .id(gpui::SharedString::from(format!("agent-en-{key}")))
+                        .child(chip(
+                            if pref.disabled { "off".into() } else { "on".into() },
+                            !pref.disabled,
+                            hx,
+                        ))
+                        .on_click(cx.listener(move |ws, _, _, cx| {
+                            cx.stop_propagation();
+                            let e = ws.prefs.agents.entry(toggle_key.clone()).or_default();
+                            e.disabled = !e.disabled;
+                            save_prefs_to(&ws.prefs_path, &ws.prefs);
+                            cx.notify();
+                        })),
+                );
+            if editing {
+                row = row.child(div().flex_1().child(self.render_input(hx, &edit_text, cx)));
+            } else {
+                row = row.child(
+                    div()
+                        .id(gpui::SharedString::from(format!("agent-cmd-{key}")))
+                        .flex_1()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_md()
+                        .bg(hx.surface)
+                        .border_1()
+                        .border_color(hx.border)
+                        .text_xs()
+                        .font_family(hx.font_mono)
+                        .text_color(if pref.command.is_some() { hx.tx0 } else { hx.tx2 })
+                        .cursor_pointer()
+                        .hover(|d| d.bg(hx.surface_hover))
+                        .child(cmd_display)
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            cx.stop_propagation();
+                            ws.begin_edit(
+                                Edit::AgentCmd(edit_key_.clone(), prefill.clone()),
+                                window,
+                                cx,
+                            );
+                        })),
+                );
+            }
+            agents = agents.child(row);
+        }
+        body = body
+            .child(section_title("Agents"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(hx.tx2)
+                    .pb_1()
+                    .child("Click a command to edit it (runs via $SHELL -lc; empty restores the default). Enter saves, Esc cancels."),
+            )
+            .child(agents);
 
         let entries = crate::shortcuts::entries();
         let scopes = [
@@ -2736,11 +2933,31 @@ impl HarnessWorkspace {
             )
             .child(self.tab_menu_item(hx, "❯_  Terminal", "⌘T", TabKind::Shell, cx))
             .child(self.tab_menu_item(hx, "{ }  Editor", "⌘E", TabKind::Editor, cx));
-        // `main` is a read-only checkout and runs no agent (D8).
-        if let Some(kind) = agent {
-            menu = menu
-                .child(self.tab_menu_item(hx, &format!("❯_  {kind}"), "", TabKind::Agent, cx))
-                .child(self.tab_menu_item(hx, "◆  Agent chat", "⌘⇧C", TabKind::Chat, cx));
+        // `main` is a read-only checkout and runs no agent (D8). A worktree
+        // offers every *enabled* agent, not only its recorded default — the
+        // default merely decides which one the status pill trusts first.
+        if agent.is_some() {
+            for kind in AgentKind::known() {
+                let disabled = self
+                    .prefs
+                    .agents
+                    .get(kind.as_str())
+                    .is_some_and(|p| p.disabled);
+                if disabled {
+                    continue;
+                }
+                let (glyph, color) = agent_mark(&kind);
+                let label = format!("{glyph}  {kind}");
+                menu = menu.child(self.tab_menu_item_colored(
+                    hx,
+                    &label,
+                    "",
+                    TabKind::Agent(kind.clone()),
+                    color,
+                    cx,
+                ));
+            }
+            menu = menu.child(self.tab_menu_item(hx, "◆  Agent chat", "⌘⇧C", TabKind::Chat, cx));
         }
         menu
     }
@@ -2771,7 +2988,56 @@ impl HarnessWorkspace {
             .on_click(cx.listener(move |ws, _, window, cx| {
                 cx.stop_propagation();
                 ws.tab_menu = None;
-                ws.open_tab(kind, window, cx);
+                ws.open_tab(kind.clone(), window, cx);
+            }))
+    }
+
+    /// A tab-menu item whose leading glyph carries an agent's brand color.
+    /// Monogram marks, not logos: hand-drawn approximations of trademarks
+    /// would be worse than none, and real logo files can slot in later.
+    fn tab_menu_item_colored(
+        &self,
+        hx: &HarnessTheme,
+        label: &str,
+        shortcut: &str,
+        kind: TabKind,
+        color: Rgba,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let (glyph, rest) = label.split_once("  ").unwrap_or(("", label));
+        div()
+            .id(gpui::SharedString::from(format!("tabmenu-{label}")))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .text_xs()
+            .text_color(hx.tx1)
+            .cursor_pointer()
+            .hover(|d| d.bg(hx.surface_hover).text_color(hx.tx0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .w(px(16.0))
+                            .text_center()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(color)
+                            .child(glyph.to_string()),
+                    )
+                    .child(div().font_family(hx.font_mono).child(rest.to_string())),
+            )
+            .child(div().text_color(hx.tx2).child(shortcut.to_string()))
+            .on_click(cx.listener(move |ws, _, window, cx| {
+                cx.stop_propagation();
+                ws.tab_menu = None;
+                ws.open_tab(kind.clone(), window, cx);
             }))
     }
 
@@ -3609,6 +3875,10 @@ struct Prefs {
     font_ui: Option<String>,
     #[serde(default)]
     font_mono: Option<String>,
+    /// Per-agent settings, keyed by `AgentKind::as_str()`. Missing entry =
+    /// enabled, default command.
+    #[serde(default)]
+    agents: std::collections::BTreeMap<String, AgentPref>,
     sidebar_width: f32,
     diff_width: f32,
     sidebar_open: bool,
@@ -3622,6 +3892,7 @@ impl Default for Prefs {
             zed_theme: None,
             font_ui: None,
             font_mono: None,
+            agents: Default::default(),
             sidebar_width: 280.0,
             diff_width: 340.0,
             sidebar_open: true,

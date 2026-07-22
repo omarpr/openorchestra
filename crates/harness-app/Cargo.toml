@@ -51,6 +51,20 @@ grammars = { git = "https://github.com/zed-industries/zed.git", rev = "952d712da
 # buttons — silently draws nothing.
 assets = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
 tree-sitter-rust = "0.24.2"
+# The rest of the curated grammar set (§3.2 revised: a curated set, not one,
+# not eighteen). Versions pinned to zed's own Cargo.lock so the queries in the
+# grammars crate compile against the node types these grammars produce.
+tree-sitter-language = "0.1"
+# typescript + yaml come from zed's forks (same revs as zed's Cargo.toml):
+# upstream typescript lacks a fix zed's queries rely on, and upstream yaml
+# still exports the pre-LanguageFn binding shape.
+tree-sitter-typescript = { git = "https://github.com/zed-industries/tree-sitter-typescript", rev = "e2c53597d6a5d9cf7bbe8dccde576fe1e46c5899" }
+tree-sitter-yaml = { git = "https://github.com/zed-industries/tree-sitter-yaml", rev = "baff0b51c64ef6a1fb1f8390f3ad6015b83ec13a" }
+tree-sitter-go = "=0.25.0"
+tree-sitter-json = "=0.24.8"
+tree-sitter-python = "=0.25.0"
+tree-sitter-css = "=0.23.2"
+tree-sitter-bash = "=0.25.1"
 
 # Spike 4: the headless worktree manager + registry (git worktree lifecycle,
 # status, merge-base diff). Path dep — light (serde only), no zed cone.

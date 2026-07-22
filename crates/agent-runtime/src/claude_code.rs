@@ -79,18 +79,27 @@ impl ClaudeCodeRuntime {
     /// reaching into the filesystem.
     pub fn settings_for(shim: &Path) -> serde_json::Value {
         let command = format!("node {}", shim.display());
-        let entry = |matcher: &str| {
+        let entry = || {
+            // No `matcher` field, deliberately. Matchers filter *tool names*
+            // and only apply to PreToolUse/PostToolUse; on other events an
+            // entry carrying one risks never matching at all — which is
+            // exactly what happened: Notification hooks with
+            // matcher="permission_prompt" never fired, so the agent never
+            // reported waiting and never notified.
             serde_json::json!({
-                "matcher": matcher,
                 "hooks": [{ "type": "command", "command": command }]
             })
         };
         serde_json::json!({
             "hooks": {
-                // permission_prompt / idle_prompt are the two "blocked on the
-                // user" matchers; Stop closes the turn out to idle.
-                "Notification": [entry("permission_prompt"), entry("idle_prompt")],
-                "Stop": [entry("")],
+                // The running edge was the missing half: with only
+                // Notification+Stop wired, a working agent looked IDLE for
+                // its whole turn. UserPromptSubmit fires as the turn starts,
+                // PreToolUse keeps refreshing "running" during it.
+                "UserPromptSubmit": [entry()],
+                "PreToolUse": [entry()],
+                "Notification": [entry()],
+                "Stop": [entry()],
             }
         })
     }

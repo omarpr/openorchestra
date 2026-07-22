@@ -244,15 +244,18 @@ fn claude_code_writes_notification_hooks_pointing_at_the_shim() {
         serde_json::from_str(&std::fs::read_to_string(wt.path().join(".claude/settings.local.json")).unwrap())
             .unwrap();
 
-    let matchers: Vec<&str> = settings["hooks"]["Notification"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|e| e["matcher"].as_str().unwrap())
-        .collect();
-    assert!(matchers.contains(&"permission_prompt"));
-    assert!(matchers.contains(&"idle_prompt"));
-    assert!(settings["hooks"]["Stop"].is_array());
+    // Every lifecycle edge is hooked: without UserPromptSubmit/PreToolUse a
+    // working agent looks IDLE for its entire turn, which is exactly the bug
+    // this shape fixes. And no `matcher` fields: matchers filter tool names
+    // (PreToolUse only) — a Notification entry carrying one never fires.
+    for event in ["UserPromptSubmit", "PreToolUse", "Notification", "Stop"] {
+        let entries = settings["hooks"][event].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "{event} must be hooked exactly once");
+        assert!(
+            entries[0].get("matcher").is_none(),
+            "{event} must not carry a matcher"
+        );
+    }
 
     let command = settings["hooks"]["Notification"][0]["hooks"][0]["command"]
         .as_str()
@@ -282,7 +285,7 @@ fn claude_code_preserves_the_users_own_settings_and_hooks() {
     let settings: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert_eq!(settings["model"], "opus", "unrelated settings must survive");
     assert!(text.contains("echo user-hook"), "the user's own hook must survive");
-    assert!(text.contains("permission_prompt"), "ours must be added");
+    assert!(text.contains("UserPromptSubmit"), "ours must be added");
 }
 
 #[test]
@@ -298,12 +301,13 @@ fn claude_code_on_spawn_is_idempotent() {
     let settings: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(wt.path().join(".claude/settings.local.json")).unwrap())
             .unwrap();
-    assert_eq!(
-        settings["hooks"]["Notification"].as_array().unwrap().len(),
-        2,
-        "one entry per matcher, not one per spawn"
-    );
-    assert_eq!(settings["hooks"]["Stop"].as_array().unwrap().len(), 1);
+    for event in ["UserPromptSubmit", "PreToolUse", "Notification", "Stop"] {
+        assert_eq!(
+            settings["hooks"][event].as_array().unwrap().len(),
+            1,
+            "{event}: one entry, not one per spawn"
+        );
+    }
 }
 
 // ---- Codex + Kimi: honest degradation (R11) --------------------------------
