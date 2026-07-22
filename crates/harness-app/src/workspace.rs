@@ -1562,18 +1562,6 @@ impl HarnessWorkspace {
         save_prefs_to(&self.prefs_path, &self.prefs);
     }
 
-    fn toggle_theme(&mut self, cx: &mut Context<Self>) {
-        // The ☾/☀ button toggles the harness pair; if a zed theme was active,
-        // toggling means "back to the built-ins", so the override clears.
-        self.prefs.zed_theme = None;
-        let next = theme(cx).toggled(cx);
-        crate::harness_zed_theme::install(&next, cx);
-        cx.set_global(next);
-        self.save_prefs(cx);
-        cx.refresh_windows();
-        cx.notify();
-    }
-
     /// Apply a zed theme by registry name (`None` = the harness pair).
     fn set_zed_theme(&mut self, name: Option<String>, cx: &mut Context<Self>) {
         self.prefs.zed_theme = name;
@@ -1702,37 +1690,6 @@ impl HarnessWorkspace {
                         cx.notify();
                     })),
             )
-            .child(
-                div()
-                    .id("theme-toggle")
-                    .flex_none()
-                    .px_2()
-                    .py_0p5()
-                    .rounded_md()
-                    .text_xs()
-                    .text_color(hx.tx2)
-                    .cursor_pointer()
-                    .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
-                    .child(if hx.is_dark() { "☾ dark" } else { "☀ light" })
-                    .on_click(cx.listener(|ws, _, _, cx| ws.toggle_theme(cx))),
-            )
-            .child(
-                div()
-                    .id("open-settings")
-                    .flex_none()
-                    .px_2()
-                    .py_0p5()
-                    .rounded_md()
-                    .text_xs()
-                    .text_color(if self.settings_open { hx.tx0 } else { hx.tx2 })
-                    .cursor_pointer()
-                    .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
-                    .child("⚙ settings")
-                    .on_click(cx.listener(|ws, _, _, cx| {
-                        ws.settings_open = !ws.settings_open;
-                        cx.notify();
-                    })),
-            )
     }
 
     /// The settings screen: an overlay, not a tab — settings are a glance,
@@ -1791,7 +1748,7 @@ impl HarnessWorkspace {
 
         let mut body = div().id("settings-body").flex_1().min_h_0().overflow_y_scroll().px_4().py_2();
 
-        // ---- Appearance: the harness pair plus every bundled zed theme ----
+        // ---- Appearance: mode first, then themes of that appearance -------
         let section_title = |label: &str| {
             div()
                 .pt_3()
@@ -1816,24 +1773,50 @@ impl HarnessWorkspace {
                 .child(label)
         };
 
+        // Mode decides which theme family the list below offers. Switching
+        // modes returns to the harness pair — a dark zed theme in light mode
+        // would contradict the choice just made.
+        let mut modes = div().flex().gap_1p5().pb_1();
+        for (label, dark) in [("Dark", true), ("Light", false)] {
+            let selected = self.prefs.dark == dark;
+            modes = modes.child(
+                div()
+                    .id(gpui::SharedString::from(format!("mode-{label}")))
+                    .child(chip(label.to_string(), selected, hx))
+                    .on_click(cx.listener(move |ws, _, _, cx| {
+                        cx.stop_propagation();
+                        ws.prefs.dark = dark;
+                        ws.set_zed_theme(None, cx);
+                    })),
+            );
+        }
+        body = body.child(section_title("Mode")).child(modes);
+
+        // Themes for the chosen mode: the harness palette plus every bundled
+        // zed theme of the same appearance. The registry ALSO holds our own
+        // generated theme under the harness name — excluded, or the list
+        // shows a phantom duplicate that fights the real chip for clicks
+        // (the "can't select Harness Dark" bug).
         let mut themes = div().flex().flex_wrap().gap_1p5().pb_1();
         let active_zed = self.prefs.zed_theme.clone();
-        for (label, value) in [("Harness Dark", None), ("Harness Light", None)]
-            .iter()
-            .map(|(l, _): &(&str, Option<()>)| (l.to_string(), None::<String>))
-            .chain(
-                ::theme::ThemeRegistry::global(cx)
-                    .list_names()
-                    .into_iter()
-                    .map(|n| (n.to_string(), Some(n.to_string()))),
-            )
-        {
+        let want_dark = self.prefs.dark;
+        let harness_label =
+            if want_dark { "Harness Dark".to_string() } else { "Harness Light".to_string() };
+        let mut options: Vec<(String, Option<String>)> = vec![(harness_label, None)];
+        for meta in ::theme::ThemeRegistry::global(cx).list() {
+            let name = meta.name.to_string();
+            if name == crate::harness_zed_theme::HARNESS_THEME_NAME {
+                continue;
+            }
+            let is_dark = matches!(meta.appearance, ::theme::Appearance::Dark);
+            if is_dark == want_dark {
+                options.push((name.clone(), Some(name)));
+            }
+        }
+        for (label, value) in options {
             let selected = match (&active_zed, &value) {
                 (Some(a), Some(v)) => a == v,
-                (None, None) => {
-                    // Which of the two harness chips is the active one.
-                    (label == "Harness Dark") == self.prefs.dark
-                }
+                (None, None) => true,
                 _ => false,
             };
             let value2 = value.clone();
@@ -1843,13 +1826,7 @@ impl HarnessWorkspace {
                     .child(chip(label.clone(), selected, hx))
                     .on_click(cx.listener(move |ws, _, _, cx| {
                         cx.stop_propagation();
-                        match &value2 {
-                            Some(name) => ws.set_zed_theme(Some(name.clone()), cx),
-                            None => {
-                                ws.prefs.dark = label == "Harness Dark";
-                                ws.set_zed_theme(None, cx);
-                            }
-                        }
+                        ws.set_zed_theme(value2.clone(), cx);
                     })),
             );
         }

@@ -117,13 +117,6 @@ impl HarnessTheme {
         self.bg0.r < 0.5
     }
 
-    pub fn toggled(&self, cx: &App) -> Self {
-        if self.is_dark() {
-            Self::light(cx)
-        } else {
-            Self::dark(cx)
-        }
-    }
 }
 
 impl Global for HarnessTheme {}
