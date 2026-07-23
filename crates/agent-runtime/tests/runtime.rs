@@ -279,7 +279,7 @@ fn settings_default_display_matches_what_the_spawn_actually_runs() {
     );
     assert_eq!(
         agent_runtime::default_command_display(&AgentKind::Codex),
-        "codex --sandbox workspace-write --ask-for-approval never"
+        "codex --ask-for-approval never --dangerously-bypass-hook-trust"
     );
 }
 

@@ -21,17 +21,6 @@ use agent_runtime::{
 
 const RECV: Duration = Duration::from_secs(10);
 
-/// Count `notify = ...` lines in a Codex config.
-///
-/// Substring-counting "notify" would also match the shim's own filename
-/// (`codex-notify.mjs`), which is exactly the false positive this avoids.
-fn notify_lines(config: &str) -> usize {
-    config
-        .lines()
-        .filter(|l| l.trim_start().starts_with("notify"))
-        .count()
-}
-
 // ---- SSE client ------------------------------------------------------------
 
 /// Serve one canned SSE response, optionally chunked, then close.
@@ -314,62 +303,66 @@ fn claude_code_on_spawn_is_idempotent() {
     }
 }
 
+/// The `command` strings across every hook group in `hooks.json[event]`.
+fn hook_commands(hooks: &serde_json::Value, event: &str) -> Vec<String> {
+    hooks["hooks"][event]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|group| group["hooks"].as_array())
+        .flatten()
+        .filter_map(|h| h["command"].as_str().map(str::to_owned))
+        .collect()
+}
+
 #[test]
-fn codex_notify_lands_at_root_even_when_tables_end_the_file() {
-    // The regression that corrupted a real user config: a line-based append
-    // put `notify` inside the [mcp_servers.x.env] table that happened to end
-    // the file, and codex refused to start ("invalid type: sequence").
+fn codex_migrates_off_the_legacy_notify_line() {
+    // Pre-hooks installs left `notify = ["node", ".../codex-notify.mjs"]` in
+    // config.toml. Now that the hook owns status, that line must go — including
+    // any stray copy the old line-append bug buried inside a nested table — so
+    // the two mechanisms don't both write status.json. Everything else stays.
     let _guard = CODEX_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let codex_home = tempfile::tempdir().unwrap();
     unsafe { std::env::set_var("HARNESS_CODEX_HOME", codex_home.path()) };
     let state = tempfile::tempdir().unwrap();
     let wt = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(codex_home.path()).unwrap();
-    std::fs::write(
-        codex_home.path().join("config.toml"),
-        "model = \"gpt-5\"\n\n[mcp_servers.node_repl.env]\nPATH = \"/usr/bin\"\n",
-    )
-    .unwrap();
-
-    let rt = CodexRuntime::new(state.path());
-    rt.on_spawn(wt.path()).unwrap();
-
-    let text = std::fs::read_to_string(codex_home.path().join("config.toml")).unwrap();
-    let doc: toml::Value = toml::from_str(&text).expect("config must stay parseable");
-    assert!(doc.get("notify").is_some(), "notify must exist at the ROOT");
-    assert!(
-        doc["mcp_servers"]["node_repl"]["env"].get("notify").is_none(),
-        "notify must NOT leak into nested tables"
-    );
-    // And the repair path: run again on a config damaged the old way.
+    let legacy = state.path().join("shims").join("codex-notify.mjs");
     std::fs::write(
         codex_home.path().join("config.toml"),
         format!(
-            "model = \"gpt-5\"\n\n[mcp_servers.node_repl.env]\nPATH = \"/usr/bin\"\nnotify = [\"node\", \"{}\"]\n",
-            rt.shim_path().display()
+            "model = \"gpt-5\"\nnotify = [\"node\", \"{shim}\"]\n\n\
+             [mcp_servers.node_repl.env]\nPATH = \"/usr/bin\"\nnotify = [\"node\", \"{shim}\"]\n",
+            shim = legacy.display()
         ),
     )
     .unwrap();
-    rt.on_spawn(wt.path()).unwrap();
+
+    CodexRuntime::new(state.path()).on_spawn(wt.path()).unwrap();
+
     let text = std::fs::read_to_string(codex_home.path().join("config.toml")).unwrap();
-    let doc: toml::Value = toml::from_str(&text).unwrap();
+    let doc: toml::Value = toml::from_str(&text).expect("config must stay parseable");
+    assert!(doc.get("notify").is_none(), "root notify must be removed");
     assert!(
         doc["mcp_servers"]["node_repl"]["env"].get("notify").is_none(),
-        "repair must remove the stray notify the old bug left behind"
+        "the stray nested notify must be removed too"
     );
-    assert!(doc.get("notify").is_some());
+    assert_eq!(doc["model"].as_str(), Some("gpt-5"), "unrelated config survives");
+    assert_eq!(doc["mcp_servers"]["node_repl"]["env"]["PATH"].as_str(), Some("/usr/bin"));
 }
 
 // ---- Codex + Kimi: honest degradation (R11) --------------------------------
 
 #[test]
 fn codex_is_best_effort_and_may_not_claim_input_is_needed() {
-    // Codex's TUI has no approval-blocked event — only agent-turn-complete.
-    // Reporting that as "input needed" is precisely the lie R11 forbids.
+    // Codex's TUI has no approval-blocked event — only turn start/stop. So its
+    // status hook can say running/idle but never "input needed"; reporting the
+    // latter is precisely the lie R11 forbids.
     let state = tempfile::tempdir().unwrap();
     let rt = CodexRuntime::new(state.path());
     assert_eq!(rt.fidelity(), WaitFidelity::BestEffort);
-    assert_eq!(rt.signal_kind(), SignalKind::Notify);
+    // The hook writes the shared status.json, same transport as pi / Claude.
+    assert_eq!(rt.signal_kind(), SignalKind::StatusFile);
 
     let waiting = agent_runtime::AgentSignal {
         worktree_root: Path::new("/wt").into(),
@@ -382,7 +375,7 @@ fn codex_is_best_effort_and_may_not_claim_input_is_needed() {
 }
 
 #[test]
-fn codex_writes_a_notify_line_and_stays_idempotent() {
+fn codex_installs_status_hooks_and_stays_idempotent() {
     let _guard = CODEX_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let codex_home = tempfile::tempdir().unwrap();
     unsafe { std::env::set_var("HARNESS_CODEX_HOME", codex_home.path()) };
@@ -392,39 +385,52 @@ fn codex_writes_a_notify_line_and_stays_idempotent() {
     rt.on_spawn(wt.path()).unwrap();
     rt.on_spawn(wt.path()).unwrap();
 
-    let config = std::fs::read_to_string(codex_home.path().join("config.toml")).unwrap();
-    assert_eq!(
-        notify_lines(&config),
-        1,
-        "exactly one notify line, got: {config}"
-    );
-    assert!(config.contains(&rt.shim_path().display().to_string()));
-    assert!(rt.shim_path().exists());
+    assert!(rt.shim_path().exists(), "the hook shim must be materialized");
+    let shim = rt.shim_path().display().to_string();
+    let hooks: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(codex_home.path().join("hooks.json")).unwrap())
+            .unwrap();
+
+    // Both turn edges installed, and running on_spawn twice must not stack them.
+    for event in ["UserPromptSubmit", "Stop"] {
+        let cmds = hook_commands(&hooks, event);
+        assert_eq!(cmds.len(), 1, "one {event} hook, got: {cmds:?}");
+        assert!(cmds[0].contains(&shim), "{event} hook must call our shim");
+    }
 }
 
 #[test]
-fn codex_preserves_unrelated_config_but_takes_over_notify() {
+fn codex_preserves_the_users_own_hooks() {
     let _guard = CODEX_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let codex_home = tempfile::tempdir().unwrap();
     unsafe { std::env::set_var("HARNESS_CODEX_HOME", codex_home.path()) };
-    // Codex honors a single `notify`, so ours has to win or the pill silently
-    // never updates — but everything else in the file must survive.
+    // The user already runs their own hooks. Ours must join, not replace: a
+    // foreign UserPromptSubmit hook has to survive alongside ours, and an
+    // unrelated event (SessionStart) must be left entirely alone.
     let state = tempfile::tempdir().unwrap();
     let wt = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(codex_home.path()).unwrap();
     std::fs::write(
-        codex_home.path().join("config.toml"),
-        "model = \"gpt-5\"\nnotify = [\"/usr/bin/say\", \"done\"]\napproval_policy = \"on-request\"\n",
+        codex_home.path().join("hooks.json"),
+        r#"{ "hooks": {
+              "SessionStart": [ { "hooks": [ { "type": "command", "command": "/usr/local/bin/mine.sh" } ] } ],
+              "UserPromptSubmit": [ { "hooks": [ { "type": "command", "command": "/usr/local/bin/mine.sh" } ] } ]
+        } }"#,
     )
     .unwrap();
 
     CodexRuntime::new(state.path()).on_spawn(wt.path()).unwrap();
 
-    let config = std::fs::read_to_string(codex_home.path().join("config.toml")).unwrap();
-    assert!(config.contains("model = \"gpt-5\""));
-    assert!(config.contains("approval_policy"));
-    assert!(!config.contains("/usr/bin/say"), "the foreign notify must be replaced");
-    assert_eq!(notify_lines(&config), 1);
+    let hooks: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(codex_home.path().join("hooks.json")).unwrap())
+            .unwrap();
+    // The user's SessionStart hook is untouched.
+    assert_eq!(hook_commands(&hooks, "SessionStart"), vec!["/usr/local/bin/mine.sh"]);
+    // Their UserPromptSubmit hook survives, and ours is added beside it.
+    let ups = hook_commands(&hooks, "UserPromptSubmit");
+    assert!(ups.iter().any(|c| c == "/usr/local/bin/mine.sh"), "foreign hook kept: {ups:?}");
+    assert!(ups.iter().any(|c| c.contains("codex-hook.mjs")), "our hook added: {ups:?}");
+    assert_eq!(ups.len(), 2, "exactly the two, no clobber: {ups:?}");
 }
 
 #[test]
