@@ -32,7 +32,7 @@
  * or list it under "extensions" in settings.json.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "./pi-extension-api";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";

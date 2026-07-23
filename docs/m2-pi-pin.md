@@ -120,18 +120,27 @@ a live LM Studio build.
 > `@mariozechner/pi-coding-agent` → `@earendil-works/pi-coding-agent`
 
 The GitHub org has already moved (`badlogic/pi-mono` → `earendil-works/pi-mono`; the
-changelog cites both). When the new package publishes, `script/setup-macos.sh`,
-`script/doctor.sh`, `pi-ext/package.json`, and the `import type` in
-`harness-status.ts` all need the new scope. Nothing breaks until then. This is now the
+changelog cites both). When the new package publishes, `script/setup-macos.sh` and
+`script/doctor.sh` need the new scope. Nothing breaks until then. This is now the
 principal R3 residual, replacing the pin gap M2 closed.
+
+> **Update (2026-07-22).** The other two sites this once listed —
+> `pi-ext/package.json` and the `import type` in `harness-status.ts` /
+> `harness-tools.ts` — no longer reference the npm scope at all. The devDependency
+> existed only to name `ExtensionAPI`/`ExtensionContext`; the package is deprecated
+> and carries high-severity advisories, so those types were vendored to
+> `pi-ext/pi-extension-api.d.ts` and the dependency dropped. The scope rename now
+> touches only the two runtime-install scripts.
 
 ---
 
 ## Verdict
 
 R3's *pin-gap* half is retired: one pin (0.73.1), recorded in setup, doctor,
-`package.json`, and the extension header, with both a mock suite and a real-process
-capture pinned to it. R3's *drift* half is unchanged by nature — but it is now cheap
+and the extension header, with both a mock suite and a real-process
+capture pinned to it. *(The `package.json` site listed here at M2 was later
+removed — see the §6 update: its type-only dep was vendored to
+`pi-ext/pi-extension-api.d.ts`.)* R3's *drift* half is unchanged by nature — but it is now cheap
 to re-check (`bash pi-ext/testing/capture-lifecycle.sh`) instead of expensive.
 R9 is re-verified at the new version, and came out stronger: `custom` dialogs now
 raise `waiting` too.

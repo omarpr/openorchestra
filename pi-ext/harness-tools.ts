@@ -26,7 +26,7 @@
  * Install alongside harness-status.ts (the harness passes both with `pi -e`).
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "./pi-extension-api";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
