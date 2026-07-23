@@ -2311,12 +2311,9 @@ impl HarnessWorkspace {
             let key = kind.as_str().to_string();
             let pref = self.prefs.agents.get(&key).cloned().unwrap_or_default();
             let (glyph, color) = agent_mark(&kind);
-            // The binary each adapter actually launches; claude-code's is
-            // `claude`, everyone else matches their kind string.
-            let default_cmd = match kind {
-                AgentKind::ClaudeCode => "claude",
-                _ => kind.as_str(),
-            };
+            // The command each adapter actually launches when no override is
+            // set — defined once per agent in agent-runtime, not here.
+            let default_cmd = agent_runtime::default_command_display(&kind);
             let editing = matches!(&self.edit, Edit::AgentCmd(k, _) if *k == key);
 
             let toggle_key = key.clone();
@@ -2324,8 +2321,8 @@ impl HarnessWorkspace {
             // Prefill what the user SEES — the override if set, else the
             // default — so editing refines the current command instead of
             // starting from a blank line.
-            let prefill = pref.command.clone().unwrap_or_else(|| default_cmd.to_string());
-            let cmd_display = pref.command.clone().unwrap_or_else(|| default_cmd.to_string());
+            let prefill = pref.command.clone().unwrap_or_else(|| default_cmd.clone());
+            let cmd_display = pref.command.clone().unwrap_or_else(|| default_cmd.clone());
             let edit_text = match &self.edit {
                 Edit::AgentCmd(k, t) if *k == key => t.clone(),
                 _ => String::new(),
@@ -4347,7 +4344,7 @@ fn detect_tools() -> ToolStatus {
     ToolStatus {
         git: on_path("git"),
         gh: on_path("gh"),
-        pi: on_path("pi"),
+        pi: on_path(agent_runtime::default_invocation(&AgentKind::Pi).0),
     }
 }
 

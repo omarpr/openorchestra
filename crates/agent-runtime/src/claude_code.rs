@@ -45,6 +45,13 @@ const SHIM: &str = include_str!("../shims/claude-code-status.mjs");
 
 const SHIM_FILENAME: &str = "claude-code-status.mjs";
 
+/// The default launch command — THE one definition for this agent. The
+/// registry kind is "claude-code"; the binary is `claude`. Everything else
+/// (the spawn below, the settings UI's default/prefill via
+/// [`crate::default_command_display`]) derives from these two consts.
+pub(crate) const PROGRAM: &str = "claude";
+pub(crate) const DEFAULT_ARGS: &[&str] = &["--permission-mode", "auto"];
+
 pub struct ClaudeCodeRuntime {
     state_dir: PathBuf,
 }
@@ -174,12 +181,11 @@ impl AgentRuntime for ClaudeCodeRuntime {
     }
 
     fn command(&self, _worktree_root: &Path) -> Option<AgentCommand> {
-        // The registry kind is "claude-code"; the binary is `claude`.
         Some(AgentCommand {
-            program: resolve_on_path("claude")?,
-            args: Vec::new(),
+            program: resolve_on_path(PROGRAM)?,
+            args: DEFAULT_ARGS.iter().map(|s| s.to_string()).collect(),
             env: Vec::new(),
-            label: "claude".to_string(),
+            label: PROGRAM.to_string(),
         })
     }
 }

@@ -81,7 +81,7 @@ fn drives_a_real_pi_rpc_process() {
     // Sandbox pi so the user's own ~/.pi is never read or written.
     std::env::set_var("PI_CODING_AGENT_DIR", agent_dir.path());
 
-    let mut pi = PiRpc::spawn(work.path(), &["--model", "lmstudio/omar-agent-v1"])
+    let mut pi = PiRpc::spawn("pi", work.path(), &["--model", "lmstudio/omar-agent-v1"])
         .expect("pi must be on PATH");
     let records = pi.subscribe();
 

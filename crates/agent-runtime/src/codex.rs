@@ -1,24 +1,18 @@
-//! The Codex and Kimi adapters (§4.5, roadmap A4) — the honest-degradation
-//! cases.
+//! The Codex adapter (§4.5, roadmap A4) — the best-effort honest-degradation
+//! case (its terminal-only sibling is [`crate::KimiRuntime`]).
 //!
-//! These two exist to prove that "terminal-only" and "best-effort" are
-//! *supported first-class outcomes*, not failures (R11). Both agents run fully
-//! in the embedded terminal; what differs is only how much we can say about
-//! their state.
+//! It exists to prove that "best-effort" is a *supported first-class outcome*,
+//! not a failure (R11). The agent runs fully in the embedded terminal; the
+//! adapter only limits how much we can say about its state.
 //!
-//! **Codex — best-effort.** `config.toml` can name a `notify` program, but the
-//! only event it receives in TUI mode is `agent-turn-complete`. There is **no
-//! out-of-band approval-blocked event**, so this adapter can say "the turn
-//! finished" and nothing more. It therefore reports
-//! [`WaitFidelity::BestEffort`], which means `should_notify` refuses to raise a
-//! "needs input" notification for it — labelling turn-complete as "input
-//! needed" is exactly the lie R11 exists to prevent. (`codex exec --json` and
-//! `codex mcp` expose exact events and are the upgrade path.)
-//!
-//! **Kimi — terminal-only.** The TUI exposes no hook at all, so the adapter
-//! offers no signal and raises no notification. `kimi acp` speaks the Agent
-//! Client Protocol (including permission requests) and is the structured
-//! upgrade path when the TUI is not required.
+//! `config.toml` can name a `notify` program, but the only event it receives
+//! in TUI mode is `agent-turn-complete`. There is **no out-of-band
+//! approval-blocked event**, so this adapter can say "the turn finished" and
+//! nothing more. It therefore reports [`WaitFidelity::BestEffort`], which
+//! means `should_notify` refuses to raise a "needs input" notification for
+//! it — labelling turn-complete as "input needed" is exactly the lie R11
+//! exists to prevent. (`codex exec --json` and `codex mcp` expose exact
+//! events and are the upgrade path.)
 
 use std::fs;
 use std::io;
@@ -30,6 +24,13 @@ use crate::{
 
 const SHIM: &str = include_str!("../shims/codex-notify.mjs");
 const SHIM_FILENAME: &str = "codex-notify.mjs";
+
+/// The default launch command — THE one definition for this agent. The spawn
+/// below and the settings UI (via [`crate::default_command_display`]) both
+/// derive from these two consts.
+pub(crate) const PROGRAM: &str = "codex";
+pub(crate) const DEFAULT_ARGS: &[&str] =
+    &["--sandbox", "workspace-write", "--ask-for-approval", "never"];
 
 pub struct CodexRuntime {
     state_dir: PathBuf,
@@ -156,47 +157,13 @@ impl AgentRuntime for CodexRuntime {
 
     fn command(&self, _worktree_root: &Path) -> Option<AgentCommand> {
         Some(AgentCommand {
-            program: resolve_on_path("codex")?,
-            args: Vec::new(),
+            program: resolve_on_path(PROGRAM)?,
+            args: DEFAULT_ARGS.iter().map(|s| s.to_string()).collect(),
             // The notify hook lives in the user's GLOBAL codex config; this
             // marker is what scopes it — the shim exits without writing
             // unless it inherits this from a harness-spawned codex.
             env: vec![("HARNESS_MANAGED".to_string(), "1".to_string())],
-            label: "codex".to_string(),
-        })
-    }
-}
-
-/// Kimi: runs in the terminal, offers no signal from the TUI.
-///
-/// A distinct type rather than a reuse of `TerminalOnlyRuntime` so that the
-/// ACP upgrade path (`kimi acp`) has somewhere to land.
-pub struct KimiRuntime;
-
-impl AgentRuntime for KimiRuntime {
-    fn kind(&self) -> AgentKind {
-        AgentKind::Kimi
-    }
-
-    fn fidelity(&self) -> WaitFidelity {
-        WaitFidelity::TerminalOnly
-    }
-
-    fn signal_kind(&self) -> SignalKind {
-        // `kimi acp` would make this SignalKind::Acp; the TUI has nothing.
-        SignalKind::None
-    }
-
-    fn on_spawn(&self, _worktree_root: &Path) -> io::Result<()> {
-        Ok(())
-    }
-
-    fn command(&self, _worktree_root: &Path) -> Option<AgentCommand> {
-        Some(AgentCommand {
-            program: resolve_on_path("kimi")?,
-            args: Vec::new(),
-            env: Vec::new(),
-            label: "kimi".to_string(),
+            label: PROGRAM.to_string(),
         })
     }
 }

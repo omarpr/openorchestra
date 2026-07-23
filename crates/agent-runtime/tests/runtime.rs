@@ -233,6 +233,57 @@ fn claude_code_maps_to_the_claude_binary() {
 }
 
 #[test]
+fn settings_default_display_matches_what_the_spawn_actually_runs() {
+    // The default command is defined once per agent (its module's PROGRAM /
+    // DEFAULT_ARGS consts); the settings UI shows `default_command_display`
+    // and the adapter spawns `command()`. This pins the two to each other so
+    // a flag added to one place cannot silently miss the other. pi is absent
+    // by design: its spawn appends `-e <extension>` wiring args that are not
+    // part of the user-facing default.
+    let dir = tempfile::tempdir().unwrap();
+    let kinds: Vec<(AgentKind, Box<dyn AgentRuntime>)> = vec![
+        (
+            AgentKind::ClaudeCode,
+            Box::new(agent_runtime::ClaudeCodeRuntime::new(dir.path())),
+        ),
+        (
+            AgentKind::Codex,
+            Box::new(agent_runtime::CodexRuntime::new(dir.path())),
+        ),
+        (AgentKind::Kimi, Box::new(agent_runtime::KimiRuntime)),
+        (
+            AgentKind::OpenCode,
+            Box::new(agent_runtime::OpenCodeRuntime::new("/tmp/wt")),
+        ),
+    ];
+    for (kind, rt) in kinds {
+        let display = agent_runtime::default_command_display(&kind);
+        let mut parts = display.split_whitespace();
+        let program = parts.next().expect("display always names a binary");
+        // Skipped rather than failed when the CLI is not installed.
+        let Some(cmd) = rt.command(Path::new("/tmp")) else {
+            continue;
+        };
+        assert!(cmd.program.ends_with(program), "{kind}: {:?}", cmd.program);
+        assert_eq!(
+            cmd.args,
+            parts.map(String::from).collect::<Vec<_>>(),
+            "{kind}: spawn args diverge from the settings default"
+        );
+    }
+    // The flags themselves live in exactly one place; this is a change
+    // detector, not a second definition.
+    assert_eq!(
+        agent_runtime::default_command_display(&AgentKind::ClaudeCode),
+        "claude --permission-mode auto"
+    );
+    assert_eq!(
+        agent_runtime::default_command_display(&AgentKind::Codex),
+        "codex --sandbox workspace-write --ask-for-approval never"
+    );
+}
+
+#[test]
 fn unknown_agent_kinds_still_get_a_runnable_adapter() {
     let rt = agent_runtime::runtime_for(
         &AgentKind::Other("future-agent".into()),

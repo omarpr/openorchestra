@@ -21,6 +21,7 @@
 mod bus;
 mod claude_code;
 mod codex;
+mod kimi;
 mod opencode;
 mod pi;
 pub mod sse;
@@ -28,7 +29,8 @@ mod status_file;
 
 pub use bus::Bus;
 pub use claude_code::ClaudeCodeRuntime;
-pub use codex::{CodexRuntime, KimiRuntime};
+pub use codex::CodexRuntime;
+pub use kimi::KimiRuntime;
 pub use opencode::OpenCodeRuntime;
 pub use pi::PiRuntime;
 pub use status_file::StatusFileSource;
@@ -196,6 +198,37 @@ pub trait AgentRuntime: Send + Sync {
     }
 }
 
+/// The binary name and default args a kind launches, for any caller that
+/// touches an agent CLI outside an adapter — presence checks, sidecar
+/// spawns, the settings display.
+///
+/// This does NOT define anything: each agent's `PROGRAM` / `DEFAULT_ARGS`
+/// consts in its own module are the single definition, shared with that
+/// adapter's `command()`.
+pub fn default_invocation(kind: &AgentKind) -> (&str, &'static [&'static str]) {
+    match kind {
+        AgentKind::Pi => (pi::PROGRAM, pi::DEFAULT_ARGS),
+        AgentKind::OpenCode => (opencode::PROGRAM, opencode::DEFAULT_ARGS),
+        AgentKind::ClaudeCode => (claude_code::PROGRAM, claude_code::DEFAULT_ARGS),
+        AgentKind::Codex => (codex::PROGRAM, codex::DEFAULT_ARGS),
+        AgentKind::Kimi => (kimi::PROGRAM, kimi::DEFAULT_ARGS),
+        other => (other.as_str(), &[]),
+    }
+}
+
+/// The default launch command for a kind, as one displayable line — e.g.
+/// `"claude --permission-mode auto"`.
+///
+/// The settings UI shows and prefills this string so what the user sees is
+/// exactly what an un-overridden spawn runs.
+pub fn default_command_display(kind: &AgentKind) -> String {
+    let (program, args) = default_invocation(kind);
+    std::iter::once(program)
+        .chain(args.iter().copied())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Find an executable named `program` on `$PATH`.
 ///
 /// Deliberately does not consult `$SHELL` or a bundled copy: §4.5/R12 rests on
@@ -272,15 +305,13 @@ impl AgentRuntime for TerminalOnlyRuntime {
     }
 
     fn command(&self, _worktree_root: &Path) -> Option<AgentCommand> {
-        // The CLI name is the kind's wire string for every agent in §4.5:
-        // pi / opencode / codex / claude-code -> `claude` / kimi.
-        let program = match self.kind {
-            AgentKind::ClaudeCode => "claude",
-            _ => self.kind.as_str(),
-        };
+        // Same single source as the dedicated adapters: known kinds get their
+        // module's PROGRAM / DEFAULT_ARGS (claude-code's binary is `claude`),
+        // unknown kinds run their own wire string with no args.
+        let (program, args) = default_invocation(&self.kind);
         Some(AgentCommand {
             program: resolve_on_path(program)?,
-            args: Vec::new(),
+            args: args.iter().map(|s| s.to_string()).collect(),
             env: Vec::new(),
             label: program.to_string(),
         })

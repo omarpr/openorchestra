@@ -15,6 +15,8 @@
 
 use std::path::PathBuf;
 
+use agent_runtime::AgentKind;
+
 use gpui::{
     App, Context, FocusHandle, Focusable, IntoElement, KeyDownEvent, ParentElement,
     Render, Styled, Window, div, prelude::*, px,
@@ -80,7 +82,10 @@ impl ChatPane {
     }
 
     fn connect(&mut self, cx: &mut Context<Self>) {
-        match PiRpc::spawn(&self.worktree_root, &[]) {
+        // The binary name comes from pi's one definition in agent-runtime;
+        // `--mode rpc` is pi-client's own contract, not a default-args thing.
+        let (pi_bin, _) = agent_runtime::default_invocation(&AgentKind::Pi);
+        match PiRpc::spawn(pi_bin, &self.worktree_root, &[]) {
             Ok(rpc) => {
                 let records = rpc.subscribe();
                 self.rpc = Some(rpc);

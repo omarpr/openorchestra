@@ -38,6 +38,12 @@ use crate::{
 /// Port OpenCode's server listens on by default.
 pub const DEFAULT_PORT: u16 = 4096;
 
+/// The default launch command — THE one definition for this agent. The spawn
+/// below and the settings UI (via [`crate::default_command_display`]) both
+/// derive from these two consts.
+pub(crate) const PROGRAM: &str = "opencode";
+pub(crate) const DEFAULT_ARGS: &[&str] = &[];
+
 pub struct OpenCodeRuntime {
     worktree_root: PathBuf,
     host: String,
@@ -90,10 +96,10 @@ impl AgentRuntime for OpenCodeRuntime {
 
     fn command(&self, _worktree_root: &Path) -> Option<AgentCommand> {
         Some(AgentCommand {
-            program: resolve_on_path("opencode")?,
-            args: Vec::new(),
+            program: resolve_on_path(PROGRAM)?,
+            args: DEFAULT_ARGS.iter().map(|s| s.to_string()).collect(),
             env: Vec::new(),
-            label: "opencode".to_string(),
+            label: PROGRAM.to_string(),
         })
     }
 

@@ -31,6 +31,14 @@ use crate::{
 /// pi's runtime toolset to the versioned contract (§4.4, M6) — which it reads
 /// from `tools.json`, so all three must be materialized together or the
 /// extension reports a missing schema.
+/// The default launch command — THE one definition for this agent. The spawn
+/// below and the settings UI (via [`crate::default_command_display`]) both
+/// derive from these two consts. The `-e <extension>` flags are adapter
+/// wiring, not part of the user-facing default: they are per-machine absolute
+/// paths added at spawn time.
+pub(crate) const PROGRAM: &str = "pi";
+pub(crate) const DEFAULT_ARGS: &[&str] = &[];
+
 const ASSETS: &[(&str, &str)] = &[
     ("harness-status.ts", include_str!("../../../pi-ext/harness-status.ts")),
     ("harness-tools.ts", include_str!("../../../pi-ext/harness-tools.ts")),
@@ -121,7 +129,7 @@ impl AgentRuntime for PiRuntime {
     }
 
     fn command(&self, _worktree_root: &Path) -> Option<AgentCommand> {
-        let program = resolve_on_path("pi")?;
+        let program = resolve_on_path(PROGRAM)?;
         // Materializing here as well as in on_spawn keeps `command` correct
         // when called standalone; it is a no-op once the files are current.
         self.materialize_assets().ok()?;
@@ -139,7 +147,7 @@ impl AgentRuntime for PiRuntime {
                 "HARNESS_AGENT_SCHEMA".to_string(),
                 self.schema_path().to_string_lossy().into_owned(),
             )],
-            label: "pi".to_string(),
+            label: PROGRAM.to_string(),
         })
     }
 }

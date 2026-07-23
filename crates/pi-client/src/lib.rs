@@ -10,7 +10,7 @@
 //!
 //! ```no_run
 //! use pi_client::{PiRpc, RpcCommand};
-//! let mut pi = PiRpc::spawn("/path/to/worktree", &["--model", "lmstudio/omar-agent-v1"]).unwrap();
+//! let mut pi = PiRpc::spawn("pi", "/path/to/worktree", &["--model", "lmstudio/omar-agent-v1"]).unwrap();
 //! let events = pi.subscribe();
 //! pi.send(&RpcCommand::Prompt {
 //!     id: Some("c1".into()),
@@ -48,12 +48,18 @@ pub struct PiRpc {
 }
 
 impl PiRpc {
-    /// Spawn `pi --mode rpc` with `cwd` set to the worktree root.
+    /// Spawn `<program> --mode rpc` with `cwd` set to the worktree root.
     ///
-    /// `pi` is resolved from `$PATH` — the user's own installed, authenticated
-    /// CLI, exactly as §4.5/R12 requires.
-    pub fn spawn(worktree_root: impl AsRef<Path>, extra_args: &[&str]) -> std::io::Result<PiRpc> {
-        let mut command = Command::new("pi");
+    /// `program` is the pi binary — callers pass it in (the harness passes
+    /// `agent_runtime::default_invocation`'s name) so this crate does not
+    /// keep a second copy of the CLI's name. Resolved from `$PATH` — the
+    /// user's own installed, authenticated CLI, exactly as §4.5/R12 requires.
+    pub fn spawn(
+        program: impl AsRef<std::ffi::OsStr>,
+        worktree_root: impl AsRef<Path>,
+        extra_args: &[&str],
+    ) -> std::io::Result<PiRpc> {
+        let mut command = Command::new(program);
         command
             .arg("--mode")
             .arg("rpc")
