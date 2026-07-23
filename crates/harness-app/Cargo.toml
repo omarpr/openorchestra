@@ -116,6 +116,14 @@ git = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4
 # Rendered .md preview in the diff panel — zed's own renderer, so previews
 # match the editor rather than a hand-rolled approximation.
 markdown = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+# Native git/diff INSIDE the editor: project-diff view, git panel, and editor
+# gutter change-bars. Additive to our custom review panel. Auto-attaches to the
+# hosted Workspace via git_ui::init's observe_new hook. Already compiled
+# transitively, so declaring it just makes it nameable.
+git_ui = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+# Native, live, code-highlighted Markdown preview as an editor pane item —
+# distinct from the diff-panel disk-content preview above.
+markdown_preview = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
 
 # N2 (§12): rust-analyzer needs the language *adapters*, which live here.
 # Deliberately WITHOUT default features so `load-grammars` stays off — §3.2's

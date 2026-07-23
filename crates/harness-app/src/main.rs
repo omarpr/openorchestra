@@ -229,6 +229,15 @@ fn main() {
         }
         file_finder::init(cx);
         search::init(cx);
+        // Native git/diff (project-diff view, git panel, gutter change-bars) and
+        // native Markdown preview. Both register via `cx.observe_new::<Workspace>`,
+        // so they auto-attach their actions to every hosted Workspace we build —
+        // no per-instance wiring. git_ui also installs the blame renderer and
+        // per-editor conflict views.
+        git_ui::init(cx);
+        // Leading `::` — this crate has its own `markdown_preview` module (the
+        // diff-panel renderer), which otherwise shadows zed's crate here.
+        ::markdown_preview::init(cx);
 
         cx.set_global(hx);
 

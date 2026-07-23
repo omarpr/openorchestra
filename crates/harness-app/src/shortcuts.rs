@@ -193,6 +193,28 @@ pub fn entries() -> Vec<Entry> {
             "Close file",
             ::workspace::pane::CloseActiveItem::default(),
         ),
+        // Native git/diff (git_ui): the project-diff view of all uncommitted
+        // changes, opened as a pane item beside the editor.
+        Entry::new(
+            s("cmd-shift-d"),
+            Scope::Workspace,
+            "Show project diff (git)",
+            git_ui::project_diff::Diff,
+        ),
+        // Native Markdown preview (markdown_preview): live, code-highlighted,
+        // as an editor pane. Distinct from the diff panel's ◧ toggle.
+        Entry::new(
+            s("cmd-shift-m"),
+            Scope::Workspace,
+            "Preview markdown",
+            zed_actions::preview::markdown::OpenPreview,
+        ),
+        Entry::new(
+            s("cmd-alt-m"),
+            Scope::Workspace,
+            "Preview markdown to the side",
+            zed_actions::preview::markdown::OpenPreviewToTheSide,
+        ),
 
         // ---- Text editing -------------------------------------------------
         // ⌘C here deliberately shadows the global diff-copy: context depth
