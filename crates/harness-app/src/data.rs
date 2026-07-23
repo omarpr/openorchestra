@@ -19,7 +19,11 @@ pub struct WorktreeView {
     pub dirty: usize,
 }
 
-/// A repo group: its `main` entry (read-only, D8) + its worktrees.
+/// A repo group: its `main` entry + its worktrees.
+///
+/// The `main` row is a first-class citizen (D8 revised): it carries the same
+/// live git status as a worktree card so it can show ahead/behind/dirty badges,
+/// not just a static check.
 pub struct RepoView {
     pub name: String,
     pub repo_root: PathBuf,
@@ -27,6 +31,12 @@ pub struct RepoView {
     /// Ref the diff/ahead-behind compares against — `origin/<default>` when a
     /// remote exists, else the local default branch (§6.1 D10).
     pub compare_ref: String,
+    /// Commits on the main checkout's HEAD not on `compare_ref`.
+    pub ahead: usize,
+    /// Commits on `compare_ref` not on the main checkout's HEAD.
+    pub behind: usize,
+    /// Uncommitted changed paths in the main checkout.
+    pub dirty: usize,
     pub worktrees: Vec<WorktreeView>,
 }
 
@@ -81,11 +91,17 @@ fn new_repo_view(git: &GitWorktrees<SystemRunner>, name: &str, root: &Path) -> R
     } else {
         default_branch.clone()
     };
+    // Same live status a worktree card gets — reused, not re-derived, so the
+    // main row's badges cannot drift from the card ones.
+    let status = git.status(root, Some(&compare_ref)).unwrap_or_default();
     RepoView {
         name: name.to_string(),
         repo_root: root.to_path_buf(),
         default_branch,
         compare_ref,
+        ahead: status.ahead,
+        behind: status.behind,
+        dirty: status.dirty_files,
         worktrees: Vec::new(),
     }
 }

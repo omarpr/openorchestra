@@ -457,7 +457,7 @@ impl HarnessWorkspace {
         let manager = Manager::new(registry, git, data_dir.join("worktrees"));
         let data = WorkspaceData::build(manager.git(), &manager.registry, &repo_roots);
 
-        let branches: Vec<BranchKey> = manager
+        let mut branches: Vec<BranchKey> = manager
             .registry
             .active()
             .map(|e| BranchKey {
@@ -465,6 +465,14 @@ impl HarnessWorkspace {
                 branch: e.branch.clone(),
             })
             .collect();
+        // Main-checkout CI: poll each repo's default branch too (main is
+        // first-class). PRs don't apply to a default branch, but its CI does.
+        for repo in &data.repos {
+            branches.push(BranchKey {
+                repo_dir: repo.repo_root.clone(),
+                branch: repo.default_branch.clone(),
+            });
+        }
         let (poller, forge_rx) = Poller::spawn(Arc::new(GhCli::new()), branches, PollerConfig::default());
 
         // One bus for every adapter's signal (§4.6). The sidebar pill, the
@@ -477,6 +485,15 @@ impl HarnessWorkspace {
                 for e in manager.registry.active() {
                     if let Err(err) = source.watch(&e.path, e.agent_kind.clone()) {
                         log::warn!("cannot watch {}: {err}", e.path.display());
+                    }
+                }
+                // Main checkouts are first-class (D8 revised): watch each repo
+                // root too, so an agent run on `main` drives the same status
+                // pill and notifications a worktree does. The kind is a fallback
+                // — status files self-identify their writer.
+                for root in &repo_roots {
+                    if let Err(err) = source.watch(root, AgentKind::default()) {
+                        log::warn!("cannot watch main {}: {err}", root.display());
                     }
                 }
                 Some(source)
@@ -1413,6 +1430,13 @@ impl HarnessWorkspace {
                     branch: branch.clone(),
                 });
             }
+            // Default branches for main-checkout CI (first-class main).
+            for repo in &self.data.repos {
+                p.add_branch(BranchKey {
+                    repo_dir: repo.repo_root.clone(),
+                    branch: repo.default_branch.clone(),
+                });
+            }
         }
         if let Some(source) = &mut self.status_source {
             for (_, _, path) in &items {
@@ -1425,6 +1449,11 @@ impl HarnessWorkspace {
                     .map(|e| e.agent_kind.clone())
                     .unwrap_or_default();
                 let _ = source.watch(path, kind);
+            }
+            // Watch each repo root so an agent on `main` drives its pill.
+            // `watch` is idempotent — a root already watched is a no-op error.
+            for root in &self.repo_roots {
+                let _ = source.watch(root, AgentKind::default());
             }
         }
 
@@ -2799,22 +2828,20 @@ impl HarnessWorkspace {
     ) -> impl IntoElement {
         let selected = self.selection == Selection::Main(repo.name.clone());
         let repo_name = repo.name.clone();
-        div()
-            .id(("main-entry", repo.name.len() + 1))
+
+        // Live agent state on the main checkout — main is first-class (D8
+        // revised), so an agent run on it shows the same pill a worktree does,
+        // keyed on the repo root the status watcher now watches.
+        let agent = self
+            .agent_status
+            .get(&repo.repo_root)
+            .copied()
+            .unwrap_or(AgentState::Unknown);
+
+        let header = div()
             .flex()
             .items_center()
             .gap_2()
-            .mx_1()
-            .my_0p5()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .when(selected, |d| d.bg(hx.surface))
-            .cursor_pointer()
-            .hover(|d| d.bg(hx.surface))
-            .on_click(cx.listener(move |ws, _, window, cx| {
-                ws.select(Selection::Main(repo_name.clone()), window, cx);
-            }))
             .child(
                 div()
                     .size(px(24.0))
@@ -2835,7 +2862,62 @@ impl HarnessWorkspace {
                     .child(div().text_sm().text_color(hx.tx0).child("main"))
                     .child(div().text_xs().text_color(hx.tx2).child(format!("default · {}", repo.default_branch))),
             )
-            .child(div().text_xs().text_color(hx.green).child("✓"))
+            .child(agent_pill(hx, agent));
+
+        // Badges mirror the worktree card's, minus the PR badge: a PR is a
+        // feature-branch concept, and main is the target, not a PR head. CI is
+        // the default branch's checks.
+        let fs = self.forge_status.get(&repo.default_branch);
+        let mut badges = div().flex().items_center().gap_2().mt_1();
+        if repo.ahead > 0 {
+            badges = badges.child(div().text_xs().text_color(hx.green).child(format!("↑{}", repo.ahead)));
+        }
+        if repo.behind > 0 {
+            badges = badges.child(div().text_xs().text_color(hx.amber).child(format!("↓{}", repo.behind)));
+        }
+        if repo.dirty > 0 {
+            badges = badges.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .text_xs()
+                    .text_color(hx.amber)
+                    .child(div().size(px(5.0)).rounded_full().bg(hx.amber))
+                    .child(format!("~{}", repo.dirty)),
+            );
+        }
+        if let Some((c, label)) = fs.and_then(|s| ci_summary(hx, &s.checks)) {
+            badges = badges.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .text_xs()
+                    .text_color(c)
+                    .child(div().size(px(5.0)).rounded_full().bg(c))
+                    .child(label),
+            );
+        }
+
+        div()
+            .id(("main-entry", repo.name.len() + 1))
+            .flex()
+            .flex_col()
+            .mx_1()
+            .my_0p5()
+            .p_2()
+            .rounded_md()
+            // Same accent left-border a selected worktree card gets, so "which
+            // entry is selected" reads the same whether it's main or a worktree.
+            .when(selected, |d| d.bg(hx.surface).border_l_1().border_color(hx.accent))
+            .cursor_pointer()
+            .hover(|d| d.bg(hx.surface))
+            .on_click(cx.listener(move |ws, _, window, cx| {
+                ws.select(Selection::Main(repo_name.clone()), window, cx);
+            }))
+            .child(header)
+            .child(badges)
     }
 
     fn render_card(
