@@ -426,6 +426,12 @@ pub struct HarnessWorkspace {
     bus: Bus,
     tools: ToolStatus,
     focus_handle: FocusHandle,
+    /// Focus target for the hosted-editor content wrapper. That wrapper carries
+    /// the `"Workspace"` key context and the workspace action handlers, so
+    /// focusing it makes ⌘P / ⌘⇧F resolve even when no file is open — otherwise
+    /// focus drifts to the `"Harness"` root, which has neither, and the
+    /// keystrokes silently no-op.
+    editor_host_focus: FocusHandle,
 }
 
 impl HarnessWorkspace {
@@ -562,6 +568,7 @@ impl HarnessWorkspace {
             bus,
             tools: detect_tools(),
             focus_handle: cx.focus_handle(),
+            editor_host_focus: cx.focus_handle(),
         };
         this.ensure_pane(window, cx);
         // Restore persisted appearance (zed theme + fonts). main.rs already
@@ -1151,7 +1158,17 @@ impl HarnessWorkspace {
             let Some(tab) = p.active_tab() else { return };
             let handle = match &tab.content {
                 TabContent::Terminal(t) => t.read(cx).focus_handle(cx),
-                TabContent::Editor(ws) => ws.read(cx).focus_handle(cx),
+                // With a file open, focus the workspace so the cursor lands in
+                // the buffer. With none, focus our host wrapper so ⌘P / ⌘⇧F
+                // still resolve — the empty pane would leave focus with nothing
+                // carrying the "Workspace" context.
+                TabContent::Editor(ws) => {
+                    if ws.read(cx).active_item(cx).is_some() {
+                        ws.read(cx).focus_handle(cx)
+                    } else {
+                        self.editor_host_focus.clone()
+                    }
+                }
                 TabContent::Chat(c) => c.read(cx).focus_handle(cx),
             };
             window.focus(&handle, cx);
@@ -3222,6 +3239,11 @@ impl HarnessWorkspace {
                     // and dies silently.
                     ws.update(cx, |workspace, cx| workspace.actions(div(), window, cx))
                         .key_context("Workspace")
+                        // Make the wrapper itself focusable, so focus (and thus
+                        // the "Workspace" context + these action handlers) can
+                        // rest here with no file open. Clicking the empty editor
+                        // area lands focus here too.
+                        .track_focus(&self.editor_host_focus)
                         // `.flex()`, because gpui divs default to `display:
                         // Block`, and taffy's block layout does not resolve
                         // child percentage *heights*. zed's own window root
