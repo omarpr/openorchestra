@@ -2445,13 +2445,28 @@ impl HarnessWorkspace {
                         .child(kind.to_string()),
                 )
                 .child(
+                    // Fixed width + centered so "on"/"off" occupy the same
+                    // box — otherwise the wider "off" pill shoves the command
+                    // field right and the column stops aligning.
                     div()
                         .id(gpui::SharedString::from(format!("agent-en-{key}")))
-                        .child(chip(
-                            if pref.disabled { "off".into() } else { "on".into() },
-                            !pref.disabled,
-                            hx,
-                        ))
+                        .flex_none()
+                        .w(px(38.0))
+                        .py_0p5()
+                        .rounded_md()
+                        .border_1()
+                        .text_xs()
+                        .text_center()
+                        .cursor_pointer()
+                        .border_color(if pref.disabled { hx.border } else { hx.accent })
+                        .bg(if pref.disabled {
+                            hx.surface
+                        } else {
+                            tint(hx.accent, 0.16)
+                        })
+                        .text_color(if pref.disabled { hx.tx1 } else { hx.accent })
+                        .hover(|d| d.bg(hx.surface_hover))
+                        .child(if pref.disabled { "off" } else { "on" })
                         .on_click(cx.listener(move |ws, _, _, cx| {
                             cx.stop_propagation();
                             let e = ws.prefs.agents.entry(toggle_key.clone()).or_default();
@@ -2467,6 +2482,13 @@ impl HarnessWorkspace {
                     div()
                         .id(gpui::SharedString::from(format!("agent-cmd-{key}")))
                         .flex_1()
+                        // Without min_w_0 a flex child keeps its content width
+                        // (min-width: auto), so a long default like codex's
+                        // refuses to shrink and shoves the row out of
+                        // alignment. min_w_0 lets it shrink; truncate clips the
+                        // overflow with an ellipsis.
+                        .min_w_0()
+                        .truncate()
                         .px_2()
                         .py_0p5()
                         .rounded_md()
@@ -2501,6 +2523,40 @@ impl HarnessWorkspace {
                     .child("Click a command to edit it (runs via $SHELL -lc; empty restores the default). Enter saves, Esc cancels."),
             )
             .child(agents);
+        // The reset button is always shown for discoverability, but stays
+        // greyed out and inert while every agent is already at its default —
+        // clicking it would undo nothing.
+        let agents_dirty = self
+            .prefs
+            .agents
+            .values()
+            .any(|a| a.disabled || a.command.is_some());
+        let mut reset = div()
+            .id("agents-reset")
+            .mt_1()
+            .px_3()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(hx.border)
+            .bg(hx.surface)
+            .text_xs()
+            .child("Reset agents to defaults");
+        if agents_dirty {
+            reset = reset
+                .text_color(hx.tx1)
+                .cursor_pointer()
+                .hover(|d| d.bg(hx.surface_hover).text_color(hx.tx0))
+                .on_click(cx.listener(|ws, _, _, cx| {
+                    cx.stop_propagation();
+                    ws.prefs.agents.clear();
+                    save_prefs_to(&ws.prefs_path, &ws.prefs);
+                    cx.notify();
+                }));
+        } else {
+            reset = reset.text_color(hx.tx2);
+        }
+        body = body.child(reset);
 
         // The shortcuts get their own heading now that the screen holds
         // appearance, fonts, and agents above them.
