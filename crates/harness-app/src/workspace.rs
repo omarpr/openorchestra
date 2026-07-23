@@ -415,6 +415,9 @@ pub struct HarnessWorkspace {
     _poller: Option<Poller>,
     /// One watcher for every StatusFile-signalled worktree (pi, Claude Code).
     status_source: Option<StatusFileSource>,
+    /// Watches the selected root's files so the diff panel keeps up with an
+    /// agent's edits in near real time (retargeted on every selection change).
+    diff_watch: crate::diff_watch::DiffWatcher,
     /// Where the adapters materialize their extensions and shims.
     state_dir: PathBuf,
     prefs: Prefs,
@@ -484,6 +487,8 @@ impl HarnessWorkspace {
             }
         };
 
+        let (diff_watch, diff_dirty_rx) = crate::diff_watch::DiffWatcher::new();
+
         let selection = data
             .repos
             .first()
@@ -532,6 +537,7 @@ impl HarnessWorkspace {
             agent_fidelity: HashMap::new(),
             _poller: Some(poller),
             status_source,
+            diff_watch,
             state_dir: data_dir.clone(),
             prefs,
             prefs_path,
@@ -668,6 +674,27 @@ impl HarnessWorkspace {
             })
             .detach();
         }
+
+        // Live diff refresh: a file changed under the selected root. The 250 ms
+        // poll cadence is the debounce — a burst of edits in one agent turn
+        // collapses to one recompute per tick, and the `diff_gen` guard drops
+        // any overlap. State-preserving so an in-progress review is not reset.
+        cx.spawn(async move |view, cx| loop {
+            match diff_dirty_rx.try_recv() {
+                Ok(_) => {
+                    // Coalesce everything already queued this instant.
+                    while diff_dirty_rx.try_recv().is_ok() {}
+                    if view.update(cx, |ws, cx| ws.refresh_diff_live(cx)).is_err() {
+                        break;
+                    }
+                }
+                Err(e) if e.is_empty() => {
+                    cx.background_executor().timer(Duration::from_millis(250)).await
+                }
+                Err(_) => break,
+            }
+        })
+        .detach();
 
         this
     }
@@ -1299,9 +1326,31 @@ impl HarnessWorkspace {
         cx.notify();
     }
 
+    /// Recompute the diff for a *new* selection: this resets the review view
+    /// (collapses files, drops the markdown preview) because the user has
+    /// switched to a different set of changes, and retargets the live file
+    /// watcher at the newly-selected root.
     fn recompute_diff(&mut self, cx: &mut Context<Self>) {
         self.expanded.clear();
         self.md_preview = None;
+        if let Some(r) = self.resolve() {
+            // Keep the live watch pointed at whatever the diff panel shows.
+            self.diff_watch.watch(&r.path);
+        }
+        self.spawn_diff_compute(cx);
+    }
+
+    /// Recompute the diff for the *same* selection, in response to a live file
+    /// change. Deliberately does **not** clear `expanded`/`md_preview`: the user
+    /// is reviewing the same worktree, and resetting their expand/preview state
+    /// on every agent edit would make review impossible.
+    fn refresh_diff_live(&mut self, cx: &mut Context<Self>) {
+        self.spawn_diff_compute(cx);
+    }
+
+    /// Spawn the off-thread git diff, discarding a result whose selection the
+    /// user has since left (the `diff_gen` staleness guard).
+    fn spawn_diff_compute(&mut self, cx: &mut Context<Self>) {
         let Some(r) = self.resolve() else {
             self.diff = worktrees::Diff::default();
             self.diff_pending = false;
