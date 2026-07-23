@@ -134,7 +134,8 @@ serde_json = "1"
 # Zed's workspace [patch.crates-io] entries do NOT propagate to out-of-tree
 # consumers, so we replicate the ones inside our dependency cone (from zed's
 # root Cargo.toml at the pinned rev). calloop is pinned to the rev zed's own
-# Cargo.lock resolved at v1.11.3.
+# Cargo.lock resolved at v1.11.3. windows-capture (via zed-scap) only
+# compiles on Windows, so it is untested here — replicated for lock fidelity.
 [dev-dependencies]
 tempfile = "3"
 
@@ -144,6 +145,7 @@ async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd
 calloop = { git = "https://github.com/zed-industries/calloop", rev = "eb6b4fd17b9af5ecc226546bdd04185391b3e265" }
 notify = { git = "https://github.com/zed-industries/notify", rev = "faecbc33db4f59313e5225ef766bfd9e54a54cfd" }
 notify-types = { git = "https://github.com/zed-industries/notify", rev = "faecbc33db4f59313e5225ef766bfd9e54a54cfd" }
+windows-capture = { git = "https://github.com/zed-industries/windows-capture.git", rev = "f0d6c1b6691db75461b732f6d5ff56eed002eeb9" }
 
 [profile.dev]
 # Keep target/ small (the zed cone is huge). Bump to "limited" locally if you
