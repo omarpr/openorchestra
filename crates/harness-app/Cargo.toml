@@ -24,6 +24,9 @@ license = "GPL-3.0-or-later"
 
 [dependencies]
 crossbeam-channel = "0.5"
+# Live diff-watcher (diff_watch.rs). The [patch.crates-io] below redirects this
+# to zed's notify fork, the same one status-watch resolves.
+notify = "8"
 gpui = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
 # Platform entry point (Application constructor) — new split at v1.11.x; the
 # features mirror what zed's own gpui examples enable.
