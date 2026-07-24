@@ -312,6 +312,16 @@ impl HarnessWorkspace {
             );
         }
 
+        if !self.has_tmux {
+            body = body.child(
+                div()
+                    .text_xs()
+                    .text_color(hx.tx2)
+                    .pb_1()
+                    .child("Install tmux for terminal/agent sessions that survive app restarts."),
+            );
+        }
+
         // ---- Agents: enable/disable + launch-command override -------------
         let mut agents = div().flex().flex_col().gap_1().pb_1();
         for kind in AgentKind::known() {
