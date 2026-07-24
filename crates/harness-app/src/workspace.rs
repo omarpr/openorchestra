@@ -487,6 +487,13 @@ pub struct HarnessWorkspace {
     resource: Option<crate::resource_monitor::Snapshot>,
     /// Rolling trail of recent totals, drawn as the band's sparklines.
     resource_history: crate::resource_monitor::History,
+    /// Project roots the user archived — hidden from the active list but kept so
+    /// they can be restored. Persisted to `archived.json`; never deletes files.
+    archived_repos: Vec<PathBuf>,
+    archived_path: PathBuf,
+    /// First click of the two-click "remove project" (trash) confirm, by repo
+    /// name — so a stray click can't drop a whole project's group.
+    pending_repo_trash: Option<String>,
 }
 
 /// How many samples the sidebar sparkline retains (≈2 min at the 2 s cadence).
@@ -511,6 +518,8 @@ impl HarnessWorkspace {
             .unwrap_or_else(|| launch_hint.clone())
             .join(".openorchestra");
         let repos_path = data_dir.join("repos.json");
+        let archived_path = data_dir.join("archived.json");
+        let archived_repos = load_repos(&archived_path);
         let prefs_path = data_dir.join("prefs.json");
         let prefs = load_prefs(&prefs_path);
         let reg_path = data_dir.join("registry.json");
@@ -642,6 +651,9 @@ impl HarnessWorkspace {
             editor_host_focus: cx.focus_handle(),
             resource: None,
             resource_history: crate::resource_monitor::History::new(RESOURCE_HISTORY),
+            archived_repos,
+            archived_path,
+            pending_repo_trash: None,
         };
         this.ensure_pane(window, cx);
         // Restore persisted appearance (zed theme + fonts). main.rs already
@@ -1388,6 +1400,20 @@ fn save_repos(path: &Path, repos: &[PathBuf]) {
     }
 }
 
+/// Move `root` out of `from` and into `to` (append), returning whether it was
+/// present. Used for archive (active → archived) and restore (archived →
+/// active); idempotent on `to` so a double-restore can't duplicate an entry.
+fn relocate_root(from: &mut Vec<PathBuf>, to: &mut Vec<PathBuf>, root: &Path) -> bool {
+    let Some(ix) = from.iter().position(|p| p == root) else {
+        return false;
+    };
+    let moved = from.remove(ix);
+    if !to.contains(&moved) {
+        to.push(moved);
+    }
+    true
+}
+
 fn slugify(name: &str) -> String {
     let mut slug = String::new();
     let mut last_dash = true;
@@ -1672,6 +1698,27 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
             .sanitized();
         assert!(huge.sidebar_width <= 640.0);
         assert!(huge.diff_width <= 800.0);
+    }
+
+    #[test]
+    fn relocate_root_moves_between_lists_without_duplicating() {
+        use super::relocate_root;
+        use std::path::PathBuf;
+        let mut active = vec![PathBuf::from("/a"), PathBuf::from("/b")];
+        let mut archived: Vec<PathBuf> = vec![];
+
+        // Archive /a: leaves active, lands in archived.
+        assert!(relocate_root(&mut active, &mut archived, std::path::Path::new("/a")));
+        assert_eq!(active, vec![PathBuf::from("/b")]);
+        assert_eq!(archived, vec![PathBuf::from("/a")]);
+
+        // Absent root: no-op, reports false.
+        assert!(!relocate_root(&mut active, &mut archived, std::path::Path::new("/zzz")));
+
+        // Restore /a back, then a redundant restore can't duplicate it.
+        assert!(relocate_root(&mut archived, &mut active, std::path::Path::new("/a")));
+        assert!(!relocate_root(&mut archived, &mut active, std::path::Path::new("/a")));
+        assert_eq!(active.iter().filter(|p| p.as_path() == std::path::Path::new("/a")).count(), 1);
     }
 
     #[test]

@@ -178,6 +178,7 @@ impl HarnessWorkspace {
             // across nothing.
             return column
                 .child(div().flex_1())
+                .when(!self.archived_repos.is_empty(), |d| d.child(self.render_archived(hx, cx)))
                 .child(self.add_folder_button(hx, cx));
         }
 
@@ -185,7 +186,10 @@ impl HarnessWorkspace {
         for repo in &self.data.repos {
             groups = groups.child(self.render_repo_group(hx, repo, cx));
         }
-        column.child(groups).child(self.add_folder_button(hx, cx))
+        column
+            .child(groups)
+            .when(!self.archived_repos.is_empty(), |d| d.child(self.render_archived(hx, cx)))
+            .child(self.add_folder_button(hx, cx))
     }
 
     pub(crate) fn render_repo_group(
@@ -197,7 +201,31 @@ impl HarnessWorkspace {
         let collapsed = *self.collapsed.get(&repo.name).unwrap_or(&false);
         let repo_name = repo.name.clone();
         let plus_repo = repo.name.clone();
+        let archive_repo = repo.name.clone();
+        let trash_repo = repo.name.clone();
+        let trash_pending = self.pending_repo_trash.as_deref() == Some(repo.name.as_str());
         let count = repo.worktrees.len();
+
+        // A small icon button in the repo header (archive, trash), styled like
+        // the `+`. `danger` tints it red — used to flag the trash's armed
+        // (click-again-to-confirm) state.
+        let header_icon =
+            |id_seed: usize, glyph: &'static str, tip_text: &'static str, danger: bool| {
+                div()
+                    .id(("repo-icon", id_seed))
+                    .size(px(20.0))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    .text_xs()
+                    .text_color(if danger { hx.red } else { hx.tx2 })
+                    .cursor_pointer()
+                    .tooltip(tip(tip_text))
+                    .hover(|d| d.bg(hx.surface).text_color(if danger { hx.red } else { hx.tx0 }))
+                    .child(glyph)
+            };
 
         let header = div()
             .flex()
@@ -222,11 +250,30 @@ impl HarnessWorkspace {
                     .child(div().flex_1().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx0).child(repo.name.clone()))
                     .child(div().text_xs().text_color(hx.tx2).child(format!("{count} {}", if count == 1 { "tree" } else { "trees" }))),
             )
+            // Archive and trash sit before the +, per-project. Archive is
+            // restorable; trash forgets the project (files kept) behind a
+            // two-click confirm.
+            .child(
+                header_icon(repo.name.len(), "▦", "Archive project", false).on_click(
+                    cx.listener(move |ws, _, window, cx| {
+                        cx.stop_propagation();
+                        ws.archive_repo(archive_repo.clone(), window, cx);
+                    }),
+                ),
+            )
+            .child(
+                header_icon(repo.name.len() + 1000, "✕", "Remove project (files kept)", trash_pending)
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        cx.stop_propagation();
+                        ws.trash_repo(trash_repo.clone(), window, cx);
+                    })),
+            )
             .child(
                 div()
                     .id(("repo-plus", repo.name.len()))
                     .size(px(20.0))
                     .flex()
+                    .flex_none()
                     .items_center()
                     .justify_center()
                     .rounded_md()
@@ -276,6 +323,52 @@ impl HarnessWorkspace {
             group = group.child(body);
         }
         group
+    }
+
+    /// The restorable "ARCHIVED" list at the foot of the sidebar. Each row
+    /// restores its project on click. Rendered only when something is archived.
+    pub(crate) fn render_archived(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut section = div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .border_t_1()
+            .border_color(hx.border)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .h(px(28.0))
+                    .px_3()
+                    .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx2).child("ARCHIVED")),
+            );
+
+        for (ix, root) in self.archived_repos.iter().enumerate() {
+            let name = root
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| root.to_string_lossy().into_owned());
+            let restore_root = root.clone();
+            section = section.child(
+                div()
+                    .id(("archived-row", ix))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .px_3()
+                    .py_1()
+                    .cursor_pointer()
+                    .tooltip(tip("Restore project"))
+                    .hover(|d| d.bg(hx.surface))
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        ws.restore_repo(restore_root.clone(), window, cx);
+                    }))
+                    .child(div().flex_1().min_w_0().text_sm().text_color(hx.tx1).child(name))
+                    .child(div().flex_none().text_xs().text_color(hx.tx2).child("restore ⤴")),
+            );
+        }
+        section
     }
 
     pub(crate) fn render_main_entry(

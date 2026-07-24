@@ -8,6 +8,7 @@ impl HarnessWorkspace {
     pub(crate) fn select(&mut self, sel: Selection, window: &mut Window, cx: &mut Context<Self>) {
         self.selection = sel;
         self.pending_delete = None;
+        self.pending_repo_trash = None;
         self.menu = None;
         self.edit = None;
         self.ensure_pane(window, cx);
@@ -87,27 +88,126 @@ impl HarnessWorkspace {
     }
 
     pub(crate) fn add_repo(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        match self.manager.git().repo_root(&path) {
-            Ok(root) => {
-                let name = root
-                    .file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                if !self.repo_roots.contains(&root) {
-                    self.repo_roots.push(root);
-                    save_repos(&self.repos_path, &self.repo_roots);
-                    self.note = format!("added {name}");
-                } else {
-                    self.note = "folder already added".to_string();
-                }
-                self.refresh(window, cx);
-                self.select(Selection::Main(name), window, cx);
-            }
-            Err(_) => {
-                self.note = "not a git repository".to_string();
-                cx.notify();
-            }
+        let Ok(root) = self.manager.git().repo_root(&path) else {
+            self.note = "not a git repository".to_string();
+            cx.notify();
+            return;
+        };
+        let name = root
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        // The picker returns whatever folder was chosen, but a repo is tracked
+        // by its git top-level. When they differ, the user picked a subfolder —
+        // say so, or "it added the parent" reads as a bug (it isn't).
+        let resolved_up = root != path;
+        let picked = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        if self.repo_roots.contains(&root) {
+            // Already active. Make the no-op legible instead of a silent nothing.
+            self.note = if resolved_up {
+                format!("‘{picked}’ is inside ‘{name}’, which is already added")
+            } else {
+                format!("‘{name}’ is already added")
+            };
+            self.refresh(window, cx);
+            self.select(Selection::Main(name), window, cx);
+            return;
         }
+
+        // Re-adding an archived project restores it rather than starting fresh.
+        if relocate_root(&mut self.archived_repos, &mut self.repo_roots, &root) {
+            save_repos(&self.repos_path, &self.repo_roots);
+            save_repos(&self.archived_path, &self.archived_repos);
+            self.note = format!("restored ‘{name}’ from archive");
+            self.refresh(window, cx);
+            self.select(Selection::Main(name), window, cx);
+            return;
+        }
+
+        self.repo_roots.push(root);
+        save_repos(&self.repos_path, &self.repo_roots);
+        self.note = if resolved_up {
+            format!("added ‘{name}’ (the git repo containing ‘{picked}’)")
+        } else {
+            format!("added ‘{name}’")
+        };
+        self.refresh(window, cx);
+        self.select(Selection::Main(name), window, cx);
+    }
+
+    /// The tracked git root for a repo group, by its display name.
+    fn repo_root_for_name(&self, name: &str) -> Option<PathBuf> {
+        self.data
+            .repos
+            .iter()
+            .find(|r| r.name == name)
+            .map(|r| r.repo_root.clone())
+    }
+
+    /// Reselect a sane entry after a project leaves the active list, so the
+    /// center/diff panels never point at a group that is gone.
+    fn reselect_after_removal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(name) = self.data.repos.first().map(|r| r.name.clone()) {
+            self.select(Selection::Main(name), window, cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    /// Archive a whole project: move its root to the restorable archived list.
+    /// Non-destructive — worktrees and files stay on disk; the group just leaves
+    /// the active sidebar until restored (from the Archived section, or by
+    /// adding it again).
+    pub(crate) fn archive_repo(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.repo_root_for_name(&name) else { return };
+        if relocate_root(&mut self.repo_roots, &mut self.archived_repos, &root) {
+            save_repos(&self.repos_path, &self.repo_roots);
+            save_repos(&self.archived_path, &self.archived_repos);
+            self.note = format!("archived ‘{name}’");
+        }
+        self.pending_repo_trash = None;
+        self.refresh(window, cx);
+        self.reselect_after_removal(window, cx);
+    }
+
+    /// Remove a project from openOrchestra entirely (two-click confirm). Files
+    /// on disk are untouched — this only forgets the folder; re-add it to bring
+    /// it back. Distinct from Archive, which keeps it in a restorable list.
+    pub(crate) fn trash_repo(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_repo_trash.as_deref() != Some(name.as_str()) {
+            self.pending_repo_trash = Some(name.clone());
+            self.note = format!("remove ‘{name}’? click the trash again to confirm (files are kept)");
+            cx.notify();
+            return;
+        }
+        self.pending_repo_trash = None;
+        if let Some(root) = self.repo_root_for_name(&name) {
+            self.repo_roots.retain(|p| p != &root);
+            save_repos(&self.repos_path, &self.repo_roots);
+            self.note = format!("removed ‘{name}’ (files kept on disk)");
+        }
+        self.refresh(window, cx);
+        self.reselect_after_removal(window, cx);
+    }
+
+    /// Restore an archived project back into the active list.
+    pub(crate) fn restore_repo(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if relocate_root(&mut self.archived_repos, &mut self.repo_roots, &root) {
+            save_repos(&self.repos_path, &self.repo_roots);
+            save_repos(&self.archived_path, &self.archived_repos);
+            let name = root
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            self.note = format!("restored ‘{name}’");
+        }
+        self.refresh(window, cx);
+        let name = root.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        self.select(Selection::Main(name), window, cx);
     }
 
     // ---- text edit -------------------------------------------------------

@@ -159,6 +159,77 @@ pub fn sample_once(sys: &mut System, has_tmux: bool) -> RawSample {
     RawSample { app_pid: std::process::id(), procs, session_panes }
 }
 
+/// A process reduced to what agent-liveness needs: its pid, parent, and a
+/// normalized command name (lowercased basename, leading `-` login marker
+/// stripped).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProcInfo {
+    pub pid: u32,
+    pub parent: Option<u32>,
+    pub comm: String,
+}
+
+/// Command basenames that count as "just a shell" — a pane sitting at one of
+/// these, with no other descendant, means the agent has exited to the
+/// `exec $SHELL` fallback and is gone.
+const SHELL_COMMS: &[&str] = &[
+    "sh", "bash", "zsh", "fish", "dash", "csh", "tcsh", "ksh", "login", "tmux",
+];
+
+fn is_shell(comm: &str) -> bool {
+    SHELL_COMMS.contains(&comm)
+}
+
+/// Parse `ps -axo pid=,ppid=,comm=` output into [`ProcInfo`]s, normalizing the
+/// command to a lowercased basename without a leading login-shell `-`.
+pub fn parse_ps(output: &str) -> Vec<ProcInfo> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let pid: u32 = parts.next()?.parse().ok()?;
+            let ppid: u32 = parts.next()?.parse().ok()?;
+            // comm is the last `=` field; rejoin in case a path carries spaces.
+            let raw = parts.collect::<Vec<_>>().join(" ");
+            if raw.is_empty() {
+                return None;
+            }
+            let base = raw.rsplit('/').next().unwrap_or(&raw);
+            let comm = base.trim_start_matches('-').to_ascii_lowercase();
+            Some(ProcInfo { pid, parent: (ppid != 0).then_some(ppid), comm })
+        })
+        .collect()
+}
+
+/// Whether an agent — any non-shell process — is alive anywhere in the subtrees
+/// rooted at `roots` (roots included). A subtree of only shells, or roots that
+/// no longer exist, means no agent is running there.
+pub fn agent_running_in(procs: &[ProcInfo], roots: &[u32]) -> bool {
+    let by_pid: HashMap<u32, &ProcInfo> = procs.iter().map(|p| (p.pid, p)).collect();
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for p in procs {
+        if let Some(pp) = p.parent {
+            children.entry(pp).or_default().push(p.pid);
+        }
+    }
+    let mut visited: HashSet<u32> = HashSet::new();
+    let mut stack: Vec<u32> = roots.to_vec();
+    while let Some(pid) = stack.pop() {
+        if !visited.insert(pid) {
+            continue;
+        }
+        if let Some(p) = by_pid.get(&pid) {
+            if !is_shell(&p.comm) {
+                return true;
+            }
+        }
+        if let Some(kids) = children.get(&pid) {
+            stack.extend(kids.iter().copied());
+        }
+    }
+    false
+}
+
 /// `"34%"` — integer percent, clamped at zero so a transient negative delta
 /// from sysinfo never prints a minus sign.
 pub fn fmt_cpu(pct: f32) -> String {
@@ -389,6 +460,53 @@ mod tests {
             .expect("the sampler must see our own pid");
         assert!(mine.rss_bytes > 0, "a running process holds some memory");
         assert!(raw.session_panes.is_empty(), "has_tmux=false skips the tmux read");
+    }
+
+    #[test]
+    fn parse_ps_normalizes_comm_to_a_bare_basename() {
+        // The exact shapes observed from `ps -axo pid=,ppid=,comm=`.
+        let out = "97973 82836 -zsh\n99906 82836 sh\n99909 99906 /Users/omar/.local/bin/claude\n1 0 /sbin/launchd\n";
+        let procs = parse_ps(out);
+        assert_eq!(
+            procs,
+            vec![
+                ProcInfo { pid: 97973, parent: Some(82836), comm: "zsh".into() },
+                ProcInfo { pid: 99906, parent: Some(82836), comm: "sh".into() },
+                ProcInfo { pid: 99909, parent: Some(99906), comm: "claude".into() },
+                // ppid 0 → no parent.
+                ProcInfo { pid: 1, parent: None, comm: "launchd".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_pane_of_only_shells_has_no_agent() {
+        // lithepg's stale case: the pane fell back to `-zsh`, agent long gone.
+        let procs = parse_ps("97973 82836 -zsh\n98039 97973 -zsh\n");
+        assert!(!agent_running_in(&procs, &[97973]), "only shells → no agent");
+    }
+
+    #[test]
+    fn a_live_agent_under_the_pane_shell_is_detected() {
+        // omar-harness: pane runs `sh -lc`, with claude as its child.
+        let procs = parse_ps("99906 82836 sh\n99909 99906 /Users/omar/.local/bin/claude\n");
+        assert!(agent_running_in(&procs, &[99906]), "claude under the pane → alive");
+    }
+
+    #[test]
+    fn an_agent_running_a_shell_tool_still_counts_as_alive() {
+        // Guards against clearing a working agent mid-Bash-tool: the whole
+        // subtree is searched, so claude is found even under a transient shell.
+        let procs = parse_ps("100 82836 sh\n101 100 claude\n102 101 bash\n");
+        assert!(agent_running_in(&procs, &[100]));
+    }
+
+    #[test]
+    fn a_gone_session_has_no_agent() {
+        // No live pane pids at all, or a root that no longer exists.
+        let procs = parse_ps("1 0 launchd\n");
+        assert!(!agent_running_in(&procs, &[]), "no roots → nothing alive");
+        assert!(!agent_running_in(&procs, &[99999]), "vanished root → nothing alive");
     }
 
     #[test]

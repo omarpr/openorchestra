@@ -38,19 +38,74 @@ impl HarnessWorkspace {
         if candidates.is_empty() {
             return;
         }
+
+        // Second liveness signal, for the common case where the status writer
+        // stamps no pid (Claude Code and friends): is an actual agent process
+        // still alive in the worktree's tmux session? A session that has fallen
+        // back to a bare shell (`exec $SHELL`) leaves the last "waiting"/"running"
+        // in status.json forever — this is what clears those stale pills. Both
+        // shell-outs run once per reconcile, only while a non-terminal pill
+        // exists, so an idle app still does no work. Empty `procs` means `ps`
+        // failed; skip the tmux path entirely rather than clear on no evidence.
+        let procs = if self.has_tmux {
+            crate::resource_monitor::parse_ps(&ps_snapshot())
+        } else {
+            Vec::new()
+        };
+        let panes = if self.has_tmux && !procs.is_empty() {
+            crate::tmux::list_session_panes()
+        } else {
+            Vec::new()
+        };
+
         let mut changed = false;
         for root in candidates {
-            match status_pid(&root) {
-                Some(pid) if !pid_alive(pid) => {
+            // Strongest signal: a stamped pid that no longer exists.
+            if let Some(pid) = status_pid(&root) {
+                if !pid_alive(pid) {
                     self.agent_status.insert(root, AgentState::Unknown);
                     changed = true;
                 }
-                _ => {}
+                // A stamped, live pid is authoritative — trust it, skip the rest.
+                continue;
+            }
+            // No pid: fall back to tmux session liveness (skip if `ps` failed).
+            if procs.is_empty() {
+                continue;
+            }
+            let Some(prefix) = self.session_prefix_for_path(&root) else {
+                continue;
+            };
+            let pane_pids: Vec<u32> = panes
+                .iter()
+                .filter(|(session, _)| session.starts_with(&prefix))
+                .map(|(_, pid)| *pid)
+                .collect();
+            // Either the worktree has no live session, or the session is now
+            // just a shell — the agent that wrote this pill is gone.
+            if !crate::resource_monitor::agent_running_in(&procs, &pane_pids) {
+                self.agent_status.insert(root, AgentState::Unknown);
+                changed = true;
             }
         }
         if changed {
             cx.notify();
         }
+    }
+
+    /// The tmux session prefix that backs the tab set for the worktree (or main
+    /// checkout) at `path`, or `None` if the path is neither. Mirrors the key
+    /// `resolve()` / `open_tab` use, so the prefix matches the live session name.
+    fn session_prefix_for_path(&self, path: &Path) -> Option<String> {
+        for repo in &self.data.repos {
+            if repo.repo_root == path {
+                return Some(crate::tmux::session_prefix(&format!("main:{}", repo.name)));
+            }
+            if let Some(w) = repo.worktrees.iter().find(|w| w.path == path) {
+                return Some(crate::tmux::session_prefix(&w.id));
+            }
+        }
+        None
     }
 
     /// Fold one raw sample into the current worktree list, producing the
@@ -949,4 +1004,16 @@ fn status_pid(root: &Path) -> Option<u32> {
 /// run as us, so `EPERM` (exists, other user) can't arise here.
 fn pid_alive(pid: u32) -> bool {
     pid != 0 && unsafe { libc::kill(pid as libc::pid_t, 0) } == 0
+}
+
+/// A `pid ppid comm` snapshot of every process, for agent-liveness checks.
+/// Empty on any error — callers treat that as "no evidence" and don't act on it.
+fn ps_snapshot() -> String {
+    std::process::Command::new("ps")
+        .args(["-axo", "pid=,ppid=,comm="])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
 }
