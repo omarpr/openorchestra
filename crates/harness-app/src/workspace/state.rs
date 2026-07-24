@@ -320,7 +320,7 @@ impl HarnessWorkspace {
         let (content, title) = match kind {
             TabKind::Shell => (
                 TabContent::Terminal(
-                    cx.new(|cx| TerminalPane::new(r.path.clone(), None, window, cx)),
+                    cx.new(|cx| TerminalPane::new(r.path.clone(), None, None, window, cx)),
                 ),
                 "❯_ shell".to_string(),
             ),
@@ -332,7 +332,7 @@ impl HarnessWorkspace {
                     .unwrap_or_else(|| "shell".to_string());
                 (
                     TabContent::Terminal(
-                        cx.new(|cx| TerminalPane::new(r.path.clone(), command, window, cx)),
+                        cx.new(|cx| TerminalPane::new(r.path.clone(), command, None, window, cx)),
                     ),
                     label,
                 )

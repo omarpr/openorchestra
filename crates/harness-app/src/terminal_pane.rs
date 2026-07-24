@@ -38,6 +38,14 @@ use workspace::Workspace;
 
 use crate::theme::theme;
 
+/// A tmux session this pane should run under. `attach_only` restores a live
+/// session (bare `tmux attach`); otherwise the session is created/attached with
+/// its command.
+pub struct TerminalSession {
+    pub name: String,
+    pub attach_only: bool,
+}
+
 pub struct TerminalPane {
     view: Option<Entity<TerminalView>>,
     /// Human-readable description of what's running (status bar chrome).
@@ -46,6 +54,7 @@ pub struct TerminalPane {
     worktree_root: PathBuf,
     window_id: u64,
     respawn_pending: bool,
+    tmux_backed: bool,
     focus_handle: FocusHandle,
 }
 
@@ -55,6 +64,7 @@ impl TerminalPane {
     pub fn new(
         worktree_root: PathBuf,
         agent: Option<AgentCommand>,
+        session: Option<TerminalSession>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -66,32 +76,60 @@ impl TerminalPane {
             worktree_root,
             window_id,
             respawn_pending: false,
+            tmux_backed: session.is_some(),
             focus_handle: cx.focus_handle(),
         };
-        this.spawn(agent, window, cx);
+        this.spawn(agent, session, window, cx);
         this
     }
 
     fn spawn(
         &mut self,
         agent: Option<AgentCommand>,
+        session: Option<TerminalSession>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (shell, spawned, env) = match agent {
-            Some(cmd) => {
-                let spawned = format!("{} ({})", cmd.label, cmd.program.display());
+        let (shell, spawned, env) = match session {
+            // tmux-backed: run a tmux client; the agent (and its env, inlined into
+            // the script) live in the tmux server, so this pane's env is empty.
+            Some(sess) => {
+                let label = agent
+                    .as_ref()
+                    .map(|c| c.label.clone())
+                    .unwrap_or_else(|| "shell".to_string());
+                let args = crate::tmux::client_args(
+                    &sess.name,
+                    &self.worktree_root,
+                    agent.as_ref().filter(|_| !sess.attach_only),
+                    sess.attach_only,
+                );
                 (
                     Shell::WithArguments {
-                        program: cmd.program.to_string_lossy().into_owned(),
-                        args: cmd.args,
-                        title_override: Some(cmd.label),
+                        program: "tmux".to_string(),
+                        args,
+                        title_override: Some(label.clone()),
                     },
-                    spawned,
-                    cmd.env,
+                    format!("{label} (tmux {})", sess.name),
+                    Vec::new(),
                 )
             }
-            None => (Shell::System, "$SHELL".to_string(), Vec::new()),
+            // No tmux: today's direct spawn.
+            None => match agent {
+                Some(cmd) => {
+                    let spawned = format!("{} ({})", cmd.label, cmd.program.display());
+                    (
+                        Shell::WithArguments {
+                            program: cmd.program.to_string_lossy().into_owned(),
+                            args: cmd.args,
+                            title_override: Some(cmd.label),
+                        },
+                        spawned,
+                        cmd.env,
+                    )
+                }
+                None => (Shell::System, "$SHELL".to_string(), Vec::new()),
+            },
         };
 
         self.spawned = spawned;
@@ -125,7 +163,7 @@ impl TerminalPane {
                     let terminal = cx.new(|cx| builder.subscribe(cx));
                     // Respawn a shell when the process exits (don't leave a dead pane).
                     cx.subscribe(&terminal, |pane, _term, event: &TerminalEvent, cx| {
-                        if matches!(event, TerminalEvent::CloseTerminal) {
+                        if matches!(event, TerminalEvent::CloseTerminal) && !pane.tmux_backed {
                             pane.respawn_pending = true;
                             cx.notify();
                         }
@@ -172,7 +210,7 @@ impl Render for TerminalPane {
             self.respawn_pending = false;
             // Respawn a plain shell, not the agent: quitting the agent is a
             // deliberate act, and relaunching it would trap the user in a loop.
-            self.spawn(None, window, cx);
+            self.spawn(None, None, window, cx);
         }
         let hx = theme(cx).clone();
         match &self.view {
