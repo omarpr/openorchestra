@@ -53,6 +53,41 @@ impl HarnessWorkspace {
         }
     }
 
+    /// Fold one raw sample into the current worktree list, producing the
+    /// snapshot the sidebar band draws. Attribution is by tmux session prefix;
+    /// main checkouts are first-class attributables alongside worktrees, so
+    /// their sessions land in a row too rather than vanishing from the total.
+    pub(crate) fn apply_resource(
+        &mut self,
+        raw: crate::resource_monitor::RawSample,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::resource_monitor::Attributable;
+        let mut attributables: Vec<Attributable> = Vec::new();
+        for repo in &self.data.repos {
+            let main_key = format!("main:{}", repo.name);
+            attributables.push(Attributable {
+                label: format!("{} · main", repo.name),
+                session_prefix: crate::tmux::session_prefix(&main_key),
+            });
+            for w in &repo.worktrees {
+                attributables.push(Attributable {
+                    label: w.name.clone(),
+                    session_prefix: crate::tmux::session_prefix(&w.id),
+                });
+            }
+        }
+        let snapshot = crate::resource_monitor::aggregate(
+            &raw.procs,
+            raw.app_pid,
+            &raw.session_panes,
+            &attributables,
+        );
+        self.resource_history.push(snapshot.total);
+        self.resource = Some(snapshot);
+        cx.notify();
+    }
+
     pub(crate) fn apply_agent(&mut self, signal: AgentSignal, cx: &mut Context<Self>) {
         let previous = self.agent_status.insert(signal.worktree_root.clone(), signal.state);
 
