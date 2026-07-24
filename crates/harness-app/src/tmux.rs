@@ -93,6 +93,35 @@ pub fn is_live(name: &str, live: &[String]) -> bool {
     live.iter().any(|s| s == name)
 }
 
+use std::process::Command;
+
+/// Whether a `tmux` binary is on PATH. Cached by the caller (checked once at
+/// startup); cheap enough to compute directly here.
+pub fn has_tmux() -> bool {
+    Command::new("tmux")
+        .arg("-V")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Names of currently-live tmux sessions. Empty on any error (no server yet,
+/// tmux missing) — callers treat "unknown" as "not live", which restores fresh.
+pub fn live_sessions() -> Vec<String> {
+    let out = Command::new("tmux")
+        .args(["ls", "-F", "#{session_name}"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => parse_sessions(&String::from_utf8_lossy(&o.stdout)),
+        _ => Vec::new(),
+    }
+}
+
+/// Tear down a session (used on explicit tab close). Best-effort.
+pub fn kill_session(name: &str) {
+    let _ = Command::new("tmux").args(["kill-session", "-t", name]).output();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,5 +205,15 @@ mod tests {
         assert!(is_live("harness_k_2", &live));
         assert!(!is_live("harness_k_9", &live));
         assert!(parse_sessions("").is_empty());
+    }
+
+    #[test]
+    fn has_tmux_matches_which() {
+        let via_which = std::process::Command::new("which")
+            .arg("tmux")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        assert_eq!(has_tmux(), via_which);
     }
 }
