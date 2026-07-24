@@ -317,23 +317,35 @@ impl HarnessWorkspace {
             return;
         }
 
+        let tab_id = self.next_tab_id();
+
         let (content, title) = match kind {
-            TabKind::Shell => (
-                TabContent::Terminal(
-                    cx.new(|cx| TerminalPane::new(r.path.clone(), None, None, window, cx)),
-                ),
-                "❯_ shell".to_string(),
-            ),
+            TabKind::Shell => {
+                let session = self.has_tmux.then(|| crate::terminal_pane::TerminalSession {
+                    name: crate::tmux::session_name(&r.key, tab_id),
+                    attach_only: false,
+                });
+                (
+                    TabContent::Terminal(
+                        cx.new(|cx| TerminalPane::new(r.path.clone(), None, session, window, cx)),
+                    ),
+                    "❯_ shell".to_string(),
+                )
+            }
             TabKind::Agent(ref agent) => {
                 let command = self.agent_command_for(agent, &r);
                 let label = command
                     .as_ref()
                     .map(|c| c.label.clone())
                     .unwrap_or_else(|| "shell".to_string());
+                let session = self.has_tmux.then(|| crate::terminal_pane::TerminalSession {
+                    name: crate::tmux::session_name(&r.key, tab_id),
+                    attach_only: false,
+                });
                 (
-                    TabContent::Terminal(
-                        cx.new(|cx| TerminalPane::new(r.path.clone(), command, None, window, cx)),
-                    ),
+                    TabContent::Terminal(cx.new(|cx| {
+                        TerminalPane::new(r.path.clone(), command, session, window, cx)
+                    })),
                     label,
                 )
             }
@@ -380,14 +392,10 @@ impl HarnessWorkspace {
             last_used: 0,
         });
         pane.last_used = self.pane_clock;
-        // Per-pane-set id, unique within this worktree's tabs. Task 6 sources
-        // `Tab::id` from the globally-persisted `next_tab_id()` counter
-        // instead; this local derivation is a placeholder that keeps the
-        // pane's own bookkeeping correct until that wiring lands.
-        let id = pane.tabs.iter().map(|t| t.id).max().unwrap_or(0) + 1;
-        pane.tabs.push(Tab { id, title, content, agent: agent_of_kind });
-        pane.active = id;
+        pane.tabs.push(Tab { id: tab_id, title, content, agent: agent_of_kind });
+        pane.active = tab_id;
         self.focus_active_pane(window, cx);
+        self.save_panes();
         cx.notify();
     }
 
@@ -395,6 +403,10 @@ impl HarnessWorkspace {
     /// process, or a chat's `pi --mode rpc` sidecar.
     pub(crate) fn close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(r) = self.resolve() else { return };
+        if self.has_tmux {
+            // Explicit close tears the session down (only app-exit detaches).
+            crate::tmux::kill_session(&crate::tmux::session_name(&r.key, id));
+        }
         let Some(pane) = self.panes.get_mut(&r.key) else { return };
         let Some(ix) = pane.tabs.iter().position(|t| t.id == id) else { return };
         pane.tabs.remove(ix);
@@ -409,10 +421,11 @@ impl HarnessWorkspace {
         }
         // A worktree with no tabs is a dead end; give it a shell back.
         if pane.tabs.is_empty() {
-            self.open_tab(TabKind::Shell, window, cx);
+            self.open_tab(TabKind::Shell, window, cx); // saves panes itself
             return;
         }
         self.focus_active_pane(window, cx);
+        self.save_panes();
         cx.notify();
     }
 
