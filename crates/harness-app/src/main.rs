@@ -15,6 +15,7 @@ mod diff_watch;
 mod harness_zed_theme;
 mod markdown_preview;
 mod notifier;
+mod panes_state;
 mod shortcuts;
 mod terminal_pane;
 mod theme;
