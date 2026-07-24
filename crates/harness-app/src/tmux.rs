@@ -7,9 +7,11 @@ use std::path::Path;
 
 use agent_runtime::AgentCommand;
 
-/// Deterministic tmux session name for a tab. Prefixed so it never collides
-/// with the user's own sessions; sanitized to tmux-legal characters.
-pub fn session_name(worktree_key: &str, tab_id: u64) -> String {
+/// The `harness_<slug>_` stem every session for a given key shares. The
+/// resource monitor keys off this to attribute a live session back to its
+/// worktree, so the slugging lives here and `session_name` builds on it — the
+/// two can never drift.
+pub fn session_prefix(worktree_key: &str) -> String {
     let mut slug = String::with_capacity(worktree_key.len());
     for ch in worktree_key.chars() {
         if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
@@ -18,7 +20,13 @@ pub fn session_name(worktree_key: &str, tab_id: u64) -> String {
             slug.push('-');
         }
     }
-    format!("harness_{slug}_{tab_id}")
+    format!("harness_{slug}_")
+}
+
+/// Deterministic tmux session name for a tab. Prefixed so it never collides
+/// with the user's own sessions; sanitized to tmux-legal characters.
+pub fn session_name(worktree_key: &str, tab_id: u64) -> String {
+    format!("{}{tab_id}", session_prefix(worktree_key))
 }
 
 /// Single-quote a string for POSIX `sh`, escaping embedded single quotes.
@@ -47,10 +55,13 @@ pub fn agent_script(cmd: &AgentCommand) -> String {
 /// Args after `tmux` for the client the pane runs. tmux splits its argv on a
 /// bare `;` argument, so each invocation is a small command sequence.
 ///
-/// Every path disables the status bar **for that session only**
-/// (`set-option -t NAME status off`) so openOrchestra's embedded terminals stay
-/// clean without ever touching the user's global tmux config or their other
-/// sessions — the option is set before the client attaches.
+/// Every path disables the status bar and enables mouse reporting **for that
+/// session only** (`set-option -t NAME status off` / `mouse on`) so
+/// openOrchestra's embedded terminals stay clean and scrollable without ever
+/// touching the user's global tmux config or their other sessions — both
+/// options are set before the client attaches. Mouse mode is what makes the
+/// scroll wheel work: tmux runs on the alternate screen, so without it the
+/// wheel is inert (there is no host scrollback to fall back on).
 ///
 /// - `attach_only` (restore of a live session): `set-option … ; attach-session`.
 ///   No `new-session`: on a session that already exists `-A` attaches
@@ -71,6 +82,8 @@ pub fn client_args(
     if attach_only {
         return vec![
             "set-option".into(), "-t".into(), session.into(), "status".into(), "off".into(),
+            ";".into(),
+            "set-option".into(), "-t".into(), session.into(), "mouse".into(), "on".into(),
             ";".into(),
             "attach-session".into(), "-t".into(), session.into(),
         ];
@@ -93,6 +106,8 @@ pub fn client_args(
         ";".into(),
         "set-option".into(), "-t".into(), session.into(), "status".into(), "off".into(),
         ";".into(),
+        "set-option".into(), "-t".into(), session.into(), "mouse".into(), "on".into(),
+        ";".into(),
         "attach-session".into(), "-t".into(), session.into(),
     ]);
     args
@@ -111,6 +126,26 @@ pub fn parse_sessions(ls_output: &str) -> Vec<String> {
 /// Whether `name` is among the live sessions.
 pub fn is_live(name: &str, live: &[String]) -> bool {
     live.iter().any(|s| s == name)
+}
+
+/// Parse `tmux list-panes -a -F '#{session_name} #{pane_pid}'` into
+/// `(session_name, pane_pid)` pairs. Session names never contain a space (they
+/// are our slugged keys), so the pid is whatever follows the last space; a
+/// malformed or empty line is skipped rather than guessed at.
+pub fn parse_session_panes(output: &str) -> Vec<(String, u32)> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let (name, pid) = line.rsplit_once(' ')?;
+            let pid: u32 = pid.trim().parse().ok()?;
+            let name = name.trim();
+            if name.is_empty() {
+                return None;
+            }
+            Some((name.to_string(), pid))
+        })
+        .collect()
 }
 
 use std::process::Command;
@@ -133,6 +168,21 @@ pub fn live_sessions() -> Vec<String> {
         .output();
     match out {
         Ok(o) if o.status.success() => parse_sessions(&String::from_utf8_lossy(&o.stdout)),
+        _ => Vec::new(),
+    }
+}
+
+/// `(session_name, pane_pid)` for every pane the tmux server holds. Empty on
+/// any error (no server, tmux missing) — the resource band then attributes
+/// nothing to worktrees and shows the base-app total only.
+pub fn list_session_panes() -> Vec<(String, u32)> {
+    let out = Command::new("tmux")
+        .args(["list-panes", "-a", "-F", "#{session_name} #{pane_pid}"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            parse_session_panes(&String::from_utf8_lossy(&o.stdout))
+        }
         _ => Vec::new(),
     }
 }
@@ -175,6 +225,39 @@ mod tests {
     }
 
     #[test]
+    fn parse_session_panes_pairs_names_with_pids_and_skips_junk() {
+        let out = "harness_wtA_1 4321\nharness_wtA_2 4400\nmy-session 12\n\n  \nbroken-line\nname 99x\n";
+        let panes = parse_session_panes(out);
+        assert_eq!(
+            panes,
+            vec![
+                ("harness_wtA_1".to_string(), 4321),
+                ("harness_wtA_2".to_string(), 4400),
+                ("my-session".to_string(), 12),
+            ],
+            "well-formed rows parse; blank/no-pid/non-numeric rows drop"
+        );
+    }
+
+    #[test]
+    fn every_session_name_starts_with_its_key_prefix() {
+        // The resource monitor attributes a live session back to a worktree by
+        // this prefix, so it must be exactly what `session_name` is built from.
+        let key = "acme/fix.bug:v2";
+        let prefix = session_prefix(key);
+        assert_eq!(prefix, "harness_acme-fix-bug-v2_");
+        for tab in [1u64, 7, 999] {
+            assert!(
+                session_name(key, tab).starts_with(&prefix),
+                "session name for tab {tab} must carry the key prefix"
+            );
+        }
+        // A different key must not share the prefix, or two worktrees' usage
+        // would merge.
+        assert!(!session_name("other", 1).starts_with(&prefix));
+    }
+
+    #[test]
     fn shell_quote_escapes_single_quotes_and_spaces() {
         assert_eq!(shell_quote("plain"), "'plain'");
         assert_eq!(shell_quote("a b"), "'a b'");
@@ -190,12 +273,17 @@ mod tests {
     }
 
     // The status bar is hidden per-session before the client attaches. Helper:
-    // the sub-slice `set-option -t NAME status off` must appear, and `status on`
-    // (a global change) must never.
+    // the sub-slice `set-option -t NAME status off` must appear, and the session
+    // must never be told `status on` (a change that would outlive the pane).
     fn hides_status_bar(a: &[String], session: &str) -> bool {
-        a.windows(5).any(|w| {
-            w == ["set-option", "-t", session, "status", "off"]
-        }) && !a.iter().any(|x| x == "on")
+        a.windows(5).any(|w| w == ["set-option", "-t", session, "status", "off"])
+            && !a.windows(5).any(|w| w == ["set-option", "-t", session, "status", "on"])
+    }
+
+    // Scroll works in a tmux pane only when the session requests mouse
+    // reporting; the client sets it per-session, scoped like `status off`.
+    fn enables_mouse(a: &[String], session: &str) -> bool {
+        a.windows(5).any(|w| w == ["set-option", "-t", session, "mouse", "on"])
     }
 
     #[test]
@@ -237,11 +325,28 @@ mod tests {
             vec![
                 "set-option", "-t", "harness_k_7", "status", "off",
                 ";",
+                "set-option", "-t", "harness_k_7", "mouse", "on",
+                ";",
                 "attach-session", "-t", "harness_k_7",
             ]
         );
         // No new-session on restore: it would attach early and trap the pane.
         assert!(!a.iter().any(|x| x == "new-session"), "restore must not re-create: {a:?}");
+    }
+
+    #[test]
+    fn client_args_enable_mouse_so_the_wheel_scrolls() {
+        // Every path must turn on mouse reporting for its session — without it
+        // tmux (always on the alternate screen) leaves the scroll wheel inert.
+        let c = cmd();
+        let fresh_agent = client_args("harness_k_1", Path::new("/repo"), Some(&c), false);
+        let fresh_shell = client_args("harness_k_2", Path::new("/repo"), None, false);
+        let restored = client_args("harness_k_3", Path::new("/repo"), None, true);
+        assert!(enables_mouse(&fresh_agent, "harness_k_1"), "{fresh_agent:?}");
+        assert!(enables_mouse(&fresh_shell, "harness_k_2"), "{fresh_shell:?}");
+        assert!(enables_mouse(&restored, "harness_k_3"), "{restored:?}");
+        // Scoped to our session only — never a global `set -g`.
+        assert!(!fresh_agent.iter().any(|x| x == "-g"), "must not touch global config");
     }
 
     #[test]

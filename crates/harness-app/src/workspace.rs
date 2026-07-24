@@ -482,7 +482,15 @@ pub struct HarnessWorkspace {
     /// focus drifts to the `"Harness"` root, which has neither, and the
     /// keystrokes silently no-op.
     editor_host_focus: FocusHandle,
+    /// Latest resource sample driving the sidebar band; `None` until the first
+    /// tick lands (and while CPU has no delta yet).
+    resource: Option<crate::resource_monitor::Snapshot>,
+    /// Rolling trail of recent totals, drawn as the band's sparklines.
+    resource_history: crate::resource_monitor::History,
 }
+
+/// How many samples the sidebar sparkline retains (≈2 min at the 2 s cadence).
+const RESOURCE_HISTORY: usize = 60;
 
 
 // The chrome view's methods are split across the `workspace/` module by
@@ -632,6 +640,8 @@ impl HarnessWorkspace {
             tools: detect_tools(),
             focus_handle: cx.focus_handle(),
             editor_host_focus: cx.focus_handle(),
+            resource: None,
+            resource_history: crate::resource_monitor::History::new(RESOURCE_HISTORY),
         };
         this.ensure_pane(window, cx);
         // Restore persisted appearance (zed theme + fonts). main.rs already
@@ -805,6 +815,31 @@ impl HarnessWorkspace {
                 .is_err()
             {
                 break;
+            }
+        })
+        .detach();
+
+        // Sample openOrchestra's own CPU/memory footprint for the sidebar band.
+        // The sysinfo refresh + tmux pane read run on a background thread; only
+        // the (cheap, pure) attribution runs on the UI thread. The `System` is
+        // reused across ticks so CPU figures are real deltas, not zeros.
+        let sampler_has_tmux = has_tmux;
+        cx.spawn(async move |view, cx| {
+            let mut sys = sysinfo::System::new();
+            loop {
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+                let (returned, raw) = cx
+                    .background_spawn(async move {
+                        let mut sys = sys;
+                        let raw =
+                            crate::resource_monitor::sample_once(&mut sys, sampler_has_tmux);
+                        (sys, raw)
+                    })
+                    .await;
+                sys = returned;
+                if view.update(cx, |ws, cx| ws.apply_resource(raw, cx)).is_err() {
+                    break;
+                }
             }
         })
         .detach();

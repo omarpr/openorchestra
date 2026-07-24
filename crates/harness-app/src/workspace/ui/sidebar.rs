@@ -51,6 +51,101 @@ impl HarnessWorkspace {
             )
     }
 
+    /// The resource band atop the sidebar: openOrchestra's whole CPU/memory
+    /// footprint as two labelled sparklines, with a per-worktree breakdown on
+    /// hover. `base + Σ worktrees` by construction, so the hover rows add up to
+    /// the totals shown here.
+    pub(crate) fn render_resource_band(&self, hx: &HarnessTheme, _cx: &mut Context<Self>) -> impl IntoElement {
+        use crate::resource_monitor::{fmt_cpu, fmt_mem};
+        let snap = self.resource.as_ref();
+        let cpu_label = snap.map(|s| fmt_cpu(s.total.cpu_pct)).unwrap_or_else(|| "—".into());
+        let mem_label = snap.map(|s| fmt_mem(s.total.rss_bytes)).unwrap_or_else(|| "—".into());
+        let cpu_hist: Vec<f32> = self.resource_history.iter().map(|u| u.cpu_pct).collect();
+        let mem_hist: Vec<f32> = self.resource_history.iter().map(|u| u.rss_bytes as f32).collect();
+
+        // Hover breakdown: worktrees with any usage, most-CPU first, then the
+        // shared base-app row (muted) so the rows sum to the total.
+        let mut rows: Vec<ResourceRow> = Vec::new();
+        if let Some(s) = snap {
+            let mut wts: Vec<&crate::resource_monitor::WorktreeUsage> = s
+                .per_worktree
+                .iter()
+                .filter(|w| w.usage.cpu_pct >= 0.5 || w.usage.rss_bytes > 0)
+                .collect();
+            wts.sort_by(|a, b| {
+                b.usage
+                    .cpu_pct
+                    .partial_cmp(&a.usage.cpu_pct)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            rows.extend(wts.iter().map(|w| ResourceRow {
+                label: w.label.clone(),
+                cpu: fmt_cpu(w.usage.cpu_pct),
+                mem: fmt_mem(w.usage.rss_bytes),
+                muted: false,
+            }));
+            rows.push(ResourceRow {
+                label: "App (base)".into(),
+                cpu: fmt_cpu(s.base.cpu_pct),
+                mem: fmt_mem(s.base.rss_bytes),
+                muted: true,
+            });
+        }
+
+        let series = |label: &'static str, value: String, hist: Vec<f32>, color: gpui::Rgba| {
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .h(px(15.0))
+                .child(div().w(px(30.0)).flex_none().text_xs().text_color(hx.tx2).child(label))
+                .child(sparkline(&hist, color))
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(hx.tx0)
+                        .child(value),
+                )
+        };
+
+        div()
+            .id("resource-band")
+            .flex()
+            .flex_col()
+            .flex_none()
+            .px_3()
+            .py_1p5()
+            .gap_0p5()
+            .border_b_1()
+            .border_color(hx.border)
+            .tooltip(move |_window, cx| cx.new(|_| ResourceTooltip { rows: rows.clone() }).into())
+            .child(series("CPU", cpu_label, cpu_hist, hx.accent))
+            .child(series("MEM", mem_label, mem_hist, hx.green))
+    }
+
+    /// A sidebar section label — the small bordered strip that heads each
+    /// region (STATS, WORKTREES). Kept in one place so the two read identically.
+    fn section_header(&self, hx: &HarnessTheme, label: &'static str) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .h(px(34.0))
+            .px_3()
+            .border_b_1()
+            .border_color(hx.border)
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(hx.tx2)
+                    .child(label),
+            )
+    }
+
     pub(crate) fn render_sidebar(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
         let mut column = div()
             .flex()
@@ -62,17 +157,9 @@ impl HarnessWorkspace {
             .border_r_1()
             .border_color(hx.border)
             .overflow_hidden()
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .h(px(34.0))
-                    .px_3()
-                    .border_b_1()
-                    .border_color(hx.border)
-                    .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx2).child("WORKTREES")),
-            );
+            .child(self.section_header(hx, "STATS"))
+            .child(self.render_resource_band(hx, cx))
+            .child(self.section_header(hx, "WORKTREES"));
 
         if self.data.repos.is_empty() {
             column = column.child(
@@ -588,5 +675,98 @@ impl HarnessWorkspace {
             .hover(|d| d.bg(hx.surface_hover).text_color(if danger { hx.red } else { hx.tx0 }))
             .on_click(handler)
             .child(label.to_string())
+    }
+}
+
+/// A bar sparkline for the resource band. Each sample is a thin vertical bar,
+/// its height the value relative to the visible window's own peak — so the
+/// shape reads even as the absolute scale (a few % vs. a whole core) shifts.
+/// A floor of 1px keeps a baseline visible when everything is near zero.
+fn sparkline(values: &[f32], color: gpui::Rgba) -> impl IntoElement {
+    const H: f32 = 13.0;
+    const BAR_W: f32 = 2.0;
+    const MAX_BARS: usize = 48;
+
+    let start = values.len().saturating_sub(MAX_BARS);
+    let visible = &values[start..];
+    let peak = visible.iter().copied().fold(0.0_f32, f32::max).max(f32::EPSILON);
+
+    let mut row = div().flex().flex_row().items_end().flex_none().h(px(H)).gap(px(1.0));
+    for &v in visible {
+        let ratio = (v / peak).clamp(0.0, 1.0);
+        let bar_h = (ratio * H).max(1.0);
+        row = row.child(div().w(px(BAR_W)).h(px(bar_h)).rounded_sm().bg(color));
+    }
+    row
+}
+
+/// One row of the resource band's hover breakdown.
+#[derive(Clone)]
+struct ResourceRow {
+    label: String,
+    cpu: String,
+    mem: String,
+    /// The shared "App (base)" row is dimmed — it isn't a worktree.
+    muted: bool,
+}
+
+/// The hover popover listing per-worktree usage plus the base-app row.
+struct ResourceTooltip {
+    rows: Vec<ResourceRow>,
+}
+
+impl Render for ResourceTooltip {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let hx = theme(cx);
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_2()
+            .min_w(px(190.0))
+            .bg(hx.surface2)
+            .border_1()
+            .border_color(hx.border2)
+            .rounded_md()
+            .shadow_lg();
+
+        if self.rows.is_empty() {
+            return col.child(
+                div().text_xs().text_color(hx.tx2).child("Measuring usage…"),
+            );
+        }
+
+        for r in &self.rows {
+            col = col.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(if r.muted { hx.tx2 } else { hx.tx0 })
+                            .child(r.label.clone()),
+                    )
+                    .child(
+                        div()
+                            .w(px(40.0))
+                            .flex_none()
+                            .text_xs()
+                            .text_color(hx.tx1)
+                            .child(r.cpu.clone()),
+                    )
+                    .child(
+                        div()
+                            .w(px(56.0))
+                            .flex_none()
+                            .text_xs()
+                            .text_color(hx.tx1)
+                            .child(r.mem.clone()),
+                    ),
+            );
+        }
+        col
     }
 }

@@ -7,6 +7,44 @@ impl HarnessWorkspace {
 
     pub(crate) fn render_top_bar(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
         let branch = self.resolve().map(|r| r.branch).unwrap_or_else(|| "no folder".to_string());
+        // The left toggle shows/hides the whole left panel (stats + worktrees),
+        // so it sits on the left and is named for the panel, not its list.
+        let sidebar_toggle = div()
+            .id("toggle-sidebar")
+            .flex_none()
+            .px_2()
+            .py_0p5()
+            .rounded_md()
+            .text_xs()
+            .text_color(if self.prefs.sidebar_open { hx.tx1 } else { hx.tx2 })
+            .cursor_pointer()
+            .tooltip(tip("Toggle sidebar"))
+            .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
+            .child("▤ sidebar")
+            .on_click(cx.listener(|ws, _, _, cx| {
+                ws.prefs.sidebar_open = !ws.prefs.sidebar_open;
+                ws.save_prefs(cx);
+                cx.notify();
+            }));
+
+        let diff_toggle = div()
+            .id("toggle-diff")
+            .flex_none()
+            .px_2()
+            .py_0p5()
+            .rounded_md()
+            .text_xs()
+            .text_color(if self.prefs.diff_open { hx.tx1 } else { hx.tx2 })
+            .cursor_pointer()
+            .tooltip(tip("Toggle diff panel"))
+            .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
+            .child("diff ▤")
+            .on_click(cx.listener(|ws, _, _, cx| {
+                ws.prefs.diff_open = !ws.prefs.diff_open;
+                ws.save_prefs(cx);
+                cx.notify();
+            }));
+
         div()
             .flex()
             .flex_none()
@@ -16,6 +54,8 @@ impl HarnessWorkspace {
             .bg(hx.bg0)
             .border_b_1()
             .border_color(hx.border)
+            // Left: the sidebar toggle. Center: title (flex_1). Right: diff.
+            .child(sidebar_toggle)
             .child(
                 div()
                     .flex_1()
@@ -27,44 +67,7 @@ impl HarnessWorkspace {
                     .child(div().text_xs().text_color(hx.tx2).child("·"))
                     .child(div().text_xs().font_family(hx.font_mono).text_color(hx.tx1).child(branch)),
             )
-            .child(
-                div()
-                    .id("toggle-sidebar")
-                    .flex_none()
-                    .px_2()
-                    .py_0p5()
-                    .rounded_md()
-                    .text_xs()
-                    .text_color(if self.prefs.sidebar_open { hx.tx1 } else { hx.tx2 })
-                    .cursor_pointer()
-                    .tooltip(tip("Toggle worktrees sidebar"))
-                    .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
-                    .child("▤ worktrees")
-                    .on_click(cx.listener(|ws, _, _, cx| {
-                        ws.prefs.sidebar_open = !ws.prefs.sidebar_open;
-                        ws.save_prefs(cx);
-                        cx.notify();
-                    })),
-            )
-            .child(
-                div()
-                    .id("toggle-diff")
-                    .flex_none()
-                    .px_2()
-                    .py_0p5()
-                    .rounded_md()
-                    .text_xs()
-                    .text_color(if self.prefs.diff_open { hx.tx1 } else { hx.tx2 })
-                    .cursor_pointer()
-                    .tooltip(tip("Toggle diff panel"))
-                    .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
-                    .child("diff ▤")
-                    .on_click(cx.listener(|ws, _, _, cx| {
-                        ws.prefs.diff_open = !ws.prefs.diff_open;
-                        ws.save_prefs(cx);
-                        cx.notify();
-                    })),
-            )
+            .child(diff_toggle)
     }
 
     /// The conductor pet: a small maestro who appears with each notification
