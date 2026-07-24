@@ -1,7 +1,7 @@
 //! Split out of `workspace.rs` (see its module docs). Pure relocation:
 //! `impl HarnessWorkspace` methods for this feature area.
 
-use super::*;
+use super::super::*;
 
 impl HarnessWorkspace {
 

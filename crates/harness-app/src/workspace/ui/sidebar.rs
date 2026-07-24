@@ -1,7 +1,7 @@
 //! Split out of `workspace.rs` (see its module docs). Pure relocation:
 //! `impl HarnessWorkspace` methods for this feature area.
 
-use super::*;
+use super::super::*;
 
 impl HarnessWorkspace {
 
@@ -402,6 +402,7 @@ impl HarnessWorkspace {
                 cx.listener({
                     let id = id.clone();
                     move |ws, ev: &MouseDownEvent, _window, cx| {
+                        eprintln!("[diag] card on_mouse_down(Right) fired");
                         cx.stop_propagation();
                         ws.pending_delete = None;
                         ws.menu = Some(CardMenu {
@@ -413,6 +414,22 @@ impl HarnessWorkspace {
                     }
                 }),
             )
+            // GPUI routes non-primary (right/middle) *clicks* through the
+            // aux-click path (div.rs special-cases `has_aux_click_listeners`),
+            // which is distinct from the raw right on_mouse_down listener above.
+            // Wiring both makes the menu robust to whichever path the platform
+            // actually delivers.
+            .on_aux_click(cx.listener({
+                let id = id.clone();
+                move |ws, ev: &gpui::ClickEvent, _window, cx| {
+                    eprintln!("[diag] card on_aux_click fired");
+                    cx.stop_propagation();
+                    ws.pending_delete = None;
+                    let pos = ev.position();
+                    ws.menu = Some(CardMenu { id: id.clone(), x: pos.x, y: pos.y });
+                    cx.notify();
+                }
+            }))
             .child(header)
             .child(div().mt_1().text_xs().font_family(hx.font_mono).text_color(hx.tx1).overflow_hidden().child(card.branch.clone()))
             .child(badges);

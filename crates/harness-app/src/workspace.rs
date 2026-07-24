@@ -456,11 +456,7 @@ pub struct HarnessWorkspace {
 // helpers live here.
 mod state;
 mod actions;
-mod ui_chrome;
-mod ui_settings;
-mod ui_sidebar;
-mod ui_center;
-mod ui_diff;
+mod ui;
 
 impl HarnessWorkspace {
     pub fn new(launch_hint: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -856,6 +852,17 @@ impl Render for HarnessWorkspace {
             .on_action(cx.listener(|ws, _: &crate::NewChat, window, cx| {
                 ws.open_tab(TabKind::Chat, window, cx)
             }))
+            // [diag] Window-level probe: does a right mouse-down reach the app
+            // at all? If ROOT-RIGHT never prints on a right/control-click while
+            // ROOT-LEFT does, the platform isn't delivering right-clicks.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_ws, _e: &MouseDownEvent, _w, _cx| eprintln!("[diag] ROOT mouse_down LEFT")),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|_ws, _e: &MouseDownEvent, _w, _cx| eprintln!("[diag] ROOT mouse_down RIGHT")),
+            )
             .on_mouse_move(cx.listener(|ws, ev: &MouseMoveEvent, _, cx| ws.drag_move(ev, cx)))
             .on_mouse_up(
                 MouseButton::Left,
