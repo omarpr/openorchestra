@@ -223,6 +223,23 @@ pub(crate) struct Tab {
     content: TabContent,
 }
 
+impl Tab {
+    /// Classify this tab for persistence (`panes_state`). `TabContent` holds
+    /// live entities that can't be matched by kind ergonomically at the call
+    /// site, so `save_panes` goes through this instead.
+    fn kind_tag(&self) -> crate::panes_state::TabRecordKind {
+        use crate::panes_state::TabRecordKind as K;
+        match &self.content {
+            TabContent::Editor(_) => K::Editor,
+            TabContent::Chat(_) => K::Chat,
+            TabContent::Terminal(_) => match &self.agent {
+                Some(a) => K::Agent(a.clone()),
+                None => K::Shell,
+            },
+        }
+    }
+}
+
 #[derive(Clone, PartialEq)]
 #[derive(Debug)]
 pub(crate) enum Selection {
@@ -332,7 +349,6 @@ struct PaneSet {
     tabs: Vec<Tab>,
     /// Id of the active tab, not an index — indices shift when a tab closes.
     active: u64,
-    next_id: u64,
     /// Monotonic counter, bumped on every touch, for LRU eviction (M5b).
     last_used: u64,
 }
@@ -413,6 +429,11 @@ pub struct HarnessWorkspace {
     diff_pending: bool,
     /// Monotonic tick for pane LRU ordering.
     pane_clock: u64,
+    /// Persisted open-tab records for reattaching tmux sessions on reopen.
+    panes_state: crate::panes_state::PanesState,
+    panes_path: PathBuf,
+    /// Whether `tmux` is available; when false, sessions are not persistent.
+    has_tmux: bool,
     /// The active inline edit, if any. `Editor`-backed, so it carries its own
     /// focus, caret, and selection — no more hand-rolled caret blink.
     edit: Option<ActiveEdit>,
@@ -471,6 +492,9 @@ impl HarnessWorkspace {
         let prefs_path = data_dir.join("prefs.json");
         let prefs = load_prefs(&prefs_path);
         let reg_path = data_dir.join("registry.json");
+        let panes_path = data_dir.join("panes.json");
+        let panes_state = crate::panes_state::load(&panes_path);
+        let has_tmux = crate::tmux::has_tmux();
 
         let mut repo_roots = load_repos(&repos_path);
         // Auto-add the launch dir if it's inside a git repo.
@@ -570,6 +594,9 @@ impl HarnessWorkspace {
             diff_gen: 0,
             diff_pending: false,
             pane_clock: 0,
+            panes_state,
+            panes_path,
+            has_tmux,
             edit: None,
             new_target_repo,
             menu: None,

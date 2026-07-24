@@ -377,12 +377,14 @@ impl HarnessWorkspace {
         let pane = self.panes.entry(r.key.clone()).or_insert_with(|| PaneSet {
             tabs: Vec::new(),
             active: 0,
-            next_id: 1,
             last_used: 0,
         });
         pane.last_used = self.pane_clock;
-        let id = pane.next_id;
-        pane.next_id += 1;
+        // Per-pane-set id, unique within this worktree's tabs. Task 6 sources
+        // `Tab::id` from the globally-persisted `next_tab_id()` counter
+        // instead; this local derivation is a placeholder that keeps the
+        // pane's own bookkeeping correct until that wiring lands.
+        let id = pane.tabs.iter().map(|t| t.id).max().unwrap_or(0) + 1;
         pane.tabs.push(Tab { id, title, content, agent: agent_of_kind });
         pane.active = id;
         self.focus_active_pane(window, cx);
@@ -687,5 +689,39 @@ impl HarnessWorkspace {
             });
         })
         .detach();
+    }
+
+    /// Draw the next globally-unique, persisted tab id.
+    pub(crate) fn next_tab_id(&mut self) -> u64 {
+        // next_tab_id starts at 0 on a fresh install; first id handed out is 1.
+        self.panes_state.next_tab_id += 1;
+        let id = self.panes_state.next_tab_id;
+        crate::panes_state::save(&self.panes_path, &self.panes_state);
+        id
+    }
+
+    /// Rebuild the persisted tab records from the live pane sets and write them.
+    /// Only terminal/agent tabs are meaningful to reattach, but every tab is
+    /// recorded so the strip comes back intact.
+    pub(crate) fn save_panes(&mut self) {
+        use crate::panes_state::{TabRecord, WorktreePanes};
+        let mut worktrees = std::collections::BTreeMap::new();
+        for (key, pane) in &self.panes {
+            let tabs = pane
+                .tabs
+                .iter()
+                .map(|t| TabRecord {
+                    id: t.id,
+                    kind: t.kind_tag(),
+                    title: t.title.clone(),
+                })
+                .collect();
+            worktrees.insert(
+                key.clone(),
+                WorktreePanes { active: Some(pane.active), tabs },
+            );
+        }
+        self.panes_state.worktrees = worktrees;
+        crate::panes_state::save(&self.panes_path, &self.panes_state);
     }
 }
