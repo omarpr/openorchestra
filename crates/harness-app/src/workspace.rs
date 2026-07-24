@@ -21,6 +21,8 @@ use gpui::{
     Pixels, Render, Rgba, Styled, Window, div, prelude::*, px, rgb,
 };
 
+use editor::Editor;
+
 use agent_runtime::{
     runtime_for, AgentKind, AgentSignal, AgentState, Bus, StatusFileSource, WaitFidelity,
 };
@@ -228,14 +230,27 @@ enum Selection {
     Worktree(String),
 }
 
-#[derive(Clone, PartialEq)]
-enum Edit {
-    None,
-    NewName(String),
-    Rename(String, String),
-    Avatar(String, String),
-    /// Editing an agent's launch command in settings (kind string, text).
-    AgentCmd(String, String),
+/// What an active inline edit targets. The text itself lives in the backing
+/// `Editor` (full caret/selection/clipboard editing), not here — this only
+/// carries which thing is being edited so the commit knows where to write.
+#[derive(Clone)]
+enum EditKind {
+    /// New worktree name, created under `new_target_repo`.
+    NewName,
+    /// Rename worktree `id`.
+    Rename(String),
+    /// Edit worktree `id`'s avatar initials.
+    Avatar(String),
+    /// Edit an agent's launch command in settings (kind string).
+    AgentCmd(String),
+}
+
+/// An inline edit in progress: what it targets, and the single-line `Editor`
+/// backing it. Replacing the old hand-rolled append-only field, this brings
+/// real text editing — caret motion, selection, ⌘A/C/V/X, IME.
+struct ActiveEdit {
+    kind: EditKind,
+    editor: Entity<Editor>,
 }
 
 /// The name an agent goes by in front of users — notification titles, rows.
@@ -301,7 +316,8 @@ struct DragState {
 struct CommentDraft {
     file: String,
     line: u32,
-    body: String,
+    /// The single-line editor holding the draft comment text.
+    editor: Entity<Editor>,
     /// Window coordinates of the gutter cell that opened it.
     at: gpui::Point<Pixels>,
 }
@@ -397,10 +413,9 @@ pub struct HarnessWorkspace {
     diff_pending: bool,
     /// Monotonic tick for pane LRU ordering.
     pane_clock: u64,
-    edit: Edit,
-    edit_focus: FocusHandle,
-    caret_on: bool,
-    blink_gen: u64,
+    /// The active inline edit, if any. `Editor`-backed, so it carries its own
+    /// focus, caret, and selection — no more hand-rolled caret blink.
+    edit: Option<ActiveEdit>,
     new_target_repo: String,
     menu: Option<CardMenu>,
     /// Open "new tab" menu, anchored under the `+` in the tab strip.
@@ -546,10 +561,7 @@ impl HarnessWorkspace {
             diff_gen: 0,
             diff_pending: false,
             pane_clock: 0,
-            edit: Edit::None,
-            edit_focus: cx.focus_handle(),
-            caret_on: true,
-            blink_gen: 0,
+            edit: None,
             new_target_repo,
             menu: None,
             tab_menu: None,
@@ -1241,49 +1253,40 @@ impl HarnessWorkspace {
             .and_then(|r| self.review.get(&r.key, &file, line))
             .map(|c| c.body.clone())
             .unwrap_or_default();
+        let editor = cx.new(|cx| {
+            let mut e = Editor::single_line(window, cx);
+            e.set_placeholder_text("What should the agent change here?", window, cx);
+            if !existing.is_empty() {
+                e.set_text(existing.as_str(), window, cx);
+            }
+            e
+        });
+        window.focus(&editor.focus_handle(cx), cx);
         self.comment_draft = Some(CommentDraft {
             file,
             line,
-            body: existing,
+            editor,
             at,
         });
-        window.focus(&self.edit_focus, cx);
         cx.notify();
     }
 
-    fn comment_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        match event.keystroke.key.as_str() {
-            "escape" => {
-                self.comment_draft = None;
-                cx.notify();
-            }
-            "enter" => self.commit_comment(cx),
-            "backspace" => {
-                if let Some(draft) = self.comment_draft.as_mut() {
-                    draft.body.pop();
-                }
-                cx.notify();
-            }
-            _ => {
-                let m = &event.keystroke.modifiers;
-                if let Some(ch) = event.keystroke.key_char.clone()
-                    && !ch.is_empty()
-                    && !m.control
-                    && !m.platform
-                    && let Some(draft) = self.comment_draft.as_mut()
-                {
-                    draft.body.push_str(&ch);
-                    cx.notify();
-                }
-            }
-        }
-        cx.stop_propagation();
+    /// Enter in the comment popover (routed from `menu::Confirm`).
+    fn confirm_comment(&mut self, _: &menu::Confirm, _window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_comment(cx);
+    }
+
+    /// Escape in the comment popover (routed from `menu::Cancel`): abandon it.
+    fn cancel_comment(&mut self, _: &menu::Cancel, _window: &mut Window, cx: &mut Context<Self>) {
+        self.comment_draft = None;
+        cx.notify();
     }
 
     fn commit_comment(&mut self, cx: &mut Context<Self>) {
         let Some(draft) = self.comment_draft.take() else { return };
+        let body = draft.editor.read(cx).text(cx);
         if let Some(r) = self.resolve() {
-            self.review.set(&r.key, &draft.file, draft.line, &draft.body);
+            self.review.set(&r.key, &draft.file, draft.line, &body);
             self.review.save(&self.review_path);
         }
         cx.notify();
@@ -1420,7 +1423,7 @@ impl HarnessWorkspace {
         self.selection = sel;
         self.pending_delete = None;
         self.menu = None;
-        self.edit = Edit::None;
+        self.edit = None;
         self.ensure_pane(window, cx);
         self.recompute_diff(cx);
         self.focus_active_pane(window, cx);
@@ -1523,75 +1526,62 @@ impl HarnessWorkspace {
 
     // ---- text edit -------------------------------------------------------
 
-    fn begin_edit(&mut self, edit: Edit, window: &mut Window, cx: &mut Context<Self>) {
-        self.edit = edit;
-        self.menu = None;
-        self.caret_on = true;
-        self.blink_gen = self.blink_gen.wrapping_add(1);
-        let blink_id = self.blink_gen;
-        window.focus(&self.edit_focus, cx);
-        cx.spawn(async move |view, cx| loop {
-            cx.background_executor().timer(Duration::from_millis(530)).await;
-            let cont = view
-                .update(cx, |ws, cx| {
-                    if ws.blink_gen != blink_id || matches!(ws.edit, Edit::None) {
-                        false
-                    } else {
-                        ws.caret_on = !ws.caret_on;
-                        cx.notify();
-                        true
-                    }
-                })
-                .unwrap_or(false);
-            if !cont {
-                break;
+    /// Open an inline edit backed by a real single-line `Editor`. `seed` is the
+    /// current value (pre-filled and selected so the first keystroke replaces
+    /// it); `placeholder` shows when the field is empty.
+    fn begin_edit(
+        &mut self,
+        kind: EditKind,
+        seed: &str,
+        placeholder: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let seed = seed.to_string();
+        let placeholder = placeholder.to_string();
+        let editor = cx.new(|cx| {
+            let mut e = Editor::single_line(window, cx);
+            e.set_placeholder_text(placeholder.as_str(), window, cx);
+            if !seed.is_empty() {
+                // Pre-fill with the current value; the caret lands at the end,
+                // and ⌘A selects all to retype from scratch.
+                e.set_text(seed.as_str(), window, cx);
             }
-        })
-        .detach();
+            e
+        });
+        window.focus(&editor.focus_handle(cx), cx);
+        self.edit = Some(ActiveEdit { kind, editor });
+        self.menu = None;
         cx.notify();
     }
 
-    fn edit_text_mut(&mut self) -> Option<&mut String> {
-        match &mut self.edit {
-            Edit::NewName(t) | Edit::Rename(_, t) | Edit::Avatar(_, t) | Edit::AgentCmd(_, t) => {
-                Some(t)
-            }
-            Edit::None => None,
-        }
+    /// The active edit's target, for the render sites that decide whether a
+    /// given row/card is the one being edited.
+    fn edit_kind(&self) -> Option<&EditKind> {
+        self.edit.as_ref().map(|e| &e.kind)
     }
 
-    fn edit_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        match event.keystroke.key.as_str() {
-            "escape" => {
-                self.edit = Edit::None;
-                cx.notify();
-            }
-            "enter" => self.commit_edit(window, cx),
-            "backspace" => {
-                if let Some(t) = self.edit_text_mut() {
-                    t.pop();
-                }
-                self.caret_on = true;
-                cx.notify();
-            }
-            _ => {
-                let m = &event.keystroke.modifiers;
-                if let Some(ch) = event.keystroke.key_char.clone()
-                    && !ch.is_empty() && !m.control && !m.platform {
-                        if let Some(t) = self.edit_text_mut() {
-                            t.push_str(&ch);
-                        }
-                        self.caret_on = true;
-                        cx.notify();
-                    }
-            }
-        }
-        cx.stop_propagation();
+    /// The active edit's backing editor, for the render sites that draw it.
+    fn edit_editor(&self) -> Option<Entity<Editor>> {
+        self.edit.as_ref().map(|e| e.editor.clone())
+    }
+
+    /// Enter in an inline edit field (routed from the global `menu::Confirm`).
+    fn confirm_edit(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_edit(window, cx);
+    }
+
+    /// Escape in an inline edit field (routed from `menu::Cancel`): abandon it.
+    fn cancel_edit(&mut self, _: &menu::Cancel, _window: &mut Window, cx: &mut Context<Self>) {
+        self.edit = None;
+        cx.notify();
     }
 
     fn commit_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match std::mem::replace(&mut self.edit, Edit::None) {
-            Edit::NewName(text) => {
+        let Some(active) = self.edit.take() else { return };
+        let text = active.editor.read(cx).text(cx);
+        match active.kind {
+            EditKind::NewName => {
                 let name = text.trim().to_string();
                 if !name.is_empty() {
                     self.create_named(&name, window, cx);
@@ -1599,7 +1589,7 @@ impl HarnessWorkspace {
                     cx.notify();
                 }
             }
-            Edit::Rename(id, text) => {
+            EditKind::Rename(id) => {
                 let name = text.trim();
                 if !name.is_empty() {
                     let _ = self.manager.registry.rename(&id, name);
@@ -1607,7 +1597,7 @@ impl HarnessWorkspace {
                 }
                 self.refresh(window, cx);
             }
-            Edit::Avatar(id, text) => {
+            EditKind::Avatar(id) => {
                 let initials = text.trim().to_uppercase();
                 if !initials.is_empty()
                     && let Some(e) = self.manager.registry.get(&id) {
@@ -1620,14 +1610,13 @@ impl HarnessWorkspace {
                     }
                 self.refresh(window, cx);
             }
-            Edit::AgentCmd(kind, text) => {
+            EditKind::AgentCmd(kind) => {
                 let cmd = text.trim().to_string();
                 let entry = self.prefs.agents.entry(kind).or_default();
                 entry.command = if cmd.is_empty() { None } else { Some(cmd) };
                 save_prefs_to(&self.prefs_path, &self.prefs);
                 cx.notify();
             }
-            Edit::None => {}
         }
     }
 
@@ -1951,6 +1940,7 @@ impl HarnessWorkspace {
                     .text_xs()
                     .text_color(if self.prefs.sidebar_open { hx.tx1 } else { hx.tx2 })
                     .cursor_pointer()
+                    .tooltip(tip("Toggle worktrees sidebar"))
                     .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
                     .child("▤ worktrees")
                     .on_click(cx.listener(|ws, _, _, cx| {
@@ -1969,6 +1959,7 @@ impl HarnessWorkspace {
                     .text_xs()
                     .text_color(if self.prefs.diff_open { hx.tx1 } else { hx.tx2 })
                     .cursor_pointer()
+                    .tooltip(tip("Toggle diff panel"))
                     .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
                     .child("diff ▤")
                     .on_click(cx.listener(|ws, _, _, cx| {
@@ -2350,7 +2341,7 @@ impl HarnessWorkspace {
                     .items_center()
                     .gap_1p5()
                     .pb_1()
-                    .child(div().id("fs-minus").child(size_chip("−")).on_click(cx.listener(step(-1.0))))
+                    .child(div().id("fs-minus").tooltip(tip("Smaller")).child(size_chip("−")).on_click(cx.listener(step(-1.0))))
                     .child(
                         div()
                             .w(px(44.0))
@@ -2360,7 +2351,7 @@ impl HarnessWorkspace {
                             .text_color(hx.tx0)
                             .child(format!("{size:.0} px")),
                     )
-                    .child(div().id("fs-plus").child(size_chip("+")).on_click(cx.listener(step(1.0)))),
+                    .child(div().id("fs-plus").tooltip(tip("Larger")).child(size_chip("+")).on_click(cx.listener(step(1.0)))),
             );
         }
 
@@ -2409,7 +2400,7 @@ impl HarnessWorkspace {
             // The command each adapter actually launches when no override is
             // set — defined once per agent in agent-runtime, not here.
             let default_cmd = agent_runtime::default_command_display(&kind);
-            let editing = matches!(&self.edit, Edit::AgentCmd(k, _) if *k == key);
+            let editing = matches!(self.edit_kind(), Some(EditKind::AgentCmd(k)) if *k == key);
 
             let toggle_key = key.clone();
             let edit_key_ = key.clone();
@@ -2418,10 +2409,6 @@ impl HarnessWorkspace {
             // starting from a blank line.
             let prefill = pref.command.clone().unwrap_or_else(|| default_cmd.clone());
             let cmd_display = pref.command.clone().unwrap_or_else(|| default_cmd.clone());
-            let edit_text = match &self.edit {
-                Edit::AgentCmd(k, t) if *k == key => t.clone(),
-                _ => String::new(),
-            };
 
             let mut row = div()
                 .flex()
@@ -2475,8 +2462,8 @@ impl HarnessWorkspace {
                             cx.notify();
                         })),
                 );
-            if editing {
-                row = row.child(div().flex_1().child(self.render_input(hx, &edit_text, cx)));
+            if let Some(editor) = editing.then(|| self.edit_editor()).flatten() {
+                row = row.child(div().flex_1().child(self.render_input(hx, editor, cx)));
             } else {
                 row = row.child(
                     div()
@@ -2504,7 +2491,9 @@ impl HarnessWorkspace {
                         .on_click(cx.listener(move |ws, _, window, cx| {
                             cx.stop_propagation();
                             ws.begin_edit(
-                                Edit::AgentCmd(edit_key_.clone(), prefill.clone()),
+                                EditKind::AgentCmd(edit_key_.clone()),
+                                &prefill,
+                                "launch command…",
                                 window,
                                 cx,
                             );
@@ -2855,7 +2844,7 @@ impl HarnessWorkspace {
                     .on_click(cx.listener(move |ws, _, window, cx| {
                         cx.stop_propagation();
                         ws.new_target_repo = plus_repo.clone();
-                        ws.begin_edit(Edit::NewName(String::new()), window, cx);
+                        ws.begin_edit(EditKind::NewName, "", "worktree name…", window, cx);
                     }))
                     .child("+"),
             );
@@ -2871,10 +2860,11 @@ impl HarnessWorkspace {
                 .border_l_1()
                 .border_color(hx.border);
             body = body.child(self.render_main_entry(hx, repo, cx));
-            if let Edit::NewName(text) = &self.edit
-                && self.new_target_repo == repo.name {
+            if matches!(self.edit_kind(), Some(EditKind::NewName))
+                && self.new_target_repo == repo.name
+                && let Some(editor) = self.edit_editor() {
                     body = body
-                        .child(div().mx_1().my_0p5().child(self.render_input(hx, text, cx)))
+                        .child(div().mx_1().my_0p5().child(self.render_input(hx, editor, cx)))
                         // The optional syntax is invisible otherwise (M5a).
                         .child(
                             div()
@@ -3001,8 +2991,8 @@ impl HarnessWorkspace {
     ) -> impl IntoElement {
         let selected = self.selection == Selection::Worktree(card.id.clone());
         let id = card.id.clone();
-        let renaming = matches!(&self.edit, Edit::Rename(rid, _) if rid == &id);
-        let avatar_open = matches!(&self.edit, Edit::Avatar(aid, _) if aid == &id);
+        let renaming = matches!(self.edit_kind(), Some(EditKind::Rename(rid)) if rid == &id);
+        let avatar_open = matches!(self.edit_kind(), Some(EditKind::Avatar(aid)) if aid == &id);
 
         let avatar_id = id.clone();
         let avatar = div()
@@ -3026,13 +3016,12 @@ impl HarnessWorkspace {
                     .get(&avatar_id)
                     .map(|e| e.avatar.initials.clone())
                     .unwrap_or_default();
-                ws.begin_edit(Edit::Avatar(avatar_id.clone(), cur), window, cx);
+                ws.begin_edit(EditKind::Avatar(avatar_id.clone()), &cur, "AB", window, cx);
             }))
             .child(card.initials.clone());
 
-        let name_el: AnyElement = if renaming {
-            let text = if let Edit::Rename(_, t) = &self.edit { t.clone() } else { String::new() };
-            self.render_input(hx, &text, cx).into_any_element()
+        let name_el: AnyElement = if let Some(editor) = renaming.then(|| self.edit_editor()).flatten() {
+            self.render_input(hx, editor, cx).into_any_element()
         } else {
             div()
                 .flex_1()
@@ -3138,7 +3127,6 @@ impl HarnessWorkspace {
         id: &str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let initials = if let Edit::Avatar(_, t) = &self.edit { t.clone() } else { String::new() };
         let mut swatches = div().flex().flex_wrap().gap_1();
         for ix in 0..8u8 {
             let sid = id.to_string();
@@ -3167,16 +3155,25 @@ impl HarnessWorkspace {
             .border_1()
             .border_color(hx.border2)
             .child(div().text_xs().text_color(hx.tx2).mb_1().child("INITIALS"))
-            .child(self.render_input(hx, &initials, cx))
+            .children(self.edit_editor().map(|editor| self.render_input(hx, editor, cx)))
             .child(div().text_xs().text_color(hx.tx2).mt_2().mb_1().child("COLOR"))
             .child(swatches)
     }
 
-    fn render_input(&self, hx: &HarnessTheme, text: &str, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The chrome around an inline edit's `Editor`. The wrapper carries the
+    /// `HarnessInput` key context (so escape→`menu::Cancel` outranks the
+    /// editor's clear-selection escape) and the confirm/cancel action handlers;
+    /// the editor itself owns caret, selection, and clipboard.
+    fn render_input(
+        &self,
+        hx: &HarnessTheme,
+        editor: Entity<Editor>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         div()
-            .id("edit-input")
-            .track_focus(&self.edit_focus)
-            .on_key_down(cx.listener(Self::edit_key))
+            .key_context("HarnessInput")
+            .on_action(cx.listener(Self::confirm_edit))
+            .on_action(cx.listener(Self::cancel_edit))
             .flex()
             .items_center()
             .flex_1()
@@ -3189,8 +3186,7 @@ impl HarnessWorkspace {
             .border_color(hx.accent)
             .text_sm()
             .text_color(hx.tx0)
-            .child(div().min_w_0().overflow_hidden().child(text.to_string()))
-            .when(self.caret_on, |d| d.child(div().w(px(2.0)).h(px(14.0)).ml(px(1.0)).bg(hx.accent)))
+            .child(editor)
     }
 
     fn render_context_menu(&self, hx: &HarnessTheme, menu: &CardMenu, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3224,7 +3220,7 @@ impl HarnessWorkspace {
                 cx.stop_propagation();
                 let name = ws.manager.registry.get(&rename_id).map(|e| e.name.clone()).unwrap_or_default();
                 ws.select(Selection::Worktree(rename_id.clone()), window, cx);
-                ws.begin_edit(Edit::Rename(rename_id.clone(), name), window, cx);
+                ws.begin_edit(EditKind::Rename(rename_id.clone()), &name, "name…", window, cx);
             })))
             .child(self.menu_item(hx, "Archive", false, cx.listener(move |ws, _, window, cx| {
                 cx.stop_propagation();
@@ -3445,6 +3441,8 @@ impl HarnessWorkspace {
                     .px_1()
                     .rounded_sm()
                     .text_color(hx.tx2)
+                    .cursor_pointer()
+                    .tooltip(tip("Close tab"))
                     .hover(|d| d.bg(hx.surface).text_color(hx.red))
                     .child("×")
                     .on_click(cx.listener(move |ws, _, window, cx| {
@@ -3474,6 +3472,7 @@ impl HarnessWorkspace {
             .text_xs()
             .text_color(hx.tx2)
             .cursor_pointer()
+            .tooltip(tip("New tab"))
             .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
             .child("＋")
             .on_click(cx.listener(|ws, ev: &gpui::ClickEvent, _, cx| {
@@ -3558,22 +3557,19 @@ impl HarnessWorkspace {
                             .child(format!("line {}", draft.line)),
                     ),
             )
-            // Body: the text field, sized like a note rather than a one-liner.
+            // Body: the text field. The editor carries its own placeholder,
+            // caret, and selection; the wrapper routes confirm/cancel.
             .child(
                 div()
-                    .id("comment-input")
-                    .track_focus(&self.edit_focus)
-                    .on_key_down(cx.listener(Self::comment_key))
+                    .key_context("HarnessInput")
+                    .on_action(cx.listener(Self::confirm_comment))
+                    .on_action(cx.listener(Self::cancel_comment))
                     .min_h(px(56.0))
                     .px_3()
                     .py_2()
                     .text_xs()
-                    .text_color(if draft.body.is_empty() { hx.tx2 } else { hx.tx0 })
-                    .child(if draft.body.is_empty() {
-                        "What should the agent change here?".to_string()
-                    } else {
-                        draft.body.clone()
-                    }),
+                    .text_color(hx.tx0)
+                    .child(draft.editor.clone()),
             )
             // Footer: the two things you can do, and how.
             .child(
@@ -4019,6 +4015,8 @@ impl HarnessWorkspace {
                                 .gap_1()
                                 .when(has_comment, |d| d.bg(tint(hx.amber, 0.18)))
                                 .text_color(if has_comment { hx.amber } else { hx.tx2 })
+                                .cursor_pointer()
+                                .tooltip(tip(if has_comment { "Edit comment" } else { "Comment on line" }))
                                 .hover(|d| d.bg(hx.surface).text_color(hx.accent))
                                 // The marker sits in a fixed slot rather than
                                 // being prefixed to the number, so commented
@@ -4251,6 +4249,8 @@ impl HarnessWorkspace {
                             .text_xs()
                             .font_family(hx.font_mono)
                             .text_color(if reviewed { hx.green } else { hx.tx2 })
+                            .cursor_pointer()
+                            .tooltip(tip(if reviewed { "Mark not reviewed" } else { "Mark reviewed" }))
                             .hover(|d| d.text_color(hx.green))
                             .child(if reviewed { "☑" } else { "☐" })
                             .on_click(cx.listener(move |ws, _, _, cx| {
@@ -4302,6 +4302,8 @@ impl HarnessWorkspace {
                                 .rounded_md()
                                 .text_xs()
                                 .text_color(if previewing { hx.accent } else { hx.tx2 })
+                                .cursor_pointer()
+                                .tooltip(tip("Toggle Markdown preview"))
                                 .hover(|h| h.bg(hx.surface_hover))
                                 .child(if previewing { "◨" } else { "◧" })
                                 .on_click(cx.listener(move |ws, _, _, cx| {
@@ -4370,10 +4372,13 @@ impl Render for HarnessWorkspace {
         // off the editor. Re-assert only for this exact case, and only once
         // focus has actually escaped, so it converges instead of thrashing.
         if self.settings_open
-            && matches!(self.edit, Edit::AgentCmd(..))
-            && !self.edit_focus.is_focused(window)
+            && matches!(self.edit_kind(), Some(EditKind::AgentCmd(_)))
+            && let Some(editor) = self.edit_editor()
         {
-            window.focus(&self.edit_focus, cx);
+            let handle = editor.focus_handle(cx);
+            if !handle.is_focused(window) {
+                window.focus(&handle, cx);
+            }
         }
 
         let hx = theme(cx).clone();
@@ -4813,6 +4818,39 @@ impl NewWorktree {
             base_ref: base_ref.unwrap_or_else(|| default_base.to_string()),
         }
     }
+}
+
+/// A minimal text tooltip — a styled popover label shown on hover, so
+/// icon-only controls (the tab `×`, the reviewed checkbox, the font-size
+/// steppers) carry a readable name. Native apps have no ARIA; a hover label
+/// is the accessible-name affordance available here.
+struct TextTooltip {
+    text: gpui::SharedString,
+}
+
+impl Render for TextTooltip {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let hx = theme(cx);
+        div()
+            .bg(hx.surface2)
+            .border_1()
+            .border_color(hx.border2)
+            .rounded_md()
+            .px_1p5()
+            .py_0p5()
+            .text_xs()
+            .text_color(hx.tx0)
+            .child(self.text.clone())
+    }
+}
+
+/// Build the closure `.tooltip()` wants: it hands back a fresh tooltip view
+/// each time the pointer settles on the element it is attached to.
+fn tip(
+    text: impl Into<gpui::SharedString>,
+) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
+    let text = text.into();
+    move |_window, cx| cx.new(|_| TextTooltip { text: text.clone() }).into()
 }
 
 #[cfg(test)]

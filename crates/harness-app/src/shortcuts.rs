@@ -22,6 +22,12 @@ pub enum Scope {
     Workspace,
     /// When focus is in a text editor buffer.
     Editor,
+    /// One of the chrome's inline single-line inputs (rename, new worktree,
+    /// avatar initials, agent command, review comment). The wrapper carries a
+    /// `HarnessInput` key context; this predicate matches AT the editor node
+    /// (like `Picker > Editor`), so it can bind escape→Cancel over the
+    /// Editor-scoped clear-selection escape.
+    Input,
     /// Only FULL editors (buffers), not single-line inputs. zed's own keymap
     /// makes this split: enter must insert a newline in a buffer but must
     /// CONFIRM in a search box or picker — a Newline bound to all Editors
@@ -44,6 +50,10 @@ impl Scope {
             Scope::Workspace => Some("Workspace"),
             Scope::Editor => Some("Editor"),
             Scope::EditorFull => Some("Editor && mode == full"),
+            // Matches at the editor node itself (deepest), same shape as
+            // `Picker > Editor`; catalog order breaks the tie against the
+            // plain `Editor` escape so Cancel wins in our inline inputs.
+            Scope::Input => Some("HarnessInput > Editor"),
             // "Picker > Editor", zed's own predicate: the picker's query box
             // IS an editor, so a plain "Picker" context matches at the picker
             // node — SHALLOWER than the query editor — and the Editor-scoped
@@ -59,6 +69,7 @@ impl Scope {
             Scope::Workspace => "Editor tab",
             Scope::Editor => "Text editing",
             Scope::EditorFull => "Text editing (buffers)",
+            Scope::Input => "Inline input",
             Scope::Picker => "File finder",
         }
     }
@@ -261,6 +272,15 @@ pub fn entries() -> Vec<Entry> {
         // control it when it gets loud.
         Entry::new(s("cmd-alt-b"), Scope::Editor, "Toggle inline git blame", ed::ToggleGitBlameInline),
         Entry::new(s("cmd-alt-g"), Scope::Editor, "Toggle git blame gutter", ::git::Blame),
+
+        // ---- Inline inputs ------------------------------------------------
+        // Rename / new-worktree / avatar / agent-command / review-comment
+        // fields are single-line editors. Enter reaches the global
+        // menu::Confirm (a single-line editor has no Newline binding), but
+        // escape would otherwise hit the Editor-scoped clear-selection; this
+        // deeper predicate rebinds it to Cancel so escape abandons the edit.
+        // Placed AFTER the Editor escape so catalog order gives it priority.
+        Entry::new(s("escape"), Scope::Input, "Cancel the edit", menu::Cancel),
 
         // ---- Pickers ------------------------------------------------------
         // Without this, ⌘P opens the file finder and only ⌘P closes it again —
