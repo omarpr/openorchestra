@@ -228,12 +228,10 @@ impl HarnessWorkspace {
             return;
         }
 
-        // A worktree opens with a single PLAIN terminal. The agent is a thing
-        // you start, not a thing that starts itself: auto-spawning it burned a
-        // pi session on every worktree you merely glanced at, and left no way
-        // to just get a shell. Add an agent tab (or type `pi`) when you want one.
-        // (`open_tab` creates the pane itself now.)
-        self.open_tab(TabKind::Shell, window, cx);
+        let restored = self.restore_tabs(&r.key, window, cx);
+        if !restored {
+            self.open_tab(TabKind::Shell, window, cx);
+        }
         self.evict_stale_panes(&r.key);
     }
 
@@ -713,28 +711,110 @@ impl HarnessWorkspace {
         id
     }
 
-    /// Rebuild the persisted tab records from the live pane sets and write them.
-    /// Only terminal/agent tabs are meaningful to reattach, but every tab is
-    /// recorded so the strip comes back intact.
+    /// Rebuild the persisted tab records for the CURRENTLY-LIVE pane sets and
+    /// write them. Worktrees not in `self.panes` right now (evicted, or not yet
+    /// restored this session) keep their existing records, so lazy
+    /// restore-on-reselect still finds them — eviction stays non-destructive.
     pub(crate) fn save_panes(&mut self) {
         use crate::panes_state::{TabRecord, WorktreePanes};
-        let mut worktrees = std::collections::BTreeMap::new();
-        for (key, pane) in &self.panes {
-            let tabs = pane
-                .tabs
-                .iter()
-                .map(|t| TabRecord {
-                    id: t.id,
-                    kind: t.kind_tag(),
-                    title: t.title.clone(),
-                })
-                .collect();
-            worktrees.insert(
-                key.clone(),
-                WorktreePanes { active: Some(pane.active), tabs },
-            );
+        // Collect first to avoid borrowing self.panes and self.panes_state at once.
+        let updates: Vec<(String, WorktreePanes)> = self
+            .panes
+            .iter()
+            .map(|(key, pane)| {
+                let tabs = pane
+                    .tabs
+                    .iter()
+                    .map(|t| TabRecord { id: t.id, kind: t.kind_tag(), title: t.title.clone() })
+                    .collect();
+                (key.clone(), WorktreePanes { active: Some(pane.active), tabs })
+            })
+            .collect();
+        for (key, wp) in updates {
+            self.panes_state.worktrees.insert(key, wp);
         }
-        self.panes_state.worktrees = worktrees;
         crate::panes_state::save(&self.panes_path, &self.panes_state);
+    }
+
+    /// Recreate a worktree's persisted tabs on first build. Live tmux sessions
+    /// reattach; dead ones (reboot / killed) come back as a plain shell — never
+    /// an unattended agent relaunch. Returns false if there was nothing to
+    /// restore.
+    fn restore_tabs(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        use crate::panes_state::TabRecordKind as K;
+        let Some(saved) = self.panes_state.worktrees.get(key) else { return false };
+        if saved.tabs.is_empty() {
+            return false;
+        }
+        // Clone out before mutating self.
+        let records: Vec<(u64, K, String)> = saved
+            .tabs
+            .iter()
+            .map(|t| (t.id, t.kind.clone(), t.title.clone()))
+            .collect();
+        let saved_active = saved.active;
+        let live = if self.has_tmux { crate::tmux::live_sessions() } else { Vec::new() };
+
+        for (id, kind, title) in records {
+            match kind {
+                K::Editor => self.open_tab(TabKind::Editor, window, cx),
+                K::Chat => self.open_tab(TabKind::Chat, window, cx),
+                K::Shell => self.restore_terminal_tab(key, id, None, &title, &live, window, cx),
+                K::Agent(a) => self.restore_terminal_tab(key, id, Some(a), &title, &live, window, cx),
+            }
+        }
+
+        // Restore the active tab if its id survived (ids are stable for
+        // terminal/agent tabs; editor/chat drew fresh ids so may not match).
+        if let Some(active) = saved_active
+            && let Some(pane) = self.panes.get_mut(key)
+            && pane.tabs.iter().any(|t| t.id == active)
+        {
+            pane.active = active;
+            self.focus_active_pane(window, cx);
+        }
+        let restored = self.panes.contains_key(key);
+        if restored {
+            self.save_panes();
+        }
+        restored
+    }
+
+    /// Rebuild one terminal/agent tab, preserving its persisted id. Live session
+    /// → reattach (`attach_only`); dead → plain shell in the worktree.
+    fn restore_terminal_tab(
+        &mut self,
+        key: &str,
+        id: u64,
+        agent: Option<AgentKind>,
+        title: &str,
+        live: &[String],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(r) = self.resolve() else { return };
+        let name = crate::tmux::session_name(key, id);
+        let alive = self.has_tmux && crate::tmux::is_live(&name, live);
+        // Keep the agent mark only when we actually reattached a live agent
+        // session; a dead agent comes back as a plain shell.
+        let mark = if alive { agent } else { None };
+        let session = self
+            .has_tmux
+            .then(|| crate::terminal_pane::TerminalSession { name, attach_only: alive });
+        // Restore never passes a command: a live session is reattached
+        // (attach_only ignores it), a dead one is a plain shell.
+        let content = TabContent::Terminal(cx.new(|cx| {
+            crate::terminal_pane::TerminalPane::new(r.path.clone(), None, session, window, cx)
+        }));
+
+        self.pane_clock = self.pane_clock.wrapping_add(1);
+        let pane = self.panes.entry(key.to_string()).or_insert_with(|| PaneSet {
+            tabs: Vec::new(),
+            active: 0,
+            last_used: 0,
+        });
+        pane.last_used = self.pane_clock;
+        pane.tabs.push(Tab { id, title: title.to_string(), content, agent: mark });
+        pane.active = id;
     }
 }

@@ -26,14 +26,14 @@ pub struct WorktreePanes {
     pub tabs: Vec<TabRecord>,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TabRecord {
     pub id: u64,
     pub kind: TabRecordKind,
     pub title: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum TabRecordKind {
     Shell,
     Agent(AgentKind),
