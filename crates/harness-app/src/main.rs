@@ -18,6 +18,7 @@ mod notifier;
 mod shortcuts;
 mod terminal_pane;
 mod theme;
+mod tmux;
 mod workspace;
 mod workspace_host;
 
