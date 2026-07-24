@@ -320,6 +320,15 @@ impl<R: CommandRunner> GitWorktrees<R> {
         Ok(out.stdout.trim().to_string())
     }
 
+    /// The branch currently checked out in `dir`'s HEAD, e.g. `master` or a
+    /// feature branch. Returns `HEAD` for a detached head — the same string
+    /// `git rev-parse --abbrev-ref HEAD` yields — so callers can render it
+    /// verbatim without a separate detached-state probe.
+    pub fn current_branch(&self, dir: &Path) -> Result<String, GitError> {
+        let out = self.git_ok(dir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+        Ok(out.stdout.trim().to_string())
+    }
+
     /// Dirty-file count + ahead/behind. `upstream` is the ref to compare
     /// against (e.g. `origin/main` or `@{upstream}`); when it cannot be
     /// resolved, ahead/behind are reported as 0 rather than erroring.

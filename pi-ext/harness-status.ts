@@ -44,6 +44,11 @@ interface HarnessStatus {
 	state: HarnessState;
 	timestamp: string; // ISO-8601
 	sessionFile: string | null;
+	// PID of the agent process. The harness uses this to unstick a pill: if a
+	// "waiting"/"running" status is left behind by an agent that was killed
+	// mid-dialog (so `session_shutdown` never fired to write "idle"), it can see
+	// the process is gone (`kill(pid, 0)`) and drop the pill to idle.
+	pid: number;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -71,6 +76,7 @@ export default function (pi: ExtensionAPI) {
 			agent: "pi",
 			timestamp: new Date().toISOString(),
 			sessionFile,
+			pid: process.pid,
 		};
 		try {
 			const dir = path.join(cwd, ".harness");

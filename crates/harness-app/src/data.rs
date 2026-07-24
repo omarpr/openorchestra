@@ -28,6 +28,11 @@ pub struct RepoView {
     pub name: String,
     pub repo_root: PathBuf,
     pub default_branch: String,
+    /// Branch actually checked out in the main working copy's HEAD. Usually the
+    /// default branch, but the main checkout can sit on a feature branch — the
+    /// sidebar shows this so "main" never lies about where HEAD is (`HEAD` here
+    /// when detached).
+    pub head_branch: String,
     /// Ref the diff/ahead-behind compares against — `origin/<default>` when a
     /// remote exists, else the local default branch (§6.1 D10).
     pub compare_ref: String,
@@ -85,6 +90,11 @@ fn new_repo_view(git: &GitWorktrees<SystemRunner>, name: &str, root: &Path) -> R
     let default_branch = git
         .default_branch(root)
         .unwrap_or_else(|_| "main".to_string());
+    // What HEAD is actually on — falls back to the default branch only if the
+    // probe fails, so the label degrades to the old behavior rather than blank.
+    let head_branch = git
+        .current_branch(root)
+        .unwrap_or_else(|_| default_branch.clone());
     let origin_ref = format!("origin/{default_branch}");
     let compare_ref = if git.ref_exists(root, &origin_ref) {
         origin_ref
@@ -98,6 +108,7 @@ fn new_repo_view(git: &GitWorktrees<SystemRunner>, name: &str, root: &Path) -> R
         name: name.to_string(),
         repo_root: root.to_path_buf(),
         default_branch,
+        head_branch,
         compare_ref,
         ahead: status.ahead,
         behind: status.behind,

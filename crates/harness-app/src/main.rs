@@ -419,7 +419,7 @@ fn main() {
                 // Settings lives. The bounds are the restore size.
                 window_bounds: Some(WindowBounds::Maximized(bounds)),
                 titlebar: Some(TitlebarOptions {
-                    title: Some("omar-harness".into()),
+                    title: Some("openOrchestra".into()),
                     ..Default::default()
                 }),
                 ..Default::default()

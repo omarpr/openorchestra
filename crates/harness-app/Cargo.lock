@@ -4504,6 +4504,7 @@ dependencies = [
  "http_client",
  "language",
  "languages",
+ "libc",
  "log",
  "markdown",
  "markdown_preview",

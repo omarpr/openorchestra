@@ -387,6 +387,78 @@ impl HarnessWorkspace {
         save_prefs_to(&self.prefs_path, &self.prefs);
     }
 
+    /// Live openOrchestra tmux sessions (our `harness_` prefix). Also catches
+    /// orphaned sessions whose tab is gone, so "close terminals" really leaves
+    /// nothing of ours running.
+    fn live_harness_sessions(&self) -> Vec<String> {
+        if !self.has_tmux {
+            return Vec::new();
+        }
+        crate::tmux::live_sessions()
+            .into_iter()
+            .filter(|n| n.starts_with("harness_"))
+            .collect()
+    }
+
+    /// Entry point for both quit paths (⌘Q / menu, and the window close button).
+    /// Returns whether the app may close *now*: `true` when we've started the
+    /// quit, `false` when we've instead opened the keep-or-close prompt and are
+    /// waiting on the user.
+    pub(crate) fn request_quit(&mut self, cx: &mut Context<Self>) -> bool {
+        let sessions = self.live_harness_sessions();
+        // Nothing of ours is running — no reason to ask.
+        if sessions.is_empty() {
+            cx.quit();
+            return true;
+        }
+        match self.prefs.close_terminals_on_exit {
+            // A remembered choice skips the prompt entirely.
+            Some(kill) => {
+                if kill {
+                    self.kill_sessions(&sessions);
+                }
+                cx.quit();
+                true
+            }
+            None => {
+                self.close_prompt = Some(ClosePrompt {
+                    remember: false,
+                    session_count: sessions.len(),
+                });
+                cx.notify();
+                false
+            }
+        }
+    }
+
+    /// Resolve the quit prompt. `keep` leaves the tmux sessions running
+    /// (detached); otherwise they're killed. A ticked "remember" persists the
+    /// choice so the prompt won't show again.
+    pub(crate) fn resolve_quit(&mut self, keep: bool, cx: &mut Context<Self>) {
+        let remember = self.close_prompt.as_ref().is_some_and(|p| p.remember);
+        self.close_prompt = None;
+        if remember {
+            self.prefs.close_terminals_on_exit = Some(!keep);
+            save_prefs_to(&self.prefs_path, &self.prefs);
+        }
+        if !keep {
+            self.kill_sessions(&self.live_harness_sessions());
+        }
+        cx.quit();
+    }
+
+    /// Dismiss the quit prompt without quitting.
+    pub(crate) fn cancel_quit(&mut self, cx: &mut Context<Self>) {
+        self.close_prompt = None;
+        cx.notify();
+    }
+
+    fn kill_sessions(&self, names: &[String]) {
+        for name in names {
+            crate::tmux::kill_session(name);
+        }
+    }
+
     /// Re-install the whole keymap and menus from the catalog + overrides.
     /// Clear-then-bind, not bind-on-top: gpui breaks precedence ties by
     /// recency, so stale chords would keep firing their old actions.

@@ -18,7 +18,7 @@ use std::time::Duration;
 use gpui::{
     AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, KeyDownEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, PathPromptOptions,
-    Pixels, Render, Rgba, Styled, Window, div, prelude::*, px, rgb,
+    Pixels, Render, Rgba, Styled, Window, div, prelude::*, px, rgb, rgba,
 };
 
 use editor::Editor;
@@ -345,6 +345,17 @@ pub(crate) struct CardMenu {
     y: Pixels,
 }
 
+/// State of the "keep or close your terminals?" prompt shown on quit.
+pub(crate) struct ClosePrompt {
+    /// The "remember my choice" checkbox — when set, the chosen action is
+    /// persisted to `Prefs::close_terminals_on_exit` so the prompt is skipped
+    /// next time.
+    remember: bool,
+    /// How many live openOrchestra tmux sessions the choice affects, shown so
+    /// "close" isn't a blind action.
+    session_count: usize,
+}
+
 struct PaneSet {
     tabs: Vec<Tab>,
     /// Id of the active tab, not an index — indices shift when a tab closes.
@@ -441,6 +452,9 @@ pub struct HarnessWorkspace {
     menu: Option<CardMenu>,
     /// Open "new tab" menu, anchored under the `+` in the tab strip.
     tab_menu: Option<Pixels>,
+    /// The quit confirmation is open (keep vs. close terminals). Present only
+    /// while the user is deciding; carries the "remember my choice" checkbox.
+    close_prompt: Option<ClosePrompt>,
     pending_delete: Option<String>,
     note: String,
     forge_status: HashMap<String, BranchStatus>,
@@ -601,6 +615,7 @@ impl HarnessWorkspace {
             new_target_repo,
             menu: None,
             tab_menu: None,
+            close_prompt: None,
             pending_delete: None,
             note: String::new(),
             forge_status: HashMap::new(),
@@ -689,6 +704,16 @@ impl HarnessWorkspace {
         }
         this.recompute_diff(cx);
 
+        // Route the window's close button (red X) through the same
+        // keep-or-close-terminals prompt as ⌘Q. `request_quit` returns whether
+        // the app may close now: `false` holds the window open while the prompt
+        // is up; `true` when there's nothing to ask (no sessions, or a
+        // remembered choice) and the quit has already begun.
+        let weak = cx.weak_entity();
+        window.on_window_should_close(cx, move |_window, cx| {
+            weak.update(cx, |ws, cx| ws.request_quit(cx)).unwrap_or(true)
+        });
+
         // Notification "View" clicks: the platform delegate pushes worktree
         // ids; select them and front the app. Foreground actions activate the
         // app at the OS level already — cx.activate makes the dev-fallback
@@ -764,6 +789,22 @@ impl HarnessWorkspace {
                     cx.background_executor().timer(Duration::from_millis(250)).await
                 }
                 Err(_) => break,
+            }
+        })
+        .detach();
+
+        // Unstick agent pills. A status file left on waiting/running by a
+        // process that died without writing "idle" (killed mid-dialog, crashed)
+        // would show forever; every few seconds, drop any such pill whose pid is
+        // gone. The probe is a couple of tiny file reads only when a non-terminal
+        // pill exists, so an idle app does no work.
+        cx.spawn(async move |view, cx| loop {
+            cx.background_executor().timer(Duration::from_secs(3)).await;
+            if view
+                .update(cx, |ws, cx| ws.reconcile_agent_liveness(cx))
+                .is_err()
+            {
+                break;
             }
         })
         .detach();
@@ -879,6 +920,14 @@ impl Render for HarnessWorkspace {
             .on_action(cx.listener(|ws, _: &crate::NewChat, window, cx| {
                 ws.open_tab(TabKind::Chat, window, cx)
             }))
+            // ⌘Q / menu quit routes through the keep-or-close-terminals prompt
+            // instead of quitting outright. stop_propagation so the app-level
+            // fallback `Quit` handler doesn't also fire and quit behind the
+            // prompt's back.
+            .on_action(cx.listener(|ws, _: &crate::Quit, _window, cx| {
+                cx.stop_propagation();
+                ws.request_quit(cx);
+            }))
             // [diag] Window-level probe: does a right mouse-down reach the app
             // at all? If ROOT-RIGHT never prints on a right/control-click while
             // ROOT-LEFT does, the platform isn't delivering right-clicks.
@@ -959,7 +1008,123 @@ impl Render for HarnessWorkspace {
                 )
                 .child(self.render_tab_menu(&hx, x, cx));
         }
+
+        if self.close_prompt.is_some() {
+            root = root.child(self.render_close_prompt(&hx, cx));
+        }
         root
+    }
+}
+
+impl HarnessWorkspace {
+    /// The keep-or-close-terminals confirmation shown on quit. A centered modal
+    /// over a dimming backdrop; clicking the backdrop cancels the quit.
+    fn render_close_prompt(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
+        let Some(prompt) = self.close_prompt.as_ref() else {
+            return div().into_any_element();
+        };
+        let n = prompt.session_count;
+        let remember = prompt.remember;
+        let count_label = format!(
+            "{n} terminal session{} still running.",
+            if n == 1 { " is" } else { "s are" }
+        );
+
+        // Checkbox: a small square that fills with the accent when ticked.
+        let checkbox = div()
+            .id("close-remember")
+            .flex()
+            .items_center()
+            .gap_2()
+            .cursor_pointer()
+            .on_click(cx.listener(|ws, _, _, cx| {
+                if let Some(p) = ws.close_prompt.as_mut() {
+                    p.remember = !p.remember;
+                }
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .size(px(16.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(if remember { hx.accent } else { hx.border2 })
+                    .when(remember, |d| d.bg(hx.accent))
+                    .when(remember, |d| d.child(div().text_xs().text_color(rgb(0xffffff)).child("✓"))),
+            )
+            .child(div().text_sm().text_color(hx.tx1).child("Remember my choice"));
+
+        let button = |id: &'static str, label: String, danger: bool| {
+            div()
+                .id(id)
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .h(px(34.0))
+                .rounded_md()
+                .border_1()
+                .border_color(if danger { hx.border2 } else { hx.accent })
+                .bg(if danger { hx.surface } else { tint(hx.accent, 0.16) })
+                .text_sm()
+                .text_color(if danger { hx.tx0 } else { hx.accent })
+                .cursor_pointer()
+                .hover(|d| d.border_color(if danger { hx.red } else { hx.accent }).text_color(if danger { hx.red } else { hx.accent }))
+                .child(label)
+        };
+
+        let card = div()
+            .w(px(400.0))
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_4()
+            .rounded_lg()
+            .bg(hx.surface2)
+            .border_1()
+            .border_color(hx.border2)
+            .shadow_lg()
+            // A click inside the card must not reach the dismiss backdrop.
+            .on_mouse_down(MouseButton::Left, cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()))
+            .child(div().text_lg().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx0).child("Quit openOrchestra?"))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(hx.tx1)
+                    .child(format!("{count_label} Keep them running in the background, or close them?")),
+            )
+            .child(checkbox)
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .mt_1()
+                    .child(button("close-keep", "Keep running".into(), false).on_click(
+                        cx.listener(|ws, _, _, cx| ws.resolve_quit(true, cx)),
+                    ))
+                    .child(button("close-kill", "Close terminals".into(), true).on_click(
+                        cx.listener(|ws, _, _, cx| ws.resolve_quit(false, cx)),
+                    )),
+            );
+
+        div()
+            .id("close-backdrop")
+            .absolute()
+            .top(px(0.0))
+            .left(px(0.0))
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x00000099))
+            // Clicking outside the card cancels the quit — the safe default.
+            .on_mouse_down(MouseButton::Left, cx.listener(|ws, _, _, cx| ws.cancel_quit(cx)))
+            .child(card)
+            .into_any_element()
     }
 }
 
@@ -1090,6 +1255,11 @@ struct Prefs {
     diff_width: f32,
     sidebar_open: bool,
     diff_open: bool,
+    /// Remembered answer to the "keep or close terminals on quit?" prompt.
+    /// `None` = ask every time; `Some(true)` = always kill the tmux sessions;
+    /// `Some(false)` = always leave them running (detached).
+    #[serde(default)]
+    close_terminals_on_exit: Option<bool>,
 }
 
 fn default_true() -> bool {
@@ -1111,6 +1281,7 @@ impl Default for Prefs {
             diff_width: 340.0,
             sidebar_open: true,
             diff_open: true,
+            close_terminals_on_exit: None,
         }
     }
 }

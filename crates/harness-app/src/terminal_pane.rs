@@ -144,7 +144,14 @@ impl TerminalPane {
             // extension finds the contract from inside a packaged .app).
             env.into_iter().collect(),
             SettingsCursorShape::default(),
-            AlternateScroll::On,
+            // Off, not On: with alternate-scroll on, spinning the wheel inside a
+            // full-screen TUI (Claude Code, pi, vim) that hasn't enabled mouse
+            // reporting makes the terminal translate the wheel into arrow-key
+            // presses (ESC O A / ESC O B), which the agent reads as navigation.
+            // Off unsets that mode so the wheel is inert there; TUIs that *do*
+            // enable mouse reporting still receive real scroll events (the
+            // mouse-mode branch in Terminal::scroll_wheel runs first).
+            AlternateScroll::Off,
             None,
             Vec::new(),
             0,

@@ -35,6 +35,9 @@ impl HarnessWorkspace {
                     .text_sm()
                     .text_color(hx.tx1)
                     .cursor_pointer()
+                    // Carries a tooltip like the app's other actionable controls,
+                    // naming the fuller action the short label can't.
+                    .tooltip(tip("Add a git repository folder"))
                     .hover(|d| {
                         d.bg(hx.surface_hover)
                             .border_color(hx.accent)
@@ -142,6 +145,9 @@ impl HarnessWorkspace {
                     .rounded_md()
                     .text_color(hx.tx1)
                     .cursor_pointer()
+                    // Icon-only control: the tooltip is its accessible name, the
+                    // same affordance the tab ×, steppers, etc. carry.
+                    .tooltip(tip("New worktree"))
                     .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
                     .on_click(cx.listener(move |ws, _, window, cx| {
                         cx.stop_propagation();
@@ -225,7 +231,15 @@ impl HarnessWorkspace {
                     .flex_1()
                     .min_w_0()
                     .child(div().text_sm().text_color(hx.tx0).child("main"))
-                    .child(div().text_xs().text_color(hx.tx2).child(format!("default · {}", repo.default_branch))),
+                    // The main checkout usually sits on the default branch, but
+                    // it can be on a feature branch — show where HEAD actually
+                    // is. Only the default branch earns the "default ·" tag; any
+                    // other branch is shown by name so it never reads as master.
+                    .child(div().text_xs().text_color(hx.tx2).child(if repo.head_branch == repo.default_branch {
+                        format!("default · {}", repo.default_branch)
+                    } else {
+                        repo.head_branch.clone()
+                    })),
             )
             .child(agent_pill(hx, agent));
 

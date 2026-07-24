@@ -17,6 +17,42 @@ impl HarnessWorkspace {
         cx.notify();
     }
 
+    /// Drop any `Running`/`Waiting` pill whose agent process is gone.
+    ///
+    /// The pill is a mirror of `.harness/status.json`, and an agent that is
+    /// killed mid-dialog (tmux `kill-session`, a crash, Ctrl-C) never writes the
+    /// resolving `"idle"` — so the pill would stick forever. The status file
+    /// carries the writer's `pid`; if that process no longer exists we know the
+    /// agent is gone and drop the pill to `Unknown` (which renders as IDLE).
+    ///
+    /// Runs on a slow timer. Only worktrees currently showing a non-terminal
+    /// pill are probed, and a missing `pid` (an older agent, or a writer that
+    /// doesn't stamp one) is left untouched — we never guess a process dead.
+    pub(crate) fn reconcile_agent_liveness(&mut self, cx: &mut Context<Self>) {
+        let candidates: Vec<PathBuf> = self
+            .agent_status
+            .iter()
+            .filter(|(_, s)| matches!(s, AgentState::Running | AgentState::Waiting))
+            .map(|(root, _)| root.clone())
+            .collect();
+        if candidates.is_empty() {
+            return;
+        }
+        let mut changed = false;
+        for root in candidates {
+            match status_pid(&root) {
+                Some(pid) if !pid_alive(pid) => {
+                    self.agent_status.insert(root, AgentState::Unknown);
+                    changed = true;
+                }
+                _ => {}
+            }
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
     pub(crate) fn apply_agent(&mut self, signal: AgentSignal, cx: &mut Context<Self>) {
         let previous = self.agent_status.insert(signal.worktree_root.clone(), signal.state);
 
@@ -189,8 +225,15 @@ impl HarnessWorkspace {
             key: format!("main:{}", r.name),
             path: r.repo_root.clone(),
             agent_kind: None,
-            compare_ref: r.compare_ref.clone(),
-            branch: r.default_branch.clone(),
+            // Main's diff is its *uncommitted* work only (`git diff HEAD`), not
+            // the branch-vs-default review a worktree card shows. The main
+            // checkout often sits on a feature branch whose commits are all
+            // landed; diffing against the default branch then paints a huge diff
+            // over an already-committed tree, which reads as a bug. HEAD keeps
+            // the panel empty once everything is committed. (Ahead/behind badges
+            // still use RepoView.compare_ref — this only steers the diff.)
+            compare_ref: "HEAD".to_string(),
+            branch: r.head_branch.clone(),
         };
         match &self.selection {
             Selection::Main(repo) => {
@@ -401,9 +444,23 @@ impl HarnessWorkspace {
     /// process, or a chat's `pi --mode rpc` sidecar.
     pub(crate) fn close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(r) = self.resolve() else { return };
+        // Is the tab being closed an agent tab? If so, killing its session ends
+        // that agent, and a dead agent never writes the resolving "idle" — so its
+        // pill would stay stuck on WAITING/RUNNING forever. Clear it here.
+        let was_agent = self
+            .panes
+            .get(&r.key)
+            .and_then(|p| p.tabs.iter().find(|t| t.id == id))
+            .is_some_and(|t| t.agent.is_some());
         if self.has_tmux {
             // Explicit close tears the session down (only app-exit detaches).
             crate::tmux::kill_session(&crate::tmux::session_name(&r.key, id));
+        }
+        if was_agent {
+            // Unknown (renders as IDLE) rather than Idle: we killed the process,
+            // we didn't observe a clean finish. A file event can't unstick this
+            // because the dead agent will never touch status.json again.
+            self.agent_status.insert(r.path.clone(), AgentState::Unknown);
         }
         let Some(pane) = self.panes.get_mut(&r.key) else { return };
         let Some(ix) = pane.tabs.iter().position(|t| t.id == id) else { return };
@@ -838,4 +895,23 @@ impl HarnessWorkspace {
         pane.tabs.push(Tab { id, title: title.to_string(), content, agent: mark });
         pane.active = id;
     }
+}
+
+/// The `pid` an agent stamped into `<root>/.harness/status.json`, if present.
+/// `None` when the file is missing/malformed or the writer didn't record one —
+/// callers treat that as "can't verify" and leave the pill alone.
+fn status_pid(root: &Path) -> Option<u32> {
+    #[derive(serde::Deserialize)]
+    struct Probe {
+        pid: Option<u32>,
+    }
+    let bytes = std::fs::read(root.join(".harness").join("status.json")).ok()?;
+    serde_json::from_slice::<Probe>(&bytes).ok()?.pid
+}
+
+/// Whether a process with this pid currently exists. `kill(pid, 0)` sends no
+/// signal; it just probes existence — 0 means alive, `ESRCH` means gone. Agents
+/// run as us, so `EPERM` (exists, other user) can't arise here.
+fn pid_alive(pid: u32) -> bool {
+    pid != 0 && unsafe { libc::kill(pid as libc::pid_t, 0) } == 0
 }

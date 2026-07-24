@@ -141,6 +141,9 @@ env_logger = "0.11"
 # deserializes cleanly). serde_json is already deep in the zed cone.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# kill(pid, 0) liveness probe — unsticks an agent pill left on waiting/running
+# by a process that died without writing "idle".
+libc = "0.2"
 
 # Zed's workspace [patch.crates-io] entries do NOT propagate to out-of-tree
 # consumers, so we replicate the ones inside our dependency cone (from zed's

@@ -44,10 +44,24 @@ pub fn agent_script(cmd: &AgentCommand) -> String {
     format!("{}; exec \"$SHELL\" -l", parts.join(" "))
 }
 
-/// Args after `tmux` for the client the pane runs.
-/// - `attach_only` (restore of a live session): `new-session -A -s NAME`.
-/// - otherwise: `new-session -A -s NAME -c CWD [sh -lc SCRIPT]` — with the
-///   agent script when `command` is `Some`, a plain shell when `None`.
+/// Args after `tmux` for the client the pane runs. tmux splits its argv on a
+/// bare `;` argument, so each invocation is a small command sequence.
+///
+/// Every path disables the status bar **for that session only**
+/// (`set-option -t NAME status off`) so openOrchestra's embedded terminals stay
+/// clean without ever touching the user's global tmux config or their other
+/// sessions — the option is set before the client attaches.
+///
+/// - `attach_only` (restore of a live session): `set-option … ; attach-session`.
+///   No `new-session`: on a session that already exists `-A` attaches
+///   immediately and would re-attach again after the user detaches, trapping the
+///   pane. The set-option here also migrates sessions made before the bar was
+///   hidden.
+/// - otherwise (fresh tab, newly-minted unique name): `new-session -A -d …`
+///   creates it *detached* (the name can't already exist, so `-A` never attaches
+///   early), then `set-option`, then `attach-session` as the pane's foreground
+///   client. `-c CWD` and the optional `sh -lc SCRIPT` agent command ride on the
+///   new-session.
 pub fn client_args(
     session: &str,
     cwd: &Path,
@@ -56,15 +70,15 @@ pub fn client_args(
 ) -> Vec<String> {
     if attach_only {
         return vec![
-            "new-session".into(),
-            "-A".into(),
-            "-s".into(),
-            session.into(),
+            "set-option".into(), "-t".into(), session.into(), "status".into(), "off".into(),
+            ";".into(),
+            "attach-session".into(), "-t".into(), session.into(),
         ];
     }
     let mut args = vec![
         "new-session".into(),
         "-A".into(),
+        "-d".into(),
         "-s".into(),
         session.into(),
         "-c".into(),
@@ -75,6 +89,12 @@ pub fn client_args(
         args.push("-lc".into());
         args.push(agent_script(cmd));
     }
+    args.extend([
+        ";".into(),
+        "set-option".into(), "-t".into(), session.into(), "status".into(), "off".into(),
+        ";".into(),
+        "attach-session".into(), "-t".into(), session.into(),
+    ]);
     args
 }
 
@@ -169,19 +189,36 @@ mod tests {
         assert!(s.trim_end().ends_with(r#"exec "$SHELL" -l"#), "{s}");
     }
 
+    // The status bar is hidden per-session before the client attaches. Helper:
+    // the sub-slice `set-option -t NAME status off` must appear, and `status on`
+    // (a global change) must never.
+    fn hides_status_bar(a: &[String], session: &str) -> bool {
+        a.windows(5).any(|w| {
+            w == ["set-option", "-t", session, "status", "off"]
+        }) && !a.iter().any(|x| x == "on")
+    }
+
     #[test]
     fn client_args_fresh_agent() {
         let c = cmd();
         let a = client_args("harness_k_7", Path::new("/repo"), Some(&c), false);
+        // Fresh tab creates the session detached so `set-option` can run before
+        // the attach — `-A -d` on a brand-new name won't attach early.
         assert_eq!(a[0], "new-session");
         assert_eq!(a[1], "-A");
-        assert_eq!(a[2], "-s");
-        assert_eq!(a[3], "harness_k_7");
+        assert_eq!(a[2], "-d");
         assert!(a.iter().any(|x| x == "-c"), "cwd flag missing: {a:?}");
         assert!(a.iter().any(|x| x == "/repo"));
-        assert_eq!(a[a.len() - 3], "sh");
-        assert_eq!(a[a.len() - 2], "-lc");
-        assert!(a.last().unwrap().contains("/usr/bin/pi"));
+        assert!(a.iter().any(|x| x == "harness_k_7"));
+        // The agent script rides on the new-session command, before the first `;`.
+        let first_sep = a.iter().position(|x| x == ";").expect("command separator");
+        assert_eq!(a[first_sep - 3], "sh");
+        assert_eq!(a[first_sep - 2], "-lc");
+        assert!(a[first_sep - 1].contains("/usr/bin/pi"));
+        // Ends by attaching as the pane's foreground client.
+        assert_eq!(a[a.len() - 3], "attach-session");
+        assert_eq!(a[a.len() - 1], "harness_k_7");
+        assert!(hides_status_bar(&a, "harness_k_7"), "status bar not hidden: {a:?}");
     }
 
     #[test]
@@ -189,12 +226,22 @@ mod tests {
         let a = client_args("harness_k_9", Path::new("/repo"), None, false);
         assert!(a.iter().any(|x| x == "-c"));
         assert!(!a.iter().any(|x| x == "sh"), "shell tab must have no sh -lc: {a:?}");
+        assert!(hides_status_bar(&a, "harness_k_9"), "status bar not hidden: {a:?}");
     }
 
     #[test]
-    fn client_args_attach_only_is_bare_attach() {
+    fn client_args_attach_only_sets_status_then_attaches() {
         let a = client_args("harness_k_7", Path::new("/repo"), None, true);
-        assert_eq!(a, vec!["new-session", "-A", "-s", "harness_k_7"]);
+        assert_eq!(
+            a,
+            vec![
+                "set-option", "-t", "harness_k_7", "status", "off",
+                ";",
+                "attach-session", "-t", "harness_k_7",
+            ]
+        );
+        // No new-session on restore: it would attach early and trap the pane.
+        assert!(!a.iter().any(|x| x == "new-session"), "restore must not re-create: {a:?}");
     }
 
     #[test]
