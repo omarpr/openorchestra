@@ -270,6 +270,11 @@ impl HarnessWorkspace {
             Ok(()) => self.note = format!("archived {id}"),
             Err(e) => self.note = format!("archive failed: {e}"),
         }
+        // Archiving stops the worktree's agents (freeing resources) and
+        // purges its tab record, so unarchiving later starts fresh instead of
+        // leaking a detached session or resurrecting a stale one.
+        self.teardown_sessions(&id);
+        self.panes.remove(&id);
         self.refresh(window, cx);
         if let Some(name) = self.data.repos.first().map(|r| r.name.clone()) {
             self.select(Selection::Main(name), window, cx);
@@ -282,6 +287,10 @@ impl HarnessWorkspace {
             Ok(()) => self.note = format!("deleted {id}"),
             Err(e) => self.note = format!("delete failed: {e}"),
         }
+        // Teardown first (it reads the persisted record); then drop the live
+        // pane client. Otherwise a later worktree with the same id could
+        // reattach to this one's still-running agent session.
+        self.teardown_sessions(&id);
         self.panes.remove(&id);
         self.pending_delete = None;
         self.refresh(window, cx);

@@ -702,6 +702,27 @@ impl HarnessWorkspace {
         .detach();
     }
 
+    /// Kill every tmux session backing a worktree's tabs and drop its persisted
+    /// record. Used when a worktree is deleted or archived, so agents don't leak
+    /// as detached sessions and a later same-named worktree can't reattach to
+    /// the old one. Reads the PERSISTED records (not just live panes) so evicted
+    /// tabs' sessions are torn down too.
+    pub(crate) fn teardown_sessions(&mut self, id: &str) {
+        if self.has_tmux {
+            let names: Vec<String> = self
+                .panes_state
+                .worktrees
+                .get(id)
+                .map(|wp| wp.tabs.iter().map(|t| crate::tmux::session_name(id, t.id)).collect())
+                .unwrap_or_default();
+            for name in names {
+                crate::tmux::kill_session(&name);
+            }
+        }
+        self.panes_state.worktrees.remove(id);
+        crate::panes_state::save(&self.panes_path, &self.panes_state);
+    }
+
     /// Draw the next globally-unique, persisted tab id.
     pub(crate) fn next_tab_id(&mut self) -> u64 {
         // next_tab_id starts at 0 on a fresh install; first id handed out is 1.
