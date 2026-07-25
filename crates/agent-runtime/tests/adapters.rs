@@ -6,7 +6,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Both codex tests point HARNESS_CODEX_HOME at their own tempdir; the
@@ -15,8 +15,9 @@ static CODEX_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 use agent_runtime::sse::SseStream;
 use agent_runtime::{
-    AgentKind, AgentRuntime, AgentState, ClaudeCodeRuntime, CodexRuntime, KimiRuntime,
-    OpenCodeRuntime, SignalKind, WaitFidelity, WaitReason,
+    AgentKind, AgentRuntime, AgentSignal, AgentState, ClaudeCodeRuntime, CodexRuntime,
+    ConfigurableRuntime, HookInstall, KimiRuntime, OpenCodeRuntime, SignalKind, SignalProfile,
+    WaitFidelity, WaitReason,
 };
 
 const RECV: Duration = Duration::from_secs(10);
@@ -489,7 +490,11 @@ fn shims_are_syntactically_valid_javascript() {
     for shim in [
         ClaudeCodeRuntime::new(state.path()).shim_path(),
         CodexRuntime::new(state.path()).shim_path(),
+        agent_runtime::harness_status_shim_path(state.path()),
     ] {
+        if !shim.exists() {
+            agent_runtime::materialize_harness_status_shim(state.path()).unwrap();
+        }
         let out = std::process::Command::new("node").arg("--check").arg(&shim).output();
         match out {
             Ok(out) => assert!(
@@ -501,4 +506,313 @@ fn shims_are_syntactically_valid_javascript() {
             Err(_) => eprintln!("node not installed — skipping shim syntax check"),
         }
     }
+}
+
+// ---- configurable custom agents -------------------------------------------
+
+#[test]
+fn configurable_runtime_installs_claude_local_hooks_with_agent_env() {
+    let state = tempfile::tempdir().unwrap();
+    let wt = tempfile::tempdir().unwrap();
+    let kind = AgentKind::Other("cursor-agent".into());
+    let profile = SignalProfile::exact(HookInstall::ClaudeLocalSettings);
+    let rt = ConfigurableRuntime::new(kind.clone(), state.path(), profile);
+    assert_eq!(rt.fidelity(), WaitFidelity::Exact);
+    assert_eq!(rt.signal_kind(), SignalKind::StatusFile);
+    rt.on_spawn(wt.path()).unwrap();
+
+    assert!(rt.shim_path().exists(), "universal shim must be materialized");
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(wt.path().join(".claude/settings.local.json")).unwrap(),
+    )
+    .unwrap();
+    let shim = rt.shim_path().display().to_string();
+    for event in ["UserPromptSubmit", "PreToolUse", "Notification", "Stop"] {
+        let blob = settings["hooks"][event].to_string();
+        assert!(blob.contains(&shim), "{event} must call universal shim: {blob}");
+        assert!(
+            blob.contains("harness-status.mjs"),
+            "{event} must use harness-status.mjs"
+        );
+    }
+    let cmd = rt.command(wt.path()).unwrap();
+    assert!(
+        cmd.env.iter().any(|(k, v)| k == "HARNESS_MANAGED" && v == "1"),
+        "managed marker required: {:?}",
+        cmd.env
+    );
+    assert!(
+        cmd.env
+            .iter()
+            .any(|(k, v)| k == "HARNESS_AGENT" && v == "cursor-agent"),
+        "agent slug in env: {:?}",
+        cmd.env
+    );
+}
+
+#[test]
+fn configurable_runtime_codex_hooks_are_idempotent() {
+    let _guard = CODEX_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let codex_home = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("HARNESS_CODEX_HOME", codex_home.path()) };
+
+    let state = tempfile::tempdir().unwrap();
+    let wt = tempfile::tempdir().unwrap();
+    let kind = AgentKind::Other("my-agent".into());
+    let profile = SignalProfile::best_effort(HookInstall::CodexUserHooks);
+    let rt = ConfigurableRuntime::new(kind, state.path(), profile);
+    rt.on_spawn(wt.path()).unwrap();
+    rt.on_spawn(wt.path()).unwrap(); // idempotent
+
+    let hooks: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(codex_home.path().join("hooks.json")).unwrap())
+            .unwrap();
+    let shim = rt.shim_path().display().to_string();
+    for event in ["UserPromptSubmit", "Stop"] {
+        let cmds = hook_commands(&hooks, event);
+        assert_eq!(
+            cmds.iter().filter(|c| c.contains(&shim)).count(),
+            1,
+            "{event} must have exactly one of our hooks: {cmds:?}"
+        );
+        let ours = cmds.iter().find(|c| c.contains(&shim)).unwrap();
+        assert!(
+            ours.contains("HARNESS_AGENT") && ours.contains("my-agent"),
+            "{event} hook must gate on HARNESS_AGENT=my-agent: {ours}"
+        );
+    }
+}
+
+#[test]
+fn configurable_codex_hooks_coexist_with_builtin_codex_hook() {
+    let _guard = CODEX_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let codex_home = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("HARNESS_CODEX_HOME", codex_home.path()) };
+
+    let state = tempfile::tempdir().unwrap();
+    let wt = tempfile::tempdir().unwrap();
+
+    // Built-in Codex installs first…
+    CodexRuntime::new(state.path()).on_spawn(wt.path()).unwrap();
+    // …then a custom agent with the Codex dialect.
+    let custom = ConfigurableRuntime::new(
+        AgentKind::Other("cursor-agent".into()),
+        state.path(),
+        SignalProfile::best_effort(HookInstall::CodexUserHooks),
+    );
+    custom.on_spawn(wt.path()).unwrap();
+
+    let hooks: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(codex_home.path().join("hooks.json")).unwrap())
+            .unwrap();
+    for event in ["UserPromptSubmit", "Stop"] {
+        let cmds = hook_commands(&hooks, event);
+        assert!(
+            cmds.iter().any(|c| c.contains("codex-hook.mjs")),
+            "{event} must still have the built-in codex hook: {cmds:?}"
+        );
+        assert!(
+            cmds.iter().any(|c| c.contains("harness-status.mjs") && c.contains("cursor-agent")),
+            "{event} must have the gated custom hook: {cmds:?}"
+        );
+        assert_eq!(cmds.len(), 2, "{event} must keep both entries: {cmds:?}");
+    }
+}
+
+#[test]
+fn runtime_for_with_signal_selects_configurable_for_other() {
+    let state = tempfile::tempdir().unwrap();
+    let wt = tempfile::tempdir().unwrap();
+    let kind = AgentKind::Other("cursor-agent".into());
+
+    let plain = agent_runtime::runtime_for(&kind, wt.path(), state.path());
+    assert_eq!(plain.fidelity(), WaitFidelity::TerminalOnly);
+
+    let signaled = agent_runtime::runtime_for_with_signal(
+        &kind,
+        wt.path(),
+        state.path(),
+        Some(SignalProfile::exact(HookInstall::None)),
+    );
+    assert_eq!(signaled.fidelity(), WaitFidelity::Exact);
+    assert_eq!(signaled.signal_kind(), SignalKind::StatusFile);
+}
+
+#[test]
+fn other_with_exact_fidelity_notifies_on_waiting() {
+    let signal = AgentSignal {
+        worktree_root: PathBuf::from("/wt"),
+        kind: AgentKind::Other("cursor-agent".into()),
+        state: AgentState::Waiting,
+        reason: WaitReason::PermissionPrompt,
+        session_file: None,
+    };
+    assert!(signal.should_notify(WaitFidelity::Exact));
+    assert!(!signal.should_notify(WaitFidelity::BestEffort));
+    assert!(!signal.should_notify(WaitFidelity::TerminalOnly));
+
+    let finished = AgentSignal {
+        state: AgentState::Idle,
+        reason: WaitReason::TurnComplete,
+        ..signal.clone()
+    };
+    assert!(finished.should_notify_finished(Some(AgentState::Running), WaitFidelity::BestEffort));
+    assert!(finished.should_notify_finished(Some(AgentState::Running), WaitFidelity::Exact));
+    assert!(!finished.should_notify_finished(Some(AgentState::Running), WaitFidelity::TerminalOnly));
+}
+
+#[test]
+fn harness_status_shim_writes_agent_field_when_managed() {
+    let state = tempfile::tempdir().unwrap();
+    let wt = tempfile::tempdir().unwrap();
+    let shim = agent_runtime::materialize_harness_status_shim(state.path()).unwrap();
+
+    let out = std::process::Command::new("node")
+        .arg(&shim)
+        .arg("waiting")
+        .current_dir(wt.path())
+        .env("HARNESS_MANAGED", "1")
+        .env("HARNESS_AGENT", "cursor-agent")
+        .env_remove("CLAUDE_PROJECT_DIR")
+        .env_remove("CODEX_PROJECT_DIR")
+        .output();
+    let Ok(out) = out else {
+        eprintln!("node not installed — skipping shim write test");
+        return;
+    };
+    assert!(out.status.success(), "shim stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let status: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(wt.path().join(".harness/status.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(status["state"], "waiting");
+    assert_eq!(status["agent"], "cursor-agent");
+}
+
+#[test]
+fn harness_status_shim_refuses_to_write_without_managed_marker() {
+    let state = tempfile::tempdir().unwrap();
+    let wt = tempfile::tempdir().unwrap();
+    let shim = agent_runtime::materialize_harness_status_shim(state.path()).unwrap();
+
+    let out = std::process::Command::new("node")
+        .arg(&shim)
+        .arg("running")
+        .current_dir(wt.path())
+        .env_remove("HARNESS_MANAGED")
+        .env("HARNESS_AGENT", "cursor-agent")
+        .output();
+    let Ok(out) = out else {
+        eprintln!("node not installed — skipping shim gate test");
+        return;
+    };
+    assert!(out.status.success());
+    assert!(
+        !wt.path().join(".harness/status.json").exists(),
+        "unmanaged runs must not write status.json"
+    );
+}
+
+#[test]
+fn harness_status_shim_refuses_to_write_without_agent_slug() {
+    // Built-in Codex sets HARNESS_MANAGED alone; without HARNESS_AGENT this
+    // shim must stay silent so a leftover ~/.codex entry cannot race codex-hook.
+    let state = tempfile::tempdir().unwrap();
+    let wt = tempfile::tempdir().unwrap();
+    let shim = agent_runtime::materialize_harness_status_shim(state.path()).unwrap();
+
+    let out = std::process::Command::new("node")
+        .arg(&shim)
+        .arg("running")
+        .current_dir(wt.path())
+        .env("HARNESS_MANAGED", "1")
+        .env_remove("HARNESS_AGENT")
+        .output();
+    let Ok(out) = out else {
+        eprintln!("node not installed — skipping shim agent-gate test");
+        return;
+    };
+    assert!(out.status.success());
+    assert!(
+        !wt.path().join(".harness/status.json").exists(),
+        "managed-but-no-agent must not write status.json"
+    );
+}
+
+#[test]
+fn harness_status_shim_uses_codex_project_dir_over_cwd() {
+    let state = tempfile::tempdir().unwrap();
+    let launch_cwd = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let shim = agent_runtime::materialize_harness_status_shim(state.path()).unwrap();
+
+    let out = std::process::Command::new("node")
+        .arg(&shim)
+        .arg("running")
+        .current_dir(launch_cwd.path())
+        .env("HARNESS_MANAGED", "1")
+        .env("HARNESS_AGENT", "my-agent")
+        .env("CODEX_PROJECT_DIR", project.path())
+        .env_remove("CLAUDE_PROJECT_DIR")
+        .output();
+    let Ok(out) = out else {
+        eprintln!("node not installed — skipping CODEX_PROJECT_DIR test");
+        return;
+    };
+    assert!(out.status.success(), "shim stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        project.path().join(".harness/status.json").exists(),
+        "status must land in CODEX_PROJECT_DIR"
+    );
+    assert!(
+        !launch_cwd.path().join(".harness/status.json").exists(),
+        "must not write to the hook process cwd"
+    );
+}
+
+#[test]
+fn harness_status_shim_uses_payload_cwd_for_codex_hooks() {
+    let state = tempfile::tempdir().unwrap();
+    let launch_cwd = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let shim = agent_runtime::materialize_harness_status_shim(state.path()).unwrap();
+
+    let payload = serde_json::json!({
+        "hook_event_name": "UserPromptSubmit",
+        "cwd": project.path().display().to_string(),
+    });
+    let child = std::process::Command::new("node")
+        .arg(&shim)
+        .current_dir(launch_cwd.path())
+        .env("HARNESS_MANAGED", "1")
+        .env("HARNESS_AGENT", "my-agent")
+        .env_remove("CLAUDE_PROJECT_DIR")
+        .env_remove("CODEX_PROJECT_DIR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    let Ok(mut child) = child else {
+        eprintln!("node not installed — skipping payload.cwd test");
+        return;
+    };
+    use std::io::Write;
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "shim stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let status: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.path().join(".harness/status.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(status["state"], "running");
+    assert_eq!(status["agent"], "my-agent");
+    assert!(
+        !launch_cwd.path().join(".harness/status.json").exists(),
+        "must not write to the hook process cwd"
+    );
 }

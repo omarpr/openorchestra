@@ -178,7 +178,7 @@ impl HarnessWorkspace {
             .agent_fidelity
             .get(&signal.worktree_root)
             .copied()
-            .unwrap_or_else(|| agent_runtime::fidelity_for(&signal.kind));
+            .unwrap_or_else(|| self.fidelity_for_kind(&signal.kind));
         if previous != Some(signal.state) && signal.should_notify(fidelity) {
             self.notify_needs_input(&signal, cx);
         }
@@ -256,7 +256,7 @@ impl HarnessWorkspace {
             cx,
         );
         crate::notifier::notify_agent(
-            agent_display(&signal.kind),
+            &agent_display(&signal.kind),
             &crate::notifier::label_for(&name, &signal.worktree_root),
             &repo,
             &id,
@@ -289,7 +289,7 @@ impl HarnessWorkspace {
             cx,
         );
         crate::notifier::notify_agent(
-            agent_display(&signal.kind),
+            &agent_display(&signal.kind),
             &crate::notifier::label_for(&name, &signal.worktree_root),
             &repo,
             &id,
@@ -368,6 +368,21 @@ impl HarnessWorkspace {
         self.evict_stale_panes(&r.key);
     }
 
+    /// Fidelity for notifications: prefs signal profile for custom agents,
+    /// else the kind's built-in declaration. Used when the per-worktree cache
+    /// is cold (app restart before any agent tab was opened).
+    pub(crate) fn fidelity_for_kind(&self, kind: &AgentKind) -> WaitFidelity {
+        if let Some(signal) = self
+            .prefs
+            .agents
+            .get(kind.as_str())
+            .and_then(|p| p.signal.as_ref())
+        {
+            return signal.fidelity;
+        }
+        agent_runtime::fidelity_for(kind)
+    }
+
     /// Prepare the worktree's agent adapter and return the command to run.
     ///
     /// Separate from tab creation because it also wires up the status signal
@@ -384,7 +399,13 @@ impl HarnessWorkspace {
         kind: &AgentKind,
         r: &Resolved,
     ) -> Option<agent_runtime::AgentCommand> {
-        let runtime = runtime_for(kind, &r.path, &self.state_dir);
+        let signal = self
+            .prefs
+            .agents
+            .get(kind.as_str())
+            .and_then(|p| p.signal.clone());
+        let runtime =
+            agent_runtime::runtime_for_with_signal(kind, &r.path, &self.state_dir, signal);
         if let Err(e) = runtime.on_spawn(&r.path) {
             log::warn!("{kind} setup failed for {}: {e}", r.path.display());
         }
@@ -413,6 +434,13 @@ impl HarnessWorkspace {
                 })
                 .ok();
         }
+        // Resolve the adapter command first so a prefs override can keep the
+        // managed env (HARNESS_MANAGED / HARNESS_AGENT) that hooks need.
+        let runtime_cmd = runtime.command(&r.path);
+        let runtime_env = runtime_cmd
+            .as_ref()
+            .map(|c| c.env.clone())
+            .unwrap_or_default();
         if let Some(cmd) = self
             .prefs
             .agents
@@ -423,15 +451,14 @@ impl HarnessWorkspace {
             return Some(agent_runtime::AgentCommand {
                 program: shell.into(),
                 args: vec!["-lc".into(), cmd],
-                env: Vec::new(),
+                env: runtime_env,
                 label: kind.as_str().to_string(),
             });
         }
-        let command = runtime.command(&r.path);
-        if command.is_none() {
+        if runtime_cmd.is_none() {
             log::info!("{kind} not on PATH — falling back to a plain shell");
         }
-        command
+        runtime_cmd
     }
 
     /// Open a new tab in the active worktree's set and focus it.

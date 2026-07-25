@@ -298,9 +298,40 @@ impl HarnessWorkspace {
             }
             EditKind::AgentCmd(kind) => {
                 let cmd = text.trim().to_string();
+                // Preserve custom-ness: or_default yields custom:false, which
+                // would drop a custom agent from the catalog after an edit.
+                let is_custom_key = AgentKind::known().iter().all(|k| k.as_str() != kind);
                 let entry = self.prefs.agents.entry(kind).or_default();
+                if is_custom_key {
+                    entry.custom = true;
+                }
                 entry.command = if cmd.is_empty() { None } else { Some(cmd) };
                 save_prefs_to(&self.prefs_path, &self.prefs);
+                cx.notify();
+            }
+            EditKind::NewAgent => {
+                let slug = text.trim().to_string();
+                if valid_agent_slug(&slug, &self.prefs) {
+                    // Prefill the launch command with the slug itself so a
+                    // plain `cursor-agent` works the moment it is added; the
+                    // user can refine it from the row afterwards.
+                    self.prefs.agents.insert(
+                        slug.clone(),
+                        AgentPref {
+                            disabled: false,
+                            command: Some(slug.clone()),
+                            custom: true,
+                            signal: None,
+                        },
+                    );
+                    save_prefs_to(&self.prefs_path, &self.prefs);
+                } else {
+                    self.note = if slug.is_empty() {
+                        "agent name can't be empty".to_string()
+                    } else {
+                        format!("'{slug}' is not a valid new agent name")
+                    };
+                }
                 cx.notify();
             }
         }

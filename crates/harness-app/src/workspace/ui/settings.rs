@@ -324,9 +324,10 @@ impl HarnessWorkspace {
 
         // ---- Agents: enable/disable + launch-command override -------------
         let mut agents = div().flex().flex_col().gap_1().pb_1();
-        for kind in AgentKind::known() {
+        for kind in agent_catalog(&self.prefs) {
             let key = kind.as_str().to_string();
             let pref = self.prefs.agents.get(&key).cloned().unwrap_or_default();
+            let is_custom = matches!(kind, AgentKind::Other(_));
             let (glyph, color) = agent_mark(&kind);
             // The command each adapter actually launches when no override is
             // set — defined once per agent in agent-runtime, not here.
@@ -387,7 +388,12 @@ impl HarnessWorkspace {
                         .child(if pref.disabled { "off" } else { "on" })
                         .on_click(cx.listener(move |ws, _, _, cx| {
                             cx.stop_propagation();
+                            let is_custom_key =
+                                AgentKind::known().iter().all(|k| k.as_str() != toggle_key);
                             let e = ws.prefs.agents.entry(toggle_key.clone()).or_default();
+                            if is_custom_key {
+                                e.custom = true;
+                            }
                             e.disabled = !e.disabled;
                             save_prefs_to(&ws.prefs_path, &ws.prefs);
                             cx.notify();
@@ -431,7 +437,77 @@ impl HarnessWorkspace {
                         })),
                 );
             }
+            if is_custom {
+                let remove_key = key.clone();
+                row = row.child(
+                    div()
+                        .id(gpui::SharedString::from(format!("agent-rm-{key}")))
+                        .flex_none()
+                        .w(px(20.0))
+                        .py_0p5()
+                        .rounded_md()
+                        .text_center()
+                        .text_sm()
+                        .text_color(hx.tx2)
+                        .cursor_pointer()
+                        .hover(|d| d.bg(hx.surface_hover).text_color(hx.red))
+                        .child("×")
+                        .on_click(cx.listener(move |ws, _, _, cx| {
+                            cx.stop_propagation();
+                            ws.prefs.agents.remove(&remove_key);
+                            save_prefs_to(&ws.prefs_path, &ws.prefs);
+                            cx.notify();
+                        })),
+                );
+            }
             agents = agents.child(row);
+            // Signal / hook controls — custom agents only. Built-ins keep
+            // their dedicated adapters; these prefs drive ConfigurableRuntime.
+            if is_custom {
+                agents = agents.child(self.render_agent_signal_row(hx, &key, &pref, cx));
+            }
+        }
+        // Add-a-custom-agent affordance: a slug field (prefilled empty) that
+        // creates a new `AgentKind::Other` on commit.
+        let adding = matches!(self.edit_kind(), Some(EditKind::NewAgent));
+        if let Some(editor) = adding.then(|| self.edit_editor()).flatten() {
+            agents = agents.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .py_1()
+                    .child(
+                        div()
+                            .w(px(18.0))
+                            .text_center()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(hx.tx2)
+                            .child("◇"),
+                    )
+                    .child(div().flex_1().child(self.render_input(hx, editor, cx))),
+            );
+        } else {
+            agents = agents.child(
+                div()
+                    .id("agent-add")
+                    .mt_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(hx.border)
+                    .bg(hx.surface)
+                    .text_xs()
+                    .text_color(hx.tx1)
+                    .cursor_pointer()
+                    .hover(|d| d.bg(hx.surface_hover).text_color(hx.tx0))
+                    .child("+ Add agent")
+                    .on_click(cx.listener(|ws, _, window, cx| {
+                        cx.stop_propagation();
+                        ws.begin_edit(EditKind::NewAgent, "", "agent name…", window, cx);
+                    })),
+            );
         }
         body = body
             .child(section_title("Agents"))
@@ -440,17 +516,18 @@ impl HarnessWorkspace {
                     .text_xs()
                     .text_color(hx.tx2)
                     .pb_1()
-                    .child("Click a command to edit it (runs via $SHELL -lc; empty restores the default). Enter saves, Esc cancels."),
+                    .child("Click a command to edit it (runs via $SHELL -lc; empty restores the default). Custom agents can enable status hooks for busy/idle notifications. Enter saves, Esc cancels."),
             )
             .child(agents);
         // The reset button is always shown for discoverability, but stays
-        // greyed out and inert while every agent is already at its default —
-        // clicking it would undo nothing.
+        // greyed out and inert while every built-in agent is already at its
+        // default — clicking it would undo nothing. Custom agents are the
+        // user's own additions, not defaults, so reset never touches them.
         let agents_dirty = self
             .prefs
             .agents
             .values()
-            .any(|a| a.disabled || a.command.is_some());
+            .any(|a| !a.custom && (a.disabled || a.command.is_some()));
         let mut reset = div()
             .id("agents-reset")
             .mt_1()
@@ -469,7 +546,9 @@ impl HarnessWorkspace {
                 .hover(|d| d.bg(hx.surface_hover).text_color(hx.tx0))
                 .on_click(cx.listener(|ws, _, _, cx| {
                     cx.stop_propagation();
-                    ws.prefs.agents.clear();
+                    // Drop built-in overrides only; keep the user's custom
+                    // agents, which have no "default" to reset to.
+                    ws.prefs.agents.retain(|_, a| a.custom);
                     save_prefs_to(&ws.prefs_path, &ws.prefs);
                     cx.notify();
                 }));
@@ -632,5 +711,138 @@ impl HarnessWorkspace {
             }))
             .child(card.on_click(|_, _, cx| cx.stop_propagation()))
             .into_any_element()
+    }
+
+    /// Second row under a custom agent: cycle signal fidelity and hook-install
+    /// dialect; when Manual + signal on, show the shim invocation to wire.
+    fn render_agent_signal_row(
+        &self,
+        hx: &HarnessTheme,
+        key: &str,
+        pref: &AgentPref,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        use agent_runtime::{HookInstall, SignalProfile, WaitFidelity};
+
+        let fidelity_label = match pref.signal.as_ref().map(|s| s.fidelity) {
+            None => "signal: off",
+            Some(WaitFidelity::BestEffort) => "signal: best",
+            Some(WaitFidelity::Exact) => "signal: exact",
+            Some(WaitFidelity::TerminalOnly) => "signal: off",
+        };
+        let install_label = match pref.signal.as_ref().map(|s| s.install) {
+            None | Some(HookInstall::None) => "hooks: manual",
+            Some(HookInstall::ClaudeLocalSettings) => "hooks: claude",
+            Some(HookInstall::CodexUserHooks) => "hooks: codex",
+        };
+        let signal_on = pref.signal.as_ref().is_some_and(|s| {
+            !matches!(s.fidelity, WaitFidelity::TerminalOnly)
+        });
+        let show_shim = signal_on
+            && matches!(
+                pref.signal.as_ref().map(|s| s.install),
+                None | Some(HookInstall::None)
+            );
+        let shim_cmd = agent_runtime::harness_status_shim_command(&self.state_dir);
+
+        let fid_key = key.to_string();
+        let inst_key = key.to_string();
+
+        let mut row = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .pl(px(28.0))
+            .pb_1()
+            .child(
+                div()
+                    .id(gpui::SharedString::from(format!("agent-sig-{key}")))
+                    .flex_none()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(hx.border)
+                    .bg(hx.surface)
+                    .text_xs()
+                    .text_color(if signal_on { hx.accent } else { hx.tx2 })
+                    .cursor_pointer()
+                    .hover(|d| d.bg(hx.surface_hover))
+                    .child(fidelity_label)
+                    .on_click(cx.listener(move |ws, _, _, cx| {
+                        cx.stop_propagation();
+                        let e = ws.prefs.agents.entry(fid_key.clone()).or_default();
+                        e.custom = true;
+                        let install = e
+                            .signal
+                            .as_ref()
+                            .map(|s| s.install)
+                            .unwrap_or(HookInstall::None);
+                        e.signal = match e.signal.as_ref().map(|s| s.fidelity) {
+                            None | Some(WaitFidelity::TerminalOnly) => {
+                                Some(SignalProfile::best_effort(install))
+                            }
+                            Some(WaitFidelity::BestEffort) => {
+                                Some(SignalProfile::exact(install))
+                            }
+                            Some(WaitFidelity::Exact) => None,
+                        };
+                        save_prefs_to(&ws.prefs_path, &ws.prefs);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .id(gpui::SharedString::from(format!("agent-inst-{key}")))
+                    .flex_none()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(hx.border)
+                    .bg(hx.surface)
+                    .text_xs()
+                    .text_color(if signal_on { hx.tx0 } else { hx.tx2 })
+                    .cursor_pointer()
+                    .hover(|d| d.bg(hx.surface_hover))
+                    .child(install_label)
+                    .on_click(cx.listener(move |ws, _, _, cx| {
+                        cx.stop_propagation();
+                        let e = ws.prefs.agents.entry(inst_key.clone()).or_default();
+                        e.custom = true;
+                        // Turning on hooks without a fidelity still enables
+                        // best-effort so install is meaningful.
+                        let fidelity = e
+                            .signal
+                            .as_ref()
+                            .map(|s| s.fidelity)
+                            .filter(|f| !matches!(f, WaitFidelity::TerminalOnly))
+                            .unwrap_or(WaitFidelity::BestEffort);
+                        let next_install = match e.signal.as_ref().map(|s| s.install) {
+                            None | Some(HookInstall::None) => HookInstall::ClaudeLocalSettings,
+                            Some(HookInstall::ClaudeLocalSettings) => HookInstall::CodexUserHooks,
+                            Some(HookInstall::CodexUserHooks) => HookInstall::None,
+                        };
+                        e.signal = Some(SignalProfile {
+                            fidelity,
+                            install: next_install,
+                        });
+                        save_prefs_to(&ws.prefs_path, &ws.prefs);
+                        cx.notify();
+                    })),
+            );
+        if show_shim {
+            row = row.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .font_family(hx.font_mono)
+                    .text_color(hx.tx2)
+                    .child(shim_cmd),
+            );
+        }
+        row
     }
 }
