@@ -596,7 +596,6 @@ impl HarnessWorkspace {
                 cx.listener({
                     let id = id.clone();
                     move |ws, ev: &MouseDownEvent, _window, cx| {
-                        eprintln!("[diag] card on_mouse_down(Right) fired");
                         cx.stop_propagation();
                         ws.pending_delete = None;
                         ws.menu = Some(CardMenu {
@@ -616,7 +615,6 @@ impl HarnessWorkspace {
             .on_aux_click(cx.listener({
                 let id = id.clone();
                 move |ws, ev: &gpui::ClickEvent, _window, cx| {
-                    eprintln!("[diag] card on_aux_click fired");
                     cx.stop_propagation();
                     ws.pending_delete = None;
                     let pos = ev.position();
@@ -758,7 +756,10 @@ impl HarnessWorkspace {
         handler: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
     ) -> impl IntoElement {
         div()
-            .id(("menu-item", label.len()))
+            // Key on the label itself, not its length — "Rename" and "Delete"
+            // are both 6 chars, and GPUI needs unique sibling ElementIds for
+            // click hit-testing. With a collision, Delete's on_click never fires.
+            .id(gpui::SharedString::from(format!("menu-item-{label}")))
             .px_2()
             .py_1()
             .rounded_md()
