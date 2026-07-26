@@ -21,6 +21,7 @@
 mod bus;
 mod claude_code;
 mod codex;
+mod configurable;
 mod kimi;
 mod opencode;
 mod pi;
@@ -30,12 +31,18 @@ mod status_file;
 pub use bus::Bus;
 pub use claude_code::ClaudeCodeRuntime;
 pub use codex::CodexRuntime;
+pub use configurable::{
+    harness_status_shim_command, harness_status_shim_path, materialize_harness_status_shim,
+    ConfigurableRuntime, HookInstall, SignalProfile,
+};
 pub use kimi::KimiRuntime;
 pub use opencode::OpenCodeRuntime;
 pub use pi::PiRuntime;
 pub use status_file::StatusFileSource;
 
 use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
 
 pub use status_watch::AgentState;
 pub use worktrees::AgentKind;
@@ -54,7 +61,8 @@ pub enum WaitReason {
 
 /// How much to trust an agent's "waiting" signal (R11). The UI reflects this
 /// rather than pretending every agent reports the same thing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WaitFidelity {
     /// A real, out-of-band "I am blocked on you" event.
     Exact,
@@ -258,10 +266,27 @@ fn is_executable(path: &Path) -> bool {
 /// Unknown kinds (a registry written by a newer build) fall back to a
 /// terminal-only adapter that runs the kind's own name as the command — the
 /// honest behavior: we can still launch it, we just have no signal.
+///
+/// Custom agents with a configured [`SignalProfile`] should use
+/// [`runtime_for_with_signal`] so hooks and fidelity apply.
 pub fn runtime_for(
     kind: &AgentKind,
     worktree_root: &Path,
     state_dir: &Path,
+) -> Box<dyn AgentRuntime> {
+    runtime_for_with_signal(kind, worktree_root, state_dir, None)
+}
+
+/// Like [`runtime_for`], but applies `signal` to [`AgentKind::Other`].
+///
+/// Built-in kinds ignore `signal` — they keep their dedicated adapters.
+/// `Other` with `Some(profile)` gets a [`ConfigurableRuntime`]; without, the
+/// terminal-only baseline.
+pub fn runtime_for_with_signal(
+    kind: &AgentKind,
+    worktree_root: &Path,
+    state_dir: &Path,
+    signal: Option<SignalProfile>,
 ) -> Box<dyn AgentRuntime> {
     match kind {
         AgentKind::Pi => Box::new(PiRuntime::new(state_dir)),
@@ -269,7 +294,14 @@ pub fn runtime_for(
         AgentKind::ClaudeCode => Box::new(ClaudeCodeRuntime::new(state_dir)),
         AgentKind::Codex => Box::new(CodexRuntime::new(state_dir)),
         AgentKind::Kimi => Box::new(KimiRuntime),
-        other => Box::new(TerminalOnlyRuntime::new(other.clone())),
+        other => match signal {
+            Some(profile) => Box::new(ConfigurableRuntime::new(
+                other.clone(),
+                state_dir,
+                profile,
+            )),
+            None => Box::new(TerminalOnlyRuntime::new(other.clone())),
+        },
     }
 }
 

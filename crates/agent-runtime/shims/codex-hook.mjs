@@ -72,6 +72,10 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 	// it, exit before touching the filesystem — a codex run in a random repo
 	// must not grow a .harness directory.
 	if (process.env.HARNESS_MANAGED !== "1") process.exit(0);
+	// Custom agents (ConfigurableRuntime) set HARNESS_AGENT and install their
+	// own gated harness-status.mjs entry in the same global hooks.json. Skip
+	// so we do not overwrite their agent slug with "codex".
+	if (process.env.HARNESS_AGENT) process.exit(0);
 	let payload = {};
 	try {
 		// Codex hooks deliver the event as JSON on stdin (Claude-Code style); the

@@ -389,7 +389,7 @@ impl HarnessWorkspace {
         // a worktree's recorded default merely decides which signal the
         // status pill trusts first.
         {
-            for kind in AgentKind::known() {
+            for kind in agent_catalog(&self.prefs) {
                 let disabled = self
                     .prefs
                     .agents
