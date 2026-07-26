@@ -3,6 +3,8 @@ name = "agent-schema"
 version = "0.1.0"
 edition = "2021"
 description = "The versioned agent tool-schema contract: single source of truth shared by the pi extension, the training generator, and the harness (architecture §4.4)"
+# Headless: no zed dependency. GPL to match the app it ships in.
+license = "GPL-3.0-or-later"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

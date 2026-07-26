@@ -3,6 +3,8 @@ name = "pi-client"
 version = "0.1.0"
 edition = "2021"
 description = "Typed client for pi's RPC mode: JSONL framing, protocol types, and state derivation (architecture §4.2-4.3)"
+# Headless: no zed dependency. GPL to match the app it ships in.
+license = "GPL-3.0-or-later"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

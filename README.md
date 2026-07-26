@@ -46,6 +46,16 @@ and the one build gotcha that bites everyone: `crates/harness-app` is outside th
 root workspace, so a root `cargo build` skips it and still reports success.
 By taking part you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
 
+## License
+
+[GPL-3.0-or-later](LICENSE).
+
+Not a preference — a consequence. openOrchestra embeds a real zed editor, and the
+crates it links (`workspace`, `project`, `editor`, `git_ui`, `search`,
+`terminal`, `theme`, and the rest) are GPL-3.0-or-later, so anything distributed
+with them must be too. `gpui` and `util` are Apache-2.0, which combines into a
+GPLv3 work in that direction. No AGPL crate (`collab`) is linked.
+
 ## More
 
 Architecture, decisions, and the embedding gotchas live in

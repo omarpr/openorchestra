@@ -3,6 +3,8 @@ name = "status-watch"
 version = "0.1.0"
 edition = "2021"
 description = "Watches worktree .harness/status.json files and delivers agent status updates (architecture §4.1, Spike 2)"
+# Headless: no zed dependency. GPL to match the app it ships in.
+license = "GPL-3.0-or-later"
 
 [dependencies]
 notify = "8"

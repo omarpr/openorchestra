@@ -117,6 +117,21 @@ cargo test --bin harness-app   # it is a binary crate, so --bin, not --lib
   behind the change.
 - Expect review from the project lead, who has the final say on acceptance.
 
+## Licensing of contributions
+
+openOrchestra is [GPL-3.0-or-later](LICENSE), because it links zed's GPL crates —
+see the README. Contributions are accepted under that same license: what comes in
+goes out under the terms the project already carries. There is no CLA and no
+copyright assignment.
+
+Two practical consequences worth knowing before you write code:
+
+- Don't paste in code under a license that cannot combine into GPLv3 (anything
+  proprietary, or GPL-incompatible terms). Apache-2.0 and MIT are fine.
+- Adding a dependency means checking its license, not just its API. The weekly
+  [`security-audit.yml`](.github/workflows/security-audit.yml) job checks
+  advisories, not license compatibility — that part is on the reviewer.
+
 ## Reporting security issues
 
 Please do **not** open public issues for security vulnerabilities. Use the

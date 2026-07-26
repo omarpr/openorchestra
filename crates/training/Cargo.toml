@@ -3,6 +3,8 @@ name = "training"
 version = "0.1.0"
 edition = "2021"
 description = "Session-exhaust harvesting: archived pi sessions + final diffs + outcome labels -> schema-versioned training records (architecture §6.4)"
+# Headless: no zed dependency. GPL to match the app it ships in.
+license = "GPL-3.0-or-later"
 
 [dependencies]
 worktrees = { path = "../worktrees" }
