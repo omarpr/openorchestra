@@ -178,6 +178,48 @@ pub fn readable_diff_lines(unified: &str) -> Vec<DiffRow> {
 }
 
 
+/// Dock width at or above which the diff surface splits into two columns.
+///
+/// Below this a file list and a diff column would each be too narrow to read a
+/// path or a line of code without truncation, so the accordion — which gives
+/// the full width to whichever file is open — stays the better layout.
+const DIFF_TWO_PANE_MIN: f32 = 560.0;
+
+/// Whether to draw the diff surface as files-left/changes-right.
+///
+/// Decided from the location and the persisted dock width rather than measured
+/// bounds: a tab always fills the center, and the dock's width is a pref we
+/// already own, so neither case needs a layout pass to answer.
+fn use_two_pane(location: DiffLocation, dock_width: f32) -> bool {
+    match location {
+        DiffLocation::Tab => true,
+        DiffLocation::Dock => dock_width >= DIFF_TWO_PANE_MIN,
+    }
+}
+
+/// The line in the *working file* that diff row `ix` refers to.
+///
+/// Added and context rows already carry new-file numbers. A removed row does
+/// not: `readable_diff_lines` gives it the OLD file's number, which addresses a
+/// line that is gone. Opening the file there would land somewhere unrelated and
+/// read as a targeting bug rather than as a missing line, so a removed row
+/// resolves to the next row that still exists — stopping at the next file
+/// header, since the following file's line 1 is not this deletion's neighbour.
+/// A removed run at the end of a file has no successor and yields `None`: open
+/// the file, don't guess.
+fn target_line_for_row(rows: &[DiffRow], ix: usize) -> Option<u32> {
+    let row = rows.get(ix)?;
+    match row.kind {
+        DiffLineKind::Added | DiffLineKind::Context => row.number,
+        DiffLineKind::Removed => rows[ix + 1..]
+            .iter()
+            .take_while(|r| r.kind != DiffLineKind::FileHeader)
+            .find(|r| matches!(r.kind, DiffLineKind::Added | DiffLineKind::Context))
+            .and_then(|r| r.number),
+        DiffLineKind::FileHeader | DiffLineKind::HunkBreak => None,
+    }
+}
+
 /// Cap on rendered diff lines.
 ///
 /// Each line is its own element, so an enormous diff would build tens of
@@ -1646,8 +1688,8 @@ mod new_worktree_tests {
 #[cfg(test)]
 mod diff_render_tests {
     use super::{
-        load_prefs, readable_diff_lines, save_prefs_to, DiffLineKind, DiffLocation, NewWorktree,
-        Prefs,
+        load_prefs, readable_diff_lines, save_prefs_to, target_line_for_row, use_two_pane,
+        DiffLineKind, DiffLocation, NewWorktree, Prefs, DIFF_TWO_PANE_MIN,
     };
 
     /// Verbatim shape of the noise a new file produces — the case that
@@ -1784,6 +1826,76 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
             .sanitized();
         assert!(huge.sidebar_width <= 640.0);
         assert!(huge.diff_width <= 800.0);
+    }
+
+    #[test]
+    fn the_tab_is_always_two_pane_and_the_dock_only_when_wide_enough() {
+        // A tab fills the center, so it always has room; the dock can be dragged
+        // down to 220px, where two columns would leave neither readable.
+        assert!(use_two_pane(DiffLocation::Tab, 0.0));
+        assert!(!use_two_pane(DiffLocation::Dock, 340.0));
+        assert!(!use_two_pane(DiffLocation::Dock, DIFF_TWO_PANE_MIN - 1.0));
+        assert!(use_two_pane(DiffLocation::Dock, DIFF_TWO_PANE_MIN));
+        assert!(use_two_pane(DiffLocation::Dock, 800.0));
+    }
+
+    #[test]
+    fn an_added_or_context_row_targets_its_own_line() {
+        let rows = readable_diff_lines(
+            "diff --git a/x.rs b/x.rs\n@@ -1,2 +1,3 @@\n ctx\n+added\n ctx2\n",
+        );
+        let added = rows.iter().position(|r| r.kind == DiffLineKind::Added).unwrap();
+        assert_eq!(target_line_for_row(&rows, added), rows[added].number);
+        let ctx = rows.iter().position(|r| r.kind == DiffLineKind::Context).unwrap();
+        assert_eq!(target_line_for_row(&rows, ctx), rows[ctx].number);
+    }
+
+    #[test]
+    fn a_removed_row_targets_the_next_line_that_still_exists() {
+        // A removed row carries its OLD file line number, which does not exist
+        // in the working file. Jumping to it would land on an unrelated line and
+        // look like the feature simply picked the wrong place.
+        let rows = readable_diff_lines(
+            "diff --git a/x.rs b/x.rs\n@@ -1,3 +1,2 @@\n keep\n-gone\n after\n",
+        );
+        let removed = rows.iter().position(|r| r.kind == DiffLineKind::Removed).unwrap();
+        let after = rows
+            .iter()
+            .enumerate()
+            .find(|(i, r)| *i > removed && r.kind == DiffLineKind::Context)
+            .map(|(_, r)| r.number)
+            .unwrap();
+        assert_eq!(target_line_for_row(&rows, removed), after);
+    }
+
+    #[test]
+    fn a_trailing_run_of_removed_rows_targets_nothing() {
+        // Deleting the tail of a file leaves no following line to jump to.
+        // Opening the file with no jump is right; guessing a line is not.
+        let rows = readable_diff_lines(
+            "diff --git a/x.rs b/x.rs\n@@ -1,3 +1,1 @@\n keep\n-gone\n-also gone\n",
+        );
+        let removed = rows.iter().position(|r| r.kind == DiffLineKind::Removed).unwrap();
+        assert_eq!(target_line_for_row(&rows, removed), None);
+    }
+
+    #[test]
+    fn a_header_or_hunk_break_targets_nothing_and_an_out_of_range_index_is_safe() {
+        let rows = readable_diff_lines("diff --git a/x.rs b/x.rs\n@@ -1,1 +1,1 @@\n keep\n");
+        assert_eq!(target_line_for_row(&rows, 0), None, "file header");
+        assert_eq!(target_line_for_row(&rows, 9999), None, "out of range");
+    }
+
+    #[test]
+    fn a_removed_row_does_not_target_a_line_in_the_next_file() {
+        // Two files in one diff: a deletion at the end of the first must not
+        // reach across the boundary and open the second file's first line.
+        let rows = readable_diff_lines(
+            "diff --git a/x.rs b/x.rs\n@@ -1,2 +1,1 @@\n keep\n-gone\n\
+diff --git a/y.rs b/y.rs\n@@ -1,1 +1,2 @@\n other\n+new\n",
+        );
+        let removed = rows.iter().position(|r| r.kind == DiffLineKind::Removed).unwrap();
+        assert_eq!(target_line_for_row(&rows, removed), None);
     }
 
     #[test]
