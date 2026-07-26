@@ -427,7 +427,7 @@ impl HarnessWorkspace {
             // selected line is one of the two edit-intent triggers, and gpui
             // routes key events along the focus path only.
             .track_focus(&self.diff_surface_focus)
-            .child(self.render_diff_header(hx, &r, adds, dels));
+            .child(self.render_diff_header(hx, &r, adds, dels, cx));
         if review_count > 0 {
             panel = panel.child(self.render_review_bar(hx, review_count, cx));
         }
@@ -468,12 +468,69 @@ impl HarnessWorkspace {
     }
 
     /// The branch line and the changed-files/±counts line above the review.
+    /// The push control, shown only when this branch actually has commits the
+    /// remote does not.
+    ///
+    /// Two steps, like the review bar's clear/discard: the armed label names the
+    /// remote and the count, because a button reading "push" alone does not say
+    /// where the work is about to go — and for a branch with no upstream, where
+    /// it goes is a remote branch that does not exist yet.
+    fn render_push_control(
+        &self,
+        hx: &HarnessTheme,
+        r: &Resolved,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let (path, state) = self.push_state.as_ref()?;
+        // The probe is async; ignore an answer that outlived its selection.
+        if path != &r.path || state.unpushed == 0 {
+            return None;
+        }
+        let n = state.unpushed;
+        let publishing = state.upstream.is_none();
+
+        let (label, color) = if self.pushing {
+            ("pushing…".to_string(), hx.tx2)
+        } else if self.push_armed {
+            let target = match &state.upstream {
+                Some(u) => u.clone(),
+                None => format!("origin/{}", r.branch),
+            };
+            let verb = if publishing { "publish" } else { "push" };
+            (format!("{verb} {n} → {target}?"), hx.amber)
+        } else if publishing {
+            (format!("↑{n} publish"), hx.green)
+        } else {
+            (format!("↑{n} push"), hx.green)
+        };
+
+        Some(
+            div()
+                .id("push-branch")
+                .flex()
+                .items_center()
+                .h(px(20.0))
+                .px_1p5()
+                .rounded_md()
+                .text_xs()
+                .font_family(hx.font_mono)
+                .text_color(color)
+                .when(!self.pushing, |d| {
+                    d.cursor_pointer().hover(|d| d.bg(hx.surface))
+                })
+                .child(label)
+                .on_click(cx.listener(|ws, _, _, cx| ws.push_branch(cx)))
+                .into_any_element(),
+        )
+    }
+
     fn render_diff_header(
         &self,
         hx: &HarnessTheme,
         r: &Resolved,
         adds: usize,
         dels: usize,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
             .flex()
@@ -523,6 +580,7 @@ impl HarnessWorkspace {
                             .gap_2()
                             .text_xs()
                             .font_family(hx.font_mono)
+                            .children(self.render_push_control(hx, r, cx))
                             .child(div().text_color(hx.green).child(format!("+{adds}")))
                             .child(div().text_color(hx.red).child(format!("−{dels}"))),
                     ),

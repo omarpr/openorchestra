@@ -623,6 +623,20 @@ pub struct HarnessWorkspace {
     /// twice the git processes to agree on the same numbers, and the watcher can
     /// fire far faster than git can answer.
     status_pending: bool,
+    /// The selected root's standing against its own tracking branch, tagged with
+    /// the path it was measured in. Tagged rather than bare because the answer
+    /// arrives asynchronously and the user may have selected another worktree by
+    /// then — a push count from the previous selection is worse than none.
+    push_state: Option<(PathBuf, worktrees::PushState)>,
+    /// The push control is armed: the next click pushes. Cleared by selecting
+    /// anything else, so an armed button never survives the branch it was for.
+    push_armed: bool,
+    /// A push is running. The control shows it and stops accepting clicks —
+    /// git would reject the second one anyway, but only after the user has been
+    /// given two "pushing…" states to interpret.
+    pushing: bool,
+    /// A push-state probe is in flight (same reasoning as `status_pending`).
+    push_probe_pending: bool,
     /// Where the adapters materialize their extensions and shims.
     state_dir: PathBuf,
     prefs: Prefs,
@@ -812,6 +826,10 @@ impl HarnessWorkspace {
             diff_watch,
             git_watch,
             status_pending: false,
+            push_state: None,
+            push_armed: false,
+            pushing: false,
+            push_probe_pending: false,
             state_dir: data_dir.clone(),
             prefs,
             prefs_path,
@@ -1006,7 +1024,15 @@ impl HarnessWorkspace {
                 Ok(path) => {
                     while git_moved_rx.try_recv().is_ok() {}
                     log::debug!("git moved: {}", path.display());
-                    if view.update(cx, |ws, cx| ws.refresh_status_live(cx)).is_err() {
+                    if view
+                        .update(cx, |ws, cx| {
+                            ws.refresh_status_live(cx);
+                            // A commit or a push moves what the push control
+                            // offers, and both land here.
+                            ws.refresh_push_state(cx);
+                        })
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -1025,7 +1051,13 @@ impl HarnessWorkspace {
         // the recompute runs off-thread and repaints only when a number moved.
         cx.spawn(async move |view, cx| loop {
             cx.background_executor().timer(Duration::from_secs(10)).await;
-            if view.update(cx, |ws, cx| ws.refresh_status_live(cx)).is_err() {
+            if view
+                .update(cx, |ws, cx| {
+                    ws.refresh_status_live(cx);
+                    ws.refresh_push_state(cx);
+                })
+                .is_err()
+            {
                 break;
             }
         })

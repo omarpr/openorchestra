@@ -1006,6 +1006,12 @@ impl HarnessWorkspace {
             // Keep the live watch pointed at whatever the diff panel shows.
             self.diff_watch.watch(&r.path);
         }
+        // A push offer belongs to one branch. Carrying an armed control — or a
+        // count — across a selection change would let a click aimed at one
+        // branch push another.
+        self.push_armed = false;
+        self.push_state = None;
+        self.refresh_push_state(cx);
         self.spawn_diff_compute(cx);
     }
 
@@ -1067,6 +1073,138 @@ impl HarnessWorkspace {
                 if ws.apply_status(computed) {
                     cx.notify();
                 }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Probe the selected root's standing against its own tracking branch, off
+    /// the UI thread.
+    ///
+    /// Separate from `refresh_status_live` rather than folded into it, for two
+    /// reasons: it asks about one worktree (the one whose diff is on screen)
+    /// where that asks about every card, and it must run on selection change,
+    /// when the other pass may legitimately be mid-flight for the *previous*
+    /// selection and would skip this one on its `status_pending` guard.
+    pub(crate) fn refresh_push_state(&mut self, cx: &mut Context<Self>) {
+        if self.push_probe_pending {
+            return;
+        }
+        let Some(r) = self.resolve() else {
+            self.push_state = None;
+            return;
+        };
+        // A worktree's ahead/behind compares against the repo's default branch;
+        // that is the right fallback for a branch with no upstream, because it
+        // is what publishing would send.
+        let fallback = self
+            .data
+            .repos
+            .iter()
+            .find(|repo| r.path.starts_with(&repo.repo_root) || repo.repo_root == r.path)
+            .map(|repo| repo.compare_ref.clone())
+            .unwrap_or_else(|| "origin/HEAD".to_string());
+        let path = r.path.clone();
+        self.push_probe_pending = true;
+
+        cx.spawn(async move |view, cx| {
+            let probed = cx
+                .background_spawn(async move {
+                    let git = GitWorktrees::new(SystemRunner);
+                    let state = git.push_state(&path, &fallback);
+                    (path, state)
+                })
+                .await;
+            view.update(cx, |ws, cx| {
+                ws.push_probe_pending = false;
+                // Drop an answer for a selection the user has already left.
+                log::debug!(
+                    "push state {}: upstream={:?} unpushed={}",
+                    probed.0.display(),
+                    probed.1.upstream,
+                    probed.1.unpushed
+                );
+                if ws.resolve().is_some_and(|r| r.path == probed.0) && ws.push_state.as_ref() != Some(&probed) {
+                    ws.push_state = Some(probed);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The push control's two steps. The first click arms it — the label then
+    /// states the remote and the count, because "push" alone does not say where
+    /// — and the second runs git.
+    ///
+    /// A branch with no upstream is *published*: `push -u <remote> <branch>`,
+    /// which creates the remote branch and records the tracking ref so the next
+    /// push is an ordinary one.
+    pub(crate) fn push_branch(&mut self, cx: &mut Context<Self>) {
+        if self.pushing {
+            return;
+        }
+        let Some((_, state)) = self.push_state.clone() else { return };
+        let Some(r) = self.resolve() else { return };
+        if state.unpushed == 0 {
+            return;
+        }
+        if !self.push_armed {
+            self.push_armed = true;
+            cx.notify();
+            return;
+        }
+
+        // Publishing needs a remote to publish to; without one there is nothing
+        // honest to do, and git's own error would arrive seconds later.
+        let publish = match &state.upstream {
+            Some(_) => None,
+            None => match GitWorktrees::new(SystemRunner).default_remote(&r.path) {
+                Some(remote) => Some((remote, r.branch.clone())),
+                None => {
+                    self.push_armed = false;
+                    self.note = "no remote to publish to".to_string();
+                    cx.notify();
+                    return;
+                }
+            },
+        };
+
+        self.push_armed = false;
+        self.pushing = true;
+        self.note = String::new();
+        cx.notify();
+
+        let (path, count) = (r.path.clone(), state.unpushed);
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let git = GitWorktrees::new(SystemRunner);
+                    let publish = publish.as_ref().map(|(r, b)| (r.as_str(), b.as_str()));
+                    git.push(&path, publish)
+                })
+                .await;
+            view.update(cx, |ws, cx| {
+                ws.pushing = false;
+                ws.note = match result {
+                    // git says what it did on stderr; its own words beat ours,
+                    // and "Everything up-to-date" is worth seeing verbatim.
+                    Ok(out) => {
+                        let last = out.lines().last().unwrap_or("").trim().to_string();
+                        if last.is_empty() {
+                            format!("pushed {count} commit{}", if count == 1 { "" } else { "s" })
+                        } else {
+                            last
+                        }
+                    }
+                    Err(e) => format!("push failed: {e}"),
+                };
+                // Whatever happened, the counts on screen are now stale.
+                ws.refresh_push_state(cx);
+                ws.refresh_status_live(cx);
+                cx.notify();
             })
             .ok();
         })

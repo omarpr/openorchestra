@@ -24,6 +24,18 @@ pub struct GitStatus {
     pub behind: usize,
 }
 
+/// Whether a branch's commits have reached its remote, for the diff surface's
+/// push control.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PushState {
+    /// The tracking branch, e.g. `origin/feat-x`. `None` means this branch has
+    /// never been published, so pushing it is a `-u` publish rather than an
+    /// update.
+    pub upstream: Option<String>,
+    /// Commits a push would send. Zero means there is nothing to offer.
+    pub unpushed: usize,
+}
+
 /// The kind of change for a file in the diff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Change {
@@ -354,6 +366,70 @@ impl<R: CommandRunner> GitWorktrees<R> {
             ahead,
             behind,
         })
+    }
+
+    /// Where this branch stands against its **own** tracking branch.
+    ///
+    /// Deliberately not [`GitStatus::ahead`], which counts against the repo's
+    /// default branch: a worktree on `feat/x` is legitimately 3 ahead of
+    /// `origin/main` while being fully pushed to `origin/feat/x`, and a push
+    /// button driven by that number would offer to push nothing. Only
+    /// `@{upstream}` answers "is this work on the remote yet".
+    ///
+    /// With no upstream — a branch created here and never published — the count
+    /// falls back to commits not on `fallback` (the repo's `origin/<default>`),
+    /// which is exactly what publishing would send.
+    pub fn push_state(&self, worktree: &Path, fallback: &str) -> PushState {
+        let upstream = self
+            .git_ok(
+                worktree,
+                &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+            )
+            .ok()
+            .map(|o| o.stdout.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        let base = upstream.clone().unwrap_or_else(|| fallback.to_string());
+        let range = format!("{base}..HEAD");
+        let unpushed = self
+            .git_ok(worktree, &["rev-list", "--count", &range])
+            .ok()
+            .and_then(|o| o.stdout.trim().parse().ok())
+            .unwrap_or(0);
+
+        PushState { upstream, unpushed }
+    }
+
+    /// The remote a never-published branch should be published to: `origin` when
+    /// it exists, else the first remote configured. `None` means the repo has no
+    /// remote at all, and the caller must not offer to publish.
+    pub fn default_remote(&self, worktree: &Path) -> Option<String> {
+        let out = self.git_ok(worktree, &["remote"]).ok()?;
+        let names: Vec<&str> = out.stdout.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        names
+            .iter()
+            .find(|n| **n == "origin")
+            .or_else(|| names.first())
+            .map(|n| n.to_string())
+    }
+
+    /// `git push`, or `git push -u <remote> <branch>` when `publish_to` names a
+    /// remote — the first publication of a branch has to say where it goes and
+    /// record the upstream, or the next push asks the same question again.
+    ///
+    /// Returns git's stderr, which is where it writes the human-readable result
+    /// ("Everything up-to-date", the new-branch hint, the rejection reason), so
+    /// the caller can show what actually happened rather than a bare success.
+    pub fn push(
+        &self,
+        worktree: &Path,
+        publish_to: Option<(&str, &str)>,
+    ) -> Result<String, GitError> {
+        let out = match publish_to {
+            Some((remote, branch)) => self.git_ok(worktree, &["push", "-u", remote, branch])?,
+            None => self.git_ok(worktree, &["push"])?,
+        };
+        Ok(out.stderr.trim().to_string())
     }
 
     /// Diff the worktree against `merge-base(base_ref, HEAD)` (§6.1 D10). Reads

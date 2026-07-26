@@ -17,7 +17,9 @@ mod git;
 mod registry;
 mod runner;
 
-pub use git::{Change, Diff, DiffFile, GitError, GitStatus, GitWorktrees, WorktreeListEntry};
+pub use git::{
+    Change, Diff, DiffFile, GitError, GitStatus, GitWorktrees, PushState, WorktreeListEntry,
+};
 pub use registry::{
     AVATAR_PALETTE_LEN, AgentKind, Avatar, Registry, RegistryError, RepoGroup, WorktreeEntry,
 };
