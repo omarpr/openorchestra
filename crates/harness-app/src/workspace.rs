@@ -241,6 +241,40 @@ const DIFF_ROW_H: f32 = 15.0;
 /// lives inside the file list's own scroll area and so needs a definite height.
 const INLINE_BODY_MAX_H: f32 = 420.0;
 
+/// Which pane of Settings is showing.
+///
+/// One page had grown to five topics and 900 lines of builder; a rail turns
+/// "scroll until you recognise it" into "pick the thing you came for", and gives
+/// Notifications somewhere to exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsSection {
+    Appearance,
+    Editor,
+    Diff,
+    Agents,
+    Notifications,
+}
+
+impl SettingsSection {
+    pub(crate) const ALL: [SettingsSection; 5] = [
+        SettingsSection::Appearance,
+        SettingsSection::Editor,
+        SettingsSection::Diff,
+        SettingsSection::Agents,
+        SettingsSection::Notifications,
+    ];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            SettingsSection::Appearance => "Appearance",
+            SettingsSection::Editor => "Editor",
+            SettingsSection::Diff => "Diff",
+            SettingsSection::Agents => "Agents",
+            SettingsSection::Notifications => "Notifications",
+        }
+    }
+}
+
 /// One line of the rendered diff body.
 #[derive(Clone, Copy)]
 pub(crate) enum BodyItem {
@@ -591,6 +625,9 @@ pub struct HarnessWorkspace {
     clearing_review: bool,
     /// The settings screen (⌘, or the gear). Transient, never persisted.
     settings_open: bool,
+    /// Which Settings pane is showing. Not persisted: reopening Settings should
+    /// land where the page starts, not where you happened to leave it.
+    settings_section: SettingsSection,
     /// The requirements screen is open. Not dismissible while a Required tool
     /// is missing — see `preflight::blocked`.
     preflight_open: bool,
@@ -832,6 +869,7 @@ impl HarnessWorkspace {
             comment_draft: None,
             clearing_review: false,
             settings_open: false,
+            settings_section: SettingsSection::Appearance,
             // Probed once at startup; the screen opens below if this machine is
             // missing something that blocks, or if it has never been shown.
             preflight_open: false,
@@ -903,6 +941,18 @@ impl HarnessWorkspace {
         );
         if crate::preflight::blocked(&this.preflight) || !this.prefs.seen_preflight {
             this.preflight_open = true;
+        }
+        // Probe hook: open Settings at startup, optionally on a named pane
+        // (`HARNESS_PROBE_SETTINGS=Notifications`). ⌘, cannot be dispatched
+        // without a focused editor, so without this the settings layout is the
+        // one surface a headless run cannot assert anything about.
+        if let Some(want) = std::env::var_os("HARNESS_PROBE_SETTINGS") {
+            this.settings_open = true;
+            let want = want.to_string_lossy().to_string();
+            if let Some(s) = SettingsSection::ALL.iter().find(|s| s.label() == want) {
+                this.settings_section = *s;
+            }
+            log::info!("HARNESS_PROBE_SETTINGS: pane = {}", this.settings_section.label());
         }
         // Restore persisted appearance (zed theme + fonts). main.rs already
         // installed the harness pair pre-window to avoid a theme flash; this
@@ -1612,6 +1662,10 @@ pub(crate) enum DiffLocation {
 #[serde(default)]
 struct Prefs {
     dark: bool,
+    /// Logical name of the notification sound (see `sounds`), never a
+    /// filename — the pref outlives the platform that resolves it.
+    #[serde(default = "default_notify_sound")]
+    notify_sound: String,
     /// The requirements screen has been shown once. First launch shows it even
     /// on a fully-equipped machine, so the tools the app leans on are named
     /// before their absence has to be inferred from an empty screen.
@@ -1671,6 +1725,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_notify_sound() -> String {
+    crate::sounds::DEFAULT.to_string()
+}
+
 fn default_diff_list_width() -> f32 {
     280.0
 }
@@ -1679,6 +1737,7 @@ impl Default for Prefs {
     fn default() -> Self {
         Prefs {
             dark: true,
+            notify_sound: default_notify_sound(),
             seen_preflight: false,
             zed_theme: None,
             font_ui: None,

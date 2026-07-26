@@ -21,6 +21,7 @@ mod panes_state;
 mod preflight;
 mod resource_monitor;
 mod shortcuts;
+mod sounds;
 mod terminal_pane;
 mod theme;
 mod tmux;

@@ -109,9 +109,12 @@ impl HarnessWorkspace {
                     ),
             );
 
+        use crate::workspace::SettingsSection as S;
+        let sec = self.settings_section;
+
         let mut body = div().id("settings-body").flex_1().min_h_0().overflow_y_scroll().px_4().py_2();
 
-        // ---- Appearance: mode first, then themes of that appearance -------
+        // Shared by every pane.
         let section_title = |label: &str| {
             div()
                 .pt_3()
@@ -135,6 +138,7 @@ impl HarnessWorkspace {
                 .hover(|d| d.bg(hx.surface_hover))
                 .child(label)
         };
+        if sec == S::Appearance {
 
         // Mode decides which theme family the list below offers. Switching
         // modes returns to the harness pair — a dark zed theme in light mode
@@ -194,11 +198,17 @@ impl HarnessWorkspace {
             );
         }
         body = body.child(section_title("Theme")).child(themes);
+        }
 
         // ---- Fonts: curated candidates that are actually installed --------
         let installed = cx.text_system().all_font_names();
         let has = |name: &str| installed.iter().any(|f| f == name);
         for (title, mono) in [("Code font", true), ("Interface font", false)] {
+            // The code face is an Editor setting; the interface face is part of
+            // how the app looks. Same loop, two panes.
+            if sec != if mono { S::Editor } else { S::Appearance } {
+                continue;
+            }
             let candidates: &[&str] = if mono {
                 &["Menlo", "Monaco", "SF Mono", "Courier New", "JetBrains Mono",
                   "Fira Code", "Source Code Pro", "IBM Plex Mono", "Zed Plex Mono", "Hack"]
@@ -228,6 +238,7 @@ impl HarnessWorkspace {
             }
             body = body.child(section_title(title)).child(row);
         }
+        if sec == S::Editor {
         {
             let size = self.prefs.font_size.unwrap_or(13.0);
             let step = |delta: f32| {
@@ -275,7 +286,81 @@ impl HarnessWorkspace {
                     .child(div().id("fs-plus").tooltip(tip("Larger")).child(size_chip("+")).on_click(cx.listener(step(1.0)))),
             );
         }
+        }
 
+        if sec == S::Notifications {
+            let current = self.prefs.notify_sound.clone();
+            let mut list = div().flex().flex_col().gap_0p5().pb_1();
+            for sound in crate::sounds::CATALOG {
+                let id = sound.id;
+                let selected = current == id;
+                let origin = match sound.source {
+                    crate::sounds::Source::Bundled => "bundled",
+                    crate::sounds::Source::System => "macOS",
+                    crate::sounds::Source::SystemDefault => "the system alert sound",
+                    crate::sounds::Source::Silent => "no sound at all",
+                };
+                list = list.child(
+                    div()
+                        .id(gpui::SharedString::from(format!("sound-{id}")))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_md()
+                        .when(selected, |d| d.bg(hx.surface))
+                        .cursor_pointer()
+                        .hover(|d| d.bg(hx.surface_hover))
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(12.0))
+                                .text_xs()
+                                .text_color(hx.accent)
+                                .child(if selected { "●" } else { "○" }),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(110.0))
+                                .text_sm()
+                                .text_color(hx.tx0)
+                                .child(id),
+                        )
+                        .child(div().flex_1().text_xs().text_color(hx.tx2).child(origin))
+                        // Hearing it is the only way to choose one. Plays on
+                        // click without selecting, so you can audition the list.
+                        .child(
+                            div()
+                                .id(gpui::SharedString::from(format!("play-{id}")))
+                                .flex_none()
+                                .px_1p5()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(hx.tx2)
+                                .cursor_pointer()
+                                .hover(|d| d.bg(hx.surface).text_color(hx.accent))
+                                .child("▶")
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.stop_propagation();
+                                    crate::sounds::preview(id);
+                                })),
+                        )
+                        .on_click(cx.listener(move |ws, _, _, cx| {
+                            cx.stop_propagation();
+                            ws.prefs.notify_sound = id.to_string();
+                            save_prefs_to(&ws.prefs_path, &ws.prefs);
+                            // Selecting plays it too: picking a sound you cannot
+                            // hear is picking a name.
+                            crate::sounds::preview(id);
+                            cx.notify();
+                        })),
+                );
+            }
+            body = body.child(section_title("Notification sound")).child(list);
+        }
+        if sec == S::Notifications {
         // ---- Extras --------------------------------------------------------
         {
             let enabled = self.prefs.pet_enabled;
@@ -311,7 +396,9 @@ impl HarnessWorkspace {
                     ),
             );
         }
+        }
 
+        if sec == S::Diff {
         // ---- Diff panel ----------------------------------------------------
         {
             let location = self.prefs.diff_location;
@@ -351,7 +438,9 @@ impl HarnessWorkspace {
                     .child("Install tmux for terminal/agent sessions that survive app restarts."),
             );
         }
+        }
 
+        if sec == S::Agents {
         // ---- Agents: enable/disable + launch-command override -------------
         let mut agents = div().flex().flex_col().gap_1().pb_1();
         for kind in agent_catalog(&self.prefs) {
@@ -707,7 +796,46 @@ impl HarnessWorkspace {
                     })),
             );
         }
-        card = card.child(body);
+        }
+        let mut rail = div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w(px(140.0))
+            .gap_0p5()
+            .p_2()
+            .border_r_1()
+            .border_color(hx.border);
+        for s in S::ALL {
+            let selected = s == sec;
+            rail = rail.child(
+                div()
+                    .id(gpui::SharedString::from(format!("settings-nav-{}", s.label())))
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_sm()
+                    .when(selected, |d| d.bg(hx.surface))
+                    .text_color(if selected { hx.tx0 } else { hx.tx2 })
+                    .cursor_pointer()
+                    .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
+                    .child(s.label())
+                    .on_click(cx.listener(move |ws, _, _, cx| {
+                        cx.stop_propagation();
+                        ws.settings_section = s;
+                        cx.notify();
+                    })),
+            );
+        }
+        card = card.child(
+            div()
+                .flex()
+                .flex_1()
+                .h_full()
+                .min_h_0()
+                .child(rail)
+                .child(body),
+        );
 
         // Full-window backdrop. Swallows mouse-down (the ＋-menu lesson: a
         // backdrop that closes on mouse-down eats the click before any child

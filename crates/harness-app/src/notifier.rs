@@ -48,6 +48,7 @@ pub fn notify_agent(
     repo: &str,
     worktree_id: &str,
     alert: AgentAlert,
+    sound: &str,
 ) {
     let (title, body) = match alert {
         AgentAlert::NeedsAttention => (
@@ -62,11 +63,11 @@ pub fn notify_agent(
     log::info!("NOTIFY posting: {title}: {body}");
     #[cfg(target_os = "macos")]
     {
-        if mac::post(&title, &body, worktree_id) {
+        if mac::post(&title, &body, worktree_id, sound) {
             return;
         }
     }
-    let _ = worktree_id;
+    let _ = (worktree_id, sound);
     post(&title, &body);
 }
 
@@ -232,7 +233,7 @@ mod mac {
 
     /// Post through the notification center. Returns false when unavailable
     /// (unbundled dev run) so the caller can fall back.
-    pub fn post(title: &str, body: &str, worktree_id: &str) -> bool {
+    pub fn post(title: &str, body: &str, worktree_id: &str, sound: &str) -> bool {
         if !READY.get().copied().unwrap_or(false) {
             return false;
         }
@@ -241,12 +242,30 @@ mod mac {
         content.setTitle(&NSString::from_str(title));
         content.setBody(&NSString::from_str(body));
         content.setCategoryIdentifier(&NSString::from_str(CATEGORY));
-        // The uh-oh chirp (an original two-tone homage to ICQ's — the real
-        // sample is copyrighted). Ships in Contents/Resources; soundNamed
-        // resolves bundle resources by filename.
-        content.setSound(Some(&objc2_user_notifications::UNNotificationSound::soundNamed(
-            &NSString::from_str("uh-oh.wav"),
-        )));
+        // The chosen sound, resolved from its logical name. `soundNamed`
+        // searches the bundle's Resources *and* the Library/Sounds
+        // directories, so one call covers both our originals and the macOS
+        // system sounds. Silence is expressed by setting no sound at all —
+        // there is no "quiet" sound to name.
+        {
+            use crate::sounds::{self, Source};
+            let chosen = sounds::resolve(sound);
+            match chosen.source {
+                Source::Silent => {}
+                Source::SystemDefault => content.setSound(Some(
+                    &objc2_user_notifications::UNNotificationSound::defaultSound(),
+                )),
+                Source::Bundled | Source::System => {
+                    if let Some(file) = sounds::file_name(chosen) {
+                        content.setSound(Some(
+                            &objc2_user_notifications::UNNotificationSound::soundNamed(
+                                &NSString::from_str(&file),
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
         // Unique per posting (nanos suffix) or macOS replaces the previous
         // banner for the same identifier.
         let id = format!(

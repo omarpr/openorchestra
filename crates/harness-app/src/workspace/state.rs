@@ -261,6 +261,7 @@ impl HarnessWorkspace {
             &repo,
             &id,
             crate::notifier::AgentAlert::NeedsAttention,
+            &self.prefs.notify_sound,
         );
     }
 
@@ -294,6 +295,7 @@ impl HarnessWorkspace {
             &repo,
             &id,
             crate::notifier::AgentAlert::Finished,
+            &self.prefs.notify_sound,
         );
     }
 
