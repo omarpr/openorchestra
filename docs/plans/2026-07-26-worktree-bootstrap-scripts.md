@@ -22,6 +22,7 @@ Add hybrid (committed + local) setup/teardown hooks for worktree lifecycle, then
 - **Agent cwd** remains a real git worktree (the task’s designated **home member**), with a brief harness-written `AGENTS.md` listing sibling absolute paths. Do **not** make a meta-directory the agent cwd.
 - **Home member at create time:** first selected project is presumed home, but home must be changeable in the create UI before creation is initiated (explicit choice, convenient default).
 - **Projects foot stays in the sidebar** as first-class inventory: selecting a project opens its main checkout with editor **and** terminal (and the ability to spin up an agent) for maintenance — e.g. pull latest on the default branch, or explore/ask questions without starting a task.
+- **Migrate existing worktrees on rollout:** every active (and archived) registry worktree without a `task_id` is converted into a single-member Task so nothing is orphaned or lost. See Migration below.
 - Task-level setup/teardown (outside repos) runs before/after per-member hooks.
 
 ## UX
@@ -160,6 +161,31 @@ Also:
 - openorchestra: `<path>`
 ```
 
+## Migration — existing worktrees → single-member tasks
+
+When the task model ships, openOrchestra must upgrade on-disk state so current work is not lost and no git worktree is left unindexed.
+
+**Trigger:** first launch (or first `tasks.json` / registry load) after the build that introduces Tasks — idempotent; safe to re-run.
+
+**For each `WorktreeEntry` in `registry.json` that has no `task_id`:**
+
+1. Create a `Task` with:
+   - `id` / `slug` derived from the existing entry (`task_slug` / worktree id)
+   - `name` = existing display `name`
+   - `home_repo` = that entry’s `repo`
+   - `members` = one member pointing at the existing worktree (`worktree_id`, `path`, `branch`)
+   - `agent_kind`, `created_at`, `archived` copied from the entry
+2. Set `task_id` on the registry entry.
+3. Preserve on-disk worktree path, branch, panes/`panes.json` keys, review notes, and tmux session naming compatibility (map old worktree-key pane records onto the new task / member keys, or keep a compatibility alias so reattach still works).
+
+**Archived entries:** migrate the same way into archived tasks (do not resurrect dirs).
+
+**Failure / partial runs:** write tasks and registry updates atomically (temp + rename); skip entries that already have `task_id`; never delete a worktree dir as part of migration.
+
+**UI after migration:** sidebar shows former worktrees as single-member tasks under **Tasks**; Projects foot unchanged. No user prompt required for the default path (silent upgrade); optional one-line note (“Migrated N worktrees to tasks”) is fine.
+
+Add this as an explicit implementation step before flipping the sidebar to task-centric UI, with a regression test that loads a fixture `registry.json` (no tasks) and asserts one task per entry plus stable paths.
+
 ## Phase 5 — Sidebar UI
 
 - Primary list: **Tasks** (not repos). Expandable task rows; children are member projects with branch/dirty badges.
@@ -173,10 +199,11 @@ Also:
 1. Hooks schema + merge (replace) + unit tests in `worktrees`
 2. Single-member create/archive hooks (behavior win before sidebar flip)
 3. Task model + multi-member create/teardown in `worktrees` / app state
-4. Selection + pane split (task agent vs member editor); preserve `Selection::Main` / Projects foot terminals
-5. Unified DIFF + click-to-open across members
-6. Sidebar regrouped around Tasks; Projects foot remains for inventory + maintenance shells/agents
-7. Home `AGENTS.md` + architecture doc update (`docs/architecture.md` §6.1)
+4. **Migration:** registry worktrees → single-member tasks (idempotent, tested); pane/session key compatibility
+5. Selection + pane split (task agent vs member editor); preserve `Selection::Main` / Projects foot terminals
+6. Unified DIFF + click-to-open across members
+7. Sidebar regrouped around Tasks; Projects foot remains for inventory + maintenance shells/agents
+8. Home `AGENTS.md` + architecture doc update (`docs/architecture.md` §6.1)
 
 ## Out of scope (follow-ups)
 
