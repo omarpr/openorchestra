@@ -1079,6 +1079,46 @@ impl HarnessWorkspace {
         .detach();
     }
 
+    /// Re-probe the tool requirements, off the UI thread.
+    ///
+    /// Off-thread because probing spawns up to nine processes to ask each tool
+    /// its version, which is a visible stall on the render thread — and this
+    /// runs from a button the user presses right after installing something.
+    pub(crate) fn rerun_preflight(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |view, cx| {
+            let checks = cx
+                .background_spawn(async move {
+                    crate::preflight::probe(crate::preflight::version_on_path)
+                })
+                .await;
+            view.update(cx, |ws, cx| {
+                ws.preflight = checks;
+                // Installing the last blocking tool should not also require
+                // finding the dismiss button that was not there a moment ago.
+                if !crate::preflight::blocked(&ws.preflight) && ws.prefs.seen_preflight {
+                    ws.preflight_open = false;
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Close the requirements screen and remember that it has been seen, so a
+    /// healthy machine is never shown it again unprompted.
+    pub(crate) fn dismiss_preflight(&mut self, cx: &mut Context<Self>) {
+        if crate::preflight::blocked(&self.preflight) {
+            return;
+        }
+        self.preflight_open = false;
+        if !self.prefs.seen_preflight {
+            self.prefs.seen_preflight = true;
+            self.save_prefs(cx);
+        }
+        cx.notify();
+    }
+
     /// Probe the selected root's standing against its own tracking branch, off
     /// the UI thread.
     ///

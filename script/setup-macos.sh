@@ -84,17 +84,19 @@ fi
 # 4. Rust toolchain.
 command -v cargo >/dev/null 2>&1 || die "Rust toolchain missing — install via https://rustup.rs"
 
-# 5. Runtime tools (recommended). The app runs without these — the terminal
-#    falls back to a plain shell and PR/CI badges hide — but they're what make it
-#    useful: `pi` is the coding agent; `gh` powers the PR/CI badges.
+# 5. Runtime tools. tmux is REQUIRED: every agent runs inside a tmux session, so
+#    without it an agent dies with its tab and nothing reattaches after a
+#    restart. The app refuses to start without it. node and gh are recommended —
+#    the terminal falls back to a plain shell and PR/CI badges hide.
 run_need=()
+command -v tmux >/dev/null 2>&1 || run_need+=(tmux)
 command -v node >/dev/null 2>&1 || run_need+=(node)
 command -v gh   >/dev/null 2>&1 || run_need+=(gh)
 if ((${#run_need[@]})); then
   say "Installing runtime tools via Homebrew: ${run_need[*]}"
   brew install "${run_need[@]}"
 else
-  say "node + gh OK"
+  say "tmux + node + gh OK"
 fi
 
 # pi (the coding agent) via npm.

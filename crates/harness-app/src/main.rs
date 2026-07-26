@@ -18,6 +18,7 @@ mod markdown_preview;
 mod markdown_preview_button;
 mod notifier;
 mod panes_state;
+mod preflight;
 mod resource_monitor;
 mod shortcuts;
 mod terminal_pane;
@@ -50,6 +51,8 @@ actions!(
         CopyDiffSelection,
         /// Open the settings screen (⌘,).
         OpenSettings,
+        /// Open the tool-requirements screen on demand.
+        FirstTimeChecks,
         /// Close the active tab in the current worktree pane (⌘W outside an
         /// editor; inside one, the Workspace-scoped binding closes the file).
         CloseTab,
@@ -509,6 +512,7 @@ pub fn install_menus(cx: &mut gpui::App) {
             disabled: false,
             items: vec![
                 gpui::MenuItem::action("Settings…", OpenSettings),
+                gpui::MenuItem::action("First-time Checks…", FirstTimeChecks),
                 gpui::MenuItem::separator(),
                 gpui::MenuItem::action("Quit openOrchestra", Quit),
             ],

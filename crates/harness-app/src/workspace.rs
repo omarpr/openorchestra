@@ -591,6 +591,12 @@ pub struct HarnessWorkspace {
     clearing_review: bool,
     /// The settings screen (⌘, or the gear). Transient, never persisted.
     settings_open: bool,
+    /// The requirements screen is open. Not dismissible while a Required tool
+    /// is missing — see `preflight::blocked`.
+    preflight_open: bool,
+    /// Last probe result. Re-run by the screen's Re-check button, so installing
+    /// a tool does not mean restarting the app.
+    preflight: Vec<crate::preflight::Check>,
     /// The conductor pet: message shown, expiry, and which beat of the
     /// two-pose arm cycle it is on.
     pet: Option<(String, std::time::Instant)>,
@@ -826,6 +832,10 @@ impl HarnessWorkspace {
             comment_draft: None,
             clearing_review: false,
             settings_open: false,
+            // Probed once at startup; the screen opens below if this machine is
+            // missing something that blocks, or if it has never been shown.
+            preflight_open: false,
+            preflight: Vec::new(),
             pet: None,
             pet_pose: false,
             rebinding: None,
@@ -874,6 +884,26 @@ impl HarnessWorkspace {
             pending_repo_trash: None,
         };
         this.ensure_pane(window, cx);
+        // What this machine can actually do, before the user infers it from an
+        // empty screen. Opens when something Required is missing (and then it
+        // cannot be dismissed), or once on a first ever launch — but never for
+        // an optional gap alone, because a screen that appears every morning
+        // because rust-analyzer is absent is a screen nobody reads.
+        this.preflight = crate::preflight::probe(crate::preflight::version_on_path);
+        let short: Vec<&str> = this
+            .preflight
+            .iter()
+            .filter(|c| c.missing())
+            .map(|c| c.name)
+            .collect();
+        log::info!(
+            "preflight: missing {short:?}, blocked={}, seen_before={}",
+            crate::preflight::blocked(&this.preflight),
+            this.prefs.seen_preflight
+        );
+        if crate::preflight::blocked(&this.preflight) || !this.prefs.seen_preflight {
+            this.preflight_open = true;
+        }
         // Restore persisted appearance (zed theme + fonts). main.rs already
         // installed the harness pair pre-window to avoid a theme flash; this
         // only does further work when prefs carry overrides.
@@ -1220,6 +1250,9 @@ impl Render for HarnessWorkspace {
             // toggles perfectly. Absolute positioning takes it out of flow;
             // being last takes it to the top.
             .when(self.settings_open, |d| d.child(self.render_settings(&hx, cx)))
+            // Last, so it draws over Settings: when it is blocking there is
+            // nothing else worth interacting with.
+            .when(self.preflight_open, |d| d.child(self.render_preflight(&hx, cx)))
             // Drag tracking lives on the root so the pointer can leave the
             // 6px handle mid-drag without the resize stopping.
             .on_action(cx.listener(|ws, _: &crate::CopyDiffSelection, _, cx| {
@@ -1238,6 +1271,13 @@ impl Render for HarnessWorkspace {
                     return;
                 };
                 ws.close_tab(active, window, cx);
+            }))
+            .on_action(cx.listener(|ws, _: &crate::FirstTimeChecks, _, cx| {
+                // Always re-probe on open: the point of reaching for it is
+                // usually that something changed since startup.
+                ws.preflight_open = true;
+                ws.rerun_preflight(cx);
+                cx.notify();
             }))
             .on_action(cx.listener(|ws, _: &crate::OpenSettings, _, cx| {
                 ws.settings_open = !ws.settings_open;
@@ -1572,6 +1612,11 @@ pub(crate) enum DiffLocation {
 #[serde(default)]
 struct Prefs {
     dark: bool,
+    /// The requirements screen has been shown once. First launch shows it even
+    /// on a fully-equipped machine, so the tools the app leans on are named
+    /// before their absence has to be inferred from an empty screen.
+    #[serde(default)]
+    seen_preflight: bool,
     /// A zed theme name overriding the harness dark/light pair. `None` means
     /// the built-in pair selected by `dark`.
     #[serde(default)]
@@ -1634,6 +1679,7 @@ impl Default for Prefs {
     fn default() -> Self {
         Prefs {
             dark: true,
+            seen_preflight: false,
             zed_theme: None,
             font_ui: None,
             font_mono: None,

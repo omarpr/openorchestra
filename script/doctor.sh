@@ -20,6 +20,16 @@ else
   missing_required=1
 fi
 
+# tmux was missing from this report entirely while the app called `tmux -V` at
+# startup and hung every persistent agent session off it — the same blind spot
+# the in-app requirements screen now covers. Note `-V`: tmux has no --version.
+if have tmux; then
+  ok "tmux       $(tmux -V 2>/dev/null | sed 's/tmux //')"
+else
+  bad "tmux       agents die with their tab and never reattach:  brew install tmux"
+  missing_required=1
+fi
+
 sec "Agent — needed to run pi in worktree terminals (else the terminal is a plain shell)"
 if have node; then ok "node       $(node --version 2>/dev/null)"; else warn "node       brew install node"; fi
 # The supported pin (architecture §8 R3, docs/m2-pi-pin.md). The extension's
