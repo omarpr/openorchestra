@@ -220,13 +220,37 @@ fn target_line_for_row(rows: &[DiffRow], ix: usize) -> Option<u32> {
     }
 }
 
-/// Cap on rendered diff lines.
+/// Cap on diff lines held for one file.
 ///
-/// Each line is its own element, so an enormous diff would build tens of
-/// thousands of them and stall the frame. Set well above any realistic
-/// single-file hunk; when it bites, the UI says so rather than truncating
-/// silently.
-const MAX_DIFF_LINES: usize = 5000;
+/// This used to be a *rendering* cap of 5 000, because every line was its own
+/// element on every frame and an enormous diff stalled the frame outright. The
+/// body is virtualized now — only the rows on screen are built — so the cap
+/// bounds parsing and memory rather than paint, and can sit far above any real
+/// file. When it bites, the UI says so rather than truncating silently.
+const MAX_DIFF_LINES: usize = 50_000;
+
+/// Height every body item is drawn at.
+///
+/// `uniform_list` measures the first item and assumes the rest match, so this is
+/// a contract, not a preference: hunk rules and review notes are drawn at the
+/// row height because a taller one would desynchronise the list's arithmetic
+/// from what is painted.
+const DIFF_ROW_H: f32 = 15.0;
+
+/// How tall an inline-expanded body may grow in the narrow layout, where it
+/// lives inside the file list's own scroll area and so needs a definite height.
+const INLINE_BODY_MAX_H: f32 = 420.0;
+
+/// One line of the rendered diff body.
+#[derive(Clone, Copy)]
+pub(crate) enum BodyItem {
+    /// An index into the file's parsed rows.
+    Row(usize),
+    /// A review note, pinned under the line it annotates.
+    Note(u32),
+    /// The tail marker: how many lines the cap dropped.
+    Truncated(usize),
+}
 
 const DIFF_ADD_TX: u32 = 0x7fdd97;
 const DIFF_DEL_TX: u32 = 0xf2868f;
@@ -637,6 +661,9 @@ pub struct HarnessWorkspace {
     pushing: bool,
     /// A push-state probe is in flight (same reasoning as `status_pending`).
     push_probe_pending: bool,
+    /// Parsed diff rows per file, for the life of the current diff. Rendering
+    /// takes `&self`, hence the `RefCell`; the view is single-threaded.
+    row_cache: std::cell::RefCell<HashMap<String, std::sync::Arc<Vec<DiffRow>>>>,
     /// Where the adapters materialize their extensions and shims.
     state_dir: PathBuf,
     prefs: Prefs,
@@ -830,6 +857,7 @@ impl HarnessWorkspace {
             push_armed: false,
             pushing: false,
             push_probe_pending: false,
+            row_cache: Default::default(),
             state_dir: data_dir.clone(),
             prefs,
             prefs_path,

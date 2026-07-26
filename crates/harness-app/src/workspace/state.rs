@@ -1246,6 +1246,7 @@ impl HarnessWorkspace {
     pub(crate) fn spawn_diff_compute(&mut self, cx: &mut Context<Self>) {
         let Some(r) = self.resolve() else {
             self.diff = worktrees::Diff::default();
+            self.row_cache.borrow_mut().clear();
             self.diff_pending = false;
             cx.notify();
             return;
@@ -1268,6 +1269,8 @@ impl HarnessWorkspace {
                     return;
                 }
                 ws.diff = computed;
+                // The parsed rows describe the diff that just went away.
+                ws.row_cache.borrow_mut().clear();
                 ws.diff_pending = false;
                 cx.notify();
             });

@@ -135,20 +135,55 @@ impl HarnessWorkspace {
             )
     }
 
+    /// Parsed rows for `file`, cached for the life of the current diff.
+    ///
+    /// Parsing is the expensive half of drawing a body: re-deriving 3 000 rows
+    /// on every frame spends milliseconds re-computing something that has not
+    /// changed since the last `git diff`. The cache is keyed by file and emptied
+    /// wholesale when a new diff lands, so an entry can never outlive the text it
+    /// describes. `RefCell` because rendering takes `&self` — the view is
+    /// single-threaded and nothing re-enters this.
+    pub(crate) fn parsed_rows(&self, file: &str) -> std::sync::Arc<Vec<DiffRow>> {
+        if let Some(hit) = self.row_cache.borrow().get(file) {
+            return hit.clone();
+        }
+        let rows = std::sync::Arc::new(readable_diff_lines(&self.unified_for_file(file)));
+        self.row_cache
+            .borrow_mut()
+            .insert(file.to_string(), rows.clone());
+        rows
+    }
+
     /// The unified diff body, rendered inline beneath the file it belongs
     /// to (or beneath the whole list when no single file is selected).
-    pub(crate) fn render_diff_body(&self, hx: &HarnessTheme, file: &str, cx: &mut Context<Self>) -> AnyElement {
-        let mut preview = div()
+    ///
+    /// Virtualized. Every row used to be built on every frame: 3 000 rows cost
+    /// 21 ms to *build* in debug and 4–7 ms in release, before gpui laid out or
+    /// painted some twelve thousand nodes, each with a hitbox and listeners.
+    /// The frame budget is 16 ms, so a big file could not be scrolled — each
+    /// scroll frame rebuilt the entire file. A `uniform_list` builds only the
+    /// rows on screen, which is why the cap below can now be large.
+    ///
+    /// `bounded` is the narrow layout, where a body is expanded *inside* the
+    /// file list's own scroll area and so needs a definite height; the two-pane
+    /// layout gives it the whole right column.
+    pub(crate) fn render_diff_body(
+        &self,
+        hx: &HarnessTheme,
+        file: &str,
+        bounded: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let _started = std::time::Instant::now();
+        let wrapper = div()
             .id("diff-preview")
             .flex()
             .flex_col()
-            .flex_none()
             .my_1()
             .rounded_md()
             .bg(hx.bg0)
             .border_1()
             .border_color(hx.border)
-            .items_start()
             .text_xs()
             .font_family(hx.font_mono)
             // Typing with a line selected is the other way people say "I want to
@@ -165,219 +200,284 @@ impl HarnessWorkspace {
                 let Some((file, from, _)) = ws.diff_selection.clone() else {
                     return;
                 };
-                let rows = readable_diff_lines(&ws.unified_for_file(&file));
+                let rows = ws.parsed_rows(&file);
                 let line = target_line_for_row(&rows, from);
                 ws.request_edit(file, line, window, cx);
             }));
-        let unified = self.unified_for_file(file);
-        if unified.is_empty() {
-            preview = preview.child(div().p_2().text_color(hx.tx2).child("—"));
-        } else {
-            let shown = readable_diff_lines(&unified);
-            let total = shown.len();
-            let transparent = Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
-            // Comments hang off (file, line); with no file selected the rows
-            // span several files, so fall back to each row's own header.
-            let worktree_key = self.resolve().map(|r| r.key);
-            let file_for_comments = file.to_string();
-            // Shared by every row's double-click handler: the parsed rows are
-            // what turn a clicked index into a line that exists in the file.
-            let rows_for_edit = std::sync::Arc::new(shown.clone());
-            for (ix, r) in shown.iter().enumerate().take(MAX_DIFF_LINES) {
-                // A hunk boundary is a thin rule plus git's section text (the
-                // enclosing function or heading). The old `@@ -a,b +c,d @@`
-                // coordinates are gone: the gutter shows the real line numbers,
-                // which is the same information without the decoding step.
-                if r.kind == DiffLineKind::HunkBreak {
-                    preview = preview.child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .gap_2()
-                            .h(px(18.0))
-                            .px_2()
-                            .border_t_1()
-                            .border_color(hx.border)
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_color(hx.tx2)
-                                    .whitespace_nowrap()
-                                    .child(r.text.clone()),
-                            ),
-                    );
-                    continue;
-                }
 
-                let (fg, bg, marker) = match r.kind {
-                    DiffLineKind::FileHeader => (hx.tx0, hx.surface, ""),
-                    DiffLineKind::Added => (rgb(DIFF_ADD_TX), tint(hx.green, 0.13), "+"),
-                    DiffLineKind::Removed => (rgb(DIFF_DEL_TX), tint(hx.red, 0.13), "−"),
-                    DiffLineKind::Context => (hx.tx2, transparent, " "),
-                    DiffLineKind::HunkBreak => unreachable!("handled above"),
-                };
+        let rows = self.parsed_rows(file);
+        if rows.is_empty() {
+            return wrapper
+                .flex_none()
+                .child(div().p_2().text_color(hx.tx2).child("—"))
+                .into_any_element();
+        }
 
-                let selected = self
-                    .diff_selection
-                    .as_ref()
-                    .is_some_and(|(f, from, to)| f == file && ix >= *from && ix <= *to);
-                let row_bg = if selected { tint(hx.accent, 0.22) } else { bg };
-
-                if r.kind == DiffLineKind::FileHeader {
-                    preview = preview.child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .h(px(15.0))
-                            .bg(row_bg)
-                            .px_2()
-                            .text_color(fg)
-                            .whitespace_nowrap()
-                            .child(r.text.clone()),
-                    );
-                    continue;
-                }
-
-                let line_no = r.number;
-                let comment_key = (file_for_comments.clone(), line_no);
-                let row_file = file_for_comments.clone();
-                let move_file = file_for_comments.clone();
-                let dbl_file = file_for_comments.clone();
-                let dbl_rows = rows_for_edit.clone();
-                let has_comment = line_no.is_some_and(|n| {
-                    worktree_key
-                        .as_deref()
-                        .is_some_and(|k| self.review.get(k, &file_for_comments, n).is_some())
-                });
-
-                preview = preview.child(
-                    div()
-                        .id(("diffrow", ix))
-                        .flex()
-                        .flex_none()
-                        .h(px(15.0))
-                        .bg(row_bg)
-                        .cursor_pointer()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |ws, ev: &MouseDownEvent, window, cx| {
-                                // A second click on a diff line means "let me
-                                // change this". The diff itself cannot be typed
-                                // into, so offer the file that can.
-                                if ev.click_count >= 2 {
-                                    ws.diff_selecting = false;
-                                    let line = target_line_for_row(&dbl_rows, ix);
-                                    ws.request_edit(dbl_file.clone(), line, window, cx);
-                                    return;
-                                }
-                                ws.diff_selecting = true;
-                                ws.select_diff_row(&row_file, ix, ev.modifiers.shift, cx);
-                            }),
-                        )
-                        // Dragging over rows extends the selection, which is
-                        // what "highlight some lines" means with a mouse.
-                        .on_mouse_move(cx.listener(move |ws, _: &MouseMoveEvent, _, cx| {
-                            if ws.diff_selecting {
-                                ws.extend_diff_selection(&move_file, ix, cx);
-                            }
-                        }))
-                        .child(
-                            // Fixed-width gutter so the code column stays
-                            // aligned as numbers grow past 999. Doubles as the
-                            // comment affordance.
-                            div()
-                                .id(("diffgutter", ix))
-                                .flex_none()
-                                .w(px(46.0))
-                                .pr_1()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .when(has_comment, |d| d.bg(tint(hx.amber, 0.18)))
-                                .text_color(if has_comment { hx.amber } else { hx.tx2 })
-                                .cursor_pointer()
-                                .tooltip(tip(if has_comment { "Edit comment" } else { "Comment on line" }))
-                                .hover(|d| d.bg(hx.surface).text_color(hx.accent))
-                                // The marker sits in a fixed slot rather than
-                                // being prefixed to the number, so commented
-                                // lines do not shift their digits sideways.
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .w(px(8.0))
-                                        .child(if has_comment { "▸" } else { "" }),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .child(line_no.map(|n| n.to_string()).unwrap_or_default()),
-                                )
-                                .on_click(cx.listener(
-                                    move |ws, ev: &gpui::ClickEvent, window, cx| {
-                                        cx.stop_propagation();
-                                        if let Some(line) = comment_key.1 {
-                                            ws.begin_comment(
-                                                comment_key.0.clone(),
-                                                line,
-                                                ev.position(),
-                                                window,
-                                                cx,
-                                            );
-                                        }
-                                    },
-                                )),
-                        )
-                        .child(div().flex_none().w(px(10.0)).text_color(fg).child(marker))
-                        .child(
-                            div()
-                                .flex_none()
-                                .pr_2()
-                                .text_color(fg)
-                                .whitespace_nowrap()
-                                .child(r.text.clone()),
-                        ),
-                );
-
-                // An existing note renders under its line, where the thing it
-                // is about is still on screen.
-                if has_comment
-                    && let (Some(k), Some(n)) = (worktree_key.as_deref(), line_no)
-                    && let Some(c) = self.review.get(k, &file_for_comments, n)
-                {
-                    preview = preview.child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .py_0p5()
-                            .pl(px(56.0))
-                            .pr_2()
-                            .bg(tint(hx.amber, 0.10))
-                            .border_l_2()
-                            .border_color(hx.amber)
-                            .text_color(hx.tx1)
-                            .child(c.body.clone()),
-                    );
-                }
-            }
-            if total > MAX_DIFF_LINES {
-                // Never truncate silently — a diff that just stops looks like
-                // the change is smaller than it is.
-                preview = preview.child(
-                    div()
-                        .flex_none()
-                        .h(px(15.0))
-                        .px_2()
-                        .text_color(hx.amber)
-                        .child(format!(
-                            "… {} more lines — select a single file, or view the full diff in git",
-                            total - MAX_DIFF_LINES
-                        )),
-                );
+        // Flattened fresh each frame, unlike the parse: a note appears the
+        // moment a comment is saved, while the diff behind it has not changed.
+        // Walking the parsed rows to interleave notes is tens of microseconds —
+        // it is *building elements* that had to be bounded, not iterating.
+        let worktree_key = self.resolve().map(|r| r.key);
+        let shown = rows.len().min(MAX_DIFF_LINES);
+        let mut items: Vec<BodyItem> = Vec::with_capacity(shown);
+        for ix in 0..shown {
+            items.push(BodyItem::Row(ix));
+            if let (Some(k), Some(n)) = (worktree_key.as_deref(), rows[ix].number)
+                && self.review.get(k, file, n).is_some()
+            {
+                items.push(BodyItem::Note(n));
             }
         }
-        preview.into_any_element()
+        if rows.len() > shown {
+            items.push(BodyItem::Truncated(rows.len() - shown));
+        }
+
+        let count = items.len();
+        let items = std::sync::Arc::new(items);
+        let rows_for_items = rows.clone();
+        let file_owned = file.to_string();
+        let theme_for_items = hx.clone();
+
+        let list = gpui::uniform_list(
+            // Unique per file: the narrow layout can have several bodies
+            // expanded at once, and a shared id would make them share a scroll
+            // position.
+            gpui::ElementId::Name(format!("diff-rows:{file}").into()),
+            count,
+            cx.processor(move |ws, range: std::ops::Range<usize>, _window, cx| {
+                range
+                    .map(|i| {
+                        ws.render_body_item(
+                            &theme_for_items,
+                            &file_owned,
+                            &rows_for_items,
+                            items[i],
+                            cx,
+                        )
+                    })
+                    .collect()
+            }),
+        );
+
+        // 15 px is `DIFF_ROW_H`, the height every item is drawn at — uniform_list
+        // measures the first item and assumes the rest match, which is exactly
+        // why notes and hunk rules are drawn at the row height too.
+        let list = if bounded {
+            list.h(px((count as f32 * DIFF_ROW_H).min(INLINE_BODY_MAX_H)))
+        } else {
+            list.flex_1().min_h_0()
+        };
+        log::trace!("diff body: {count} items prepared in {:?}", _started.elapsed());
+        // Same idiom as the settings overlay: a virtualized list that lays out
+        // to zero height reports perfect state and paints nothing, which is
+        // indistinguishable from "the diff is empty" without this.
+        let wrapper = wrapper.when(std::env::var_os("HARNESS_PROBE_PAINT").is_some(), |d| {
+            d.child(
+                gpui::canvas(
+                    |b, _, _| log::info!("paint: diff body bounds = {b:?}"),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+        });
+        wrapper
+            .when(!bounded, |d| d.flex_1().min_h_0())
+            .child(list)
+            .into_any_element()
+    }
+
+    /// One 15 px line of the body: a diff row, a review note pinned under the
+    /// line it annotates, or the "this file was truncated" tail.
+    fn render_body_item(
+        &self,
+        hx: &HarnessTheme,
+        file: &str,
+        rows: &std::sync::Arc<Vec<DiffRow>>,
+        item: BodyItem,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let transparent = Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+        let ix = match item {
+            BodyItem::Truncated(n) => {
+                // Never truncate silently — a diff that just stops looks like
+                // the change is smaller than it is.
+                return div()
+                    .h(px(DIFF_ROW_H))
+                    .px_2()
+                    .text_color(hx.amber)
+                    .whitespace_nowrap()
+                    .child(format!("… {n} more lines — view the full diff in git"))
+                    .into_any_element();
+            }
+            BodyItem::Note(line) => {
+                let body = self
+                    .resolve()
+                    .and_then(|r| self.review.get(&r.key, file, line).map(|c| c.body.clone()))
+                    .unwrap_or_default();
+                // One line, ellipsized: the note is a marker that a comment is
+                // here, and the comment editor holds the full text.
+                return div()
+                    .flex()
+                    .h(px(DIFF_ROW_H))
+                    .items_center()
+                    .pl(px(56.0))
+                    .pr_2()
+                    .bg(tint(hx.amber, 0.10))
+                    .border_l_2()
+                    .border_color(hx.amber)
+                    .text_color(hx.tx1)
+                    .overflow_hidden()
+                    .child(div().min_w_0().whitespace_nowrap().child(body))
+                    .into_any_element();
+            }
+            BodyItem::Row(ix) => ix,
+        };
+        let r = &rows[ix];
+
+        // A hunk boundary is a thin rule plus git's section text (the enclosing
+        // function or heading). The old `@@ -a,b +c,d @@` coordinates are gone:
+        // the gutter shows the real line numbers, which is the same information
+        // without the decoding step.
+        if r.kind == DiffLineKind::HunkBreak {
+            return div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .h(px(DIFF_ROW_H))
+                .px_2()
+                .border_t_1()
+                .border_color(hx.border)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_color(hx.tx2)
+                        .whitespace_nowrap()
+                        .child(r.text.clone()),
+                )
+                .into_any_element();
+        }
+
+        let (fg, bg, marker) = match r.kind {
+            DiffLineKind::FileHeader => (hx.tx0, hx.surface, ""),
+            DiffLineKind::Added => (rgb(DIFF_ADD_TX), tint(hx.green, 0.13), "+"),
+            DiffLineKind::Removed => (rgb(DIFF_DEL_TX), tint(hx.red, 0.13), "−"),
+            DiffLineKind::Context => (hx.tx2, transparent, " "),
+            DiffLineKind::HunkBreak => unreachable!("handled above"),
+        };
+
+        let selected = self
+            .diff_selection
+            .as_ref()
+            .is_some_and(|(f, from, to)| f == file && ix >= *from && ix <= *to);
+        let row_bg = if selected { tint(hx.accent, 0.22) } else { bg };
+
+        if r.kind == DiffLineKind::FileHeader {
+            return div()
+                .flex()
+                .h(px(DIFF_ROW_H))
+                .bg(row_bg)
+                .px_2()
+                .text_color(fg)
+                .whitespace_nowrap()
+                .child(r.text.clone())
+                .into_any_element();
+        }
+
+        let line_no = r.number;
+        let comment_file = file.to_string();
+        let row_file = file.to_string();
+        let move_file = file.to_string();
+        let dbl_file = file.to_string();
+        let dbl_rows = rows.clone();
+        let has_comment = line_no.is_some_and(|n| {
+            self.resolve()
+                .is_some_and(|r| self.review.get(&r.key, file, n).is_some())
+        });
+
+        div()
+            .id(("diffrow", ix))
+            .flex()
+            .h(px(DIFF_ROW_H))
+            .bg(row_bg)
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |ws, ev: &MouseDownEvent, window, cx| {
+                    // A second click on a diff line means "let me change this".
+                    // The diff itself cannot be typed into, so offer the file
+                    // that can.
+                    if ev.click_count >= 2 {
+                        ws.diff_selecting = false;
+                        let line = target_line_for_row(&dbl_rows, ix);
+                        ws.request_edit(dbl_file.clone(), line, window, cx);
+                        return;
+                    }
+                    ws.diff_selecting = true;
+                    ws.select_diff_row(&row_file, ix, ev.modifiers.shift, cx);
+                }),
+            )
+            // Dragging over rows extends the selection, which is what "highlight
+            // some lines" means with a mouse.
+            .on_mouse_move(cx.listener(move |ws, _: &MouseMoveEvent, _, cx| {
+                if ws.diff_selecting {
+                    ws.extend_diff_selection(&move_file, ix, cx);
+                }
+            }))
+            .child(
+                // Fixed-width gutter so the code column stays aligned as numbers
+                // grow past 999. Doubles as the comment affordance.
+                div()
+                    .id(("diffgutter", ix))
+                    .flex_none()
+                    .w(px(46.0))
+                    .pr_1()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .when(has_comment, |d| d.bg(tint(hx.amber, 0.18)))
+                    .text_color(if has_comment { hx.amber } else { hx.tx2 })
+                    .cursor_pointer()
+                    .tooltip(tip(if has_comment { "Edit comment" } else { "Comment on line" }))
+                    .hover(|d| d.bg(hx.surface).text_color(hx.accent))
+                    // The marker sits in a fixed slot rather than being prefixed
+                    // to the number, so commented lines do not shift their digits
+                    // sideways.
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(8.0))
+                            .child(if has_comment { "▸" } else { "" }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(line_no.map(|n| n.to_string()).unwrap_or_default()),
+                    )
+                    .on_click(cx.listener(move |ws, ev: &gpui::ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        if let Some(line) = line_no {
+                            ws.begin_comment(
+                                comment_file.clone(),
+                                line,
+                                ev.position(),
+                                window,
+                                cx,
+                            );
+                        }
+                    })),
+            )
+            .child(div().flex_none().w(px(10.0)).text_color(fg).child(marker))
+            .child(
+                div()
+                    .flex_none()
+                    .pr_2()
+                    .text_color(fg)
+                    .whitespace_nowrap()
+                    .child(r.text.clone()),
+            )
+            .into_any_element()
     }
 
     /// The dock: fixed width and its own left border, wrapping the shared
@@ -754,7 +854,7 @@ impl HarnessWorkspace {
                                 .child(md.clone()),
                         );
                     }
-                    None => files = files.child(self.render_diff_body(hx, &path, cx)),
+                    None => files = files.child(self.render_diff_body(hx, &path, true, cx)),
                 }
             }
         }
@@ -790,7 +890,7 @@ impl HarnessWorkspace {
         };
         let body = match self.md_preview.as_ref().filter(|(f, _)| f == &file) {
             Some((_, md)) => div().size_full().child(md.clone()).into_any_element(),
-            None => self.render_diff_body(hx, &file, cx),
+            None => self.render_diff_body(hx, &file, false, cx),
         };
         div()
             .id("diff-focused")
