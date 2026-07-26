@@ -1017,6 +1017,92 @@ impl HarnessWorkspace {
         self.spawn_diff_compute(cx);
     }
 
+    /// Recompute every card's ahead/behind/dirty off the UI thread and merge the
+    /// answers back in.
+    ///
+    /// Separate from `refresh()`, which rebuilds the whole view model — registry
+    /// included — with synchronous git calls on the render thread. That is fine
+    /// for a mutation the user just asked for, and unacceptable on a watcher
+    /// signal: `git status` on a large tree takes long enough to drop frames,
+    /// and a build can fire the watcher repeatedly. This path touches only the
+    /// numbers on the badges, so the cards, the selection and the registry are
+    /// left exactly as they are.
+    pub(crate) fn refresh_status_live(&mut self, cx: &mut Context<Self>) {
+        if self.status_pending {
+            return;
+        }
+        // Every card, main rows included — each with the compare ref its own
+        // repo resolved, so a worktree is never measured against another repo's
+        // upstream.
+        let mut targets: Vec<(PathBuf, String)> = Vec::new();
+        for repo in &self.data.repos {
+            targets.push((repo.repo_root.clone(), repo.compare_ref.clone()));
+            for wt in &repo.worktrees {
+                targets.push((wt.path.clone(), repo.compare_ref.clone()));
+            }
+        }
+        if targets.is_empty() {
+            return;
+        }
+        self.status_pending = true;
+
+        cx.spawn(async move |view, cx| {
+            let computed = cx
+                .background_spawn(async move {
+                    let git = GitWorktrees::new(SystemRunner);
+                    targets
+                        .into_iter()
+                        .map(|(path, compare_ref)| {
+                            let s = git.status(&path, Some(&compare_ref)).unwrap_or_default();
+                            (path, s.ahead, s.behind, s.dirty_files)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            view.update(cx, |ws, cx| {
+                ws.status_pending = false;
+                // Only re-render when a number actually moved. The backstop tick
+                // runs forever on an idle app, and an unconditional notify would
+                // repaint the window every few seconds for nothing.
+                if ws.apply_status(computed) {
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Merge recomputed counts into the cards, keyed by path. Returns whether
+    /// anything changed.
+    ///
+    /// A path that no longer matches a card is dropped: the worktree was deleted
+    /// while its status was in flight, and `refresh()` has already rebuilt the
+    /// list without it.
+    fn apply_status(&mut self, computed: Vec<(PathBuf, usize, usize, usize)>) -> bool {
+        let mut changed = false;
+        let mut set = |ahead: &mut usize, behind: &mut usize, dirty: &mut usize, n: (usize, usize, usize)| {
+            if (*ahead, *behind, *dirty) != n {
+                (*ahead, *behind, *dirty) = n;
+                changed = true;
+            }
+        };
+        for (path, ahead, behind, dirty) in computed {
+            log::trace!("status {}: ↑{ahead} ↓{behind} ~{dirty}", path.display());
+            for repo in &mut self.data.repos {
+                if repo.repo_root == path {
+                    set(&mut repo.ahead, &mut repo.behind, &mut repo.dirty, (ahead, behind, dirty));
+                }
+                for wt in &mut repo.worktrees {
+                    if wt.path == path {
+                        set(&mut wt.ahead, &mut wt.behind, &mut wt.dirty, (ahead, behind, dirty));
+                    }
+                }
+            }
+        }
+        changed
+    }
+
     /// Spawn the off-thread git diff, discarding a result whose selection the
     /// user has since left (the `diff_gen` staleness guard).
     pub(crate) fn spawn_diff_compute(&mut self, cx: &mut Context<Self>) {

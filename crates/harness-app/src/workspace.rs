@@ -616,6 +616,13 @@ pub struct HarnessWorkspace {
     /// Watches the selected root's files so the diff panel keeps up with an
     /// agent's edits in near real time (retargeted on every selection change).
     diff_watch: crate::diff_watch::DiffWatcher,
+    /// Watches every repo's `.git` so the sidebar's ahead/behind/dirty badges
+    /// follow git itself, not just the structural mutations `refresh()` runs on.
+    git_watch: crate::git_watch::GitWatcher,
+    /// A live status recompute is in flight. Two overlapping passes would spawn
+    /// twice the git processes to agree on the same numbers, and the watcher can
+    /// fire far faster than git can answer.
+    status_pending: bool,
     /// Where the adapters materialize their extensions and shims.
     state_dir: PathBuf,
     prefs: Prefs,
@@ -745,6 +752,13 @@ impl HarnessWorkspace {
 
         let (diff_watch, diff_dirty_rx) = crate::diff_watch::DiffWatcher::new();
 
+        // Watched from the start, and retargeted by `refresh()` whenever the
+        // repo list changes. Every repo is watched at once, unlike the diff
+        // watch: a card for a repo you are not looking at is still on screen,
+        // and a badge is only worth showing if it is current.
+        let (mut git_watch, git_moved_rx) = crate::git_watch::GitWatcher::new();
+        git_watch.watch_repos(&repo_roots);
+
         let selection = data
             .repos
             .first()
@@ -796,6 +810,8 @@ impl HarnessWorkspace {
             _poller: Some(poller),
             status_source,
             diff_watch,
+            git_watch,
+            status_pending: false,
             state_dir: data_dir.clone(),
             prefs,
             prefs_path,
@@ -959,7 +975,17 @@ impl HarnessWorkspace {
                 Ok(_) => {
                     // Coalesce everything already queued this instant.
                     while diff_dirty_rx.try_recv().is_ok() {}
-                    if view.update(cx, |ws, cx| ws.refresh_diff_live(cx)).is_err() {
+                    // The same edit that moved the diff moved the selected
+                    // card's `~N`. Nothing else sees a plain unstaged write —
+                    // it touches no git file — so this signal is the only way
+                    // that badge tracks typing.
+                    if view
+                        .update(cx, |ws, cx| {
+                            ws.refresh_diff_live(cx);
+                            ws.refresh_status_live(cx);
+                        })
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -967,6 +993,40 @@ impl HarnessWorkspace {
                     cx.background_executor().timer(Duration::from_millis(250)).await
                 }
                 Err(_) => break,
+            }
+        })
+        .detach();
+
+        // Live sidebar badges: git moved under some repo's `.git`. Same drain
+        // shape as the diff watch, and the 250 ms cadence is again the debounce
+        // — a commit writes the index, a ref and often packed-refs, which is one
+        // recompute here rather than three.
+        cx.spawn(async move |view, cx| loop {
+            match git_moved_rx.try_recv() {
+                Ok(path) => {
+                    while git_moved_rx.try_recv().is_ok() {}
+                    log::debug!("git moved: {}", path.display());
+                    if view.update(cx, |ws, cx| ws.refresh_status_live(cx)).is_err() {
+                        break;
+                    }
+                }
+                Err(e) if e.is_empty() => {
+                    cx.background_executor().timer(Duration::from_millis(250)).await
+                }
+                Err(_) => break,
+            }
+        })
+        .detach();
+
+        // Backstop. The watches above cover every git event and the selected
+        // worktree's edits; what neither sees is an agent writing files in a
+        // worktree you are not viewing, which changes that card's `~N` without
+        // touching git. Ten seconds is slow enough to be free on an idle app —
+        // the recompute runs off-thread and repaints only when a number moved.
+        cx.spawn(async move |view, cx| loop {
+            cx.background_executor().timer(Duration::from_secs(10)).await;
+            if view.update(cx, |ws, cx| ws.refresh_status_live(cx)).is_err() {
+                break;
             }
         })
         .detach();

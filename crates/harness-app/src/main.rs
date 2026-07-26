@@ -12,6 +12,7 @@ mod chat_pane;
 mod data;
 mod diff_review;
 mod diff_watch;
+mod git_watch;
 mod harness_zed_theme;
 mod markdown_preview;
 mod markdown_preview_button;

@@ -19,6 +19,9 @@ impl HarnessWorkspace {
 
     pub(crate) fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.data = WorkspaceData::build(self.manager.git(), &self.manager.registry, &self.repo_roots);
+        // Follow the repo list: a repo added here has no `.git` watch yet, and a
+        // removed one would keep firing recomputes for cards that are gone.
+        self.git_watch.watch_repos(&self.repo_roots);
 
         let items: Vec<(PathBuf, String, PathBuf)> = self
             .data
