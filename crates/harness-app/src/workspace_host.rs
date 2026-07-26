@@ -555,16 +555,26 @@ async fn probe_editor_keys(hosted: &Entity<Workspace>, cx: &mut gpui::AsyncWindo
     cx.background_executor().timer(pause).await;
 }
 
-/// Open `rel` (worktree-relative) in a hosted workspace, putting the caret on
-/// `line` when there is one.
+/// Open `rel` (worktree-relative to `root`) in a hosted workspace, putting the
+/// caret on `line` when there is one.
 ///
 /// The same recipe `probe_open` proved, promoted to a real entry point: a
 /// `RelPath` into a `ProjectPath` into `Workspace::open_path`, then a selection
 /// change so the file opens *where the user was looking* rather than at line 1.
 /// Reaching this from the diff panel is the whole point — a diff row you want
 /// to change is useless if the editor drops you at the top of the file.
+///
+/// `root` is taken rather than read off the project because a workspace created
+/// moments ago HAS no worktree yet: `project_for` starts `find_or_create_worktree`
+/// and detaches it. Asking `visible_worktrees` for the id synchronously is what
+/// made "New editor tab" open an empty editor — the tab appeared, the file
+/// silently went nowhere, and the only trace was a warn line. Re-requesting the
+/// same root joins that in-flight creation (zed dedupes by path) and resolves
+/// immediately once the worktree is registered, so both answers to the edit
+/// prompt land on the file.
 pub fn open_file_at(
     hosted: &Entity<Workspace>,
+    root: &Path,
     rel: &str,
     line: Option<u32>,
     window: &mut Window,
@@ -577,18 +587,22 @@ pub fn open_file_at(
     };
     let parsed: Arc<util::rel_path::RelPath> = parsed.as_ref().into();
 
-    let task = hosted.update(cx, |ws, cx| {
-        let worktree = ws.project().read(cx).visible_worktrees(cx).next()?;
-        let path = project::ProjectPath { worktree_id: worktree.read(cx).id(), path: parsed };
-        Some(ws.open_path(path, None, true, window, cx))
+    let worktree = hosted.update(cx, |ws, cx| {
+        ws.project()
+            .update(cx, |p, cx| p.find_or_create_worktree(root, true, cx))
     });
-    let Some(task) = task else {
-        log::warn!("open_file_at: hosted workspace has no visible worktree");
-        return;
-    };
+    let hosted = hosted.clone();
 
     window
         .spawn(cx, async move |cx| {
+            let (worktree, _) = worktree.await?;
+            let task = hosted.update_in(cx, |ws, window, cx| {
+                let path = project::ProjectPath {
+                    worktree_id: worktree.read(cx).id(),
+                    path: parsed,
+                };
+                ws.open_path(path, None, true, window, cx)
+            })?;
             let item = task.await?;
             cx.update(|window, cx| {
                 let Some(editor) = item.act_as::<editor::Editor>(cx) else {

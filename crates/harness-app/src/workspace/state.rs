@@ -644,45 +644,20 @@ impl HarnessWorkspace {
             cx.notify();
             return;
         };
-        crate::workspace_host::open_file_at(&hosted, &file, line, window, cx);
+        crate::workspace_host::open_file_at(&hosted, &r.path, &file, line, window, cx);
         self.save_panes();
         cx.notify();
     }
 
-    /// The active worktree's Diff tab, if it has one.
-    pub(crate) fn diff_tab_id(&self) -> Option<u64> {
-        let r = self.resolve()?;
-        let pane = self.panes.get(&r.key)?;
-        pane.tabs
-            .iter()
-            .find(|t| matches!(t.content, TabContent::Diff))
-            .map(|t| t.id)
-    }
-
-    /// What the top-bar diff button does, which depends on where the diff lives.
+    /// Show or hide the diff dock.
     ///
-    /// In `Dock` mode it is a visibility toggle. In `Tab` mode there is no dock
-    /// to toggle, so it focuses the worktree's Diff tab, opening one first if
-    /// there is none — the same "show me the diff" intent, landing wherever the
-    /// setting put it.
-    pub(crate) fn toggle_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match self.prefs.diff_location {
-            DiffLocation::Dock => {
-                self.prefs.diff_open = !self.prefs.diff_open;
-                self.save_prefs(cx);
-            }
-            DiffLocation::Tab => match self.diff_tab_id() {
-                Some(id) => {
-                    let Some(r) = self.resolve() else { return };
-                    if let Some(pane) = self.panes.get_mut(&r.key) {
-                        pane.active = id;
-                    }
-                    self.focus_active_pane(window, cx);
-                    self.save_panes();
-                }
-                None => self.open_tab(TabKind::Diff, window, cx),
-            },
-        }
+    /// `Dock` mode only, which is why this takes no view of `diff_location`: the
+    /// top-bar button that calls it renders only in that mode. In `Tab` mode the
+    /// diff is an ordinary tab — opened from ＋, closed with its ✕ — and there
+    /// is no dock whose visibility could be toggled.
+    pub(crate) fn toggle_diff(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.prefs.diff_open = !self.prefs.diff_open;
+        self.save_prefs(cx);
         cx.notify();
     }
 
