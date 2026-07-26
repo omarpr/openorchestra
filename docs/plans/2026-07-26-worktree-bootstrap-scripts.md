@@ -16,9 +16,12 @@ Add hybrid (committed + local) setup/teardown hooks for worktree lifecycle, then
 ## Design decisions (locked)
 
 - **Hook config is hybrid:** committed `.openorchestra/hooks.toml` per repo, overridden by `~/.openorchestra/hooks/<repo>.toml`.
+- **Local hook override merge is replace, not append:** when local config sets `scripts`, that list fully replaces the committed list.
 - **The parent object is the Task** (today’s “worktree” / effort), not the repository. A task has **one or more member projects**, each backed by a git worktree. Single-repo work is just a task with one member.
 - **One task ⇒ one driving agent ⇒ one unified changeset.** The agent session and the right-hand DIFF panel belong to the **task**. The center editor/file tree belong to the **focused member project** and can switch without restarting the agent.
 - **Agent cwd** remains a real git worktree (the task’s designated **home member**), with a brief harness-written `AGENTS.md` listing sibling absolute paths. Do **not** make a meta-directory the agent cwd.
+- **Home member at create time:** first selected project is presumed home, but home must be changeable in the create UI before creation is initiated (explicit choice, convenient default).
+- **Projects foot stays in the sidebar** as first-class inventory: selecting a project opens its main checkout with editor **and** terminal (and the ability to spin up an agent) for maintenance — e.g. pull latest on the default branch, or explore/ask questions without starting a task.
 - Task-level setup/teardown (outside repos) runs before/after per-member hooks.
 
 ## UX
@@ -35,8 +38,8 @@ TASKS
   │    └─ openorchestra feat/...       (home — agent cwd)
   └─ fix-sidebar-scroll                ← single-member task (today’s worktree)
        └─ openorchestra feat/...
-PROJECTS (optional foot section)
-  └─ main checkouts for browsing / adding repos
+PROJECTS (sidebar foot — inventory + maintenance)
+  └─ main checkouts: editor + terminal + optional explore agent
 ```
 
 | Surface | Owned by | Behavior |
@@ -46,6 +49,7 @@ PROJECTS (optional foot section)
 | Terminal / agent tab | **Task** | One tmux session; cwd = home member; survives member focus changes |
 | Right DIFF panel | **Task** | Union of all members’ diffs, grouped by repo |
 | Center editor / file tree | **Focused member** | Clicking a DIFF row switches focus to that member and opens the file |
+| Projects foot | **Main checkout** | Editor + terminal (+ optional agent) for pull/sync, browse, ask questions — not a task |
 
 Clicking a change in the changeset is the primary navigation gesture for cross-repo exploration.
 
@@ -87,7 +91,7 @@ scripts = ["scripts/worktree-teardown.sh"]
 ```
 
 - Local override at `~/.openorchestra/hooks/<repo>.toml` (same shape).
-- **Merge rule:** local `scripts` replace the committed list when present (simple, predictable).
+- **Merge rule (locked):** local `scripts` **replace** the committed list when present — never append.
 - Script path resolved from the main checkout (`repo_root`); execute with **cwd = member worktree path**.
 - Env: `HARNESS_REPO_ROOT`, `HARNESS_WORKTREE`, `HARNESS_BRANCH`, `HARNESS_TASK_SLUG`, plus for multi-member tasks `HARNESS_TASK_ID` and `HARNESS_HOME_WORKTREE`.
 - API sketch: `HooksConfig::load(...)`, `run_setup(...)`, `run_teardown(...)`.
@@ -115,7 +119,7 @@ Task {
 - **Create task:** name + select 1..N projects from `repos.json` + choose home member → create a git worktree per member (shared slug/branch grammar) → task setup → per-member hooks → write home `AGENTS.md` → select the new task.
 - **Archive/delete task:** task teardown → per-member teardown → existing git archive/delete for each member → drop task record.
 - Single-repo “＋” today becomes “create task with one member” (same gesture, richer model underneath).
-- Home member is chosen explicitly at create time (default: first selected project).
+- Home member: first selected project is the default; create UI must allow changing home before confirm.
 
 ## Phase 4 — Selection, panes, and unified DIFF
 
@@ -160,29 +164,23 @@ Also:
 
 - Primary list: **Tasks** (not repos). Expandable task rows; children are member projects with branch/dirty badges.
 - Task row shows aggregate dirty / agent pill; member rows show per-repo status.
-- Creating work: one flow — name the task, pick projects (default: current single project for the old ＋ habit).
-- Keep a compact **Projects** foot for add/archive/trash of repo roots and opening `main` — inventory, not active efforts.
+- Creating work: one flow — name the task, pick projects (order of selection sets default home), allow changing home before create.
+- **Projects foot (required):** list of main checkouts for add/archive/trash. Selecting a project opens that main checkout with the same center surfaces as today — editor, terminal, and the ability to start an agent — for maintenance (e.g. `git pull` on the default branch) or exploratory Q&A without creating a task. Project selection is **not** a task: DIFF stays main-checkout uncommitted work (`HEAD`), no task agent pill.
 - Status note while setup runs (“running setup…”).
 
 ## Implementation order
 
-1. Hooks schema + merge + unit tests in `worktrees`
+1. Hooks schema + merge (replace) + unit tests in `worktrees`
 2. Single-member create/archive hooks (behavior win before sidebar flip)
 3. Task model + multi-member create/teardown in `worktrees` / app state
-4. Selection + pane split (task agent vs member editor)
+4. Selection + pane split (task agent vs member editor); preserve `Selection::Main` / Projects foot terminals
 5. Unified DIFF + click-to-open across members
-6. Sidebar regrouped around Tasks; Projects foot for inventory
+6. Sidebar regrouped around Tasks; Projects foot remains for inventory + maintenance shells/agents
 7. Home `AGENTS.md` + architecture doc update (`docs/architecture.md` §6.1)
 
 ## Out of scope (follow-ups)
 
 - True multi-root Zed `Project` showing all members in one file tree (member switching is enough for v1)
-- Multi-agent-per-task or per-member agents
+- Multi-agent-per-task or per-member agents (Projects foot agents are separate: explore/maintenance only)
 - Cross-repo PR aggregation in forge badges (per-member badges remain fine initially)
 - Plugin marketplace for hook scripts
-
-## Open questions for review
-
-- Confirm home-member default (first selected project vs required explicit pick in the create UI).
-- Confirm local hook override merge is replace-list (not append).
-- Confirm Projects foot stays in the sidebar vs settings-only inventory.
