@@ -738,6 +738,23 @@ impl HarnessWorkspace {
         cx.notify();
     }
 
+    /// Move a tab within its own pane set, then persist the new order.
+    ///
+    /// Sorts the existing tabs rather than rebuilding them, so the live
+    /// entities — a pty and the process on the other end of it — travel with
+    /// their tab instead of being dropped and respawned.
+    pub(crate) fn move_tab(&mut self, key: &str, dragged: u64, onto: u64) {
+        let Some(pane) = self.panes.get_mut(key) else { return };
+        let ids: Vec<u64> = pane.tabs.iter().map(|t| t.id).collect();
+        let order = reordered(&ids, dragged, onto);
+        if order == ids {
+            return;
+        }
+        pane.tabs
+            .sort_by_key(|t| order.iter().position(|i| *i == t.id).unwrap_or(usize::MAX));
+        self.save_panes();
+    }
+
     /// Close a tab, dropping whatever it held — a terminal's pty and its
     /// process, or a chat's `pi --mode rpc` sidecar.
     pub(crate) fn close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {

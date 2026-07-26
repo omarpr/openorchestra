@@ -3,6 +3,28 @@
 
 use super::super::*;
 
+/// The label that follows the cursor while a tab is being dragged.
+pub(crate) struct DragGhost {
+    label: String,
+    hx: HarnessTheme,
+}
+
+impl Render for DragGhost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_0p5()
+            .rounded_md()
+            .bg(self.hx.surface2)
+            .border_1()
+            .border_color(self.hx.accent)
+            .text_xs()
+            .font_family(self.hx.font_mono)
+            .text_color(self.hx.tx0)
+            .child(self.label.clone())
+    }
+}
+
 impl HarnessWorkspace {
 
     pub(crate) fn render_center(&self, hx: &HarnessTheme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -152,6 +174,13 @@ impl HarnessWorkspace {
     ) -> impl IntoElement {
         let id = tab.id;
         let close_id = tab.id;
+        let key = self.resolve().map(|r| r.key).unwrap_or_default();
+        let drag_key = key.clone();
+        let drop_key = key;
+        let onto = tab.id;
+        let ghost_label = tab.title.clone();
+        let ghost_theme = hx.clone();
+        let hover_bg = hx.surface_hover;
         div()
             .id(("tab", tab.id as usize))
             .flex()
@@ -183,6 +212,23 @@ impl HarnessWorkspace {
                     pane.active = id;
                 }
                 ws.focus_active_pane(window, cx);
+                cx.notify();
+            }))
+            // The ghost that follows the cursor. gpui wants a real view here, so
+            // it is a one-off entity rendering this tab's own label — a generic
+            // rectangle would not say which tab is moving.
+            .on_drag(DraggedTab { key: drag_key, id }, move |_, _, _, cx| {
+                let label = ghost_label.clone();
+                let hx = ghost_theme.clone();
+                cx.new(|_| DragGhost { label, hx })
+            })
+            .drag_over::<DraggedTab>(move |d, _, _, _| d.bg(hover_bg))
+            .on_drop(cx.listener(move |ws, dragged: &DraggedTab, _, cx| {
+                // Same worktree only — see DraggedTab's note.
+                if dragged.key != drop_key {
+                    return;
+                }
+                ws.move_tab(&drop_key, dragged.id, onto);
                 cx.notify();
             }))
             .child(tab.title.clone())

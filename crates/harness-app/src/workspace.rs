@@ -263,6 +263,35 @@ pub(crate) enum TabKind {
     Diff,
 }
 
+/// The tab being dragged, and the pane set it came from.
+///
+/// Carries the worktree key so a drop can refuse a tab from somewhere else: tab
+/// sets are per worktree, and a terminal tab holds a pty spawned in that
+/// worktree's directory. Moving one across would leave a running agent pointed
+/// at a tree it was never started in.
+pub(crate) struct DraggedTab {
+    key: String,
+    id: u64,
+}
+
+/// `ids` with `dragged` moved to `onto`'s position. Unknown or identical ids
+/// leave the order untouched.
+fn reordered(ids: &[u64], dragged: u64, onto: u64) -> Vec<u64> {
+    let mut out = ids.to_vec();
+    if dragged == onto {
+        return out;
+    }
+    let (Some(from), Some(to)) = (
+        out.iter().position(|i| *i == dragged),
+        out.iter().position(|i| *i == onto),
+    ) else {
+        return out;
+    };
+    let id = out.remove(from);
+    out.insert(to, id);
+    out
+}
+
 pub(crate) struct Tab {
     /// When this tab hosts an agent CLI, its kind — the tab strip renders the
     /// agent's colored mark so five agent tabs stay tellable at a glance.
@@ -1735,8 +1764,8 @@ mod new_worktree_tests {
 #[cfg(test)]
 mod diff_render_tests {
     use super::{
-        load_prefs, readable_diff_lines, save_prefs_to, target_line_for_row, use_two_pane,
-        DiffLineKind, DiffLocation, NewWorktree, Prefs, DIFF_TWO_PANE_MIN,
+        load_prefs, readable_diff_lines, reordered, save_prefs_to, target_line_for_row,
+        use_two_pane, DiffLineKind, DiffLocation, NewWorktree, Prefs, DIFF_TWO_PANE_MIN,
     };
 
     /// Verbatim shape of the noise a new file produces — the case that
@@ -1873,6 +1902,24 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
             .sanitized();
         assert!(huge.sidebar_width <= 640.0);
         assert!(huge.diff_width <= 800.0);
+    }
+
+    #[test]
+    fn dragging_a_tab_onto_another_puts_it_at_that_position() {
+        // Forward: 1 dropped onto 3 lands after the tabs it passed.
+        assert_eq!(reordered(&[1, 2, 3, 4], 1, 3), vec![2, 3, 1, 4]);
+        // Backward: 4 dropped onto 2 lands where 2 was.
+        assert_eq!(reordered(&[1, 2, 3, 4], 4, 2), vec![1, 4, 2, 3]);
+    }
+
+    #[test]
+    fn a_tab_dropped_on_itself_or_on_a_stranger_changes_nothing() {
+        // Both arise for real: a click gpui reports as a tiny drag, and a drop
+        // onto a strip belonging to a different worktree.
+        assert_eq!(reordered(&[1, 2, 3], 2, 2), vec![1, 2, 3]);
+        assert_eq!(reordered(&[1, 2, 3], 9, 2), vec![1, 2, 3]);
+        assert_eq!(reordered(&[1, 2, 3], 2, 9), vec![1, 2, 3]);
+        assert_eq!(reordered(&[], 1, 2), Vec::<u64>::new());
     }
 
     #[test]
