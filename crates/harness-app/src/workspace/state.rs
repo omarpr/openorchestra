@@ -524,6 +524,9 @@ impl HarnessWorkspace {
                     return;
                 }
             },
+            // Nothing to construct: the surface reads state the view already
+            // holds, so the tab is a marker saying where to draw it.
+            TabKind::Diff => (TabContent::Diff, "⑂ diff".to_string()),
             TabKind::Chat => {
                 let path = r.path.clone();
                 (
@@ -639,6 +642,7 @@ impl HarnessWorkspace {
                     }
                 }
                 TabContent::Chat(c) => c.read(cx).focus_handle(cx),
+                TabContent::Diff => self.diff_surface_focus.clone(),
             };
             window.focus(&handle, cx);
         }
@@ -826,6 +830,7 @@ impl HarnessWorkspace {
     /// watcher at the newly-selected root.
     pub(crate) fn recompute_diff(&mut self, cx: &mut Context<Self>) {
         self.expanded.clear();
+        self.diff_focus = None;
         self.md_preview = None;
         if let Some(r) = self.resolve() {
             // Keep the live watch pointed at whatever the diff panel shows.
@@ -954,6 +959,7 @@ impl HarnessWorkspace {
             match kind {
                 K::Editor => self.open_tab(TabKind::Editor, window, cx),
                 K::Chat => self.open_tab(TabKind::Chat, window, cx),
+                K::Diff => self.open_tab(TabKind::Diff, window, cx),
                 K::Shell => self.restore_terminal_tab(key, id, None, &title, &live, window, cx),
                 K::Agent(a) => self.restore_terminal_tab(key, id, Some(a), &title, &live, window, cx),
             }

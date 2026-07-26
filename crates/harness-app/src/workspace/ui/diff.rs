@@ -348,34 +348,11 @@ impl HarnessWorkspace {
         preview.into_any_element()
     }
 
+    /// The dock: fixed width and its own left border, wrapping the shared
+    /// surface. Everything inside is identical to the tab — only the chrome
+    /// that makes it a *dock* lives here.
     pub(crate) fn render_diff_panel(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
-        let Some(r) = self.resolve() else {
-            return div()
-                .flex()
-                .flex_col()
-                .flex_none()
-                .w(px(self.prefs.diff_width))
-                .h_full()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .px_3()
-                .bg(hx.bg1)
-                .border_l_1()
-                .border_color(hx.border)
-                .child(div().text_sm().text_color(hx.tx1).child("No project selected"))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(hx.tx2)
-                        .child("There is no project selected or created. Create your first one!"),
-                )
-                .into_any_element();
-        };
-        let (adds, dels) = self.diff.totals();
-        let review_count = self.resolve().map_or(0, |r| self.review.count(&r.key));
-
-        let mut panel = div()
+        div()
             .flex()
             .flex_col()
             .flex_none()
@@ -384,6 +361,92 @@ impl HarnessWorkspace {
             .bg(hx.bg1)
             .border_l_1()
             .border_color(hx.border)
+            .child(self.render_diff_surface(hx, Some(self.prefs.diff_width), cx))
+            .into_any_element()
+    }
+
+    /// The diff review surface, drawn identically in the dock and in a tab.
+    ///
+    /// `dock_width` is `Some` for the dock and `None` for a tab — the only thing
+    /// the two differ by, since a tab always has room for two columns.
+    pub(crate) fn render_diff_surface(
+        &self,
+        hx: &HarnessTheme,
+        dock_width: Option<f32>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(r) = self.resolve() else {
+            return self.render_no_project(hx).into_any_element();
+        };
+        let two_pane = use_two_pane(
+            self.prefs.diff_location,
+            dock_width.unwrap_or(f32::INFINITY),
+        );
+        let (adds, dels) = self.diff.totals();
+        let review_count = self.review.count(&r.key);
+
+        let mut panel = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            // Focusable so the surface can receive keystrokes: typing over a
+            // selected line is one of the two edit-intent triggers, and gpui
+            // routes key events along the focus path only.
+            .track_focus(&self.diff_surface_focus)
+            .child(self.render_diff_header(hx, &r, adds, dels));
+        if review_count > 0 {
+            panel = panel.child(self.render_review_bar(hx, review_count, cx));
+        }
+        panel = if two_pane {
+            panel.child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .child(self.render_file_list(hx, true, cx))
+                    .child(self.splitter(hx, Drag::DiffList, cx))
+                    .child(self.render_focused_diff(hx, cx)),
+            )
+        } else {
+            panel.child(self.render_file_list(hx, false, cx))
+        };
+        panel.into_any_element()
+    }
+
+    /// Shown in place of the surface when nothing is selected.
+    fn render_no_project(&self, hx: &HarnessTheme) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .px_3()
+            .child(div().text_sm().text_color(hx.tx1).child("No project selected"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(hx.tx2)
+                    .child("There is no project selected or created. Create your first one!"),
+            )
+    }
+
+    /// The branch line and the changed-files/±counts line above the review.
+    fn render_diff_header(
+        &self,
+        hx: &HarnessTheme,
+        r: &Resolved,
+        adds: usize,
+        dels: usize,
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
             .child(
                 div()
                     .flex()
@@ -395,8 +458,7 @@ impl HarnessWorkspace {
                     .border_b_1()
                     .border_color(hx.border)
                     .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx2).child("DIFF"))
-                    .child(div().flex_1().min_w_0().text_xs().font_family(hx.font_mono).text_color(hx.tx1).overflow_hidden().child(r.branch.clone()))
-                    ,
+                    .child(div().flex_1().min_w_0().text_xs().font_family(hx.font_mono).text_color(hx.tx1).overflow_hidden().child(r.branch.clone())),
             )
             .child(
                 div()
@@ -411,12 +473,10 @@ impl HarnessWorkspace {
                             "Changed files  …".to_string()
                         } else {
                             let total = self.diff.files.len();
-                            let done = self.resolve().map_or(0, |r| {
-                                self.review.reviewed_count(
-                                    &r.key,
-                                    self.diff.files.iter().map(|f| f.path.as_str()),
-                                )
-                            });
+                            let done = self.review.reviewed_count(
+                                &r.key,
+                                self.diff.files.iter().map(|f| f.path.as_str()),
+                            );
                             if done > 0 {
                                 format!("Changed files  {done}/{total} reviewed")
                             } else {
@@ -434,28 +494,43 @@ impl HarnessWorkspace {
                             .child(div().text_color(hx.green).child(format!("+{adds}")))
                             .child(div().text_color(hx.red).child(format!("−{dels}"))),
                     ),
-            );
+            )
+    }
 
-        // One scroller holding the file list, with the selected file's diff
-        // expanded directly beneath its row — so the diff is next to the name
-        // it belongs to instead of in a separate pane you have to look away to.
+    /// The changed-file list.
+    ///
+    /// In two-pane it is the left column and a click *selects*; in the narrow
+    /// layout it is the whole surface and a click *expands* the file's diff
+    /// beneath its own row, so the diff stays next to the name it belongs to.
+    fn render_file_list(&self, hx: &HarnessTheme, two_pane: bool, cx: &mut Context<Self>) -> AnyElement {
         let worktree_key = self.resolve().map(|r| r.key);
         let mut files = div()
             .id("diff-files")
             .flex()
             .flex_col()
-            .flex_1()
             .min_h_0()
             .items_start()
             .overflow_scroll()
             .px_2()
             .pb_1();
+        files = if two_pane {
+            files.flex_none().w(px(self.prefs.diff_list_width))
+        } else {
+            files.flex_1()
+        };
         if self.diff.files.is_empty() {
             files = files.child(div().px_2().py_1().text_xs().text_color(hx.tx2).child("no changes vs merge-base"));
         }
         for (i, file) in self.diff.files.iter().enumerate() {
             let path = file.path.clone();
+            // Two-pane has one focused file and shows it beside the list;
+            // the narrow layout expands any number of them in place.
             let expanded = self.expanded.contains(&file.path);
+            let open = if two_pane {
+                self.focused_file().as_deref() == Some(path.as_str())
+            } else {
+                expanded
+            };
             let reviewed = worktree_key
                 .as_deref()
                 .is_some_and(|k| self.review.is_reviewed(k, &file.path));
@@ -479,11 +554,13 @@ impl HarnessWorkspace {
                     .px_2()
                     .py_1()
                     .rounded_md()
-                    .when(expanded, |d| d.bg(hx.surface))
+                    .when(open, |d| d.bg(hx.surface))
                     .cursor_pointer()
                     .hover(|d| d.bg(hx.surface))
                     .on_click(cx.listener(move |ws, _, _, cx| {
-                        if !ws.expanded.remove(&toggle_path) {
+                        if two_pane {
+                            ws.diff_focus = Some(toggle_path.clone());
+                        } else if !ws.expanded.remove(&toggle_path) {
                             ws.expanded.insert(toggle_path.clone());
                         }
                         cx.notify();
@@ -516,15 +593,19 @@ impl HarnessWorkspace {
                             })),
                     )
                     // Disclosure marker, so expanded state reads without
-                    // relying on the row background alone.
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(8.0))
-                            .text_xs()
-                            .text_color(hx.tx2)
-                            .child(if expanded { "▾" } else { "▸" }),
-                    )
+                    // relying on the row background alone. Two-pane has nothing
+                    // to disclose — the diff is already beside the list — so it
+                    // would only be a chevron that never means anything.
+                    .when(!two_pane, |d| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .w(px(8.0))
+                                .text_xs()
+                                .text_color(hx.tx2)
+                                .child(if expanded { "▾" } else { "▸" }),
+                        )
+                    })
                     .child(div().flex_none().w(px(12.0)).text_xs().font_family(hx.font_mono).text_color(badge_color).child(file.change.badge().to_string()))
                     .child(
                         div()
@@ -540,7 +621,7 @@ impl HarnessWorkspace {
                     )
                     // The markdown preview belongs to a file, so its toggle
                     // lives on that file's row, not the panel header.
-                    .when(expanded && crate::markdown_preview::is_markdown(&file.path), |d| {
+                    .when(open && crate::markdown_preview::is_markdown(&file.path), |d| {
                         let previewing =
                             self.md_preview.as_ref().is_some_and(|(f, _)| f == &md_path);
                         let p = md_path.clone();
@@ -566,7 +647,9 @@ impl HarnessWorkspace {
                     .child(div().flex_none().text_xs().font_family(hx.font_mono).text_color(hx.red).child(format!("−{}", file.dels))),
             );
 
-            if expanded {
+            // Only the narrow layout nests the body under its row; two-pane
+            // draws it in the column beside the list.
+            if expanded && !two_pane {
                 match self.md_preview.as_ref().filter(|(f, _)| f == &path) {
                     Some((_, md)) => {
                         files = files.child(
@@ -586,12 +669,49 @@ impl HarnessWorkspace {
             }
         }
 
-        if review_count > 0 {
-            panel = panel.child(self.render_review_bar(hx, review_count, cx));
-        }
-        panel = panel.child(files);
+        files.into_any_element()
+    }
 
-        panel.into_any_element()
+    /// Which file the two-pane layout is showing.
+    ///
+    /// Falls back to the first changed file so the right column is never blank
+    /// while there is something to review — an empty pane beside a populated
+    /// list reads as a failure to load rather than as "nothing selected".
+    pub(crate) fn focused_file(&self) -> Option<String> {
+        self.diff_focus
+            .clone()
+            .filter(|f| self.diff.files.iter().any(|file| &file.path == f))
+            .or_else(|| self.diff.files.first().map(|f| f.path.clone()))
+    }
 
+    /// The right-hand column: the focused file's diff, or its Markdown preview.
+    fn render_focused_diff(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
+        let Some(file) = self.focused_file() else {
+            return div()
+                .flex()
+                .flex_1()
+                .min_w_0()
+                .items_center()
+                .justify_center()
+                .text_xs()
+                .text_color(hx.tx2)
+                .child("no changes vs merge-base")
+                .into_any_element();
+        };
+        let body = match self.md_preview.as_ref().filter(|(f, _)| f == &file) {
+            Some((_, md)) => div().size_full().child(md.clone()).into_any_element(),
+            None => self.render_diff_body(hx, &file, cx),
+        };
+        div()
+            .id("diff-focused")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .overflow_scroll()
+            .p_1()
+            .child(body)
+            .into_any_element()
     }
 }

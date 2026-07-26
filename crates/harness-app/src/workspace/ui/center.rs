@@ -71,6 +71,9 @@ impl HarnessWorkspace {
                         .into_any_element()
                 }
                 TabContent::Chat(c) => c.clone().into_any_element(),
+                // `None`: a tab fills the center, so the surface never has to
+                // fall back to the narrow single-column layout.
+                TabContent::Diff => self.render_diff_surface(hx, None, cx),
             },
             None => div().into_any_element(),
         };

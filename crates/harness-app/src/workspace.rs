@@ -240,6 +240,13 @@ enum TabContent {
     Editor(Entity<::workspace::Workspace>),
     /// Native agent chat over pi's RPC mode (M8, §4.2–4.3).
     Chat(Entity<crate::chat_pane::ChatPane>),
+    /// The diff review surface, when `DiffLocation::Tab` puts it in the center.
+    ///
+    /// A UNIT variant, unlike the other three: the diff, the review notes, and
+    /// the expand/selection state all live on `HarnessWorkspace` already and are
+    /// resolved per worktree. Giving the tab its own entity would create a
+    /// second copy that could disagree with the dock's.
+    Diff,
 }
 
 /// What to open, before the entity exists.
@@ -252,6 +259,8 @@ pub(crate) enum TabKind {
     Agent(AgentKind),
     Editor,
     Chat,
+    /// The diff review surface as a center tab (`DiffLocation::Tab`).
+    Diff,
 }
 
 pub(crate) struct Tab {
@@ -274,6 +283,7 @@ impl Tab {
         match &self.content {
             TabContent::Editor(_) => K::Editor,
             TabContent::Chat(_) => K::Chat,
+            TabContent::Diff => K::Diff,
             TabContent::Terminal(_) => match &self.agent {
                 Some(a) => K::Agent(a.clone()),
                 None => K::Shell,
@@ -403,6 +413,8 @@ pub(crate) enum Drag {
     Sidebar,
     /// Right diff panel width. Grows leftward, so the delta is negated.
     DiffPanel,
+    /// File-list column width inside the two-pane diff surface.
+    DiffList,
 }
 
 /// A splitter drag in progress.
@@ -496,6 +508,14 @@ pub struct HarnessWorkspace {
     /// usually means comparing two files, and collapsing one to look at
     /// another loses your place in the first.
     expanded: std::collections::HashSet<String>,
+    /// The file whose diff the right column shows, in the two-pane layout.
+    ///
+    /// Separate from `expanded` on purpose. The accordion needs a SET — reviewing
+    /// usually means comparing two files, and collapsing one to open another
+    /// loses your place in the first. Two-pane needs exactly ONE. Sharing a
+    /// field would have cost the accordion its multi-expand; keeping both means
+    /// neither layout has to be reconciled when the other is in use.
+    diff_focus: Option<String>,
     /// Selected diff rows: which file, and an inclusive row range within that
     /// file's body. Scoped per file because indices restart in each body.
     diff_selection: Option<(String, usize, usize)>,
@@ -570,6 +590,12 @@ pub struct HarnessWorkspace {
     /// focus drifts to the `"Harness"` root, which has neither, and the
     /// keystrokes silently no-op.
     editor_host_focus: FocusHandle,
+    /// Focus target for the diff surface. Needed because the surface listens for
+    /// keystrokes — typing over a selected line is one of the two ways to say
+    /// "I want to edit this" — and gpui delivers key events only along the
+    /// focus path. Without it a Diff tab would take focus nowhere and swallow
+    /// nothing, which reads as the trigger simply not working.
+    diff_surface_focus: FocusHandle,
     /// Latest resource sample driving the sidebar band; `None` until the first
     /// tick lands (and while CPU has no delta yet).
     resource: Option<crate::resource_monitor::Snapshot>,
@@ -695,6 +721,7 @@ impl HarnessWorkspace {
             panes: HashMap::new(),
             diff: worktrees::Diff::default(),
             expanded: std::collections::HashSet::new(),
+            diff_focus: None,
             diff_selection: None,
             diff_selecting: false,
             review: crate::diff_review::ReviewNotes::load(
@@ -736,6 +763,7 @@ impl HarnessWorkspace {
             tools: detect_tools(),
             focus_handle: cx.focus_handle(),
             editor_host_focus: cx.focus_handle(),
+            diff_surface_focus: cx.focus_handle(),
             resource: None,
             resource_history: crate::resource_monitor::History::new(RESOURCE_HISTORY),
             archived_repos,
