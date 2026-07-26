@@ -84,7 +84,7 @@ impl CommandRunner for FakeRunner {
 }
 
 fn repo() -> &'static Path {
-    Path::new("/repos/omar-harness")
+    Path::new("/repos/openorchestra")
 }
 
 const VIEW_ARGS: &str =

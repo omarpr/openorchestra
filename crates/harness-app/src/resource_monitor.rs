@@ -488,7 +488,7 @@ mod tests {
 
     #[test]
     fn a_live_agent_under_the_pane_shell_is_detected() {
-        // omar-harness: pane runs `sh -lc`, with claude as its child.
+        // openOrchestra: pane runs `sh -lc`, with claude as its child.
         let procs = parse_ps("99906 82836 sh\n99909 99906 /Users/omar/.local/bin/claude\n");
         assert!(agent_running_in(&procs, &[99906]), "claude under the pane → alive");
     }

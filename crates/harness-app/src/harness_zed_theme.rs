@@ -58,7 +58,7 @@ pub fn install(hx: &HarnessTheme, cx: &mut App) -> Arc<Theme> {
 pub fn theme_family_content(hx: &HarnessTheme) -> ThemeFamilyContent {
     let content = json!({
         "name": "Harness",
-        "author": "omar-harness",
+        "author": "openOrchestra",
         "themes": [{
             "name": HARNESS_THEME_NAME,
             "appearance": "dark",

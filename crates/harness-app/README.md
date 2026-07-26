@@ -1,6 +1,6 @@
 # harness-app (Spike 1)
 
-GPUI desktop shell for omar-harness: single window, three-column skeleton
+GPUI desktop shell for openOrchestra: single window, three-column skeleton
 (worktree sidebar · tab strip + terminal + status bar · diff panel), with the
 terminal pane running **pi's TUI** in an embedded pty. See `SPIKE_NOTES.md` for
 what is real vs. mocked, and `docs/architecture.md` §3.4/§4.1/§9.
@@ -33,16 +33,16 @@ npm install -g @mariozechner/pi-coding-agent
 pi --version   # verified against 0.73.1
 
 # 2. Build and run (first build compiles ~880 crates; expect 5–15 min).
-git clone <this-repo> && cd omar-harness/crates/harness-app
+git clone <this-repo> && cd openorchestra/crates/harness-app
 cargo run                          # cwd for pi = current directory
 # or point the terminal at a real worktree:
 cargo run -- /path/to/some/worktree
 # or: HARNESS_WORKTREE_ROOT=/path/to/worktree cargo run
 ```
 
-Expected window: dark three-column layout titled "omar-harness" —
+Expected window: dark three-column layout titled "openOrchestra" —
 
-- **Left**: "WORKTREES" sidebar, two repo groups (`omar-harness`, `pi`) with
+- **Left**: "WORKTREES" sidebar, two repo groups (`openorchestra`, `pi`) with
   three hardcoded worktree cards (initials avatar, name, mono branch label,
   ahead/behind + dirty counts, and a colored agent-status pill:
   green **Running** / amber **Waiting** / gray **Idle**). Clicking a card

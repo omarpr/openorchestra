@@ -1,4 +1,4 @@
-# omar-harness developer entry points.
+# openOrchestra developer entry points.
 #
 #   make setup   — install/verify build + runtime tools (idempotent)
 #   make run     — verify prerequisites, then build & run the GPUI app

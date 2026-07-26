@@ -1,4 +1,4 @@
-//! omar-harness Spike 1: GPUI shell + three-column skeleton + embedded
+//! openOrchestra Spike 1: GPUI shell + three-column skeleton + embedded
 //! terminal running pi's TUI. Spike 3 adds a zed `editor` pane (see
 //! SPIKE_NOTES.md and docs/architecture.md §9).
 //!

@@ -1,7 +1,7 @@
 # openOrchestra — Architecture Document
 
 **Status:** Draft v3.2 · July 24, 2026
-**Scope:** A native Rust desktop harness (product name **openOrchestra**; repo `omar-harness`) for running coding agents across parallel git worktrees, with embedded Zed-grade editing, navigation, and terminals.
+**Scope:** A native Rust desktop harness (product name and repo **openOrchestra**) for running coding agents across parallel git worktrees, with embedded Zed-grade editing, navigation, and terminals.
 **v3 changes:** All four §9 spikes are **complete** and a post-spike MVP integration pass ("openOrchestra") has landed — this doc is rewritten to record what the spikes *proved* rather than what they *planned*. Key updates: R1 (Zed `editor` cone) and R6 (theme mapping) **retired/resolved**; the pi package is **`@mariozechner/pi-coding-agent`** (not `@mariozechner/pi`); the terminal now uses Zed's real **`terminal_view`** (the Spike 1 custom view was interim); the product is renamed **openOrchestra**; §9 recast as a completed record; new §11 (current built state) and §12 (MVP → 1.0 roadmap). Phase 2 (RPC chat) and the `agent-schema`/`training` stubs remain the principal unbuilt pieces.
 **v3.1 additions (design, not yet built):** two new directions folded in. (1) **Project navigation** — adopt Zed's `Workspace` entity to get a real file explorer (`project_panel`), quick-open **⌘P** (`file_finder`), and project-wide search **⌘⇧F** (`search`), opening real worktree files; this brings `Project::local` in and absorbs the LSP work (new §3.6, reverses Spike 3's "render without a Project" for the navigation direction). (2) **Agent-agnostic runtime** — the substrate is running any agent's own CLI (**pi, OpenCode, Codex, Claude Code, Kimi**) in the embedded terminal, like pi today; an `AgentRuntime` adapter layer adds an *optional* status/notification enhancement where the agent exposes a signal, feeding a unified bus and **native OS notifications when an agent needs input** (new §4.5–4.6). pi remains the *reference* runtime that closes the training loop. New risks R10–R12, decisions D12–D14, roadmap items incl. a proving Spike 5.
 **v3.2 additions (built, July 22–24, 2026):** five changes now live, all in `harness-app`. (1) **Persistent terminal sessions via tmux** — each worktree tab runs a `tmux` client *inside* the `terminal_view` pty (not the shell directly), so agents survive an app restart, a closed tab, and a crash, and reattach on reopen; sessions are named per worktree/tab, torn down on explicit close/delete/archive, and degrade to a plain direct-spawn shell when tmux is absent (§3.3). (2) **Sidebar resource monitor** — a STATS band showing openOrchestra's *own* CPU/memory footprint (main process + every worktree's tmux pane subtree), attributed per worktree by session-name prefix, with a hover breakdown (§3.4). (3) **Project (folder) management** — archive / trash / restore of whole repos from the sidebar, distinct from worktree archive/delete (§6.1). (4) **Agent-pill self-heal extended** — a stuck `Waiting`/`Running` pill whose writer stamped no pid now clears by checking whether a real agent process is alive in the worktree's tmux pane subtree (§6.2). (5) **Chrome tweaks** — sidebar toggle moved to the top-bar left and renamed, tmux scroll fixed via per-session mouse mode (§3.3–3.4). No new crates; new module `harness-app/src/resource_monitor.rs`.
@@ -18,7 +18,7 @@ We are building an agentic development harness with three defining properties:
 
 Non-goals for v1: collaboration/multiplayer, remote development, Windows support (macOS first, Linux second), plugin ecosystem, non-GitHub forges. (Custom agent chat UI is Phase 2 — §4.1 — but the multi-agent *runtime + notification* layer of §4.5–4.6 is in scope for the near-term roadmap.)
 
-**Naming.** The repository and Cargo workspace are `omar-harness`; the shipped macOS application and user-facing product are **openOrchestra** (`openOrchestra.app`, state in `~/.openorchestra`). "The harness" and "openOrchestra" refer to the same thing throughout.
+**Naming.** The repository, the Cargo workspace, the shipped macOS application and the user-facing product are all **openOrchestra** (`openOrchestra.app`, state in `~/.openorchestra`). "The harness" and "openOrchestra" refer to the same thing throughout.
 
 ## 2. System overview
 
@@ -320,7 +320,7 @@ Every session is an append-only JSONL tree we control the reading of. Archived s
 ## 7. Repository and crate layout
 
 ```
-omar-harness/
+openorchestra/
 ├── Cargo.toml            # root workspace (headless crates only)
 ├── crates/
 │   ├── harness-app/      # openOrchestra GPUI app — EXCLUDED from root workspace
@@ -391,7 +391,7 @@ Backend workspace test count: **44 pass** (worktrees 8, forge 25, status-watch 1
 | D8 | `main` entry behavior | Read-only workspace on the main checkout: editor/terminal tabs, plain shell (no agent spawned) |
 | D9 | Approval policy | User-selectable setting (per repo, worktree-overridable). v1 default = pi's stock approval behavior; revisit when sessions run unattended |
 | D10 | Diff base | Merge-base with origin's default branch, taken merge-base → **working tree** (shows committed *and* uncommitted task changes) |
-| D11 | Product name | **openOrchestra** (repo stays `omar-harness`) — *new in v3* |
+| D11 | Product name | **openOrchestra** (repo renamed to match) — *new in v3* |
 | D12 | Agent scope | **Fully agent-agnostic** — any coding-agent CLI (pi/OpenCode/Codex/Claude Code/Kimi) run in the embedded terminal behind one `AgentRuntime` adapter (§4.5); status/notify is optional per agent. **OpenCode is the default for new worktrees** (revised July 21, 2026): its `permission.updated` SSE event is a real out-of-band "blocked on you" signal, so its fidelity is `Exact` and it needs no extension, shim, or status file — where pi's is `BestEffort`, approximated from a file an extension has to write. pi remains the **reference runtime for training** (§4.4), which is what it uniquely offers; it is no longer the default merely by being ours. The registry still *deserializes* a missing `agent_kind` as `pi` — that is backward compatibility for entries written before the field existed, not a preference, and changing it would silently repoint existing worktrees — *new in v3.1, default revised* |
 | D13 | Project navigation | **Adopt zed's `Workspace`** + `project_panel` (file tree) / `file_finder` (⌘P) / `search` (⌘⇧F), backed by `Project::local` per worktree; supersedes Spike 3's `for_buffer(None)` for IDE-affordance worktrees and absorbs LSP — *new in v3.1* |
 | D14 | Keybindings | Load zed's default keymap (or curated subset): **⌘P** = quick-open, **⌘⇧F** = project search, ⌘⇧E = reveal in tree, plus tab/pane nav — *new in v3.1* |
