@@ -34,16 +34,25 @@ impl HarnessWorkspace {
             .py_0p5()
             .rounded_md()
             .text_xs()
-            .text_color(if self.prefs.diff_open { hx.tx1 } else { hx.tx2 })
+            // In Tab mode the button always leads somewhere (focus the diff tab,
+            // or open one), so it is never the dimmed "hidden" state that only
+            // makes sense for a dock that can be closed.
+            .text_color(
+                if self.prefs.diff_location == DiffLocation::Tab || self.prefs.diff_open {
+                    hx.tx1
+                } else {
+                    hx.tx2
+                },
+            )
             .cursor_pointer()
-            .tooltip(tip("Toggle diff panel"))
+            .tooltip(tip(if self.prefs.diff_location == DiffLocation::Tab {
+                "Show the diff tab"
+            } else {
+                "Toggle diff panel"
+            }))
             .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
             .child("diff ▤")
-            .on_click(cx.listener(|ws, _, _, cx| {
-                ws.prefs.diff_open = !ws.prefs.diff_open;
-                ws.save_prefs(cx);
-                cx.notify();
-            }));
+            .on_click(cx.listener(|ws, _, window, cx| ws.toggle_diff(window, cx)));
 
         div()
             .flex()

@@ -388,6 +388,11 @@ impl HarnessWorkspace {
             )
             .child(self.tab_menu_item(hx, "❯_  Terminal", "⌘T", TabKind::Shell, cx))
             .child(self.tab_menu_item(hx, "{ }  Editor", "⌘E", TabKind::Editor, cx));
+        // Only in Tab mode: in Dock mode the dock IS the surface, and a tab
+        // showing the same review is the duplicate the setting exists to avoid.
+        if self.prefs.diff_location == DiffLocation::Tab {
+            menu = menu.child(self.tab_menu_item(hx, "⑂  Diff", "", TabKind::Diff, cx));
+        }
         // Every enabled agent, on any selection (D8 revised: main included) —
         // a worktree's recorded default merely decides which signal the
         // status pill trusts first.

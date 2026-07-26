@@ -312,6 +312,36 @@ impl HarnessWorkspace {
             );
         }
 
+        // ---- Diff panel ----------------------------------------------------
+        {
+            let location = self.prefs.diff_location;
+            let mut row = div().flex().gap_1p5().pb_1();
+            for (label, value) in [
+                ("Right dock", DiffLocation::Dock),
+                ("Tab", DiffLocation::Tab),
+            ] {
+                let selected = location == value;
+                row = row.child(
+                    div()
+                        .id(gpui::SharedString::from(format!("diff-loc-{label}")))
+                        .child(chip(label.to_string(), selected, hx))
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            cx.stop_propagation();
+                            ws.set_diff_location(value, window, cx);
+                        })),
+                );
+            }
+            body = body.child(section_title("Diff panel")).child(row).child(
+                div()
+                    .text_xs()
+                    .text_color(hx.tx2)
+                    .pb_1()
+                    .child(
+                        "A tab gives the diff the whole window; the dock keeps it beside your work.",
+                    ),
+            );
+        }
+
         if !self.has_tmux {
             body = body.child(
                 div()

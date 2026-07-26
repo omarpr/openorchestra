@@ -560,6 +560,95 @@ impl HarnessWorkspace {
         cx.notify();
     }
 
+    /// The active worktree's Diff tab, if it has one.
+    pub(crate) fn diff_tab_id(&self) -> Option<u64> {
+        let r = self.resolve()?;
+        let pane = self.panes.get(&r.key)?;
+        pane.tabs
+            .iter()
+            .find(|t| matches!(t.content, TabContent::Diff))
+            .map(|t| t.id)
+    }
+
+    /// What the top-bar diff button does, which depends on where the diff lives.
+    ///
+    /// In `Dock` mode it is a visibility toggle. In `Tab` mode there is no dock
+    /// to toggle, so it focuses the worktree's Diff tab, opening one first if
+    /// there is none — the same "show me the diff" intent, landing wherever the
+    /// setting put it.
+    pub(crate) fn toggle_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.prefs.diff_location {
+            DiffLocation::Dock => {
+                self.prefs.diff_open = !self.prefs.diff_open;
+                self.save_prefs(cx);
+            }
+            DiffLocation::Tab => match self.diff_tab_id() {
+                Some(id) => {
+                    let Some(r) = self.resolve() else { return };
+                    if let Some(pane) = self.panes.get_mut(&r.key) {
+                        pane.active = id;
+                    }
+                    self.focus_active_pane(window, cx);
+                    self.save_panes();
+                }
+                None => self.open_tab(TabKind::Diff, window, cx),
+            },
+        }
+        cx.notify();
+    }
+
+    /// Move the diff surface between the dock and the tab strip.
+    ///
+    /// Switching to `Dock` closes every open Diff tab across all live panes: a
+    /// tab drawing a surface that has moved elsewhere is a tab that renders
+    /// nothing, and leaving one behind would look like the setting half-worked.
+    pub(crate) fn set_diff_location(
+        &mut self,
+        location: DiffLocation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.prefs.diff_location == location {
+            return;
+        }
+        self.prefs.diff_location = location;
+        if location == DiffLocation::Dock {
+            let keys: Vec<String> = self.panes.keys().cloned().collect();
+            for key in keys {
+                let Some(pane) = self.panes.get_mut(&key) else { continue };
+                let closing: Vec<u64> = pane
+                    .tabs
+                    .iter()
+                    .filter(|t| matches!(t.content, TabContent::Diff))
+                    .map(|t| t.id)
+                    .collect();
+                if closing.is_empty() {
+                    continue;
+                }
+                pane.tabs.retain(|t| !closing.contains(&t.id));
+                if closing.contains(&pane.active) {
+                    // Prefer the tab to the left, the way close_tab does.
+                    pane.active = pane.tabs.last().map(|t| t.id).unwrap_or(0);
+                }
+            }
+            // A worktree left with no tabs is a dead end; give it a shell back,
+            // the same guarantee close_tab makes.
+            if self
+                .resolve()
+                .and_then(|r| self.panes.get(&r.key))
+                .is_some_and(|p| p.tabs.is_empty())
+            {
+                self.open_tab(TabKind::Shell, window, cx);
+            }
+            // Moving the diff back to the dock should also show it there.
+            self.prefs.diff_open = true;
+            self.save_panes();
+        }
+        self.save_prefs(cx);
+        self.focus_active_pane(window, cx);
+        cx.notify();
+    }
+
     /// Close a tab, dropping whatever it held — a terminal's pty and its
     /// process, or a chat's `pi --mode rpc` sidecar.
     pub(crate) fn close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {

@@ -1043,10 +1043,13 @@ impl Render for HarnessWorkspace {
                             .child(self.splitter(&hx, Drag::Sidebar, cx))
                     })
                     .child(self.render_center(&hx, window, cx))
-                    .when(self.prefs.diff_open, |d| {
-                        d.child(self.splitter(&hx, Drag::DiffPanel, cx))
-                            .child(self.render_diff_panel(&hx, cx))
-                    }),
+                    .when(
+                        self.prefs.diff_open && self.prefs.diff_location == DiffLocation::Dock,
+                        |d| {
+                            d.child(self.splitter(&hx, Drag::DiffPanel, cx))
+                                .child(self.render_diff_panel(&hx, cx))
+                        },
+                    ),
             )
             .children(self.render_zed_modal(cx))
             .children(self.render_pet(&hx, cx))
