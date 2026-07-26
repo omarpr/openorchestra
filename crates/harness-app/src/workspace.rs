@@ -1315,6 +1315,21 @@ fn tool_chip(hx: &HarnessTheme, label: &str, present: bool, required: bool) -> i
 /// Deliberately separate from `registry.json`: that file is *project state* the
 /// training loop reads (§6.4), and mixing window chrome into it would make a
 /// theme toggle look like a change to harvestable data.
+/// Where the diff surface is drawn. `Dock` is the right-hand panel this app
+/// shipped with; `Tab` moves it into the center tab strip, where it gets the
+/// whole window and the dock is not rendered at all.
+///
+/// One location, not two: a docked panel and a tab showing the same review
+/// would each need their own scroll and selection, and the two would disagree
+/// the moment either was touched.
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum DiffLocation {
+    #[default]
+    Dock,
+    Tab,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct Prefs {
@@ -1354,6 +1369,12 @@ struct Prefs {
     collapsed: std::collections::BTreeSet<String>,
     sidebar_width: f32,
     diff_width: f32,
+    /// Where the diff surface lives (dock vs. center tab).
+    #[serde(default)]
+    diff_location: DiffLocation,
+    /// Width of the file-list column in the two-pane diff layout.
+    #[serde(default = "default_diff_list_width")]
+    diff_list_width: f32,
     sidebar_open: bool,
     diff_open: bool,
     /// Remembered answer to the "keep or close terminals on quit?" prompt.
@@ -1365,6 +1386,10 @@ struct Prefs {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_diff_list_width() -> f32 {
+    280.0
 }
 
 impl Default for Prefs {
@@ -1381,6 +1406,8 @@ impl Default for Prefs {
             collapsed: Default::default(),
             sidebar_width: 280.0,
             diff_width: 340.0,
+            diff_location: DiffLocation::Dock,
+            diff_list_width: 280.0,
             sidebar_open: true,
             diff_open: true,
             close_terminals_on_exit: None,
@@ -1394,6 +1421,7 @@ impl Prefs {
     fn sanitized(mut self) -> Self {
         self.sidebar_width = self.sidebar_width.clamp(180.0, 640.0);
         self.diff_width = self.diff_width.clamp(220.0, 800.0);
+        self.diff_list_width = self.diff_list_width.clamp(160.0, 560.0);
         self
     }
 }
@@ -1617,7 +1645,10 @@ mod new_worktree_tests {
 
 #[cfg(test)]
 mod diff_render_tests {
-    use super::{readable_diff_lines, DiffLineKind, NewWorktree, Prefs};
+    use super::{
+        load_prefs, readable_diff_lines, save_prefs_to, DiffLineKind, DiffLocation, NewWorktree,
+        Prefs,
+    };
 
     /// Verbatim shape of the noise a new file produces — the case that
     /// prompted this: five metadata lines before any content.
@@ -1753,6 +1784,39 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
             .sanitized();
         assert!(huge.sidebar_width <= 640.0);
         assert!(huge.diff_width <= 800.0);
+    }
+
+    #[test]
+    fn a_prefs_file_without_a_diff_location_loads_as_the_dock() {
+        // The setting is new; every existing install must keep the dock it has.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        std::fs::write(
+            &path,
+            r#"{"dark":true,"sidebar_width":280.0,"diff_width":340.0,"sidebar_open":true,"diff_open":true}"#,
+        )
+        .unwrap();
+        let prefs = load_prefs(&path);
+        assert_eq!(prefs.diff_location, DiffLocation::Dock);
+        assert_eq!(prefs.diff_list_width, 280.0);
+    }
+
+    #[test]
+    fn the_diff_list_width_is_clamped_like_every_other_panel() {
+        // A hand-edited or truncated file must not render the list unusable.
+        let squashed = Prefs { diff_list_width: -10.0, ..Prefs::default() }.sanitized();
+        assert!(squashed.diff_list_width >= 160.0);
+        let huge = Prefs { diff_list_width: 9999.0, ..Prefs::default() }.sanitized();
+        assert!(huge.diff_list_width <= 560.0);
+    }
+
+    #[test]
+    fn the_diff_location_survives_a_save_load_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        let prefs = Prefs { diff_location: DiffLocation::Tab, ..Prefs::default() };
+        save_prefs_to(&path, &prefs);
+        assert_eq!(load_prefs(&path).diff_location, DiffLocation::Tab);
     }
 
     #[test]
