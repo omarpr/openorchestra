@@ -136,6 +136,12 @@ markdown_preview = { git = "https://github.com/zed-industries/zed.git", rev = "9
 # public API instead of depending on it. Already compiled transitively (editor
 # and workspace both use it), so declaring it just makes it nameable.
 ui = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+# Zed's breadcrumb trail (file path › enclosing symbol) as a PrimaryLeft toolbar
+# item. Not cosmetic: `Toolbar::render` right-aligns the PrimaryRight group with
+# `justify_between`, which only pushes right when a LEFT item exists. With none,
+# the group collapses to the left edge and takes the Markdown preview eye with
+# it — zed always installs this item in its own pane init, and we did not.
+breadcrumbs = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
 
 # N2 (§12): rust-analyzer needs the language *adapters*, which live here.
 # Deliberately WITHOUT default features so `load-grammars` stays off — §3.2's

@@ -205,8 +205,15 @@ pub fn workspace_for(
                 cx.new(git_ui::branch_diff::BranchDiffToolbar::new);
             let markdown_preview_button =
                 cx.new(|_| crate::markdown_preview_button::MarkdownPreviewButton::new(workspace));
+            let breadcrumbs = cx.new(|_| breadcrumbs::Breadcrumbs::new());
             pane.update(cx, |pane, cx| {
                 pane.toolbar().update(cx, |toolbar, cx| {
+                    // FIRST, and PrimaryLeft. This is what pushes the Markdown
+                    // preview eye — and anything else right-hand — to the right
+                    // edge: zed's Toolbar right-aligns its PrimaryRight group
+                    // with `justify_between`, which needs a left sibling to
+                    // justify against. See the Cargo.toml note.
+                    toolbar.add_item(breadcrumbs, window, cx);
                     let buffer_search_bar = cx.new(|cx| {
                         search::BufferSearchBar::new(Some(languages), window, cx)
                     });

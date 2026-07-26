@@ -4489,6 +4489,7 @@ dependencies = [
  "anyhow",
  "assets",
  "block2 0.6.2",
+ "breadcrumbs",
  "client",
  "clock",
  "crossbeam-channel",
