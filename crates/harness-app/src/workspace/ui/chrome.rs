@@ -6,7 +6,7 @@ use super::super::*;
 impl HarnessWorkspace {
 
     pub(crate) fn render_top_bar(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
-        let branch = self.resolve().map(|r| r.branch).unwrap_or_else(|| "no folder".to_string());
+        let branch = self.resolve().map(|r| r.branch).unwrap_or_else(|| "no project".to_string());
         // The left toggle shows/hides the whole left panel (stats + worktrees),
         // so it sits on the left and is named for the panel, not its list.
         let sidebar_toggle = div()

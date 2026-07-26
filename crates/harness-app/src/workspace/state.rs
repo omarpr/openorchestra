@@ -307,7 +307,7 @@ impl HarnessWorkspace {
             .map(|e| e.id.clone())
     }
 
-    // ---- selection resolution (None when no folder is open) --------------
+    // ---- selection resolution (None when no project is open) -------------
 
     pub(crate) fn resolve(&self) -> Option<Resolved> {
         let primary = self.data.repos.first()?;

@@ -12,7 +12,7 @@ impl HarnessWorkspace {
     /// It sits in a padded, top-bordered strip because the sidebar column is
     /// `overflow_hidden` and full height — a button flush against that edge had
     /// its own border clipped off by the container.
-    pub(crate) fn add_folder_button(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn add_project_button(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_none()
@@ -21,7 +21,7 @@ impl HarnessWorkspace {
             .border_color(hx.border)
             .child(
                 div()
-                    .id("add-folder")
+                    .id("add-project")
                     .flex()
                     .flex_1()
                     .items_center()
@@ -37,17 +37,17 @@ impl HarnessWorkspace {
                     .cursor_pointer()
                     // Carries a tooltip like the app's other actionable controls,
                     // naming the fuller action the short label can't.
-                    .tooltip(tip("Add a git repository folder"))
+                    .tooltip(tip("Add a git repository as a project"))
                     .hover(|d| {
                         d.bg(hx.surface_hover)
                             .border_color(hx.accent)
                             .text_color(hx.tx0)
                     })
-                    .on_click(cx.listener(|ws, _, window, cx| ws.add_folder(window, cx)))
+                    .on_click(cx.listener(|ws, _, window, cx| ws.add_project(window, cx)))
                     // Icon and label as separate children so the gap is real
                     // spacing rather than a space character in the glyph run.
                     .child(div().text_color(hx.accent).child("＋"))
-                    .child("Add folder"),
+                    .child("Add project"),
             )
     }
 
@@ -127,7 +127,7 @@ impl HarnessWorkspace {
     }
 
     /// A sidebar section label — the small bordered strip that heads each
-    /// region (STATS, WORKTREES). Kept in one place so the two read identically.
+    /// region (STATS, PROJECTS). Kept in one place so the two read identically.
     fn section_header(&self, hx: &HarnessTheme, label: &'static str) -> impl IntoElement {
         div()
             .flex()
@@ -159,7 +159,7 @@ impl HarnessWorkspace {
             .overflow_hidden()
             .child(self.section_header(hx, "STATS"))
             .child(self.render_resource_band(hx, cx))
-            .child(self.section_header(hx, "WORKTREES"));
+            .child(self.section_header(hx, "PROJECTS"));
 
         if self.data.repos.is_empty() {
             column = column.child(
@@ -170,7 +170,7 @@ impl HarnessWorkspace {
                     .gap_2()
                     .mt(px(40.0))
                     .px_3()
-                    .child(div().text_sm().text_color(hx.tx1).child("No folders yet"))
+                    .child(div().text_sm().text_color(hx.tx1).child("No projects yet"))
                     .child(div().text_xs().text_color(hx.tx2).child("Open a git repository to begin.")),
             );
             // Spacer so the footer sits at the bottom here too. Without it the
@@ -179,7 +179,7 @@ impl HarnessWorkspace {
             return column
                 .child(div().flex_1())
                 .when(!self.archived_repos.is_empty(), |d| d.child(self.render_archived(hx, cx)))
-                .child(self.add_folder_button(hx, cx));
+                .child(self.add_project_button(hx, cx));
         }
 
         let mut groups = div().flex().flex_col().flex_1().overflow_hidden().pt_1();
@@ -189,7 +189,7 @@ impl HarnessWorkspace {
         column
             .child(groups)
             .when(!self.archived_repos.is_empty(), |d| d.child(self.render_archived(hx, cx)))
-            .child(self.add_folder_button(hx, cx))
+            .child(self.add_project_button(hx, cx))
     }
 
     pub(crate) fn render_repo_group(
@@ -198,7 +198,7 @@ impl HarnessWorkspace {
         repo: &crate::data::RepoView,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let collapsed = *self.collapsed.get(&repo.name).unwrap_or(&false);
+        let collapsed = self.prefs.collapsed.contains(&repo.name);
         let repo_name = repo.name.clone();
         let plus_repo = repo.name.clone();
         let archive_repo = repo.name.clone();
@@ -242,8 +242,13 @@ impl HarnessWorkspace {
                     .gap_2()
                     .cursor_pointer()
                     .on_click(cx.listener(move |ws, _, _, cx| {
-                        let e = ws.collapsed.entry(repo_name.clone()).or_insert(false);
-                        *e = !*e;
+                        // Persisted, so a collapsed project stays collapsed
+                        // across restarts. `remove` on expand keeps the prefs
+                        // file to just the collapsed ones (see Prefs::collapsed).
+                        if !ws.prefs.collapsed.remove(&repo_name) {
+                            ws.prefs.collapsed.insert(repo_name.clone());
+                        }
+                        ws.save_prefs(cx);
                         cx.notify();
                     }))
                     .child(div().text_xs().text_color(hx.tx2).child(if collapsed { "▸" } else { "▾" }))

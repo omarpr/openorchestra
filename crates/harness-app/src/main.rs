@@ -14,6 +14,7 @@ mod diff_review;
 mod diff_watch;
 mod harness_zed_theme;
 mod markdown_preview;
+mod markdown_preview_button;
 mod notifier;
 mod panes_state;
 mod resource_monitor;

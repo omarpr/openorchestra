@@ -181,12 +181,30 @@ pub fn workspace_for(
     // search. The zed-specific extras (quick actions, diagnostics, log
     // views) stay out: they live in zed's app crate and are not part of
     // "an editor that can search".
+    //
+    // The git/diff toolbars below are the same lesson a second time. Registering
+    // an action that DEPLOYS a view is not the same as providing the surface
+    // that view renders into: `git_ui::init` registers ⌘⇧D's `git::Diff`
+    // handler, but with no ProjectDiffToolbar the diff opens with no stage-all
+    // or commit header — the search-bar failure again, wearing a different hat.
     {
         let init_toolbar = |workspace: &Workspace,
                            pane: &Entity<workspace::Pane>,
                            window: &mut Window,
                            cx: &mut gpui::Context<Workspace>| {
             let languages = workspace.project().read(cx).languages().clone();
+            // Built outside the `pane.update` because each constructor wants
+            // `&Workspace`, which is borrowed for the duration of that closure.
+            let project_diff_toolbar =
+                cx.new(|cx| git_ui::project_diff::ProjectDiffToolbar::new(workspace, cx));
+            let staged_diff_toolbar =
+                cx.new(|cx| git_ui::staged_diff::StagedDiffToolbar::new(workspace, cx));
+            let unstaged_diff_toolbar =
+                cx.new(|cx| git_ui::unstaged_diff::UnstagedDiffToolbar::new(workspace, cx));
+            let branch_diff_toolbar =
+                cx.new(git_ui::branch_diff::BranchDiffToolbar::new);
+            let markdown_preview_button =
+                cx.new(|_| crate::markdown_preview_button::MarkdownPreviewButton::new(workspace));
             pane.update(cx, |pane, cx| {
                 pane.toolbar().update(cx, |toolbar, cx| {
                     let buffer_search_bar = cx.new(|cx| {
@@ -195,6 +213,14 @@ pub fn workspace_for(
                     toolbar.add_item(buffer_search_bar, window, cx);
                     let project_search_bar = cx.new(|_| search::project_search::ProjectSearchBar::new());
                     toolbar.add_item(project_search_bar, window, cx);
+                    // Each of these renders only for its own item type, so all
+                    // four can coexist on every pane exactly as they do in zed.
+                    toolbar.add_item(project_diff_toolbar, window, cx);
+                    toolbar.add_item(staged_diff_toolbar, window, cx);
+                    toolbar.add_item(unstaged_diff_toolbar, window, cx);
+                    toolbar.add_item(branch_diff_toolbar, window, cx);
+                    // The ⌘⇧M affordance: an eye icon on Markdown buffers.
+                    toolbar.add_item(markdown_preview_button, window, cx);
                 });
             });
         };
@@ -219,45 +245,124 @@ pub fn workspace_for(
         });
     }
 
-    // N1: dock the file explorer. `ProjectPanel::load` is async because it
-    // reads its serialized width from the database, so the panel appears a
-    // frame or two after the workspace does — which is why the Files tab
-    // renders the workspace immediately rather than waiting on this.
+    // N1: dock the file explorer, and beside it the git panel. Both `load`
+    // calls are async because each reads its serialized width from the
+    // database, so the panels appear a frame or two after the workspace does —
+    // which is why the Files tab renders the workspace immediately rather than
+    // waiting on either.
+    //
+    // The git panel is the FIFTH window-root duty (see the toolbar block
+    // above): `git_ui::init` registers its actions on every hosted Workspace,
+    // but zed's app crate is what actually loads and docks the panel
+    // (`zed.rs` initialize_panels). Out of tree, nobody did — so the panel
+    // existed as a set of actions with nothing to act on.
+    // The file tree opens with the tab — it IS the editor's navigation, and
+    // that is the behavior N1 shipped.
+    dock_panel(
+        &workspace,
+        "project_panel",
+        project_panel::ProjectPanel::load,
+        StartOpen::Yes,
+        window,
+        cx,
+    );
+    // The git panel is docked but CLOSED. Forcing it open would spend a third
+    // of the editor's width on every tab, in a window that already gives two
+    // columns to the harness chrome — and zed does not open it by default
+    // either. ⌘⇧G brings it up; `dock_panel` still activates it, so the dock it
+    // lands in is in a renderable state when that happens rather than opening
+    // onto nothing.
+    dock_panel(
+        &workspace,
+        "git_panel",
+        git_ui::git_panel::GitPanel::load,
+        StartOpen::No,
+        window,
+        cx,
+    );
+
+    Ok(workspace)
+}
+
+/// Whether a docked panel's dock should be open the moment the tab appears.
+///
+/// A bool at these call sites reads as `dock_panel(.., true, ..)`, which says
+/// nothing about *what* is true.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum StartOpen {
+    Yes,
+    No,
+}
+
+/// Load a zed dock panel and make it actually visible.
+///
+/// Factored out because docking a panel out of tree takes three steps that zed
+/// itself never performs together, and doing two of the three leaves a panel
+/// that is registered and invisible — indistinguishable from "the crate is
+/// broken".
+///
+/// `add_panel` alone is not enough to show anything: it leaves the dock CLOSED
+/// *and* leaves `active_panel_index` as None. `Dock::render` bails out unless
+/// the dock is open AND has an active panel, so the file tree was registered
+/// and invisible and the editor tab looked empty. Zed only activates on its
+/// panel-move path, so out-of-tree callers must do it themselves.
+///
+/// The dock is resolved from the panel's own `position()` rather than assumed:
+/// `ProjectPanel` defaults left and `GitPanel` defaults right, and activating
+/// "the last panel of the left dock" for a panel that docked right would both
+/// miss its target and steal the file tree's active slot.
+fn dock_panel<T, Fut>(
+    workspace: &Entity<Workspace>,
+    name: &'static str,
+    load: impl FnOnce(gpui::WeakEntity<Workspace>, gpui::AsyncWindowContext) -> Fut + 'static,
+    start_open: StartOpen,
+    window: &mut Window,
+    cx: &mut App,
+) where
+    T: workspace::Panel,
+    Fut: std::future::Future<Output = Result<Entity<T>>>,
+{
     workspace.update(cx, |_, cx| {
         let handle = cx.entity().downgrade();
         cx.spawn_in(window, async move |_, cx| {
-            match project_panel::ProjectPanel::load(handle.clone(), cx.clone()).await {
+            match load(handle.clone(), cx.clone()).await {
                 Ok(panel) => {
                     let added = handle.update_in(cx, |workspace, window, cx| {
+                        // Read through the entity rather than the PanelHandle
+                        // blanket impl, so this needs no extra trait in scope.
+                        let position = panel.read(cx).position(window, cx);
                         workspace.add_panel(panel, window, cx);
-                        // `add_panel` alone is not enough to show anything:
-                        // it leaves the dock CLOSED *and* leaves
-                        // `active_panel_index` as None. `Dock::render` bails
-                        // out unless the dock is open AND has an active panel,
-                        // so the tree was registered and invisible — the
-                        // editor tab looked empty. Zed only activates on its
-                        // panel-move path, so out-of-tree callers must do it.
-                        workspace.left_dock().update(cx, |dock, cx| {
-                            dock.set_open(true, window, cx);
+                        let dock = workspace.dock_at_position(position).clone();
+                        dock.update(cx, |dock, cx| {
+                            // Activate unconditionally, open conditionally. A
+                            // dock with no active panel renders nothing even
+                            // once opened, so a panel that starts closed still
+                            // has to claim the slot now — otherwise ⌘⇧G later
+                            // opens onto blank space, which is the exact bug
+                            // this helper exists to prevent.
                             let last = dock.panels_len().saturating_sub(1);
                             dock.activate_panel(last, window, cx);
+                            if start_open == StartOpen::Yes {
+                                dock.set_open(true, window, cx);
+                            }
                         });
+                        let dock = dock.read(cx);
                         (
-                            workspace.left_dock().read(cx).panels_len(),
-                            workspace.left_dock().read(cx).is_open(),
-                            workspace.left_dock().read(cx).active_panel_index(),
+                            position,
+                            dock.panels_len(),
+                            dock.is_open(),
+                            dock.active_panel_index(),
                         )
                     });
-                    log::debug!("project_panel added; left dock (panels, open, active) = {added:?}");
+                    log::debug!("{name} added; dock (position, panels, open, active) = {added:?}");
                 }
-                Err(e) => log::error!("project_panel failed to load: {e:#}"),
+                Err(e) => log::error!("{name} failed to load: {e:#}"),
             }
         })
         .detach();
     });
-
-    Ok(workspace)
 }
+
 
 /// Report whether a hosted workspace is actually usable, as opposed to merely
 /// constructed.
@@ -596,6 +701,54 @@ async fn probe_keys(hosted: &Entity<Workspace>, cx: &mut gpui::AsyncWindowContex
     .await;
     let after = hosted.update(cx, |ws, cx| ws.active_pane().read(cx).items_len());
     log::info!("HARNESS_PROBE_KEYS: cmd-shift-f search pane items {before:?} -> {after:?}");
+
+    // ⌘⇧D — git_ui's project diff, which also lands as a pane item.
+    //
+    // Probed at BOTH layers, because "nothing happens" has four causes that
+    // look identical from the outside and need four different fixes. The
+    // chord goes through the real keymap (`press` → `dispatch_keystroke`:
+    // context matching, precedence, the catalog binding); the action bypasses
+    // all of that and speaks straight to the Workspace handler. Comparing them
+    // is what separates a broken BINDING from a broken HANDLER — a distinction
+    // `dispatch_action` alone cannot make, since it would report success for a
+    // chord that never matches anything.
+    //
+    //   chord +1                      → works; nothing wrong at this layer
+    //   chord +0, action +1           → the handler is fine, the BINDING never
+    //                                   matches (key-context / focus)
+    //   chord +0, action +0           → git_ui's observe_new never registered
+    //                                   the handler on this hosted Workspace
+    //   either +1 but repo None       → it opened against a Project with no git
+    //                                   repository, so the diff is legitimately
+    //                                   empty — the bug is in Project setup
+    //
+    // `active_repository` is read AFTER the dispatches: `find_or_create_worktree`
+    // is fire-and-forget (`project_for`), so the git store is not populated the
+    // instant the workspace exists, and reading it first would report None for
+    // timing reasons rather than real ones.
+    let before = hosted.update(cx, |ws, cx| ws.active_pane().read(cx).items_len());
+    let _ = hosted.update_in(cx, |ws, window, cx| {
+        let fh = ws.focus_handle(cx);
+        window.focus(&fh, cx);
+    });
+    cx.background_executor().timer(pause).await;
+    press("cmd-shift-d", 500, cx).await;
+    let after_chord = hosted.update(cx, |ws, cx| ws.active_pane().read(cx).items_len());
+
+    focused_dispatch(hosted, Box::new(git_ui::project_diff::Diff), pause, cx).await;
+    let after_action = hosted.update(cx, |ws, cx| ws.active_pane().read(cx).items_len());
+
+    let repo = hosted.update(cx, |ws, cx| {
+        ws.project()
+            .read(cx)
+            .active_repository(cx)
+            .map(|repo| repo.read(cx).work_directory_abs_path.clone())
+    });
+    log::info!(
+        "HARNESS_PROBE_KEYS: cmd-shift-d project diff pane items {before:?} \
+         -> {after_chord:?} (chord) -> {after_action:?} (action), \
+         active_repository = {repo:?}"
+    );
 
     // ⌘P — file finder modal.
     focused_dispatch(

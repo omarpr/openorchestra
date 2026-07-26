@@ -69,9 +69,9 @@ impl HarnessWorkspace {
         cx.notify();
     }
 
-    // ---- folders ---------------------------------------------------------
+    // ---- projects --------------------------------------------------------
 
-    pub(crate) fn add_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -175,7 +175,7 @@ impl HarnessWorkspace {
     }
 
     /// Remove a project from openOrchestra entirely (two-click confirm). Files
-    /// on disk are untouched — this only forgets the folder; re-add it to bring
+    /// on disk are untouched — this only forgets the project; re-add it to bring
     /// it back. Distinct from Archive, which keeps it in a restorable list.
     pub(crate) fn trash_repo(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
         if self.pending_repo_trash.as_deref() != Some(name.as_str()) {
@@ -341,7 +341,7 @@ impl HarnessWorkspace {
     pub(crate) fn create_named(&mut self, input: &str, window: &mut Window, cx: &mut Context<Self>) {
         let target = self.new_target_repo.clone();
         let Some(repo) = self.data.repos.iter().find(|r| r.name == target).or_else(|| self.data.repos.first()) else {
-            self.note = "add a folder first".to_string();
+            self.note = "add a project first".to_string();
             cx.notify();
             return;
         };

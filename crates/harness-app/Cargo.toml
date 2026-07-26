@@ -124,6 +124,12 @@ git_ui = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac4
 # Native, live, code-highlighted Markdown preview as an editor pane item —
 # distinct from the diff-panel disk-content preview above.
 markdown_preview = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+# zed's component library (IconButton, IconName, Tooltip). Needed because the
+# Markdown preview "eye" button is NOT reusable: zed keeps it in its *binary*
+# crate (zed/src/zed/quick_action_bar/preview.rs), so we rebuild it against the
+# public API instead of depending on it. Already compiled transitively (editor
+# and workspace both use it), so declaring it just makes it nameable.
+ui = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
 
 # N2 (§12): rust-analyzer needs the language *adapters*, which live here.
 # Deliberately WITHOUT default features so `load-grammars` stays off — §3.2's

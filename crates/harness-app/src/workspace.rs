@@ -1,13 +1,13 @@
 //! Root view — three-column shell styled to `docs/harness-ui/Harness.dc.html`.
 //!
-//! The app keeps its state in `~/.openorchestra/` (registry + the list of repo
-//! folders), independent of where it was launched — so a Finder-launched
-//! `.app` (cwd `/`) still works. Folders are added via a native picker; when
-//! none are open the app shows an empty state. Sidebar cards, the diff panel,
+//! The app keeps its state in `~/.openorchestra/` (registry + the list of
+//! project roots), independent of where it was launched — so a Finder-launched
+//! `.app` (cwd `/`) still works. Projects are added via a native directory
+//! picker; when none are open the app shows an empty state. Sidebar cards, the diff panel,
 //! per-worktree tabs, create/rename/avatar, right-click menu, live PR/CI +
 //! agent badges, and tool-status chips are all here.
 //!
-//! Selection is by id and resolves to `None` when no folder is open, so nothing
+//! Selection is by id and resolves to `None` when no project is open, so nothing
 //! can index an empty repo list.
 
 use std::collections::HashMap;
@@ -448,7 +448,6 @@ pub struct HarnessWorkspace {
     repo_roots: Vec<PathBuf>,
     repos_path: PathBuf,
     selection: Selection,
-    collapsed: HashMap<String, bool>,
     panes: HashMap<String, PaneSet>,
     diff: worktrees::Diff,
     /// Files whose diff is expanded. A set, not a single selection: reviewing
@@ -651,7 +650,6 @@ impl HarnessWorkspace {
             repo_roots,
             repos_path,
             selection,
-            collapsed: HashMap::new(),
             panes: HashMap::new(),
             diff: worktrees::Diff::default(),
             expanded: std::collections::HashSet::new(),
@@ -1345,6 +1343,15 @@ struct Prefs {
     /// chord string; missing = the catalog default.
     #[serde(default)]
     shortcuts: std::collections::BTreeMap<String, String>,
+    /// Projects whose sidebar group is collapsed, keyed by project name.
+    ///
+    /// A **set**, not a map of name→bool: only collapsed projects are recorded,
+    /// so expanding one removes its entry rather than persisting `false`.
+    /// Otherwise the file accumulates an entry for every project ever touched,
+    /// and "expanded" — the default — would be stored explicitly for all of
+    /// them. Absent means expanded, which is also what a fresh install gets.
+    #[serde(default)]
+    collapsed: std::collections::BTreeSet<String>,
     sidebar_width: f32,
     diff_width: f32,
     sidebar_open: bool,
@@ -1371,6 +1378,7 @@ impl Default for Prefs {
             font_size: None,
             pet_enabled: true,
             shortcuts: Default::default(),
+            collapsed: Default::default(),
             sidebar_width: 280.0,
             diff_width: 340.0,
             sidebar_open: true,
@@ -1775,6 +1783,59 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
         assert_eq!(spec.name, "fix bug");
         assert_eq!(spec.branch.as_deref(), Some("hot/fix"));
         assert_eq!(spec.base_ref, "v2");
+    }
+}
+
+#[cfg(test)]
+mod collapsed_prefs_tests {
+    use super::{load_prefs, save_prefs_to, Prefs};
+
+    #[test]
+    fn a_collapsed_project_survives_a_disk_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+
+        let mut prefs = Prefs::default();
+        prefs.collapsed.insert("acme".to_string());
+        save_prefs_to(&path, &prefs);
+
+        let back = load_prefs(&path);
+        assert!(back.collapsed.contains("acme"), "collapsed project persists");
+        assert!(
+            !back.collapsed.contains("other"),
+            "an untouched project stays expanded"
+        );
+    }
+
+    #[test]
+    fn expanding_removes_the_entry_rather_than_storing_false() {
+        // The whole point of the set: expanding must SHRINK the file, so it
+        // does not accumulate an entry per project ever touched.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+
+        let mut prefs = Prefs::default();
+        prefs.collapsed.insert("acme".to_string());
+        save_prefs_to(&path, &prefs);
+
+        prefs.collapsed.remove("acme");
+        save_prefs_to(&path, &prefs);
+
+        assert!(load_prefs(&path).collapsed.is_empty());
+    }
+
+    #[test]
+    fn a_prefs_file_written_before_this_feature_still_loads() {
+        // `#[serde(default)]` is what makes the upgrade non-breaking; without
+        // it every existing install would fail to parse and silently reset to
+        // defaults, losing theme, fonts, and shortcut rebindings.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        std::fs::write(&path, r#"{"dark":false,"sidebar_width":300.0,"diff_width":340.0,"sidebar_open":true,"diff_open":true}"#).unwrap();
+
+        let back = load_prefs(&path);
+        assert!(back.collapsed.is_empty(), "absent = nothing collapsed");
+        assert!(!back.dark, "the rest of the file still parses");
     }
 }
 

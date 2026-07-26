@@ -212,6 +212,14 @@ pub fn entries() -> Vec<Entry> {
             "Show project diff (git)",
             git_ui::project_diff::Diff,
         ),
+        // The git panel is docked but starts CLOSED (workspace_host.rs), so
+        // this chord is its only way in. Same chord zed uses.
+        Entry::new(
+            s("cmd-shift-g"),
+            Scope::Workspace,
+            "Toggle the git panel",
+            zed_actions::git_panel::ToggleFocus,
+        ),
         // Native Markdown preview (markdown_preview): live, code-highlighted,
         // as an editor pane. Distinct from the diff panel's ◧ toggle.
         Entry::new(

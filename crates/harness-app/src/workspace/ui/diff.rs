@@ -363,12 +363,12 @@ impl HarnessWorkspace {
                 .bg(hx.bg1)
                 .border_l_1()
                 .border_color(hx.border)
-                .child(div().text_sm().text_color(hx.tx1).child("No project or folder"))
+                .child(div().text_sm().text_color(hx.tx1).child("No project selected"))
                 .child(
                     div()
                         .text_xs()
                         .text_color(hx.tx2)
-                        .child("There is no project / folder selected or created. Create your first one!"),
+                        .child("There is no project selected or created. Create your first one!"),
                 )
                 .into_any_element();
         };

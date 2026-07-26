@@ -120,7 +120,7 @@ impl HarnessWorkspace {
             .justify_center()
             .gap_3()
             .bg(hx.bg0)
-            .child(div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx1).child("No folder open"))
+            .child(div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx1).child("No project open"))
             .child(div().text_sm().text_color(hx.tx2).child("Open a git repository to start orchestrating worktrees."))
             .child(
                 div()
@@ -134,8 +134,8 @@ impl HarnessWorkspace {
                     .text_color(hx.accent)
                     .cursor_pointer()
                     .hover(|d| d.bg(tint(hx.accent, 0.24)))
-                    .on_click(cx.listener(|ws, _, window, cx| ws.add_folder(window, cx)))
-                    .child("＋ Add a folder"),
+                    .on_click(cx.listener(|ws, _, window, cx| ws.add_project(window, cx)))
+                    .child("＋ Add a project"),
             )
     }
 
