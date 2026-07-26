@@ -266,12 +266,13 @@ pub fn workspace_for(
         window,
         cx,
     );
-    // The git panel is docked but CLOSED. Forcing it open would spend a third
-    // of the editor's width on every tab, in a window that already gives two
-    // columns to the harness chrome — and zed does not open it by default
-    // either. ⌘⇧G brings it up; `dock_panel` still activates it, so the dock it
-    // lands in is in a renderable state when that happens rather than opening
-    // onto nothing.
+    // The git panel is docked but CLOSED, and — per `git_panel.dock` in
+    // main.rs — it docks LEFT, sharing that dock with the file tree. Forcing it
+    // open would spend a third of the editor's width on every tab, in a window
+    // that already gives two columns to the harness chrome, and it would take
+    // the left dock's one visible slot from the file tree. ⌘⇧G brings it up:
+    // `focus_panel` activates it by index on its way in, so it does not need
+    // `dock_panel` to have claimed the slot for it.
     dock_panel(
         &workspace,
         "git_panel",
@@ -307,10 +308,12 @@ enum StartOpen {
 /// and invisible and the editor tab looked empty. Zed only activates on its
 /// panel-move path, so out-of-tree callers must do it themselves.
 ///
-/// The dock is resolved from the panel's own `position()` rather than assumed:
-/// `ProjectPanel` defaults left and `GitPanel` defaults right, and activating
-/// "the last panel of the left dock" for a panel that docked right would both
-/// miss its target and steal the file tree's active slot.
+/// The dock is resolved from the panel's own `position()` rather than assumed,
+/// because that position is a *setting* each panel reads (`project_panel.dock`,
+/// `git_panel.dock` — both "left" here, see main.rs) and a user may drag a panel
+/// to another edge, which rewrites it. Activating "the last panel of the left
+/// dock" for a panel that had docked elsewhere would miss its target and steal
+/// the file tree's slot at the same time.
 fn dock_panel<T, Fut>(
     workspace: &Entity<Workspace>,
     name: &'static str,
@@ -334,14 +337,27 @@ fn dock_panel<T, Fut>(
                         workspace.add_panel(panel, window, cx);
                         let dock = workspace.dock_at_position(position).clone();
                         dock.update(cx, |dock, cx| {
-                            // Activate unconditionally, open conditionally. A
-                            // dock with no active panel renders nothing even
-                            // once opened, so a panel that starts closed still
-                            // has to claim the slot now — otherwise ⌘⇧G later
-                            // opens onto blank space, which is the exact bug
-                            // this helper exists to prevent.
-                            let last = dock.panels_len().saturating_sub(1);
-                            dock.activate_panel(last, window, cx);
+                            // A dock with no active panel renders nothing even
+                            // once opened, so SOMETHING has to claim the slot
+                            // now or ⌘⇧G later opens onto blank space — the
+                            // exact bug this helper exists to prevent.
+                            //
+                            // But claim it only when it is free, or when this
+                            // panel is the one meant to be showing. Both
+                            // panels dock left now, and both loads are
+                            // independent spawns: activating unconditionally
+                            // meant whichever finished last became the visible
+                            // one, so the file tree — open, and the reason the
+                            // tab exists — could be replaced by a git panel
+                            // that was asked to start closed. Skipping the
+                            // activation costs the git panel nothing:
+                            // `focus_panel` activates by index on its way in,
+                            // so ⌘⇧G still brings it up.
+                            let claimed = dock.active_panel_index().is_some();
+                            if !claimed || start_open == StartOpen::Yes {
+                                let last = dock.panels_len().saturating_sub(1);
+                                dock.activate_panel(last, window, cx);
+                            }
                             if start_open == StartOpen::Yes {
                                 dock.set_open(true, window, cx);
                             }
@@ -748,6 +764,38 @@ async fn probe_keys(hosted: &Entity<Workspace>, cx: &mut gpui::AsyncWindowContex
         "HARNESS_PROBE_KEYS: cmd-shift-d project diff pane items {before:?} \
          -> {after_chord:?} (chord) -> {after_action:?} (action), \
          active_repository = {repo:?}"
+    );
+
+    // ⌘⇧G — the git panel, which shares the LEFT dock with the file tree.
+    //
+    // Worth its own probe because the panel is deliberately never activated at
+    // dock time (`dock_panel`): it would take the visible slot away from the
+    // file tree. So the chord is the only thing that makes it appear, and
+    // "docked but unreachable" is indistinguishable from "docked and working"
+    // in every other reading of the dock. Reports the active index against the
+    // git panel's own index, since with two panels in one dock the index alone
+    // says nothing about WHICH panel is showing.
+    let git_panel_slot = |ws: &mut Workspace, cx: &mut gpui::Context<Workspace>| {
+        let dock = ws.left_dock().read(cx);
+        (
+            dock.active_panel_index(),
+            dock.panel_index_for_type::<git_ui::git_panel::GitPanel>(),
+        )
+    };
+    let (active_before, git_index) = hosted.update(cx, git_panel_slot);
+    focused_dispatch(
+        hosted,
+        Box::new(zed_actions::git_panel::ToggleFocus),
+        pause,
+        cx,
+    )
+    .await;
+    let (active_after, _) = hosted.update(cx, git_panel_slot);
+    log::info!(
+        "HARNESS_PROBE_KEYS: cmd-shift-g git panel left-dock active {active_before:?} \
+         -> {active_after:?}, git panel is index {git_index:?} \
+         (showing = {})",
+        active_after.is_some() && active_after == git_index
     );
 
     // ⌘P — file finder modal.

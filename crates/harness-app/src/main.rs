@@ -233,6 +233,16 @@ fn main() {
         }
         file_finder::init(cx);
         search::init(cx);
+        // The git panel's constructor subscribes to the LanguageModelRegistry
+        // global unconditionally (its "generate commit message" button watches
+        // for a configured model), and `App::global` panics when the global is
+        // absent — so without this line docking the panel aborts the process on
+        // launch. `language_model::init` only installs an EMPTY registry; the
+        // providers come from zed's `language_models::init`, which we
+        // deliberately do not call. That is the state we want: no LLM
+        // providers, so the AI commit-message affordance stays unconfigured
+        // while the rest of the panel works.
+        language_model::init(cx);
         // Native git/diff (project-diff view, git panel, gutter change-bars) and
         // native Markdown preview. Both register via `cx.observe_new::<Workspace>`,
         // so they auto-attach their actions to every hosted Workspace we build —
@@ -438,11 +448,23 @@ fn main() {
 /// startup and every runtime settings change call this, so the two can never
 /// disagree about anything but the fonts they pass.
 pub fn apply_zed_settings(cx: &mut gpui::App, ui_font: &str, mono_font: &str, font_size: f32) {
+    // `git_panel.dock` — the editor's diff viewer sits LEFT, beside the file
+    // tree, rather than at zed's default right edge: the harness window
+    // already spends its right side on our own chrome, so a right-docked panel
+    // puts the diff as far as it can get from the gutter it annotates.
+    // `GitPanel::position` reads exactly this key and `workspace_host::
+    // dock_panel` resolves the dock from `position()`, so this one key moves
+    // it. Dragging the panel elsewhere still works for the session, but this
+    // string is re-applied at every launch, so left is what each launch gets.
+    //
+    // Keep the literal free of `//` comments: it is parsed as JSON, and a
+    // parse failure silently reverts EVERY setting in it (parse_status below).
     let json = format!(
         r#"{{ "buffer_font_family": "{mono_font}", "buffer_font_size": {font_size},
              "ui_font_family": "{ui_font}",
              "terminal": {{ "font_family": "{mono_font}", "font_size": {font_size} }},
              "project_panel": {{ "dock": "left" }},
+             "git_panel": {{ "dock": "left" }},
              "languages": {{
                "Rust": {{ "language_servers": ["rust-analyzer"] }}
              }},

@@ -121,6 +121,12 @@ markdown = { git = "https://github.com/zed-industries/zed.git", rev = "952d712da
 # hosted Workspace via git_ui::init's observe_new hook. Already compiled
 # transitively, so declaring it just makes it nameable.
 git_ui = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
+# Only for `language_model::init` — the git panel's constructor reads the
+# LanguageModelRegistry global and `App::global` panics when it is unset, so
+# the panel cannot dock without it. init installs an empty registry and nothing
+# more; zed's `language_models` crate (the actual providers) stays out of the
+# cone. Already compiled transitively via git_ui, so declaring it costs nothing.
+language_model = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
 # Native, live, code-highlighted Markdown preview as an editor pane item —
 # distinct from the diff-panel disk-content preview above.
 markdown_preview = { git = "https://github.com/zed-industries/zed.git", rev = "952d712dac48a4af2c54fb22c82d82a9d69b72d4" }
