@@ -71,7 +71,7 @@ pub fn resolve(id: &str) -> Sound {
         .iter()
         .copied()
         .find(|s| s.id == id)
-        .unwrap_or_else(|| resolve_default())
+        .unwrap_or_else(resolve_default)
 }
 
 fn resolve_default() -> Sound {
@@ -156,7 +156,7 @@ pub fn preview(id: &str) {
         .stderr(std::process::Stdio::piped())
         .spawn()
     {
-        Ok(mut child) => {
+        Ok(child) => {
             log::debug!("sound preview {id:?} -> {}", target.display());
             let id = id.to_string();
             std::thread::spawn(move || match child.wait_with_output() {
