@@ -242,12 +242,20 @@ impl HarnessWorkspace {
         &self,
         hx: &HarnessTheme,
         draft: &CommentDraft,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         const W: f32 = 320.0;
-        // Open to the LEFT: the diff lives in the right-hand panel, so an
-        // anchor rightwards would push the popover off-window.
-        let left = (f32::from(draft.at.x) - W - 14.0).max(8.0);
+        // Open away from the nearer edge. The dock is on the right, so a gutter
+        // click there must open leftward — but in a tab the diff can sit
+        // anywhere, and opening left of a left-hand click would run off-window.
+        let window_width = f32::from(window.viewport_size().width);
+        let anchor_x = f32::from(draft.at.x);
+        let left = if anchor_x > window_width / 2.0 {
+            (anchor_x - W - 14.0).max(8.0)
+        } else {
+            (anchor_x + 14.0).min((window_width - W - 8.0).max(8.0))
+        };
         let top = (f32::from(draft.at.y) - 12.0).max(48.0);
         let existing = self
             .resolve()

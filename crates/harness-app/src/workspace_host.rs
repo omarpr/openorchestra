@@ -548,6 +548,68 @@ async fn probe_editor_keys(hosted: &Entity<Workspace>, cx: &mut gpui::AsyncWindo
     cx.background_executor().timer(pause).await;
 }
 
+/// Open `rel` (worktree-relative) in a hosted workspace, putting the caret on
+/// `line` when there is one.
+///
+/// The same recipe `probe_open` proved, promoted to a real entry point: a
+/// `RelPath` into a `ProjectPath` into `Workspace::open_path`, then a selection
+/// change so the file opens *where the user was looking* rather than at line 1.
+/// Reaching this from the diff panel is the whole point — a diff row you want
+/// to change is useless if the editor drops you at the top of the file.
+pub fn open_file_at(
+    hosted: &Entity<Workspace>,
+    rel: &str,
+    line: Option<u32>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Ok(parsed) = util::rel_path::RelPath::new(Path::new(rel), util::paths::PathStyle::local())
+    else {
+        log::warn!("open_file_at: {rel:?} is not a worktree-relative path");
+        return;
+    };
+    let parsed: Arc<util::rel_path::RelPath> = parsed.as_ref().into();
+
+    let task = hosted.update(cx, |ws, cx| {
+        let worktree = ws.project().read(cx).visible_worktrees(cx).next()?;
+        let path = project::ProjectPath { worktree_id: worktree.read(cx).id(), path: parsed };
+        Some(ws.open_path(path, None, true, window, cx))
+    });
+    let Some(task) = task else {
+        log::warn!("open_file_at: hosted workspace has no visible worktree");
+        return;
+    };
+
+    window
+        .spawn(cx, async move |cx| {
+            let item = task.await?;
+            cx.update(|window, cx| {
+                let Some(editor) = item.act_as::<editor::Editor>(cx) else {
+                    return;
+                };
+                if let Some(line) = line {
+                    editor.update(cx, |editor, cx| {
+                        // 1-based in the diff gutter, 0-based in the buffer.
+                        let row = line.saturating_sub(1);
+                        editor.change_selections(
+                            editor::SelectionEffects::default(),
+                            window,
+                            cx,
+                            |s| {
+                                s.select_ranges([
+                                    language::Point::new(row, 0)..language::Point::new(row, 0),
+                                ]);
+                            },
+                        );
+                    });
+                }
+                window.focus(&editor.focus_handle(cx), cx);
+            })?;
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+}
+
 /// Open one file in a hosted workspace and report the pane's item count.
 async fn probe_open(hosted: &Entity<Workspace>, rel: &str, cx: &mut gpui::AsyncWindowContext) {
     let Ok(rel) = util::rel_path::RelPath::new(Path::new(rel), util::paths::PathStyle::local())

@@ -446,6 +446,14 @@ pub(crate) struct CardMenu {
     y: Pixels,
 }
 
+/// A pending "you tried to edit a diff line — where should it open?" question.
+pub(crate) struct EditPrompt {
+    file: String,
+    /// The working-file line to land on, or `None` when the row was a deletion
+    /// with nothing after it to land on.
+    line: Option<u32>,
+}
+
 /// State of the "keep or close your terminals?" prompt shown on quit.
 pub(crate) struct ClosePrompt {
     /// The "remember my choice" checkbox — when set, the chosen action is
@@ -563,6 +571,9 @@ pub struct HarnessWorkspace {
     /// The quit confirmation is open (keep vs. close terminals). Present only
     /// while the user is deciding; carries the "remember my choice" checkbox.
     close_prompt: Option<ClosePrompt>,
+    /// The open "open this file to edit it?" question, raised when the user
+    /// tries to type into a diff.
+    edit_prompt: Option<EditPrompt>,
     pending_delete: Option<String>,
     note: String,
     forge_status: HashMap<String, BranchStatus>,
@@ -747,6 +758,7 @@ impl HarnessWorkspace {
             menu: None,
             tab_menu: None,
             close_prompt: None,
+            edit_prompt: None,
             pending_delete: None,
             note: String::new(),
             forge_status: HashMap::new(),
@@ -1150,7 +1162,7 @@ impl Render for HarnessWorkspace {
                             cx.listener(|ws, _, _, cx| ws.commit_comment(cx)),
                         ),
                 )
-                .child(self.render_comment_popover(&hx, &draft, cx));
+                .child(self.render_comment_popover(&hx, &draft, window, cx));
         }
 
         if let Some(x) = self.tab_menu {
@@ -1172,6 +1184,10 @@ impl Render for HarnessWorkspace {
                         ),
                 )
                 .child(self.render_tab_menu(&hx, x, cx));
+        }
+
+        if self.edit_prompt.is_some() {
+            root = root.child(self.render_edit_prompt(&hx, cx));
         }
 
         if self.close_prompt.is_some() {

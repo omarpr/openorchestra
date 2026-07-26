@@ -5,5 +5,6 @@
 mod center;
 mod chrome;
 mod diff;
+mod diff_edit;
 mod settings;
 mod sidebar;

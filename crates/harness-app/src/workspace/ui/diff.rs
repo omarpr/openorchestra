@@ -150,7 +150,25 @@ impl HarnessWorkspace {
             .border_color(hx.border)
             .items_start()
             .text_xs()
-            .font_family(hx.font_mono);
+            .font_family(hx.font_mono)
+            // Typing with a line selected is the other way people say "I want to
+            // change this". Modified chords are shortcuts, not text — ⌘C over a
+            // selection must still copy — so they pass straight through.
+            .on_key_down(cx.listener(|ws, ev: &gpui::KeyDownEvent, window, cx| {
+                let k = &ev.keystroke;
+                if k.modifiers.platform || k.modifiers.control || k.modifiers.alt {
+                    return;
+                }
+                if k.key_char.as_deref().is_none_or(|c| c.trim().is_empty()) {
+                    return;
+                }
+                let Some((file, from, _)) = ws.diff_selection.clone() else {
+                    return;
+                };
+                let rows = readable_diff_lines(&ws.unified_for_file(&file));
+                let line = target_line_for_row(&rows, from);
+                ws.request_edit(file, line, window, cx);
+            }));
         let unified = self.unified_for_file(file);
         if unified.is_empty() {
             preview = preview.child(div().p_2().text_color(hx.tx2).child("—"));
@@ -162,6 +180,9 @@ impl HarnessWorkspace {
             // span several files, so fall back to each row's own header.
             let worktree_key = self.resolve().map(|r| r.key);
             let file_for_comments = file.to_string();
+            // Shared by every row's double-click handler: the parsed rows are
+            // what turn a clicked index into a line that exists in the file.
+            let rows_for_edit = std::sync::Arc::new(shown.clone());
             for (ix, r) in shown.iter().enumerate().take(MAX_DIFF_LINES) {
                 // A hunk boundary is a thin rule plus git's section text (the
                 // enclosing function or heading). The old `@@ -a,b +c,d @@`
@@ -223,6 +244,8 @@ impl HarnessWorkspace {
                 let comment_key = (file_for_comments.clone(), line_no);
                 let row_file = file_for_comments.clone();
                 let move_file = file_for_comments.clone();
+                let dbl_file = file_for_comments.clone();
+                let dbl_rows = rows_for_edit.clone();
                 let has_comment = line_no.is_some_and(|n| {
                     worktree_key
                         .as_deref()
@@ -239,7 +262,16 @@ impl HarnessWorkspace {
                         .cursor_pointer()
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
+                            cx.listener(move |ws, ev: &MouseDownEvent, window, cx| {
+                                // A second click on a diff line means "let me
+                                // change this". The diff itself cannot be typed
+                                // into, so offer the file that can.
+                                if ev.click_count >= 2 {
+                                    ws.diff_selecting = false;
+                                    let line = target_line_for_row(&dbl_rows, ix);
+                                    ws.request_edit(dbl_file.clone(), line, window, cx);
+                                    return;
+                                }
                                 ws.diff_selecting = true;
                                 ws.select_diff_row(&row_file, ix, ev.modifiers.shift, cx);
                             }),

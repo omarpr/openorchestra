@@ -560,6 +560,95 @@ impl HarnessWorkspace {
         cx.notify();
     }
 
+    /// The user tried to edit a diff line. A diff is a picture of a change, not
+    /// the file, so the only useful response is to take them somewhere they can
+    /// actually type.
+    ///
+    /// With no editor open there is no choice to make — open one. With editors
+    /// already open, ask: dropping the file into one of several tabs the user
+    /// did not name is a guess, and a wrong guess scrolls a file they were
+    /// reading out from under them.
+    pub(crate) fn request_edit(
+        &mut self,
+        file: String,
+        line: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // A deleted file has nothing on disk to open. Say so rather than
+        // raising a question whose every answer fails.
+        if self
+            .diff
+            .files
+            .iter()
+            .any(|f| f.path == file && f.change == Change::Deleted)
+        {
+            self.note = format!("{file} is deleted in this branch");
+            cx.notify();
+            return;
+        }
+        if self.editor_tab_ids().is_empty() {
+            self.open_in_editor(file, line, true, window, cx);
+        } else {
+            self.edit_prompt = Some(EditPrompt { file, line });
+            cx.notify();
+        }
+    }
+
+    /// Ids of this worktree's editor tabs, in strip order.
+    pub(crate) fn editor_tab_ids(&self) -> Vec<u64> {
+        let Some(r) = self.resolve() else { return Vec::new() };
+        let Some(pane) = self.panes.get(&r.key) else { return Vec::new() };
+        pane.tabs
+            .iter()
+            .filter(|t| matches!(t.content, TabContent::Editor(_)))
+            .map(|t| t.id)
+            .collect()
+    }
+
+    /// Open `file` at `line` in an editor tab: a fresh one when `new_tab`, else
+    /// the last existing one. Either way the center switches to it — opening a
+    /// file in a tab the user cannot see is indistinguishable from having done
+    /// nothing at all.
+    pub(crate) fn open_in_editor(
+        &mut self,
+        file: String,
+        line: Option<u32>,
+        new_tab: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.edit_prompt = None;
+        if new_tab {
+            self.open_tab(TabKind::Editor, window, cx);
+        } else if let Some(id) = self.editor_tab_ids().last().copied() {
+            let Some(r) = self.resolve() else { return };
+            if let Some(pane) = self.panes.get_mut(&r.key) {
+                pane.active = id;
+            }
+        }
+        let Some(r) = self.resolve() else { return };
+        let hosted = self.panes.get(&r.key).and_then(|p| {
+            p.tabs
+                .iter()
+                .find(|t| t.id == p.active)
+                .and_then(|t| match &t.content {
+                    TabContent::Editor(ws) => Some(ws.clone()),
+                    _ => None,
+                })
+        });
+        let Some(hosted) = hosted else {
+            // open_tab logs the real cause (a project that would not open);
+            // this is the user-facing half.
+            self.note = "could not open an editor".to_string();
+            cx.notify();
+            return;
+        };
+        crate::workspace_host::open_file_at(&hosted, &file, line, window, cx);
+        self.save_panes();
+        cx.notify();
+    }
+
     /// The active worktree's Diff tab, if it has one.
     pub(crate) fn diff_tab_id(&self) -> Option<u64> {
         let r = self.resolve()?;
