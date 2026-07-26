@@ -257,7 +257,18 @@ impl HarnessWorkspace {
                     })
                     .collect()
             }),
-        );
+        )
+        // `Infer` — the height comes from item count, clamped to the space
+        // available. The default is `Auto`, documented as "should not calculate
+        // a fixed size", which resolves against the parent instead: give it an
+        // ancestor chain that is content-sized and the list asks its content how
+        // tall to be, its content is one measured item, and the whole diff
+        // collapses to a 15 px strip in an empty pane. `Infer` is also what
+        // zed's own project panel uses, for the same reason.
+        .with_sizing_behavior(gpui::ListSizingBehavior::Infer)
+        // Long lines may exceed the list's width instead of being squeezed into
+        // it; the container scrolls sideways to reach them.
+        .with_horizontal_sizing_behavior(gpui::ListHorizontalSizingBehavior::Unconstrained);
 
         // 15 px is `DIFF_ROW_H`, the height every item is drawn at — uniform_list
         // measures the first item and assumes the rest match, which is exactly
@@ -265,7 +276,7 @@ impl HarnessWorkspace {
         let list = if bounded {
             list.h(px((count as f32 * DIFF_ROW_H).min(INLINE_BODY_MAX_H)))
         } else {
-            list.flex_1().min_h_0()
+            list.flex_grow_1().min_h_0()
         };
         log::trace!("diff body: {count} items prepared in {:?}", _started.elapsed());
         // Same idiom as the settings overlay: a virtualized list that lays out
@@ -282,7 +293,7 @@ impl HarnessWorkspace {
             )
         });
         wrapper
-            .when(!bounded, |d| d.flex_1().min_h_0())
+            .when(!bounded, |d| d.flex_1().h_full().min_h_0())
             .child(list)
             .into_any_element()
     }
@@ -521,6 +532,12 @@ impl HarnessWorkspace {
             .flex()
             .flex_col()
             .flex_1()
+            // `h_full` beside `flex_1`, the pairing workspace.rs already
+            // documents: flex_1 alone stretches the box but leaves the height
+            // *indefinite*, so everything below resolves against content
+            // instead. A virtualized list asked to size itself against its own
+            // content is the degenerate case — see `render_diff_body`.
+            .h_full()
             .min_h_0()
             .min_w_0()
             // Focusable so the surface can receive keystrokes: typing over a
@@ -536,6 +553,7 @@ impl HarnessWorkspace {
                 div()
                     .flex()
                     .flex_1()
+                    .h_full()
                     .min_h_0()
                     .min_w_0()
                     .child(self.render_file_list(hx, true, cx))
@@ -806,7 +824,15 @@ impl HarnessWorkspace {
                             // Reviewed files recede rather than vanish — still
                             // findable, visibly done.
                             .text_color(if reviewed { hx.tx2 } else { hx.tx1 })
+                            // `overflow_hidden` alone does not stop wrapping —
+                            // it clipped the *second* line, so a name one
+                            // character too long broke across two rows with
+                            // space to spare. Ellipsis in the middle keeps the
+                            // filename readable, which is the end of a path that
+                            // identifies it.
+                            .whitespace_nowrap()
                             .overflow_hidden()
+                            .text_ellipsis_middle()
                             .child(file.path.clone()),
                     )
                     // The markdown preview belongs to a file, so its toggle
@@ -888,20 +914,32 @@ impl HarnessWorkspace {
                 .child("no changes vs merge-base")
                 .into_any_element();
         };
-        let body = match self.md_preview.as_ref().filter(|(f, _)| f == &file) {
-            Some((_, md)) => div().size_full().child(md.clone()).into_any_element(),
-            None => self.render_diff_body(hx, &file, false, cx),
-        };
-        div()
-            .id("diff-focused")
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_w_0()
-            .min_h_0()
-            .overflow_scroll()
-            .p_1()
-            .child(body)
-            .into_any_element()
+        // The two branches need opposite containers, which is why this is not
+        // one `div` with a `match` inside it.
+        //
+        // The markdown preview is a plain child that grows to its content, so it
+        // needs an ancestor that scrolls. The diff body is a `uniform_list`,
+        // which needs the exact reverse: gpui's own docs say it renders only the
+        // visible subset "when rendered into a container with overflow-y: hidden
+        // and a fixed (or max) height". Give it a scrolling ancestor instead and
+        // its height resolves against its content rather than the pane — and a
+        // virtualized list's content is one measured item, so the whole diff
+        // collapses to a ~30px strip with the pane empty beneath it. It looks
+        // like the diff failed to load; it is actually the list doing exactly
+        // what an auto height asks of it.
+        let container =
+            div().id("diff-focused").flex().flex_col().flex_1().h_full().min_w_0().min_h_0().p_1();
+        match self.md_preview.as_ref().filter(|(f, _)| f == &file) {
+            Some((_, md)) => container
+                .overflow_scroll()
+                .child(div().size_full().child(md.clone()))
+                .into_any_element(),
+            // Horizontal only: long lines still scroll sideways, while the
+            // vertical axis stays hidden so the list keeps its definite height.
+            None => container
+                .overflow_x_scroll()
+                .child(self.render_diff_body(hx, &file, false, cx))
+                .into_any_element(),
+        }
     }
 }
