@@ -55,7 +55,8 @@ pub fn app_state(cx: &mut App) -> Arc<AppState> {
         return existing;
     }
 
-    let fs = Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
+    let fs: Arc<dyn fs::Fs> =
+        Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
     let mut registry = language::LanguageRegistry::new(cx.background_executor().clone());
     // Language servers need somewhere to live even when they are NOT
     // downloaded: the adapter consults this directory before falling back to a
@@ -91,7 +92,7 @@ pub fn app_state(cx: &mut App) -> Arc<AppState> {
         client,
         user_store,
         workspace_store,
-        fs,
+        fs: fs.clone(),
         build_window_options: |_, _| Default::default(),
         // A REAL node runtime, pointed at the system node (already a hard
         // requirement for pi and the hook shims, R4). This is what brings the
@@ -113,6 +114,13 @@ pub fn app_state(cx: &mut App) -> Arc<AppState> {
         },
         session,
     });
+    // AppState holds an `fs` for Projects, but zed UI also reads
+    // `<dyn Fs>::global` — e.g. DiffStyleControls writes
+    // `editor.diff_view_style` through `update_settings_file` when you click
+    // Unified/Split. Without this, that click panics inside AppKit's mouse-up
+    // handler (`panic_cannot_unwind`) and aborts the process. Same class of
+    // missing-global crash as LanguageModelRegistry in main.rs.
+    <dyn fs::Fs>::set_global(fs, cx);
     AppState::set_global(state.clone(), cx);
     state
 }
