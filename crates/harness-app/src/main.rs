@@ -445,6 +445,28 @@ fn main() {
         )
         .expect("failed to open window");
 
+        // `HARNESS_PROBE_CLICK=x,y` clicks that window point once the first
+        // frame has been laid out. Whether a click reaches its handler is the
+        // one question every other probe is blind to: they drive state
+        // directly, which is exactly the step a broken click skips.
+        if let Some(spec) = std::env::var_os("HARNESS_PROBE_CLICK")
+            && let Some((x, y)) = spec.to_string_lossy().split_once(',')
+            && let (Ok(x), Ok(y)) = (x.trim().parse::<f32>(), y.trim().parse::<f32>())
+        {
+            let handle = cx.windows().into_iter().next();
+            cx.spawn(async move |cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(3))
+                    .await;
+                if let Some(handle) = handle {
+                    let _ = handle.update(cx, |_, window, cx| {
+                        workspace_host::probe_click(x, y, window, cx);
+                    });
+                }
+            })
+            .detach();
+        }
+
         cx.activate(true);
     });
 }

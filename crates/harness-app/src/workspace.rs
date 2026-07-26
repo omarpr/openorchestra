@@ -946,6 +946,14 @@ impl HarnessWorkspace {
         // (`HARNESS_PROBE_SETTINGS=Notifications`). ⌘, cannot be dispatched
         // without a focused editor, so without this the settings layout is the
         // one surface a headless run cannot assert anything about.
+        // Probe hook: resolve and play a sound the way the settings ▶ does, so
+        // "no sound came out" can be told apart from "the file was never found".
+        if let Some(id) = std::env::var_os("HARNESS_PROBE_SOUND") {
+            let id = id.to_string_lossy().to_string();
+            let resolved = crate::sounds::path(crate::sounds::resolve(&id));
+            log::info!("HARNESS_PROBE_SOUND: {id:?} -> {resolved:?}");
+            crate::sounds::preview(&id);
+        }
         if let Some(want) = std::env::var_os("HARNESS_PROBE_SETTINGS") {
             this.settings_open = true;
             let want = want.to_string_lossy().to_string();

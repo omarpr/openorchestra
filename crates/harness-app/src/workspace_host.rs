@@ -555,6 +555,31 @@ async fn probe_editor_keys(hosted: &Entity<Workspace>, cx: &mut gpui::AsyncWindo
     cx.background_executor().timer(pause).await;
 }
 
+/// Synthesize a left click at `x`,`y` in window coordinates.
+///
+/// The settings ▶ could not be tested any other way: every other probe drives
+/// state directly, and "does the click reach the handler" is precisely the
+/// question state cannot answer. `HARNESS_PROBE_CLICK=x,y` aims it.
+pub fn probe_click(x: f32, y: f32, window: &mut Window, cx: &mut App) {
+    let position = gpui::point(gpui::px(x), gpui::px(y));
+    let down = gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+        button: gpui::MouseButton::Left,
+        position,
+        modifiers: Default::default(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    let up = gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+        button: gpui::MouseButton::Left,
+        position,
+        modifiers: Default::default(),
+        click_count: 1,
+    });
+    log::info!("HARNESS_PROBE_CLICK: clicking at {x},{y}");
+    window.dispatch_event(down, cx);
+    window.dispatch_event(up, cx);
+}
+
 /// Open `rel` (worktree-relative to `root`) in a hosted workspace, putting the
 /// caret on `line` when there is one.
 ///

@@ -334,6 +334,11 @@ impl HarnessWorkspace {
                         .child(div().flex_1().text_xs().text_color(hx.tx2).child(origin))
                         // Hearing it is the only way to choose one. Plays on
                         // click without selecting, so you can audition the list.
+                        // No ▶ on "silent": a play button that is *correct* to
+                        // do nothing is indistinguishable from a broken one,
+                        // and it is the row most likely to be tried first when
+                        // someone is checking whether preview works at all.
+                        .when(sound.source != crate::sounds::Source::Silent, |row| row
                         .child(
                             div()
                                 .id(gpui::SharedString::from(format!("play-{id}")))
@@ -345,11 +350,14 @@ impl HarnessWorkspace {
                                 .cursor_pointer()
                                 .hover(|d| d.bg(hx.surface).text_color(hx.accent))
                                 .child("▶")
+                                .when(std::env::var_os("HARNESS_PROBE_CLICK").is_some(), |d| {
+                                    d.child(gpui::canvas(move |b, _, _| log::info!("hitbox: play-{id} = {b:?}"), |_, _, _, _| {}).absolute().size_full())
+                                })
                                 .on_click(cx.listener(move |_, _, _, cx| {
                                     cx.stop_propagation();
                                     crate::sounds::preview(id);
                                 })),
-                        )
+                        ))
                         .on_click(cx.listener(move |ws, _, _, cx| {
                             cx.stop_propagation();
                             ws.prefs.notify_sound = id.to_string();

@@ -147,11 +147,30 @@ pub fn preview(id: &str) {
         log::warn!("no audio file for sound {id:?}");
         return;
     };
-    let _ = std::process::Command::new("afplay")
-        .arg(target)
+    // Report the outcome instead of discarding it. A preview that fails
+    // silently is the worst version of this feature: the button looks dead and
+    // there is nothing anywhere to say why.
+    match std::process::Command::new("afplay")
+        .arg(&target)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(mut child) => {
+            log::debug!("sound preview {id:?} -> {}", target.display());
+            let id = id.to_string();
+            std::thread::spawn(move || match child.wait_with_output() {
+                Ok(out) if out.status.success() => {}
+                Ok(out) => log::warn!(
+                    "afplay exited {:?} for {id:?}: {}",
+                    out.status.code(),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+                Err(e) => log::warn!("afplay could not be waited on: {e}"),
+            });
+        }
+        Err(e) => log::warn!("could not run afplay for {id:?} ({}): {e}", target.display()),
+    }
 }
 
 #[cfg(test)]
