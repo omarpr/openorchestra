@@ -55,8 +55,3 @@ crates it links (`workspace`, `project`, `editor`, `git_ui`, `search`,
 `terminal`, `theme`, and the rest) are GPL-3.0-or-later, so anything distributed
 with them must be too. `gpui` and `util` are Apache-2.0, which combines into a
 GPLv3 work in that direction. No AGPL crate (`collab`) is linked.
-
-## More
-
-Architecture, decisions, and the embedding gotchas live in
-[docs/architecture.md](docs/architecture.md).

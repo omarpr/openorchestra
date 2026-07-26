@@ -9,10 +9,9 @@ guide and the [Code of Conduct](CODE_OF_CONDUCT.md).
 - **Bugs:** open an issue, or send a small, obvious fix straight as a PR.
 - **New features or non-trivial changes:** open an issue or discussion **before**
   writing code. PRs that skip this may be closed without review.
-- **Out-of-scope proposals:** anything that pushes openOrchestra toward
-  cross-platform support, a web UI, a plugin API, or replacing the embedded zed
-  editor gets closed with a pointer to the architecture doc. Nothing personal,
-  just scope discipline.
+- **Out-of-scope proposals:** anything that pushes openOrchestra toward a web UI,
+  a plugin API, or replacing the embedded zed editor gets closed. Nothing
+  personal, just scope discipline.
 
 ## Project invariants (non-negotiable)
 
@@ -79,9 +78,9 @@ cargo test --bin harness-app   # it is a binary crate, so --bin, not --lib
   it is noise; one that records "this looked correct and did nothing, because…"
   is why the next person doesn't repeat it.
 - Match the density and idiom of the code you are editing.
-- Update `docs/architecture.md` when you change architecture, and correct it when
-  you discover it is wrong. Several sections carry explicit "this turned out not
-  to exist" notes; that is the intended pattern, not an embarrassment.
+- When you discover that a design note or comment is wrong, correct it in the
+  same change. "This turned out not to exist" is the intended pattern, not an
+  embarrassment — the next person pays for a stale explanation.
 - Prefer doing git and filesystem work off the UI thread. Synchronous work in a
   render path shows up as dropped frames, and this app renders while agents are
   writing files underneath it.
