@@ -1299,10 +1299,23 @@ impl Render for HarnessWorkspace {
             // renders underneath it — "settings don't open" while the state
             // toggles perfectly. Absolute positioning takes it out of flow;
             // being last takes it to the top.
+            // Stacking order depends on whether the requirements screen is
+            // *blocking*, and getting this wrong is what made Settings look
+            // broken: an informational preflight rendered last covered a
+            // Settings the user had deliberately opened, backdrop and all, so
+            // ⌘, appeared to do nothing.
+            //
+            // A blocking screen must win over everything — there is nothing
+            // else worth interacting with. A dismissible one must not swallow
+            // a deliberate action; it waits underneath and is still there when
+            // Settings closes, because it has not been acknowledged yet.
+            .when(self.preflight_open && !crate::preflight::blocked(&self.preflight), |d| {
+                d.child(self.render_preflight(&hx, cx))
+            })
             .when(self.settings_open, |d| d.child(self.render_settings(&hx, cx)))
-            // Last, so it draws over Settings: when it is blocking there is
-            // nothing else worth interacting with.
-            .when(self.preflight_open, |d| d.child(self.render_preflight(&hx, cx)))
+            .when(self.preflight_open && crate::preflight::blocked(&self.preflight), |d| {
+                d.child(self.render_preflight(&hx, cx))
+            })
             // Drag tracking lives on the root so the pointer can leave the
             // 6px handle mid-drag without the resize stopping.
             .on_action(cx.listener(|ws, _: &crate::CopyDiffSelection, _, cx| {
@@ -1330,6 +1343,12 @@ impl Render for HarnessWorkspace {
                 cx.notify();
             }))
             .on_action(cx.listener(|ws, _: &crate::OpenSettings, _, cx| {
+                // Refuse while a required tool is missing: Settings sits behind
+                // the blocking screen, so opening it would only mean a menu
+                // item that visibly does nothing.
+                if crate::preflight::blocked(&ws.preflight) {
+                    return;
+                }
                 ws.settings_open = !ws.settings_open;
                 cx.notify();
             }))

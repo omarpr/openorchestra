@@ -67,7 +67,10 @@ impl HarnessWorkspace {
             .id("settings-card")
             .flex()
             .flex_col()
-            .w(px(520.0))
+            // Widened with the rail, not for its own sake: the rail takes 140px
+            // out of what used to be 520px of content, and the font chips and
+            // agent command rows were laid out against the old width.
+            .w(px(660.0))
             .max_h(px(600.0))
             .rounded_lg()
             .bg(hx.bg1)
@@ -833,6 +836,9 @@ impl HarnessWorkspace {
                 .flex_1()
                 .h_full()
                 .min_h_0()
+                .when(std::env::var_os("HARNESS_PROBE_PAINT").is_some(), |d| {
+                    d.child(gpui::canvas(|b, _, _| log::info!("paint: settings content row = {b:?}"), |_, _, _, _| {}).absolute().size_full())
+                })
                 .child(rail)
                 .child(body),
         );

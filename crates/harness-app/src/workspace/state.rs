@@ -1094,12 +1094,11 @@ impl HarnessWorkspace {
                 })
                 .await;
             view.update(cx, |ws, cx| {
+                // Only the result changes here. Closing on a clean re-check
+                // would snatch the screen away at the exact moment it finally
+                // says everything passes — the one moment worth reading. It
+                // closes when the user says so, via Continue.
                 ws.preflight = checks;
-                // Installing the last blocking tool should not also require
-                // finding the dismiss button that was not there a moment ago.
-                if !crate::preflight::blocked(&ws.preflight) && ws.prefs.seen_preflight {
-                    ws.preflight_open = false;
-                }
                 cx.notify();
             })
             .ok();
