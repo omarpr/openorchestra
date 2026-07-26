@@ -17,8 +17,10 @@ guide and the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 A change that breaks one of these will not merge:
 
-- **macOS-native only.** GPUI (zed's UI framework) for all UI. No Electron, no
-  cross-platform layers, no web views.
+- **Native UI, no web tech.** GPUI (zed's UI framework) for all UI. No Electron,
+  no cross-platform abstraction layers, no web views. GPUI itself runs on macOS,
+  Linux and Windows — this rule is about *how* the UI is built, not where it
+  runs.
 - **A real embedded zed, not a re-implementation.** The editor is zed's own
   `Workspace` hosted as a child view. When something is missing, wire up zed's
   existing surface rather than reinventing it — see the pane-toolbar notes in
@@ -36,6 +38,27 @@ A change that breaks one of these will not merge:
   than one that isn't shown — a stale number reads as a current one. If you add a
   surface that reflects external state, make it refresh, and say in a comment
   what refreshes it.
+
+## Platform support
+
+macOS is the only target built and tested. Linux is **not ruled out** — the
+architecture does not stand in the way, and it is worth knowing why before
+anyone assumes either direction:
+
+- Every platform-specific line in the codebase lives in
+  `crates/harness-app/src/notifier.rs`, which already carries a `notify-send`
+  branch and a catch-all for everything else. The `objc2` dependencies are gated
+  to macOS in `Cargo.toml`, so they would not even be compiled elsewhere.
+- The gaps are known and none of them is architectural: `notify-send` has no
+  action buttons or response callback, so the notification's **View** button
+  needs D-Bus (`org.freedesktop.Notifications`) to reach parity; notification
+  sound is macOS-only today; packaging, `setup-macos.sh` and the `.app` bundle
+  are macOS-shaped; and `ps -axo pid=,ppid=,comm=` in the agent-liveness probe
+  needs checking against GNU `ps`.
+- There is no Linux build in CI, so nobody should claim support until there is.
+
+Patches that keep the door open are welcome; a claim of "Linux support" without
+a CI job to back it is not.
 
 ## Development setup
 
