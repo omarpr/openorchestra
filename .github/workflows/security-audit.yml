@@ -5,11 +5,14 @@ on:
     paths:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
+      # Editing the documented advisory exceptions should re-run the audit.
+      - "**/.cargo/audit.toml"
       - ".github/workflows/security-audit.yml"
   pull_request:
     paths:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
+      - "**/.cargo/audit.toml"
   schedule:
     # Weekly, so new RustSec advisories are caught without a code change.
     - cron: "0 6 * * 1"
@@ -25,7 +28,16 @@ jobs:
           tool: cargo-audit
       # Two lockfiles: the headless workspace, and harness-app which is a
       # standalone package (zed git-dependency cone).
+      #
+      # Strict: no ignore file at the repo root, so any advisory here fails.
+      # This graph is ours and small, so it should stay exception-free.
       - name: Audit workspace lockfile
         run: cargo audit --file Cargo.lock
+      # Run from the package directory so cargo-audit picks up
+      # crates/harness-app/.cargo/audit.toml, which carries the documented
+      # exceptions for the zed cone (cargo-audit resolves that file relative to
+      # its working directory and has no --config flag). Advisories outside
+      # that ignore list still fail the job.
       - name: Audit harness-app lockfile
-        run: cargo audit --file crates/harness-app/Cargo.lock
+        working-directory: crates/harness-app
+        run: cargo audit --file Cargo.lock
