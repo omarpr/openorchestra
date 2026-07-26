@@ -2,9 +2,7 @@
 
 Thanks for your interest in openOrchestra. This project is **maintainer-led**
 with a deliberately narrow scope. Before opening a pull request, please read this
-guide, the [Code of Conduct](CODE_OF_CONDUCT.md), and
-[`docs/architecture.md`](docs/architecture.md) — the architecture document is the
-source of truth for what this app is and why it is built the way it is.
+guide and the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Before you write code
 
