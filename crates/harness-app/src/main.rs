@@ -14,6 +14,7 @@ mod diff_review;
 mod diff_watch;
 mod git_watch;
 mod harness_zed_theme;
+mod login_env;
 mod markdown_preview;
 mod markdown_preview_button;
 mod notifier;
@@ -85,6 +86,11 @@ fn first_rust_file(root: &std::path::Path) -> Option<PathBuf> {
 
 fn main() {
     env_logger::init();
+
+    // Before anything reads PATH — the requirements probe, the agent-CLI
+    // lookup, tmux, gh — and before any thread exists to race the write. A
+    // Finder-launched bundle otherwise sees only launchd's four directories.
+    login_env::hydrate_path();
 
     // Launch hint: an explicit arg/env, else the cwd (unless it's "/", which is
     // what Finder-launched .app bundles get), else the user's home. If the hint

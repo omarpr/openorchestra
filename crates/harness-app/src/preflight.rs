@@ -56,17 +56,23 @@ impl Check {
     }
 }
 
+/// The agent CLIs this app can drive, in the order the row reports them.
+///
+/// `pi` is still one of them — it is what the native chat pane speaks — but it
+/// no longer leads, because nothing here needs *pi* specifically and a screen
+/// that names one vendor reads as a requirement rather than an example.
+const AGENTS: [&str; 5] = ["claude", "codex", "opencode", "kimi", "pi"];
+
 /// Probe every tool. `lookup` returns the version string for a binary on PATH,
 /// or `None` when it is absent.
 ///
 /// The real one is [`version_on_path`]; tests pass a fake so the classification
 /// can be asserted on a machine that has any mix of these installed.
 pub fn probe(lookup: impl Fn(&str, &str) -> Option<String>) -> Vec<Check> {
-    let agents = ["pi", "claude", "codex", "opencode", "kimi"];
     // Any one agent is enough — they are peers, and the harness is useful with
     // whichever one you actually use. Reporting five separate "missing" rows
     // would imply you need all of them.
-    let agent_found = agents
+    let agent_found = AGENTS
         .iter()
         .find_map(|a| lookup(a, "--version").map(|v| format!("{a} {v}")));
 
@@ -92,9 +98,9 @@ pub fn probe(lookup: impl Fn(&str, &str) -> Option<String>) -> Vec<Check> {
             name: "an agent CLI",
             severity: Severity::Recommended,
             found: agent_found,
-            cost: "agent tabs fall back to a plain shell — pi, Claude Code, Codex, OpenCode or \
-                   Kimi, any one of them is enough",
-            fix: "npm install -g @mariozechner/pi-coding-agent",
+            cost: "agent tabs fall back to a plain shell — Claude Code, Codex, OpenCode or Kimi, \
+                   any one of them is enough",
+            fix: "npm install -g @anthropic-ai/claude-code",
             version_flag: "--version",
         },
         Check {
@@ -184,8 +190,24 @@ mod tests {
     }
 
     #[test]
+    fn the_suggested_fix_installs_an_agent_the_probe_accepts() {
+        // Copy and probe drift apart silently: a row can end up recommending a
+        // CLI that the check itself would not count as an agent.
+        let row = with(&[]);
+        let agent = row.iter().find(|c| c.name == "an agent CLI").unwrap();
+        assert!(
+            AGENTS.iter().any(|a| agent.fix.contains(a)),
+            "fix {:?} names no probed agent",
+            agent.fix
+        );
+        // pi is supported, not required — the screen must not read as if it were.
+        assert!(!agent.cost.contains("pi"), "cost still advertises pi: {:?}", agent.cost);
+        assert!(!agent.fix.contains("pi-coding-agent"), "fix still installs pi: {:?}", agent.fix);
+    }
+
+    #[test]
     fn any_single_agent_satisfies_the_agent_check() {
-        for agent in ["pi", "claude", "codex", "opencode", "kimi"] {
+        for agent in AGENTS {
             let checks = with(&["git", "tmux", agent]);
             let agent_check = checks.iter().find(|c| c.name == "an agent CLI").unwrap();
             assert!(
