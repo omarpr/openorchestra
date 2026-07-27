@@ -39,6 +39,7 @@ pub enum TabRecordKind {
     Agent(AgentKind),
     Editor,
     Chat,
+    Diff,
 }
 
 pub fn load(path: &Path) -> PanesState {
@@ -86,6 +87,25 @@ mod tests {
         save(&path, &state);
         let back = load(&path);
         assert_eq!(back, state);
+    }
+
+    #[test]
+    fn a_diff_tab_round_trips_through_disk() {
+        // The diff tab is a view over state the app already holds, but WHICH
+        // tabs are open is persisted like any other, so reopening restores the
+        // layout the user left.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("panes.json");
+        let mut state = PanesState { next_tab_id: 2, worktrees: BTreeMap::new() };
+        state.worktrees.insert(
+            "acme/fix".into(),
+            WorktreePanes {
+                active: Some(1),
+                tabs: vec![TabRecord { id: 1, kind: TabRecordKind::Diff, title: "⑂ diff".into() }],
+            },
+        );
+        save(&path, &state);
+        assert_eq!(load(&path), state);
     }
 
     #[test]

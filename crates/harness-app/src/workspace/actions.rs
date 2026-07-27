@@ -24,6 +24,9 @@ impl HarnessWorkspace {
             &self.task_store,
             &self.repo_roots,
         );
+        // Follow the repo list: a repo added here has no `.git` watch yet, and a
+        // removed one would keep firing recomputes for cards that are gone.
+        self.git_watch.watch_repos(&self.repo_roots);
 
         let items: Vec<(PathBuf, String, PathBuf)> = self
             .data
@@ -740,12 +743,14 @@ impl HarnessWorkspace {
         let start_value = match target {
             Drag::Sidebar => self.prefs.sidebar_width,
             Drag::DiffPanel => self.prefs.diff_width,
+            Drag::DiffList => self.prefs.diff_list_width,
         };
 
         let base = div()
             .id(match target {
                 Drag::Sidebar => "split-sidebar",
                 Drag::DiffPanel => "split-diff",
+                Drag::DiffList => "split-diff-list",
             })
             .flex_none()
             .cursor(if vertical {
@@ -788,12 +793,16 @@ impl HarnessWorkspace {
             Drag::Sidebar => (ev.position.x, 1.0),
             // The diff panel is right-anchored, so dragging left widens it.
             Drag::DiffPanel => (ev.position.x, -1.0),
+            // The file list is left-anchored inside the surface, so dragging
+            // right widens it — the opposite of the right-anchored dock.
+            Drag::DiffList => (ev.position.x, 1.0),
         };
         let delta = f32::from(pos - drag.start) * sign;
         let next = drag.start_value + delta;
         match drag.target {
             Drag::Sidebar => self.prefs.sidebar_width = next,
             Drag::DiffPanel => self.prefs.diff_width = next,
+            Drag::DiffList => self.prefs.diff_list_width = next,
         }
         // Clamp every frame, not on release: a panel must never be draggable
         // to zero width and become unrecoverable.

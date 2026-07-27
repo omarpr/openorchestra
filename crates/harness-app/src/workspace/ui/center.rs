@@ -3,6 +3,28 @@
 
 use super::super::*;
 
+/// The label that follows the cursor while a tab is being dragged.
+pub(crate) struct DragGhost {
+    label: String,
+    hx: HarnessTheme,
+}
+
+impl Render for DragGhost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_0p5()
+            .rounded_md()
+            .bg(self.hx.surface2)
+            .border_1()
+            .border_color(self.hx.accent)
+            .text_xs()
+            .font_family(self.hx.font_mono)
+            .text_color(self.hx.tx0)
+            .child(self.label.clone())
+    }
+}
+
 impl HarnessWorkspace {
 
     pub(crate) fn render_center(&self, hx: &HarnessTheme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -71,6 +93,9 @@ impl HarnessWorkspace {
                         .into_any_element()
                 }
                 TabContent::Chat(c) => c.clone().into_any_element(),
+                // `None`: a tab fills the center, so the surface never has to
+                // fall back to the narrow single-column layout.
+                TabContent::Diff => self.render_diff_surface(hx, None, cx),
             },
             None => div().into_any_element(),
         };
@@ -149,6 +174,13 @@ impl HarnessWorkspace {
     ) -> impl IntoElement {
         let id = tab.id;
         let close_id = tab.id;
+        let key = self.resolve().map(|r| r.key).unwrap_or_default();
+        let drag_key = key.clone();
+        let drop_key = key;
+        let onto = tab.id;
+        let ghost_label = tab.title.clone();
+        let ghost_theme = hx.clone();
+        let hover_bg = hx.surface_hover;
         div()
             .id(("tab", tab.id as usize))
             .flex()
@@ -180,6 +212,23 @@ impl HarnessWorkspace {
                     pane.active = id;
                 }
                 ws.focus_active_pane(window, cx);
+                cx.notify();
+            }))
+            // The ghost that follows the cursor. gpui wants a real view here, so
+            // it is a one-off entity rendering this tab's own label — a generic
+            // rectangle would not say which tab is moving.
+            .on_drag(DraggedTab { key: drag_key, id }, move |_, _, _, cx| {
+                let label = ghost_label.clone();
+                let hx = ghost_theme.clone();
+                cx.new(|_| DragGhost { label, hx })
+            })
+            .drag_over::<DraggedTab>(move |d, _, _, _| d.bg(hover_bg))
+            .on_drop(cx.listener(move |ws, dragged: &DraggedTab, _, cx| {
+                // Same worktree only — see DraggedTab's note.
+                if dragged.key != drop_key {
+                    return;
+                }
+                ws.move_tab(&drop_key, dragged.id, onto);
                 cx.notify();
             }))
             .child(tab.title.clone())
@@ -239,12 +288,20 @@ impl HarnessWorkspace {
         &self,
         hx: &HarnessTheme,
         draft: &CommentDraft,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         const W: f32 = 320.0;
-        // Open to the LEFT: the diff lives in the right-hand panel, so an
-        // anchor rightwards would push the popover off-window.
-        let left = (f32::from(draft.at.x) - W - 14.0).max(8.0);
+        // Open away from the nearer edge. The dock is on the right, so a gutter
+        // click there must open leftward — but in a tab the diff can sit
+        // anywhere, and opening left of a left-hand click would run off-window.
+        let window_width = f32::from(window.viewport_size().width);
+        let anchor_x = f32::from(draft.at.x);
+        let left = if anchor_x > window_width / 2.0 {
+            (anchor_x - W - 14.0).max(8.0)
+        } else {
+            (anchor_x + 14.0).min((window_width - W - 8.0).max(8.0))
+        };
         let top = (f32::from(draft.at.y) - 12.0).max(48.0);
         let existing = self
             .resolve()
@@ -385,6 +442,11 @@ impl HarnessWorkspace {
             )
             .child(self.tab_menu_item(hx, "❯_  Terminal", "⌘T", TabKind::Shell, cx))
             .child(self.tab_menu_item(hx, "{ }  Editor", "⌘E", TabKind::Editor, cx));
+        // Only in Tab mode: in Dock mode the dock IS the surface, and a tab
+        // showing the same review is the duplicate the setting exists to avoid.
+        if self.prefs.diff_location == DiffLocation::Tab {
+            menu = menu.child(self.tab_menu_item(hx, "⑂  Diff", "", TabKind::Diff, cx));
+        }
         // Every enabled agent, on any selection (D8 revised: main included) —
         // a worktree's recorded default merely decides which signal the
         // status pill trusts first.

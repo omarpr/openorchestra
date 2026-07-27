@@ -1,7 +1,7 @@
 {
-	"name": "omar-harness-pi-ext",
+	"name": "openorchestra-pi-ext",
 	"private": true,
-	"description": "pi extensions for the omar-harness (architecture §4.1/§4.4). harness-status.ts is loaded per worktree.",
+	"description": "pi extensions for openOrchestra (architecture §4.1/§4.4). harness-status.ts is loaded per worktree.",
 	"type": "module",
 	"scripts": {
 		"test": "node harness-status.test.mjs && node harness-tools.test.mjs"

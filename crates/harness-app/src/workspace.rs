@@ -191,13 +191,113 @@ pub fn readable_diff_lines(unified: &str) -> Vec<DiffRow> {
     out
 }
 
-/// Cap on rendered diff lines.
+/// Dock width at or above which the diff surface splits into two columns.
 ///
-/// Each line is its own element, so an enormous diff would build tens of
-/// thousands of them and stall the frame. Set well above any realistic
-/// single-file hunk; when it bites, the UI says so rather than truncating
-/// silently.
-const MAX_DIFF_LINES: usize = 5000;
+/// Below this a file list and a diff column would each be too narrow to read a
+/// path or a line of code without truncation, so the accordion — which gives
+/// the full width to whichever file is open — stays the better layout.
+const DIFF_TWO_PANE_MIN: f32 = 560.0;
+
+/// Whether to draw the diff surface as files-left/changes-right.
+///
+/// Decided from the location and the persisted dock width rather than measured
+/// bounds: a tab always fills the center, and the dock's width is a pref we
+/// already own, so neither case needs a layout pass to answer.
+fn use_two_pane(location: DiffLocation, dock_width: f32) -> bool {
+    match location {
+        DiffLocation::Tab => true,
+        DiffLocation::Dock => dock_width >= DIFF_TWO_PANE_MIN,
+    }
+}
+
+/// The line in the *working file* that diff row `ix` refers to.
+///
+/// Added and context rows already carry new-file numbers. A removed row does
+/// not: `readable_diff_lines` gives it the OLD file's number, which addresses a
+/// line that is gone. Opening the file there would land somewhere unrelated and
+/// read as a targeting bug rather than as a missing line, so a removed row
+/// resolves to the next row that still exists — stopping at the next file
+/// header, since the following file's line 1 is not this deletion's neighbour.
+/// A removed run at the end of a file has no successor and yields `None`: open
+/// the file, don't guess.
+fn target_line_for_row(rows: &[DiffRow], ix: usize) -> Option<u32> {
+    let row = rows.get(ix)?;
+    match row.kind {
+        DiffLineKind::Added | DiffLineKind::Context => row.number,
+        DiffLineKind::Removed => rows[ix + 1..]
+            .iter()
+            .take_while(|r| r.kind != DiffLineKind::FileHeader)
+            .find(|r| matches!(r.kind, DiffLineKind::Added | DiffLineKind::Context))
+            .and_then(|r| r.number),
+        DiffLineKind::FileHeader | DiffLineKind::HunkBreak => None,
+    }
+}
+
+/// Cap on diff lines held for one file.
+///
+/// This used to be a *rendering* cap of 5 000, because every line was its own
+/// element on every frame and an enormous diff stalled the frame outright. The
+/// body is virtualized now — only the rows on screen are built — so the cap
+/// bounds parsing and memory rather than paint, and can sit far above any real
+/// file. When it bites, the UI says so rather than truncating silently.
+const MAX_DIFF_LINES: usize = 50_000;
+
+/// Height every body item is drawn at.
+///
+/// `uniform_list` measures the first item and assumes the rest match, so this is
+/// a contract, not a preference: hunk rules and review notes are drawn at the
+/// row height because a taller one would desynchronise the list's arithmetic
+/// from what is painted.
+const DIFF_ROW_H: f32 = 15.0;
+
+/// How tall an inline-expanded body may grow in the narrow layout, where it
+/// lives inside the file list's own scroll area and so needs a definite height.
+const INLINE_BODY_MAX_H: f32 = 420.0;
+
+/// Which pane of Settings is showing.
+///
+/// One page had grown to five topics and 900 lines of builder; a rail turns
+/// "scroll until you recognise it" into "pick the thing you came for", and gives
+/// Notifications somewhere to exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsSection {
+    Appearance,
+    Editor,
+    Diff,
+    Agents,
+    Notifications,
+}
+
+impl SettingsSection {
+    pub(crate) const ALL: [SettingsSection; 5] = [
+        SettingsSection::Appearance,
+        SettingsSection::Editor,
+        SettingsSection::Diff,
+        SettingsSection::Agents,
+        SettingsSection::Notifications,
+    ];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            SettingsSection::Appearance => "Appearance",
+            SettingsSection::Editor => "Editor",
+            SettingsSection::Diff => "Diff",
+            SettingsSection::Agents => "Agents",
+            SettingsSection::Notifications => "Notifications",
+        }
+    }
+}
+
+/// One line of the rendered diff body.
+#[derive(Clone, Copy)]
+pub(crate) enum BodyItem {
+    /// An index into the file's parsed rows.
+    Row(usize),
+    /// A review note, pinned under the line it annotates.
+    Note(u32),
+    /// The tail marker: how many lines the cap dropped.
+    Truncated(usize),
+}
 
 const DIFF_ADD_TX: u32 = 0x7fdd97;
 const DIFF_DEL_TX: u32 = 0xf2868f;
@@ -211,6 +311,13 @@ enum TabContent {
     Editor(Entity<::workspace::Workspace>),
     /// Native agent chat over pi's RPC mode (M8, §4.2–4.3).
     Chat(Entity<crate::chat_pane::ChatPane>),
+    /// The diff review surface, when `DiffLocation::Tab` puts it in the center.
+    ///
+    /// A UNIT variant, unlike the other three: the diff, the review notes, and
+    /// the expand/selection state all live on `HarnessWorkspace` already and are
+    /// resolved per worktree. Giving the tab its own entity would create a
+    /// second copy that could disagree with the dock's.
+    Diff,
 }
 
 /// What to open, before the entity exists.
@@ -223,6 +330,37 @@ pub(crate) enum TabKind {
     Agent(AgentKind),
     Editor,
     Chat,
+    /// The diff review surface as a center tab (`DiffLocation::Tab`).
+    Diff,
+}
+
+/// The tab being dragged, and the pane set it came from.
+///
+/// Carries the worktree key so a drop can refuse a tab from somewhere else: tab
+/// sets are per worktree, and a terminal tab holds a pty spawned in that
+/// worktree's directory. Moving one across would leave a running agent pointed
+/// at a tree it was never started in.
+pub(crate) struct DraggedTab {
+    key: String,
+    id: u64,
+}
+
+/// `ids` with `dragged` moved to `onto`'s position. Unknown or identical ids
+/// leave the order untouched.
+fn reordered(ids: &[u64], dragged: u64, onto: u64) -> Vec<u64> {
+    let mut out = ids.to_vec();
+    if dragged == onto {
+        return out;
+    }
+    let (Some(from), Some(to)) = (
+        out.iter().position(|i| *i == dragged),
+        out.iter().position(|i| *i == onto),
+    ) else {
+        return out;
+    };
+    let id = out.remove(from);
+    out.insert(to, id);
+    out
 }
 
 pub(crate) struct Tab {
@@ -245,6 +383,7 @@ impl Tab {
         match &self.content {
             TabContent::Editor(_) => K::Editor,
             TabContent::Chat(_) => K::Chat,
+            TabContent::Diff => K::Diff,
             TabContent::Terminal(_) => match &self.agent {
                 Some(a) => K::Agent(a.clone()),
                 None => K::Shell,
@@ -379,6 +518,8 @@ pub(crate) enum Drag {
     Sidebar,
     /// Right diff panel width. Grows leftward, so the delta is negated.
     DiffPanel,
+    /// File-list column width inside the two-pane diff surface.
+    DiffList,
 }
 
 /// A splitter drag in progress.
@@ -408,6 +549,14 @@ pub(crate) struct CardMenu {
     id: String,
     x: Pixels,
     y: Pixels,
+}
+
+/// A pending "you tried to edit a diff line — where should it open?" question.
+pub(crate) struct EditPrompt {
+    file: String,
+    /// The working-file line to land on, or `None` when the row was a deletion
+    /// with nothing after it to land on.
+    line: Option<u32>,
 }
 
 /// State of the "keep or close your terminals?" prompt shown on quit.
@@ -486,6 +635,14 @@ pub struct HarnessWorkspace {
     /// usually means comparing two files, and collapsing one to look at
     /// another loses your place in the first.
     expanded: std::collections::HashSet<String>,
+    /// The file whose diff the right column shows, in the two-pane layout.
+    ///
+    /// Separate from `expanded` on purpose. The accordion needs a SET — reviewing
+    /// usually means comparing two files, and collapsing one to open another
+    /// loses your place in the first. Two-pane needs exactly ONE. Sharing a
+    /// field would have cost the accordion its multi-expand; keeping both means
+    /// neither layout has to be reconciled when the other is in use.
+    diff_focus: Option<String>,
     /// Selected diff rows: which file, and an inclusive row range within that
     /// file's body. Scoped per file because indices restart in each body.
     diff_selection: Option<(String, usize, usize)>,
@@ -500,6 +657,15 @@ pub struct HarnessWorkspace {
     clearing_review: bool,
     /// The settings screen (⌘, or the gear). Transient, never persisted.
     settings_open: bool,
+    /// Which Settings pane is showing. Not persisted: reopening Settings should
+    /// land where the page starts, not where you happened to leave it.
+    settings_section: SettingsSection,
+    /// The requirements screen is open. Not dismissible while a Required tool
+    /// is missing — see `preflight::blocked`.
+    preflight_open: bool,
+    /// Last probe result. Re-run by the screen's Re-check button, so installing
+    /// a tool does not mean restarting the app.
+    preflight: Vec<crate::preflight::Check>,
     /// The conductor pet: message shown, expiry, and which beat of the
     /// two-pose arm cycle it is on.
     pet: Option<(String, std::time::Instant)>,
@@ -533,6 +699,9 @@ pub struct HarnessWorkspace {
     /// The quit confirmation is open (keep vs. close terminals). Present only
     /// while the user is deciding; carries the "remember my choice" checkbox.
     close_prompt: Option<ClosePrompt>,
+    /// The open "open this file to edit it?" question, raised when the user
+    /// tries to type into a diff.
+    edit_prompt: Option<EditPrompt>,
     pending_delete: Option<String>,
     note: String,
     forge_status: HashMap<String, BranchStatus>,
@@ -546,6 +715,30 @@ pub struct HarnessWorkspace {
     /// Watches the selected root's files so the diff panel keeps up with an
     /// agent's edits in near real time (retargeted on every selection change).
     diff_watch: crate::diff_watch::DiffWatcher,
+    /// Watches every repo's `.git` so the sidebar's ahead/behind/dirty badges
+    /// follow git itself, not just the structural mutations `refresh()` runs on.
+    git_watch: crate::git_watch::GitWatcher,
+    /// A live status recompute is in flight. Two overlapping passes would spawn
+    /// twice the git processes to agree on the same numbers, and the watcher can
+    /// fire far faster than git can answer.
+    status_pending: bool,
+    /// The selected root's standing against its own tracking branch, tagged with
+    /// the path it was measured in. Tagged rather than bare because the answer
+    /// arrives asynchronously and the user may have selected another worktree by
+    /// then — a push count from the previous selection is worse than none.
+    push_state: Option<(PathBuf, worktrees::PushState)>,
+    /// The push control is armed: the next click pushes. Cleared by selecting
+    /// anything else, so an armed button never survives the branch it was for.
+    push_armed: bool,
+    /// A push is running. The control shows it and stops accepting clicks —
+    /// git would reject the second one anyway, but only after the user has been
+    /// given two "pushing…" states to interpret.
+    pushing: bool,
+    /// A push-state probe is in flight (same reasoning as `status_pending`).
+    push_probe_pending: bool,
+    /// Parsed diff rows per file, for the life of the current diff. Rendering
+    /// takes `&self`, hence the `RefCell`; the view is single-threaded.
+    row_cache: std::cell::RefCell<HashMap<String, std::sync::Arc<Vec<DiffRow>>>>,
     /// Where the adapters materialize their extensions and shims.
     state_dir: PathBuf,
     prefs: Prefs,
@@ -560,6 +753,12 @@ pub struct HarnessWorkspace {
     /// focus drifts to the `"Harness"` root, which has neither, and the
     /// keystrokes silently no-op.
     editor_host_focus: FocusHandle,
+    /// Focus target for the diff surface. Needed because the surface listens for
+    /// keystrokes — typing over a selected line is one of the two ways to say
+    /// "I want to edit this" — and gpui delivers key events only along the
+    /// focus path. Without it a Diff tab would take focus nowhere and swallow
+    /// nothing, which reads as the trigger simply not working.
+    diff_surface_focus: FocusHandle,
     /// Latest resource sample driving the sidebar band; `None` until the first
     /// tick lands (and while CPU has no delta yet).
     resource: Option<crate::resource_monitor::Snapshot>,
@@ -680,6 +879,13 @@ impl HarnessWorkspace {
 
         let (diff_watch, diff_dirty_rx) = crate::diff_watch::DiffWatcher::new();
 
+        // Watched from the start, and retargeted by `refresh()` whenever the
+        // repo list changes. Every repo is watched at once, unlike the diff
+        // watch: a card for a repo you are not looking at is still on screen,
+        // and a badge is only worth showing if it is current.
+        let (mut git_watch, git_moved_rx) = crate::git_watch::GitWatcher::new();
+        git_watch.watch_repos(&repo_roots);
+
         let selection = data
             .repos
             .first()
@@ -711,6 +917,7 @@ impl HarnessWorkspace {
             new_task_repos,
             new_task_home,
             expanded: std::collections::HashSet::new(),
+            diff_focus: None,
             diff_selection: None,
             diff_selecting: false,
             review: crate::diff_review::ReviewNotes::load(
@@ -720,6 +927,11 @@ impl HarnessWorkspace {
             comment_draft: None,
             clearing_review: false,
             settings_open: false,
+            settings_section: SettingsSection::Appearance,
+            // Probed once at startup; the screen opens below if this machine is
+            // missing something that blocks, or if it has never been shown.
+            preflight_open: false,
+            preflight: Vec::new(),
             pet: None,
             pet_pose: false,
             rebinding: None,
@@ -736,6 +948,7 @@ impl HarnessWorkspace {
             menu: None,
             tab_menu: None,
             close_prompt: None,
+            edit_prompt: None,
             pending_delete: None,
             note: String::new(),
             forge_status: HashMap::new(),
@@ -744,6 +957,13 @@ impl HarnessWorkspace {
             _poller: Some(poller),
             status_source,
             diff_watch,
+            git_watch,
+            status_pending: false,
+            push_state: None,
+            push_armed: false,
+            pushing: false,
+            push_probe_pending: false,
+            row_cache: Default::default(),
             state_dir: data_dir.clone(),
             prefs,
             prefs_path,
@@ -752,6 +972,7 @@ impl HarnessWorkspace {
             tools: detect_tools(),
             focus_handle: cx.focus_handle(),
             editor_host_focus: cx.focus_handle(),
+            diff_surface_focus: cx.focus_handle(),
             resource: None,
             resource_history: crate::resource_monitor::History::new(RESOURCE_HISTORY),
             archived_repos,
@@ -759,6 +980,46 @@ impl HarnessWorkspace {
             pending_repo_trash: None,
         };
         this.ensure_pane(window, cx);
+        // What this machine can actually do, before the user infers it from an
+        // empty screen. Opens when something Required is missing (and then it
+        // cannot be dismissed), or once on a first ever launch — but never for
+        // an optional gap alone, because a screen that appears every morning
+        // because rust-analyzer is absent is a screen nobody reads.
+        this.preflight = crate::preflight::probe(crate::preflight::version_on_path);
+        let short: Vec<&str> = this
+            .preflight
+            .iter()
+            .filter(|c| c.missing())
+            .map(|c| c.name)
+            .collect();
+        log::info!(
+            "preflight: missing {short:?}, blocked={}, seen_before={}",
+            crate::preflight::blocked(&this.preflight),
+            this.prefs.seen_preflight
+        );
+        if crate::preflight::blocked(&this.preflight) || !this.prefs.seen_preflight {
+            this.preflight_open = true;
+        }
+        // Probe hook: open Settings at startup, optionally on a named pane
+        // (`HARNESS_PROBE_SETTINGS=Notifications`). ⌘, cannot be dispatched
+        // without a focused editor, so without this the settings layout is the
+        // one surface a headless run cannot assert anything about.
+        // Probe hook: resolve and play a sound the way the settings ▶ does, so
+        // "no sound came out" can be told apart from "the file was never found".
+        if let Some(id) = std::env::var_os("HARNESS_PROBE_SOUND") {
+            let id = id.to_string_lossy().to_string();
+            let resolved = crate::sounds::path(crate::sounds::resolve(&id));
+            log::info!("HARNESS_PROBE_SOUND: {id:?} -> {resolved:?}");
+            crate::sounds::preview(&id);
+        }
+        if let Some(want) = std::env::var_os("HARNESS_PROBE_SETTINGS") {
+            this.settings_open = true;
+            let want = want.to_string_lossy().to_string();
+            if let Some(s) = SettingsSection::ALL.iter().find(|s| s.label() == want) {
+                this.settings_section = *s;
+            }
+            log::info!("HARNESS_PROBE_SETTINGS: pane = {}", this.settings_section.label());
+        }
         // Restore persisted appearance (zed theme + fonts). main.rs already
         // installed the harness pair pre-window to avoid a theme flash; this
         // only does further work when prefs carry overrides.
@@ -915,23 +1176,79 @@ impl HarnessWorkspace {
         // poll cadence is the debounce — a burst of edits in one agent turn
         // collapses to one recompute per tick, and the `diff_gen` guard drops
         // any overlap. State-preserving so an in-progress review is not reset.
-        cx.spawn(async move |view, cx| {
-            loop {
-                match diff_dirty_rx.try_recv() {
-                    Ok(_) => {
-                        // Coalesce everything already queued this instant.
-                        while diff_dirty_rx.try_recv().is_ok() {}
-                        if view.update(cx, |ws, cx| ws.refresh_diff_live(cx)).is_err() {
-                            break;
-                        }
+        cx.spawn(async move |view, cx| loop {
+            match diff_dirty_rx.try_recv() {
+                Ok(_) => {
+                    // Coalesce everything already queued this instant.
+                    while diff_dirty_rx.try_recv().is_ok() {}
+                    // The same edit that moved the diff moved the selected
+                    // card's `~N`. Nothing else sees a plain unstaged write —
+                    // it touches no git file — so this signal is the only way
+                    // that badge tracks typing.
+                    if view
+                        .update(cx, |ws, cx| {
+                            ws.refresh_diff_live(cx);
+                            ws.refresh_status_live(cx);
+                        })
+                        .is_err()
+                    {
+                        break;
                     }
-                    Err(e) if e.is_empty() => {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(250))
-                            .await
-                    }
-                    Err(_) => break,
                 }
+                Err(e) if e.is_empty() => {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(250))
+                        .await
+                }
+                Err(_) => break,
+            }
+        })
+        .detach();
+
+        // Live sidebar badges: git moved under some repo's `.git`. Same drain
+        // shape as the diff watch, and the 250 ms cadence is again the debounce
+        // — a commit writes the index, a ref and often packed-refs, which is one
+        // recompute here rather than three.
+        cx.spawn(async move |view, cx| loop {
+            match git_moved_rx.try_recv() {
+                Ok(path) => {
+                    while git_moved_rx.try_recv().is_ok() {}
+                    log::debug!("git moved: {}", path.display());
+                    if view
+                        .update(cx, |ws, cx| {
+                            ws.refresh_status_live(cx);
+                            // A commit or a push moves what the push control
+                            // offers, and both land here.
+                            ws.refresh_push_state(cx);
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(e) if e.is_empty() => {
+                    cx.background_executor().timer(Duration::from_millis(250)).await
+                }
+                Err(_) => break,
+            }
+        })
+        .detach();
+
+        // Backstop. The watches above cover every git event and the selected
+        // worktree's edits; what neither sees is an agent writing files in a
+        // worktree you are not viewing, which changes that card's `~N` without
+        // touching git. Ten seconds is slow enough to be free on an idle app —
+        // the recompute runs off-thread and repaints only when a number moved.
+        cx.spawn(async move |view, cx| loop {
+            cx.background_executor().timer(Duration::from_secs(10)).await;
+            if view
+                .update(cx, |ws, cx| {
+                    ws.refresh_status_live(cx);
+                    ws.refresh_push_state(cx);
+                })
+                .is_err()
+            {
+                break;
             }
         })
         .detach();
@@ -1055,10 +1372,13 @@ impl Render for HarnessWorkspace {
                         ))
                     })
                     .child(self.render_center(&hx, window, cx))
-                    .when(self.prefs.diff_open, |d| {
-                        d.child(self.splitter(&hx, Drag::DiffPanel, cx))
-                            .child(self.render_diff_panel(&hx, cx))
-                    }),
+                    .when(
+                        self.prefs.diff_open && self.prefs.diff_location == DiffLocation::Dock,
+                        |d| {
+                            d.child(self.splitter(&hx, Drag::DiffPanel, cx))
+                                .child(self.render_diff_panel(&hx, cx))
+                        },
+                    ),
             )
             .children(self.render_zed_modal(cx))
             .children(self.render_pet(&hx, cx))
@@ -1067,8 +1387,22 @@ impl Render for HarnessWorkspace {
             // renders underneath it — "settings don't open" while the state
             // toggles perfectly. Absolute positioning takes it out of flow;
             // being last takes it to the top.
-            .when(self.settings_open, |d| {
-                d.child(self.render_settings(&hx, cx))
+            // Stacking order depends on whether the requirements screen is
+            // *blocking*, and getting this wrong is what made Settings look
+            // broken: an informational preflight rendered last covered a
+            // Settings the user had deliberately opened, backdrop and all, so
+            // ⌘, appeared to do nothing.
+            //
+            // A blocking screen must win over everything — there is nothing
+            // else worth interacting with. A dismissible one must not swallow
+            // a deliberate action; it waits underneath and is still there when
+            // Settings closes, because it has not been acknowledged yet.
+            .when(self.preflight_open && !crate::preflight::blocked(&self.preflight), |d| {
+                d.child(self.render_preflight(&hx, cx))
+            })
+            .when(self.settings_open, |d| d.child(self.render_settings(&hx, cx)))
+            .when(self.preflight_open && crate::preflight::blocked(&self.preflight), |d| {
+                d.child(self.render_preflight(&hx, cx))
             })
             // Drag tracking lives on the root so the pointer can leave the
             // 6px handle mid-drag without the resize stopping.
@@ -1089,7 +1423,20 @@ impl Render for HarnessWorkspace {
                 };
                 ws.close_tab(active, window, cx);
             }))
+            .on_action(cx.listener(|ws, _: &crate::FirstTimeChecks, _, cx| {
+                // Always re-probe on open: the point of reaching for it is
+                // usually that something changed since startup.
+                ws.preflight_open = true;
+                ws.rerun_preflight(cx);
+                cx.notify();
+            }))
             .on_action(cx.listener(|ws, _: &crate::OpenSettings, _, cx| {
+                // Refuse while a required tool is missing: Settings sits behind
+                // the blocking screen, so opening it would only mean a menu
+                // item that visibly does nothing.
+                if crate::preflight::blocked(&ws.preflight) {
+                    return;
+                }
                 ws.settings_open = !ws.settings_open;
                 cx.notify();
             }))
@@ -1169,7 +1516,7 @@ impl Render for HarnessWorkspace {
                             cx.listener(|ws, _, _, cx| ws.commit_comment(cx)),
                         ),
                 )
-                .child(self.render_comment_popover(&hx, &draft, cx));
+                .child(self.render_comment_popover(&hx, &draft, window, cx));
         }
 
         if let Some(x) = self.tab_menu {
@@ -1191,6 +1538,10 @@ impl Render for HarnessWorkspace {
                         ),
                 )
                 .child(self.render_tab_menu(&hx, x, cx));
+        }
+
+        if self.edit_prompt.is_some() {
+            root = root.child(self.render_edit_prompt(&hx, cx));
         }
 
         if self.close_prompt.is_some() {
@@ -1428,10 +1779,34 @@ fn tool_chip(hx: &HarnessTheme, label: &str, present: bool, required: bool) -> i
 /// Deliberately separate from `registry.json`: that file is *project state* the
 /// training loop reads (§6.4), and mixing window chrome into it would make a
 /// theme toggle look like a change to harvestable data.
+/// Where the diff surface is drawn. `Dock` is the right-hand panel this app
+/// shipped with; `Tab` moves it into the center tab strip, where it gets the
+/// whole window and the dock is not rendered at all.
+///
+/// One location, not two: a docked panel and a tab showing the same review
+/// would each need their own scroll and selection, and the two would disagree
+/// the moment either was touched.
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum DiffLocation {
+    #[default]
+    Dock,
+    Tab,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct Prefs {
     dark: bool,
+    /// Logical name of the notification sound (see `sounds`), never a
+    /// filename — the pref outlives the platform that resolves it.
+    #[serde(default = "default_notify_sound")]
+    notify_sound: String,
+    /// The requirements screen has been shown once. First launch shows it even
+    /// on a fully-equipped machine, so the tools the app leans on are named
+    /// before their absence has to be inferred from an empty screen.
+    #[serde(default)]
+    seen_preflight: bool,
     /// A zed theme name overriding the harness dark/light pair. `None` means
     /// the built-in pair selected by `dark`.
     #[serde(default)]
@@ -1467,6 +1842,12 @@ struct Prefs {
     collapsed: std::collections::BTreeSet<String>,
     sidebar_width: f32,
     diff_width: f32,
+    /// Where the diff surface lives (dock vs. center tab).
+    #[serde(default)]
+    diff_location: DiffLocation,
+    /// Width of the file-list column in the two-pane diff layout.
+    #[serde(default = "default_diff_list_width")]
+    diff_list_width: f32,
     sidebar_open: bool,
     diff_open: bool,
     /// Remembered answer to the "keep or close terminals on quit?" prompt.
@@ -1480,10 +1861,20 @@ fn default_true() -> bool {
     true
 }
 
+fn default_notify_sound() -> String {
+    crate::sounds::DEFAULT.to_string()
+}
+
+fn default_diff_list_width() -> f32 {
+    280.0
+}
+
 impl Default for Prefs {
     fn default() -> Self {
         Prefs {
             dark: true,
+            notify_sound: default_notify_sound(),
+            seen_preflight: false,
             zed_theme: None,
             font_ui: None,
             font_mono: None,
@@ -1494,6 +1885,8 @@ impl Default for Prefs {
             collapsed: Default::default(),
             sidebar_width: 280.0,
             diff_width: 340.0,
+            diff_location: DiffLocation::Dock,
+            diff_list_width: 280.0,
             sidebar_open: true,
             diff_open: true,
             close_terminals_on_exit: None,
@@ -1507,6 +1900,7 @@ impl Prefs {
     fn sanitized(mut self) -> Self {
         self.sidebar_width = self.sidebar_width.clamp(180.0, 640.0);
         self.diff_width = self.diff_width.clamp(220.0, 800.0);
+        self.diff_list_width = self.diff_list_width.clamp(160.0, 560.0);
         self
     }
 }
@@ -1730,7 +2124,10 @@ mod new_worktree_tests {
 
 #[cfg(test)]
 mod diff_render_tests {
-    use super::{DiffLineKind, NewWorktree, Prefs, readable_diff_lines};
+    use super::{
+        load_prefs, readable_diff_lines, reordered, save_prefs_to, target_line_for_row,
+        use_two_pane, DiffLineKind, DiffLocation, NewWorktree, Prefs, DIFF_TWO_PANE_MIN,
+    };
 
     /// Verbatim shape of the noise a new file produces — the case that
     /// prompted this: five metadata lines before any content.
@@ -1889,6 +2286,127 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
         .sanitized();
         assert!(huge.sidebar_width <= 640.0);
         assert!(huge.diff_width <= 800.0);
+    }
+
+    #[test]
+    fn dragging_a_tab_onto_another_puts_it_at_that_position() {
+        // Forward: 1 dropped onto 3 lands after the tabs it passed.
+        assert_eq!(reordered(&[1, 2, 3, 4], 1, 3), vec![2, 3, 1, 4]);
+        // Backward: 4 dropped onto 2 lands where 2 was.
+        assert_eq!(reordered(&[1, 2, 3, 4], 4, 2), vec![1, 4, 2, 3]);
+    }
+
+    #[test]
+    fn a_tab_dropped_on_itself_or_on_a_stranger_changes_nothing() {
+        // Both arise for real: a click gpui reports as a tiny drag, and a drop
+        // onto a strip belonging to a different worktree.
+        assert_eq!(reordered(&[1, 2, 3], 2, 2), vec![1, 2, 3]);
+        assert_eq!(reordered(&[1, 2, 3], 9, 2), vec![1, 2, 3]);
+        assert_eq!(reordered(&[1, 2, 3], 2, 9), vec![1, 2, 3]);
+        assert_eq!(reordered(&[], 1, 2), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn the_tab_is_always_two_pane_and_the_dock_only_when_wide_enough() {
+        // A tab fills the center, so it always has room; the dock can be dragged
+        // down to 220px, where two columns would leave neither readable.
+        assert!(use_two_pane(DiffLocation::Tab, 0.0));
+        assert!(!use_two_pane(DiffLocation::Dock, 340.0));
+        assert!(!use_two_pane(DiffLocation::Dock, DIFF_TWO_PANE_MIN - 1.0));
+        assert!(use_two_pane(DiffLocation::Dock, DIFF_TWO_PANE_MIN));
+        assert!(use_two_pane(DiffLocation::Dock, 800.0));
+    }
+
+    #[test]
+    fn an_added_or_context_row_targets_its_own_line() {
+        let rows = readable_diff_lines(
+            "diff --git a/x.rs b/x.rs\n@@ -1,2 +1,3 @@\n ctx\n+added\n ctx2\n",
+        );
+        let added = rows.iter().position(|r| r.kind == DiffLineKind::Added).unwrap();
+        assert_eq!(target_line_for_row(&rows, added), rows[added].number);
+        let ctx = rows.iter().position(|r| r.kind == DiffLineKind::Context).unwrap();
+        assert_eq!(target_line_for_row(&rows, ctx), rows[ctx].number);
+    }
+
+    #[test]
+    fn a_removed_row_targets_the_next_line_that_still_exists() {
+        // A removed row carries its OLD file line number, which does not exist
+        // in the working file. Jumping to it would land on an unrelated line and
+        // look like the feature simply picked the wrong place.
+        let rows = readable_diff_lines(
+            "diff --git a/x.rs b/x.rs\n@@ -1,3 +1,2 @@\n keep\n-gone\n after\n",
+        );
+        let removed = rows.iter().position(|r| r.kind == DiffLineKind::Removed).unwrap();
+        let after = rows
+            .iter()
+            .enumerate()
+            .find(|(i, r)| *i > removed && r.kind == DiffLineKind::Context)
+            .map(|(_, r)| r.number)
+            .unwrap();
+        assert_eq!(target_line_for_row(&rows, removed), after);
+    }
+
+    #[test]
+    fn a_trailing_run_of_removed_rows_targets_nothing() {
+        // Deleting the tail of a file leaves no following line to jump to.
+        // Opening the file with no jump is right; guessing a line is not.
+        let rows = readable_diff_lines(
+            "diff --git a/x.rs b/x.rs\n@@ -1,3 +1,1 @@\n keep\n-gone\n-also gone\n",
+        );
+        let removed = rows.iter().position(|r| r.kind == DiffLineKind::Removed).unwrap();
+        assert_eq!(target_line_for_row(&rows, removed), None);
+    }
+
+    #[test]
+    fn a_header_or_hunk_break_targets_nothing_and_an_out_of_range_index_is_safe() {
+        let rows = readable_diff_lines("diff --git a/x.rs b/x.rs\n@@ -1,1 +1,1 @@\n keep\n");
+        assert_eq!(target_line_for_row(&rows, 0), None, "file header");
+        assert_eq!(target_line_for_row(&rows, 9999), None, "out of range");
+    }
+
+    #[test]
+    fn a_removed_row_does_not_target_a_line_in_the_next_file() {
+        // Two files in one diff: a deletion at the end of the first must not
+        // reach across the boundary and open the second file's first line.
+        let rows = readable_diff_lines(
+            "diff --git a/x.rs b/x.rs\n@@ -1,2 +1,1 @@\n keep\n-gone\n\
+diff --git a/y.rs b/y.rs\n@@ -1,1 +1,2 @@\n other\n+new\n",
+        );
+        let removed = rows.iter().position(|r| r.kind == DiffLineKind::Removed).unwrap();
+        assert_eq!(target_line_for_row(&rows, removed), None);
+    }
+
+    #[test]
+    fn a_prefs_file_without_a_diff_location_loads_as_the_dock() {
+        // The setting is new; every existing install must keep the dock it has.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        std::fs::write(
+            &path,
+            r#"{"dark":true,"sidebar_width":280.0,"diff_width":340.0,"sidebar_open":true,"diff_open":true}"#,
+        )
+        .unwrap();
+        let prefs = load_prefs(&path);
+        assert_eq!(prefs.diff_location, DiffLocation::Dock);
+        assert_eq!(prefs.diff_list_width, 280.0);
+    }
+
+    #[test]
+    fn the_diff_list_width_is_clamped_like_every_other_panel() {
+        // A hand-edited or truncated file must not render the list unusable.
+        let squashed = Prefs { diff_list_width: -10.0, ..Prefs::default() }.sanitized();
+        assert!(squashed.diff_list_width >= 160.0);
+        let huge = Prefs { diff_list_width: 9999.0, ..Prefs::default() }.sanitized();
+        assert!(huge.diff_list_width <= 560.0);
+    }
+
+    #[test]
+    fn the_diff_location_survives_a_save_load_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        let prefs = Prefs { diff_location: DiffLocation::Tab, ..Prefs::default() };
+        save_prefs_to(&path, &prefs);
+        assert_eq!(load_prefs(&path).diff_location, DiffLocation::Tab);
     }
 
     #[test]

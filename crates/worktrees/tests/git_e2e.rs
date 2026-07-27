@@ -230,3 +230,79 @@ fn exclude_locally_targets_the_common_dir_not_the_worktree_git_dir() {
     assert!(common.exists(), "must write the common dir's exclude file");
     assert!(fs::read_to_string(&common).unwrap().contains(".harness/"));
 }
+
+/// A clone with a bare origin — enough to exercise push against real git
+/// without a network. Returns (origin, clone).
+fn init_repo_with_origin(tmp: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let origin = tmp.join("origin.git");
+    fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "--bare", "-b", "main"]);
+
+    let work = tmp.join("app");
+    init_repo(&work);
+    git(&work, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(&work, &["push", "-u", "origin", "main"]);
+    (origin, work)
+}
+
+#[test]
+fn push_state_counts_against_the_branchs_own_upstream() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_origin, work) = init_repo_with_origin(tmp.path());
+    let g = GitWorktrees::new(SystemRunner);
+
+    // Fully pushed: nothing to offer, and the upstream is known.
+    let st = g.push_state(&work, "origin/main");
+    assert_eq!(st.upstream.as_deref(), Some("origin/main"));
+    assert_eq!(st.unpushed, 0);
+
+    fs::write(work.join("a.txt"), "a\n").unwrap();
+    git(&work, &["add", "."]);
+    git(&work, &["commit", "-m", "one"]);
+    assert_eq!(g.push_state(&work, "origin/main").unpushed, 1);
+
+    // Push, and the offer goes away.
+    g.push(&work, None).unwrap();
+    assert_eq!(g.push_state(&work, "origin/main").unpushed, 0);
+}
+
+#[test]
+fn a_never_published_branch_reports_no_upstream_and_publishes_with_u() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_origin, work) = init_repo_with_origin(tmp.path());
+    let g = GitWorktrees::new(SystemRunner);
+
+    let wt = tmp.path().join("wt");
+    g.add_worktree(&work, &wt, "feat/push", None).unwrap();
+    fs::write(wt.join("b.txt"), "b\n").unwrap();
+    git(&wt, &["add", "."]);
+    git(&wt, &["commit", "-m", "two"]);
+
+    // No upstream yet, so the count falls back to "what publishing would send".
+    let st = g.push_state(&wt, "origin/main");
+    assert_eq!(st.upstream, None, "an unpublished branch has no tracking ref");
+    assert_eq!(st.unpushed, 1);
+    assert_eq!(g.default_remote(&wt).as_deref(), Some("origin"));
+
+    g.push(&wt, Some(("origin", "feat/push"))).unwrap();
+
+    // Publishing must also *record* the upstream — otherwise the next push
+    // would still look like a first publication.
+    let after = g.push_state(&wt, "origin/main");
+    assert_eq!(after.upstream.as_deref(), Some("origin/feat/push"));
+    assert_eq!(after.unpushed, 0);
+}
+
+#[test]
+fn push_state_is_zero_in_a_repo_with_no_remote() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_root = tmp.path().join("solo");
+    init_repo(&repo_root);
+    let g = GitWorktrees::new(SystemRunner);
+
+    // `fallback` cannot resolve either, so nothing is offered rather than an
+    // error surfacing in the header.
+    let st = g.push_state(&repo_root, "origin/main");
+    assert_eq!(st, worktrees::PushState::default());
+    assert_eq!(g.default_remote(&repo_root), None);
+}

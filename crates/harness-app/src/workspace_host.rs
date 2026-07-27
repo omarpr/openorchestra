@@ -55,7 +55,8 @@ pub fn app_state(cx: &mut App) -> Arc<AppState> {
         return existing;
     }
 
-    let fs = Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
+    let fs: Arc<dyn fs::Fs> =
+        Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
     let mut registry = language::LanguageRegistry::new(cx.background_executor().clone());
     // Language servers need somewhere to live even when they are NOT
     // downloaded: the adapter consults this directory before falling back to a
@@ -91,7 +92,7 @@ pub fn app_state(cx: &mut App) -> Arc<AppState> {
         client,
         user_store,
         workspace_store,
-        fs,
+        fs: fs.clone(),
         build_window_options: |_, _| Default::default(),
         // A REAL node runtime, pointed at the system node (already a hard
         // requirement for pi and the hook shims, R4). This is what brings the
@@ -113,6 +114,13 @@ pub fn app_state(cx: &mut App) -> Arc<AppState> {
         },
         session,
     });
+    // AppState holds an `fs` for Projects, but zed UI also reads
+    // `<dyn Fs>::global` — e.g. DiffStyleControls writes
+    // `editor.diff_view_style` through `update_settings_file` when you click
+    // Unified/Split. Without this, that click panics inside AppKit's mouse-up
+    // handler (`panic_cannot_unwind`) and aborts the process. Same class of
+    // missing-global crash as LanguageModelRegistry in main.rs.
+    <dyn fs::Fs>::set_global(fs, cx);
     AppState::set_global(state.clone(), cx);
     state
 }
@@ -205,8 +213,15 @@ pub fn workspace_for(
                 cx.new(git_ui::branch_diff::BranchDiffToolbar::new);
             let markdown_preview_button =
                 cx.new(|_| crate::markdown_preview_button::MarkdownPreviewButton::new(workspace));
+            let breadcrumbs = cx.new(|_| breadcrumbs::Breadcrumbs::new());
             pane.update(cx, |pane, cx| {
                 pane.toolbar().update(cx, |toolbar, cx| {
+                    // FIRST, and PrimaryLeft. This is what pushes the Markdown
+                    // preview eye — and anything else right-hand — to the right
+                    // edge: zed's Toolbar right-aligns its PrimaryRight group
+                    // with `justify_between`, which needs a left sibling to
+                    // justify against. See the Cargo.toml note.
+                    toolbar.add_item(breadcrumbs, window, cx);
                     let buffer_search_bar = cx.new(|cx| {
                         search::BufferSearchBar::new(Some(languages), window, cx)
                     });
@@ -546,6 +561,107 @@ async fn probe_editor_keys(hosted: &Entity<Workspace>, cx: &mut gpui::AsyncWindo
     let comma = gpui::Keystroke::parse("cmd-,").expect("parses");
     let _ = cx.update(|window, cx| window.dispatch_keystroke(comma, cx));
     cx.background_executor().timer(pause).await;
+}
+
+/// Synthesize a left click at `x`,`y` in window coordinates.
+///
+/// The settings ▶ could not be tested any other way: every other probe drives
+/// state directly, and "does the click reach the handler" is precisely the
+/// question state cannot answer. `HARNESS_PROBE_CLICK=x,y` aims it.
+pub fn probe_click(x: f32, y: f32, window: &mut Window, cx: &mut App) {
+    let position = gpui::point(gpui::px(x), gpui::px(y));
+    let down = gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+        button: gpui::MouseButton::Left,
+        position,
+        modifiers: Default::default(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    let up = gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+        button: gpui::MouseButton::Left,
+        position,
+        modifiers: Default::default(),
+        click_count: 1,
+    });
+    log::info!("HARNESS_PROBE_CLICK: clicking at {x},{y}");
+    window.dispatch_event(down, cx);
+    window.dispatch_event(up, cx);
+}
+
+/// Open `rel` (worktree-relative to `root`) in a hosted workspace, putting the
+/// caret on `line` when there is one.
+///
+/// The same recipe `probe_open` proved, promoted to a real entry point: a
+/// `RelPath` into a `ProjectPath` into `Workspace::open_path`, then a selection
+/// change so the file opens *where the user was looking* rather than at line 1.
+/// Reaching this from the diff panel is the whole point — a diff row you want
+/// to change is useless if the editor drops you at the top of the file.
+///
+/// `root` is taken rather than read off the project because a workspace created
+/// moments ago HAS no worktree yet: `project_for` starts `find_or_create_worktree`
+/// and detaches it. Asking `visible_worktrees` for the id synchronously is what
+/// made "New editor tab" open an empty editor — the tab appeared, the file
+/// silently went nowhere, and the only trace was a warn line. Re-requesting the
+/// same root joins that in-flight creation (zed dedupes by path) and resolves
+/// immediately once the worktree is registered, so both answers to the edit
+/// prompt land on the file.
+pub fn open_file_at(
+    hosted: &Entity<Workspace>,
+    root: &Path,
+    rel: &str,
+    line: Option<u32>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Ok(parsed) = util::rel_path::RelPath::new(Path::new(rel), util::paths::PathStyle::local())
+    else {
+        log::warn!("open_file_at: {rel:?} is not a worktree-relative path");
+        return;
+    };
+    let parsed: Arc<util::rel_path::RelPath> = parsed.as_ref().into();
+
+    let worktree = hosted.update(cx, |ws, cx| {
+        ws.project()
+            .update(cx, |p, cx| p.find_or_create_worktree(root, true, cx))
+    });
+    let hosted = hosted.clone();
+
+    window
+        .spawn(cx, async move |cx| {
+            let (worktree, _) = worktree.await?;
+            let task = hosted.update_in(cx, |ws, window, cx| {
+                let path = project::ProjectPath {
+                    worktree_id: worktree.read(cx).id(),
+                    path: parsed,
+                };
+                ws.open_path(path, None, true, window, cx)
+            })?;
+            let item = task.await?;
+            cx.update(|window, cx| {
+                let Some(editor) = item.act_as::<editor::Editor>(cx) else {
+                    return;
+                };
+                if let Some(line) = line {
+                    editor.update(cx, |editor, cx| {
+                        // 1-based in the diff gutter, 0-based in the buffer.
+                        let row = line.saturating_sub(1);
+                        editor.change_selections(
+                            editor::SelectionEffects::default(),
+                            window,
+                            cx,
+                            |s| {
+                                s.select_ranges([
+                                    language::Point::new(row, 0)..language::Point::new(row, 0),
+                                ]);
+                            },
+                        );
+                    });
+                }
+                window.focus(&editor.focus_handle(cx), cx);
+            })?;
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
 }
 
 /// Open one file in a hosted workspace and report the pane's item count.

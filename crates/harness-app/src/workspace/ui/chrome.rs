@@ -27,23 +27,26 @@ impl HarnessWorkspace {
                 cx.notify();
             }));
 
-        let diff_toggle = div()
-            .id("toggle-diff")
-            .flex_none()
-            .px_2()
-            .py_0p5()
-            .rounded_md()
-            .text_xs()
-            .text_color(if self.prefs.diff_open { hx.tx1 } else { hx.tx2 })
-            .cursor_pointer()
-            .tooltip(tip("Toggle diff panel"))
-            .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
-            .child("diff ▤")
-            .on_click(cx.listener(|ws, _, _, cx| {
-                ws.prefs.diff_open = !ws.prefs.diff_open;
-                ws.save_prefs(cx);
-                cx.notify();
-            }));
+        // Dock mode only. The button is a visibility toggle for a dock, and in
+        // Tab mode there is no dock to toggle: the diff is a tab like any other,
+        // opened from ＋ and closed with its ✕. A second control up here would
+        // be a permanent "open the diff tab" button that no other tab kind has,
+        // which reads as chrome for a mode that is not switched on.
+        let diff_toggle = (self.prefs.diff_location == DiffLocation::Dock).then(|| {
+            div()
+                .id("toggle-diff")
+                .flex_none()
+                .px_2()
+                .py_0p5()
+                .rounded_md()
+                .text_xs()
+                .text_color(if self.prefs.diff_open { hx.tx1 } else { hx.tx2 })
+                .cursor_pointer()
+                .tooltip(tip("Toggle diff panel"))
+                .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
+                .child("diff ▤")
+                .on_click(cx.listener(|ws, _, window, cx| ws.toggle_diff(window, cx)))
+        });
 
         div()
             .flex()
@@ -54,7 +57,8 @@ impl HarnessWorkspace {
             .bg(hx.bg0)
             .border_b_1()
             .border_color(hx.border)
-            // Left: the sidebar toggle. Center: title (flex_1). Right: diff.
+            // Left: the sidebar toggle. Center: title (flex_1). Right: diff, in
+            // Dock mode only.
             .child(sidebar_toggle)
             .child(
                 div()
@@ -67,7 +71,7 @@ impl HarnessWorkspace {
                     .child(div().text_xs().text_color(hx.tx2).child("·"))
                     .child(div().text_xs().font_family(hx.font_mono).text_color(hx.tx1).child(branch)),
             )
-            .child(diff_toggle)
+            .children(diff_toggle)
     }
 
     /// The conductor pet: a small maestro who appears with each notification

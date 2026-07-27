@@ -276,6 +276,7 @@ impl HarnessWorkspace {
             &repo,
             &id,
             crate::notifier::AgentAlert::NeedsAttention,
+            &self.prefs.notify_sound,
         );
     }
 
@@ -309,6 +310,7 @@ impl HarnessWorkspace {
             &repo,
             &id,
             crate::notifier::AgentAlert::Finished,
+            &self.prefs.notify_sound,
         );
     }
 
@@ -570,6 +572,9 @@ impl HarnessWorkspace {
                     return;
                 }
             },
+            // Nothing to construct: the surface reads state the view already
+            // holds, so the tab is a marker saying where to draw it.
+            TabKind::Diff => (TabContent::Diff, "⑂ diff".to_string()),
             TabKind::Chat => {
                 let path = r.path.clone();
                 (
@@ -601,6 +606,176 @@ impl HarnessWorkspace {
         self.focus_active_pane(window, cx);
         self.save_panes();
         cx.notify();
+    }
+
+    /// The user tried to edit a diff line. A diff is a picture of a change, not
+    /// the file, so the only useful response is to take them somewhere they can
+    /// actually type.
+    ///
+    /// With no editor open there is no choice to make — open one. With editors
+    /// already open, ask: dropping the file into one of several tabs the user
+    /// did not name is a guess, and a wrong guess scrolls a file they were
+    /// reading out from under them.
+    pub(crate) fn request_edit(
+        &mut self,
+        file: String,
+        line: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // A deleted file has nothing on disk to open. Say so rather than
+        // raising a question whose every answer fails.
+        if self
+            .diff
+            .files
+            .iter()
+            .any(|f| f.path == file && f.change == Change::Deleted)
+        {
+            self.note = format!("{file} is deleted in this branch");
+            cx.notify();
+            return;
+        }
+        if self.editor_tab_ids().is_empty() {
+            self.open_in_editor(file, line, true, window, cx);
+        } else {
+            self.edit_prompt = Some(EditPrompt { file, line });
+            cx.notify();
+        }
+    }
+
+    /// Ids of this worktree's editor tabs, in strip order.
+    pub(crate) fn editor_tab_ids(&self) -> Vec<u64> {
+        let Some(r) = self.resolve() else { return Vec::new() };
+        let Some(pane) = self.panes.get(&r.key) else { return Vec::new() };
+        pane.tabs
+            .iter()
+            .filter(|t| matches!(t.content, TabContent::Editor(_)))
+            .map(|t| t.id)
+            .collect()
+    }
+
+    /// Open `file` at `line` in an editor tab: a fresh one when `new_tab`, else
+    /// the last existing one. Either way the center switches to it — opening a
+    /// file in a tab the user cannot see is indistinguishable from having done
+    /// nothing at all.
+    pub(crate) fn open_in_editor(
+        &mut self,
+        file: String,
+        line: Option<u32>,
+        new_tab: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.edit_prompt = None;
+        if new_tab {
+            self.open_tab(TabKind::Editor, window, cx);
+        } else if let Some(id) = self.editor_tab_ids().last().copied() {
+            let Some(r) = self.resolve() else { return };
+            if let Some(pane) = self.panes.get_mut(&r.key) {
+                pane.active = id;
+            }
+        }
+        let Some(r) = self.resolve() else { return };
+        let hosted = self.panes.get(&r.key).and_then(|p| {
+            p.tabs
+                .iter()
+                .find(|t| t.id == p.active)
+                .and_then(|t| match &t.content {
+                    TabContent::Editor(ws) => Some(ws.clone()),
+                    _ => None,
+                })
+        });
+        let Some(hosted) = hosted else {
+            // open_tab logs the real cause (a project that would not open);
+            // this is the user-facing half.
+            self.note = "could not open an editor".to_string();
+            cx.notify();
+            return;
+        };
+        crate::workspace_host::open_file_at(&hosted, &r.path, &file, line, window, cx);
+        self.save_panes();
+        cx.notify();
+    }
+
+    /// Show or hide the diff dock.
+    ///
+    /// `Dock` mode only, which is why this takes no view of `diff_location`: the
+    /// top-bar button that calls it renders only in that mode. In `Tab` mode the
+    /// diff is an ordinary tab — opened from ＋, closed with its ✕ — and there
+    /// is no dock whose visibility could be toggled.
+    pub(crate) fn toggle_diff(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.prefs.diff_open = !self.prefs.diff_open;
+        self.save_prefs(cx);
+        cx.notify();
+    }
+
+    /// Move the diff surface between the dock and the tab strip.
+    ///
+    /// Switching to `Dock` closes every open Diff tab across all live panes: a
+    /// tab drawing a surface that has moved elsewhere is a tab that renders
+    /// nothing, and leaving one behind would look like the setting half-worked.
+    pub(crate) fn set_diff_location(
+        &mut self,
+        location: DiffLocation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.prefs.diff_location == location {
+            return;
+        }
+        self.prefs.diff_location = location;
+        if location == DiffLocation::Dock {
+            let keys: Vec<String> = self.panes.keys().cloned().collect();
+            for key in keys {
+                let Some(pane) = self.panes.get_mut(&key) else { continue };
+                let closing: Vec<u64> = pane
+                    .tabs
+                    .iter()
+                    .filter(|t| matches!(t.content, TabContent::Diff))
+                    .map(|t| t.id)
+                    .collect();
+                if closing.is_empty() {
+                    continue;
+                }
+                pane.tabs.retain(|t| !closing.contains(&t.id));
+                if closing.contains(&pane.active) {
+                    // Prefer the tab to the left, the way close_tab does.
+                    pane.active = pane.tabs.last().map(|t| t.id).unwrap_or(0);
+                }
+            }
+            // A worktree left with no tabs is a dead end; give it a shell back,
+            // the same guarantee close_tab makes.
+            if self
+                .resolve()
+                .and_then(|r| self.panes.get(&r.key))
+                .is_some_and(|p| p.tabs.is_empty())
+            {
+                self.open_tab(TabKind::Shell, window, cx);
+            }
+            // Moving the diff back to the dock should also show it there.
+            self.prefs.diff_open = true;
+            self.save_panes();
+        }
+        self.save_prefs(cx);
+        self.focus_active_pane(window, cx);
+        cx.notify();
+    }
+
+    /// Move a tab within its own pane set, then persist the new order.
+    ///
+    /// Sorts the existing tabs rather than rebuilding them, so the live
+    /// entities — a pty and the process on the other end of it — travel with
+    /// their tab instead of being dropped and respawned.
+    pub(crate) fn move_tab(&mut self, key: &str, dragged: u64, onto: u64) {
+        let Some(pane) = self.panes.get_mut(key) else { return };
+        let ids: Vec<u64> = pane.tabs.iter().map(|t| t.id).collect();
+        let order = reordered(&ids, dragged, onto);
+        if order == ids {
+            return;
+        }
+        pane.tabs
+            .sort_by_key(|t| order.iter().position(|i| *i == t.id).unwrap_or(usize::MAX));
+        self.save_panes();
     }
 
     /// Close a tab, dropping whatever it held — a terminal's pty and its
@@ -685,6 +860,7 @@ impl HarnessWorkspace {
                     }
                 }
                 TabContent::Chat(c) => c.read(cx).focus_handle(cx),
+                TabContent::Diff => self.diff_surface_focus.clone(),
             };
             window.focus(&handle, cx);
         }
@@ -886,11 +1062,18 @@ impl HarnessWorkspace {
     /// watcher at the newly-selected root.
     pub(crate) fn recompute_diff(&mut self, cx: &mut Context<Self>) {
         self.expanded.clear();
+        self.diff_focus = None;
         self.md_preview = None;
         if let Some(r) = self.resolve() {
             // Keep the live watch pointed at whatever the diff panel shows.
             self.diff_watch.watch(&r.path);
         }
+        // A push offer belongs to one branch. Carrying an armed control — or a
+        // count — across a selection change would let a click aimed at one
+        // branch push another.
+        self.push_armed = false;
+        self.push_state = None;
+        self.refresh_push_state(cx);
         self.spawn_diff_compute(cx);
     }
 
@@ -902,12 +1085,273 @@ impl HarnessWorkspace {
         self.spawn_diff_compute(cx);
     }
 
+    /// Recompute every card's ahead/behind/dirty off the UI thread and merge the
+    /// answers back in.
+    ///
+    /// Separate from `refresh()`, which rebuilds the whole view model — registry
+    /// included — with synchronous git calls on the render thread. That is fine
+    /// for a mutation the user just asked for, and unacceptable on a watcher
+    /// signal: `git status` on a large tree takes long enough to drop frames,
+    /// and a build can fire the watcher repeatedly. This path touches only the
+    /// numbers on the badges, so the cards, the selection and the registry are
+    /// left exactly as they are.
+    pub(crate) fn refresh_status_live(&mut self, cx: &mut Context<Self>) {
+        if self.status_pending {
+            return;
+        }
+        // Every card, main rows included — each with the compare ref its own
+        // repo resolved, so a worktree is never measured against another repo's
+        // upstream.
+        let mut targets: Vec<(PathBuf, String)> = Vec::new();
+        for repo in &self.data.repos {
+            targets.push((repo.repo_root.clone(), repo.compare_ref.clone()));
+            for wt in &repo.worktrees {
+                targets.push((wt.path.clone(), repo.compare_ref.clone()));
+            }
+        }
+        if targets.is_empty() {
+            return;
+        }
+        self.status_pending = true;
+
+        cx.spawn(async move |view, cx| {
+            let computed = cx
+                .background_spawn(async move {
+                    let git = GitWorktrees::new(SystemRunner);
+                    targets
+                        .into_iter()
+                        .map(|(path, compare_ref)| {
+                            let s = git.status(&path, Some(&compare_ref)).unwrap_or_default();
+                            (path, s.ahead, s.behind, s.dirty_files)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            view.update(cx, |ws, cx| {
+                ws.status_pending = false;
+                // Only re-render when a number actually moved. The backstop tick
+                // runs forever on an idle app, and an unconditional notify would
+                // repaint the window every few seconds for nothing.
+                if ws.apply_status(computed) {
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Re-probe the tool requirements, off the UI thread.
+    ///
+    /// Off-thread because probing spawns up to nine processes to ask each tool
+    /// its version, which is a visible stall on the render thread — and this
+    /// runs from a button the user presses right after installing something.
+    pub(crate) fn rerun_preflight(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |view, cx| {
+            let checks = cx
+                .background_spawn(async move {
+                    crate::preflight::probe(crate::preflight::version_on_path)
+                })
+                .await;
+            view.update(cx, |ws, cx| {
+                // Only the result changes here. Closing on a clean re-check
+                // would snatch the screen away at the exact moment it finally
+                // says everything passes — the one moment worth reading. It
+                // closes when the user says so, via Continue.
+                ws.preflight = checks;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Close the requirements screen and remember that it has been seen, so a
+    /// healthy machine is never shown it again unprompted.
+    pub(crate) fn dismiss_preflight(&mut self, cx: &mut Context<Self>) {
+        if crate::preflight::blocked(&self.preflight) {
+            return;
+        }
+        self.preflight_open = false;
+        if !self.prefs.seen_preflight {
+            self.prefs.seen_preflight = true;
+            self.save_prefs(cx);
+        }
+        cx.notify();
+    }
+
+    /// Probe the selected root's standing against its own tracking branch, off
+    /// the UI thread.
+    ///
+    /// Separate from `refresh_status_live` rather than folded into it, for two
+    /// reasons: it asks about one worktree (the one whose diff is on screen)
+    /// where that asks about every card, and it must run on selection change,
+    /// when the other pass may legitimately be mid-flight for the *previous*
+    /// selection and would skip this one on its `status_pending` guard.
+    pub(crate) fn refresh_push_state(&mut self, cx: &mut Context<Self>) {
+        if self.push_probe_pending {
+            return;
+        }
+        let Some(r) = self.resolve() else {
+            self.push_state = None;
+            return;
+        };
+        // A worktree's ahead/behind compares against the repo's default branch;
+        // that is the right fallback for a branch with no upstream, because it
+        // is what publishing would send.
+        let fallback = self
+            .data
+            .repos
+            .iter()
+            .find(|repo| r.path.starts_with(&repo.repo_root) || repo.repo_root == r.path)
+            .map(|repo| repo.compare_ref.clone())
+            .unwrap_or_else(|| "origin/HEAD".to_string());
+        let path = r.path.clone();
+        self.push_probe_pending = true;
+
+        cx.spawn(async move |view, cx| {
+            let probed = cx
+                .background_spawn(async move {
+                    let git = GitWorktrees::new(SystemRunner);
+                    let state = git.push_state(&path, &fallback);
+                    (path, state)
+                })
+                .await;
+            view.update(cx, |ws, cx| {
+                ws.push_probe_pending = false;
+                // Drop an answer for a selection the user has already left.
+                log::debug!(
+                    "push state {}: upstream={:?} unpushed={}",
+                    probed.0.display(),
+                    probed.1.upstream,
+                    probed.1.unpushed
+                );
+                if ws.resolve().is_some_and(|r| r.path == probed.0) && ws.push_state.as_ref() != Some(&probed) {
+                    ws.push_state = Some(probed);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The push control's two steps. The first click arms it — the label then
+    /// states the remote and the count, because "push" alone does not say where
+    /// — and the second runs git.
+    ///
+    /// A branch with no upstream is *published*: `push -u <remote> <branch>`,
+    /// which creates the remote branch and records the tracking ref so the next
+    /// push is an ordinary one.
+    pub(crate) fn push_branch(&mut self, cx: &mut Context<Self>) {
+        if self.pushing {
+            return;
+        }
+        let Some((_, state)) = self.push_state.clone() else { return };
+        let Some(r) = self.resolve() else { return };
+        if state.unpushed == 0 {
+            return;
+        }
+        if !self.push_armed {
+            self.push_armed = true;
+            cx.notify();
+            return;
+        }
+
+        // Publishing needs a remote to publish to; without one there is nothing
+        // honest to do, and git's own error would arrive seconds later.
+        let publish = match &state.upstream {
+            Some(_) => None,
+            None => match GitWorktrees::new(SystemRunner).default_remote(&r.path) {
+                Some(remote) => Some((remote, r.branch.clone())),
+                None => {
+                    self.push_armed = false;
+                    self.note = "no remote to publish to".to_string();
+                    cx.notify();
+                    return;
+                }
+            },
+        };
+
+        self.push_armed = false;
+        self.pushing = true;
+        self.note = String::new();
+        cx.notify();
+
+        let (path, count) = (r.path.clone(), state.unpushed);
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let git = GitWorktrees::new(SystemRunner);
+                    let publish = publish.as_ref().map(|(r, b)| (r.as_str(), b.as_str()));
+                    git.push(&path, publish)
+                })
+                .await;
+            view.update(cx, |ws, cx| {
+                ws.pushing = false;
+                ws.note = match result {
+                    // git says what it did on stderr; its own words beat ours,
+                    // and "Everything up-to-date" is worth seeing verbatim.
+                    Ok(out) => {
+                        let last = out.lines().last().unwrap_or("").trim().to_string();
+                        if last.is_empty() {
+                            format!("pushed {count} commit{}", if count == 1 { "" } else { "s" })
+                        } else {
+                            last
+                        }
+                    }
+                    Err(e) => format!("push failed: {e}"),
+                };
+                // Whatever happened, the counts on screen are now stale.
+                ws.refresh_push_state(cx);
+                ws.refresh_status_live(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Merge recomputed counts into the cards, keyed by path. Returns whether
+    /// anything changed.
+    ///
+    /// A path that no longer matches a card is dropped: the worktree was deleted
+    /// while its status was in flight, and `refresh()` has already rebuilt the
+    /// list without it.
+    fn apply_status(&mut self, computed: Vec<(PathBuf, usize, usize, usize)>) -> bool {
+        let mut changed = false;
+        let mut set = |ahead: &mut usize, behind: &mut usize, dirty: &mut usize, n: (usize, usize, usize)| {
+            if (*ahead, *behind, *dirty) != n {
+                (*ahead, *behind, *dirty) = n;
+                changed = true;
+            }
+        };
+        for (path, ahead, behind, dirty) in computed {
+            log::trace!("status {}: ↑{ahead} ↓{behind} ~{dirty}", path.display());
+            for repo in &mut self.data.repos {
+                if repo.repo_root == path {
+                    set(&mut repo.ahead, &mut repo.behind, &mut repo.dirty, (ahead, behind, dirty));
+                }
+            }
+            for task in &mut self.data.tasks {
+                for m in &mut task.members {
+                    if m.path == path {
+                        set(&mut m.ahead, &mut m.behind, &mut m.dirty, (ahead, behind, dirty));
+                    }
+                }
+                task.dirty = task.members.iter().map(|m| m.dirty).sum();
+            }
+        }
+        changed
+    }
+
     /// Spawn the off-thread git diff, discarding a result whose selection the
     /// user has since left (the `diff_gen` staleness guard).
     pub(crate) fn spawn_diff_compute(&mut self, cx: &mut Context<Self>) {
         let Some(r) = self.resolve() else {
             self.diff = worktrees::Diff::default();
             self.unified_diff = UnifiedDiff::default();
+            self.row_cache.borrow_mut().clear();
             self.diff_pending = false;
             cx.notify();
             return;
@@ -968,6 +1412,7 @@ impl HarnessWorkspace {
                         unified: computed.unified.clone(),
                     };
                     ws.unified_diff = computed;
+                    ws.row_cache.borrow_mut().clear();
                     ws.diff_pending = false;
                     cx.notify();
                 });
@@ -989,6 +1434,8 @@ impl HarnessWorkspace {
                 }
                 ws.diff = computed;
                 ws.unified_diff = UnifiedDiff::default();
+                // The parsed rows describe the diff that just went away.
+                ws.row_cache.borrow_mut().clear();
                 ws.diff_pending = false;
                 cx.notify();
             });
@@ -1074,6 +1521,7 @@ impl HarnessWorkspace {
             match kind {
                 K::Editor => self.open_tab(TabKind::Editor, window, cx),
                 K::Chat => self.open_tab(TabKind::Chat, window, cx),
+                K::Diff => self.open_tab(TabKind::Diff, window, cx),
                 K::Shell => self.restore_terminal_tab(key, id, None, &title, &live, window, cx),
                 K::Agent(a) => self.restore_terminal_tab(key, id, Some(a), &title, &live, window, cx),
             }

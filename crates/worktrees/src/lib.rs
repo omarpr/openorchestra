@@ -19,7 +19,9 @@ mod registry;
 mod runner;
 mod tasks;
 
-pub use git::{Change, Diff, DiffFile, GitError, GitStatus, GitWorktrees, WorktreeListEntry};
+pub use git::{
+    Change, Diff, DiffFile, GitError, GitStatus, GitWorktrees, PushState, WorktreeListEntry,
+};
 pub use hooks::{
     committed_hooks_path, local_hooks_path, merge_hooks_replace, HookEnv, HookPhase, HooksConfig,
     HooksError, HooksFile, TaskHooks,
