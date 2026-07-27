@@ -102,7 +102,17 @@ impl HarnessWorkspace {
                 return Some(crate::tmux::session_prefix(&format!("main:{}", repo.name)));
             }
             if let Some(w) = repo.worktrees.iter().find(|w| w.path == path) {
+                if let Some(tid) = &w.task_id {
+                    return Some(crate::tmux::session_prefix(&format!("task:{tid}")));
+                }
                 return Some(crate::tmux::session_prefix(&w.id));
+            }
+        }
+        for task in self.task_store.active() {
+            if let Some(home) = task.home_path() {
+                if home == path {
+                    return Some(crate::tmux::session_prefix(&format!("task:{}", task.id)));
+                }
             }
         }
         None
@@ -126,9 +136,14 @@ impl HarnessWorkspace {
                 session_prefix: crate::tmux::session_prefix(&main_key),
             });
             for w in &repo.worktrees {
+                let prefix = w
+                    .task_id
+                    .as_ref()
+                    .map(|tid| crate::tmux::session_prefix(&format!("task:{tid}")))
+                    .unwrap_or_else(|| crate::tmux::session_prefix(&w.id));
                 attributables.push(Attributable {
                     label: w.name.clone(),
-                    session_prefix: crate::tmux::session_prefix(&w.id),
+                    session_prefix: prefix,
                 });
             }
         }
@@ -316,16 +331,11 @@ impl HarnessWorkspace {
         let main_of = |r: &crate::data::RepoView| Resolved {
             key: format!("main:{}", r.name),
             path: r.repo_root.clone(),
+            editor_path: r.repo_root.clone(),
             agent_kind: None,
-            // Main's diff is its *uncommitted* work only (`git diff HEAD`), not
-            // the branch-vs-default review a worktree card shows. The main
-            // checkout often sits on a feature branch whose commits are all
-            // landed; diffing against the default branch then paints a huge diff
-            // over an already-committed tree, which reads as a bug. HEAD keeps
-            // the panel empty once everything is committed. (Ahead/behind badges
-            // still use RepoView.compare_ref — this only steers the diff.)
             compare_ref: "HEAD".to_string(),
             branch: r.head_branch.clone(),
+            task_id: None,
         };
         match &self.selection {
             Selection::Main(repo) => {
@@ -333,11 +343,18 @@ impl HarnessWorkspace {
                 Some(main_of(r))
             }
             Selection::Worktree(id) => {
+                // Prefer task selection when the worktree belongs to a task.
+                if let Some(entry) = self.manager.registry.get(id)
+                    && let Some(tid) = &entry.task_id
+                {
+                    return self.resolve_task(tid, Some(id));
+                }
                 for r in &self.data.repos {
                     if let Some(w) = r.worktrees.iter().find(|w| &w.id == id) {
                         return Some(Resolved {
                             key: id.clone(),
                             path: w.path.clone(),
+                            editor_path: w.path.clone(),
                             agent_kind: Some(
                                 self.manager
                                     .registry
@@ -347,12 +364,71 @@ impl HarnessWorkspace {
                             ),
                             compare_ref: r.compare_ref.clone(),
                             branch: w.branch.clone(),
+                            task_id: None,
                         });
                     }
                 }
                 Some(main_of(primary))
             }
+            Selection::Task {
+                task_id,
+                member_id,
+            } => self.resolve_task(task_id, member_id.as_deref()),
         }
+    }
+
+    fn resolve_task(&self, task_id: &str, member_id: Option<&str>) -> Option<Resolved> {
+        let task = self.task_store.get(task_id)?;
+        let home = task.home_member()?;
+        let focused = member_id
+            .and_then(|id| task.members.iter().find(|m| m.worktree_id == id))
+            .unwrap_or(home);
+        let compare_ref = self
+            .data
+            .repos
+            .iter()
+            .find(|r| r.name == focused.repo)
+            .map(|r| r.compare_ref.clone())
+            .unwrap_or_else(|| "HEAD".into());
+        Some(Resolved {
+            key: format!("task:{task_id}"),
+            path: home.path.clone(),
+            editor_path: focused.path.clone(),
+            agent_kind: Some(task.agent_kind.clone()),
+            compare_ref,
+            branch: home.branch.clone(),
+            task_id: Some(task_id.to_string()),
+        })
+    }
+
+    /// `HARNESS_*` for a resolved target, as `new-session -e` pairs.
+    ///
+    /// This is the same context hook scripts get, handed to the tmux session so
+    /// the pane's shell inherits it instead of having `export` lines typed into
+    /// it after setup runs. Empty for a target with no task: the vars describe a
+    /// task's worktree layout and mean nothing on a bare `main` checkout.
+    pub(crate) fn pane_env(&self, r: &Resolved) -> Vec<(String, String)> {
+        let Some(task_id) = &r.task_id else {
+            return Vec::new();
+        };
+        let Some(task) = self.task_store.get(task_id) else {
+            return Vec::new();
+        };
+        let Some(home) = task.home_member() else {
+            return Vec::new();
+        };
+        let Some(entry) = self.manager.registry.get(&home.worktree_id) else {
+            return Vec::new();
+        };
+        let env = worktrees::HookEnv {
+            repo_root: entry.repo_root.clone(),
+            worktree: home.path.clone(),
+            branch: home.branch.clone(),
+            task_slug: task.slug.clone(),
+            task_id: Some(task_id.clone()),
+            home_worktree: task.home_path().map(|p| p.to_path_buf()),
+        };
+        env.to_map().into_iter().collect()
     }
 
     pub(crate) fn ensure_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -484,6 +560,7 @@ impl HarnessWorkspace {
                 let session = self.has_tmux.then(|| crate::terminal_pane::TerminalSession {
                     name: crate::tmux::session_name(&r.key, tab_id),
                     attach_only: false,
+                    env: self.pane_env(&r),
                 });
                 (
                     TabContent::Terminal(
@@ -501,6 +578,7 @@ impl HarnessWorkspace {
                 let session = self.has_tmux.then(|| crate::terminal_pane::TerminalSession {
                     name: crate::tmux::session_name(&r.key, tab_id),
                     attach_only: false,
+                    env: self.pane_env(&r),
                 });
                 (
                     TabContent::Terminal(cx.new(|cx| {
@@ -509,7 +587,7 @@ impl HarnessWorkspace {
                     label,
                 )
             }
-            TabKind::Editor => match crate::workspace_host::workspace_for(&r.path, window, cx) {
+            TabKind::Editor => match crate::workspace_host::workspace_for(&r.editor_path, window, cx) {
                 Ok(hosted) => {
                     crate::workspace_host::probe(&hosted, window, cx);
                     // Our render tree hosts the modal overlay, so our render
@@ -520,7 +598,7 @@ impl HarnessWorkspace {
                 }
                 Err(e) => {
                     // Never fatal: the other tabs still work.
-                    log::warn!("could not open project for {}: {e}", r.path.display());
+                    log::warn!("could not open project for {}: {e}", r.editor_path.display());
                     self.note = format!("could not open project: {e}");
                     cx.notify();
                     return;
@@ -620,6 +698,7 @@ impl HarnessWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.exit_hooks_edit(window, cx);
         self.edit_prompt = None;
         if new_tab {
             self.open_tab(TabKind::Editor, window, cx);
@@ -988,7 +1067,21 @@ impl HarnessWorkspace {
             return;
         }
         let Some(r) = self.resolve() else { return };
-        let abs = r.path.join(file);
+        let abs = if let Some(uf) = self
+            .unified_diff
+            .files
+            .iter()
+            .find(|f| format!("{}/{}", f.repo, f.file.path) == file)
+        {
+            let Some(member) = self.manager.registry.get(&uf.member_id) else {
+                self.note = format!("worktree {} not found", uf.member_id);
+                cx.notify();
+                return;
+            };
+            member.path.join(&uf.file.path)
+        } else {
+            r.editor_path.join(file)
+        };
         self.md_preview = Some((
             file.to_string(),
             cx.new(|cx| crate::markdown_preview::MarkdownPreview::new(abs, cx)),
@@ -1272,11 +1365,14 @@ impl HarnessWorkspace {
                 if repo.repo_root == path {
                     set(&mut repo.ahead, &mut repo.behind, &mut repo.dirty, (ahead, behind, dirty));
                 }
-                for wt in &mut repo.worktrees {
-                    if wt.path == path {
-                        set(&mut wt.ahead, &mut wt.behind, &mut wt.dirty, (ahead, behind, dirty));
+            }
+            for task in &mut self.data.tasks {
+                for m in &mut task.members {
+                    if m.path == path {
+                        set(&mut m.ahead, &mut m.behind, &mut m.dirty, (ahead, behind, dirty));
                     }
                 }
+                task.dirty = task.members.iter().map(|m| m.dirty).sum();
             }
         }
         changed
@@ -1287,6 +1383,7 @@ impl HarnessWorkspace {
     pub(crate) fn spawn_diff_compute(&mut self, cx: &mut Context<Self>) {
         let Some(r) = self.resolve() else {
             self.diff = worktrees::Diff::default();
+            self.unified_diff = UnifiedDiff::default();
             self.row_cache.borrow_mut().clear();
             self.diff_pending = false;
             cx.notify();
@@ -1295,9 +1392,69 @@ impl HarnessWorkspace {
 
         self.diff_gen = self.diff_gen.wrapping_add(1);
         let generation = self.diff_gen;
-        let (path, compare_ref) = (r.path.clone(), r.compare_ref.clone());
         self.diff_pending = true;
 
+        if let Some(task_id) = r.task_id.clone() {
+            let members: Vec<(String, String, PathBuf, String)> = self
+                .task_store
+                .get(&task_id)
+                .map(|t| {
+                    t.members
+                        .iter()
+                        .map(|m| {
+                            let compare = self
+                                .data
+                                .repos
+                                .iter()
+                                .find(|r| r.name == m.repo)
+                                .map(|r| r.compare_ref.clone())
+                                .unwrap_or_else(|| "HEAD".into());
+                            (m.worktree_id.clone(), m.repo.clone(), m.path.clone(), compare)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            cx.spawn(async move |view, cx| {
+                let computed = cx
+                    .background_spawn(async move {
+                        UnifiedDiff::from_members(
+                            &GitWorktrees::new(SystemRunner),
+                            &members,
+                        )
+                    })
+                    .await;
+                let _ = view.update(cx, |ws, cx| {
+                    if ws.diff_gen != generation {
+                        return;
+                    }
+                    // Flatten into Diff for existing panel machinery. Keys stay
+                    // `repo/path` so multi-repo files remain distinct; the panel
+                    // groups by repo and shows the relative path under each.
+                    let mut files = Vec::new();
+                    for f in &computed.files {
+                        files.push(worktrees::DiffFile {
+                            path: format!("{}/{}", f.repo, f.file.path),
+                            change: f.file.change,
+                            adds: f.file.adds,
+                            dels: f.file.dels,
+                        });
+                    }
+                    ws.diff = worktrees::Diff {
+                        base: String::new(),
+                        files,
+                        unified: computed.unified.clone(),
+                    };
+                    ws.unified_diff = computed;
+                    ws.row_cache.borrow_mut().clear();
+                    ws.diff_pending = false;
+                    cx.notify();
+                });
+            })
+            .detach();
+            return;
+        }
+
+        let (path, compare_ref) = (r.path.clone(), r.compare_ref.clone());
         cx.spawn(async move |view, cx| {
             let computed = cx
                 .background_spawn(async move {
@@ -1305,11 +1462,11 @@ impl HarnessWorkspace {
                 })
                 .await;
             let _ = view.update(cx, |ws, cx| {
-                // Stale result: the user moved on while git was working.
                 if ws.diff_gen != generation {
                     return;
                 }
                 ws.diff = computed;
+                ws.unified_diff = UnifiedDiff::default();
                 // The parsed rows describe the diff that just went away.
                 ws.row_cache.borrow_mut().clear();
                 ws.diff_pending = false;
@@ -1439,7 +1596,13 @@ impl HarnessWorkspace {
         let mark = if alive { agent } else { None };
         let session = self
             .has_tmux
-            .then(|| crate::terminal_pane::TerminalSession { name, attach_only: alive });
+            .then(|| crate::terminal_pane::TerminalSession {
+                name,
+                attach_only: alive,
+                // Ignored when reattaching; a dead session is recreated here and
+                // should come back with the same environment a fresh tab gets.
+                env: self.pane_env(&r),
+            });
         // Restore never passes a command: a live session is reattached
         // (attach_only ignores it), a dead one is a plain shell.
         let content = TabContent::Terminal(cx.new(|cx| {

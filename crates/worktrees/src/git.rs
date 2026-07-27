@@ -160,6 +160,10 @@ impl<R: CommandRunner> GitWorktrees<R> {
         }
     }
 
+    pub fn runner(&self) -> &R {
+        &self.runner
+    }
+
     /// Run git in `cwd`, returning `Ok` only on exit 0.
     fn git_ok(&self, cwd: &Path, args: &[&str]) -> Result<CommandOutput, GitError> {
         let out = self

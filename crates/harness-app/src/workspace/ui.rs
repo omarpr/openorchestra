@@ -8,4 +8,6 @@ mod diff;
 mod diff_edit;
 mod preflight;
 mod settings;
-mod sidebar;
+/// `pub(crate)` for `SidebarSection` alone — its variant labels are the keys
+/// `Prefs::collapsed_sections` persists, so the prefs tests pin them.
+pub(crate) mod sidebar;

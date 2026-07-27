@@ -19,6 +19,7 @@ fn entry(repo: &str, slug: &str) -> WorktreeEntry {
         created_at: "2026-07-19T00:00:00Z".to_string(),
         archived: false,
         agent_kind: AgentKind::default(),
+        task_id: None,
     }
 }
 

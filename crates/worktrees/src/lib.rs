@@ -10,20 +10,34 @@
 //! - [`Manager`] — ties the two together for the create / archive / delete
 //!   lifecycle flows (§6.1 D6), keeping git and the registry in step.
 //!
-//! One task = one worktree = one branch (§6.1). Worktree dirs live under
+//! One task = one or more member worktrees (§6.1). Worktree dirs live under
 //! `<worktrees_root>/<repo>/<task_slug>`.
 
 mod git;
+mod hooks;
 mod registry;
 mod runner;
+mod tasks;
 
 pub use git::{
     Change, Diff, DiffFile, GitError, GitStatus, GitWorktrees, PushState, WorktreeListEntry,
+};
+pub use hooks::{
+    classify_hook_script, clear_local_hooks, committed_hooks_path, ensure_hook_script,
+    format_visible_setup_runner, hook_script_path, local_hooks_base, local_hooks_path,
+    local_scripts_dir, merge_hooks_replace, repo_hooks_base, repo_scripts_dir, shell_export_line,
+    visible_setup_shell_line, write_visible_setup_runner, HookEnv, HookLayer, HookPhase,
+    HookScriptPhase, HooksConfig, HooksError, HooksFile, TaskHooks,
 };
 pub use registry::{
     AVATAR_PALETTE_LEN, AgentKind, Avatar, Registry, RegistryError, RepoGroup, WorktreeEntry,
 };
 pub use runner::{CommandOutput, CommandRunner, SystemRunner};
+pub use tasks::{
+    agents_md_contents, archive_task, create_task, delete_task, migrate_worktrees_to_tasks,
+    write_home_agents_md_at, CreateTaskMember, CreateTaskRequest, Task, TaskError, TaskMember,
+    TaskStore,
+};
 
 use std::path::{Path, PathBuf};
 
@@ -135,10 +149,20 @@ impl<R: CommandRunner> Manager<R> {
             created_at: req.created_at,
             archived: false,
             agent_kind: req.agent_kind,
+            task_id: None,
         };
         self.registry.add(entry)?;
         self.registry.save()?;
         Ok(id)
+    }
+
+    /// Attach an entry to a task (registry-only).
+    pub fn set_task_id(&mut self, id: &str, task_id: Option<String>) -> Result<(), WorktreeError> {
+        self.registry
+            .get_mut(id)
+            .ok_or_else(|| WorktreeError::NotFound(id.to_string()))?
+            .task_id = task_id;
+        Ok(())
     }
 
     /// Archive: remove the worktree dir, keep the branch + registry entry

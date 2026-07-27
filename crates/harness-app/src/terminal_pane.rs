@@ -44,6 +44,10 @@ use crate::theme::theme;
 pub struct TerminalSession {
     pub name: String,
     pub attach_only: bool,
+    /// `HARNESS_*` for this worktree/task, handed to `new-session -e` so the
+    /// pane's shell and any hook script inherit them. Empty when the pane has
+    /// no task context (or on `attach_only`, where it cannot apply).
+    pub env: Vec<(String, String)>,
 }
 
 pub struct TerminalPane {
@@ -103,6 +107,7 @@ impl TerminalPane {
                     &self.worktree_root,
                     agent.as_ref().filter(|_| !sess.attach_only),
                     sess.attach_only,
+                    &sess.env,
                 );
                 (
                     Shell::WithArguments {

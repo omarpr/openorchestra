@@ -6,6 +6,8 @@ use super::*;
 impl HarnessWorkspace {
 
     pub(crate) fn select(&mut self, sel: Selection, window: &mut Window, cx: &mut Context<Self>) {
+        // Heal any hooks-poisoned Main editor before leaving this selection.
+        self.exit_hooks_edit(window, cx);
         self.selection = sel;
         self.pending_delete = None;
         self.pending_repo_trash = None;
@@ -18,7 +20,12 @@ impl HarnessWorkspace {
     }
 
     pub(crate) fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.data = WorkspaceData::build(self.manager.git(), &self.manager.registry, &self.repo_roots);
+        self.data = WorkspaceData::build(
+            self.manager.git(),
+            &self.manager.registry,
+            &self.task_store,
+            &self.repo_roots,
+        );
         // Follow the repo list: a repo added here has no `.git` watch yet, and a
         // removed one would keep firing recomputes for cards that are gone.
         self.git_watch.watch_repos(&self.repo_roots);
@@ -139,7 +146,15 @@ impl HarnessWorkspace {
             format!("added ‘{name}’")
         };
         self.refresh(window, cx);
-        self.select(Selection::Main(name), window, cx);
+        self.select(Selection::Main(name.clone()), window, cx);
+        // Offer setup-script editing right after add — TOML stays hidden.
+        self.open_project_hooks(
+            &name,
+            HookScriptPhase::Setup,
+            HookLayer::Repo,
+            window,
+            cx,
+        );
     }
 
     /// The tracked git root for a repo group, by its display name.
@@ -281,22 +296,21 @@ impl HarnessWorkspace {
             EditKind::Rename(id) => {
                 let name = text.trim();
                 if !name.is_empty() {
-                    let _ = self.manager.registry.rename(&id, name);
-                    let _ = self.manager.registry.save();
-                }
-                self.refresh(window, cx);
-            }
-            EditKind::Avatar(id) => {
-                let initials = text.trim().to_uppercase();
-                if !initials.is_empty()
-                    && let Some(e) = self.manager.registry.get(&id) {
-                        let color = e.avatar.color;
-                        let _ = self
-                            .manager
-                            .registry
-                            .set_avatar(&id, worktrees::Avatar { initials, color });
+                    if self.task_store.get(&id).is_some() {
+                        let _ = self.task_store.rename(&id, name);
+                        let _ = self.task_store.save();
+                        // Keep member worktree display names in sync.
+                        if let Some(task) = self.task_store.get(&id) {
+                            for m in &task.members {
+                                let _ = self.manager.registry.rename(&m.worktree_id, name);
+                            }
+                            let _ = self.manager.registry.save();
+                        }
+                    } else {
+                        let _ = self.manager.registry.rename(&id, name);
                         let _ = self.manager.registry.save();
                     }
+                }
                 self.refresh(window, cx);
             }
             EditKind::AgentCmd(kind) => {
@@ -342,42 +356,93 @@ impl HarnessWorkspace {
 
     /// Also fix the note so it names the branch and base actually used.
     pub(crate) fn create_named(&mut self, input: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let target = self.new_target_repo.clone();
-        let Some(repo) = self.data.repos.iter().find(|r| r.name == target).or_else(|| self.data.repos.first()) else {
+        if self.data.repos.is_empty() {
             self.note = "add a project first".to_string();
             cx.notify();
             return;
-        };
-        let spec = NewWorktree::parse(input, &repo.compare_ref);
+        }
+        // Members: prefer explicit multi-select; fall back to new_target_repo.
+        let mut member_names = self.new_task_repos.clone();
+        if member_names.is_empty() {
+            member_names.push(self.new_target_repo.clone());
+        }
+        member_names.retain(|n| self.data.repos.iter().any(|r| &r.name == n));
+        if member_names.is_empty() {
+            if let Some(r) = self.data.repos.first() {
+                member_names.push(r.name.clone());
+            }
+        }
+        let mut home = self.new_task_home.clone();
+        if !member_names.iter().any(|n| n == &home) {
+            home = member_names[0].clone();
+        }
+
+        let primary = self
+            .data
+            .repos
+            .iter()
+            .find(|r| r.name == home)
+            .or_else(|| self.data.repos.first())
+            .unwrap();
+        let spec = NewWorktree::parse(input, &primary.compare_ref);
         let name = spec.name.as_str();
         let slug = slugify(name);
-        let req = CreateRequest {
-            repo: repo.name.clone(),
-            repo_root: repo.repo_root.clone(),
-            task_slug: slug.clone(),
-            branch: spec.branch.clone().unwrap_or_else(|| format!("feat/{slug}")),
-            base_ref: Some(spec.base_ref.clone()),
-            created_at: now_stamp(),
-            // OpenCode is the default (§4.5). It has the best signal of any
-            // adapter we have: `permission.updated` over its local SSE stream
-            // is a real, out-of-band "blocked on you" event, so its fidelity is
-            // Exact and it may raise notifications — where pi's is BestEffort,
-            // approximated from a status file an extension has to write. Less
-            // machinery and a truer answer.
-            //
-            // pi stays a first-class peer rather than the default because what
-            // it uniquely offers is the training loop (§4.4), not the signal.
-            // Choosing per worktree is the natural next step in the create
-            // dialog; until then this is the one that works with no setup.
+        let branch = spec
+            .branch
+            .clone()
+            .unwrap_or_else(|| format!("feat/{slug}"));
+        let created_at = now_stamp();
+
+        let members: Vec<CreateTaskMember> = member_names
+            .iter()
+            .filter_map(|n| {
+                let repo = self.data.repos.iter().find(|r| &r.name == n)?;
+                Some(CreateTaskMember {
+                    repo: repo.name.clone(),
+                    repo_root: repo.repo_root.clone(),
+                    branch: branch.clone(),
+                    base_ref: Some(repo.compare_ref.clone()),
+                })
+            })
+            .collect();
+
+        let req = CreateTaskRequest {
+            name: name.to_string(),
+            slug: slug.clone(),
+            home_repo: home.clone(),
+            members,
+            created_at,
             agent_kind: AgentKind::OpenCode,
         };
-        match self.manager.create(req) {
-            Ok(id) => {
-                let _ = self.manager.registry.rename(&id, name);
-                let _ = self.manager.registry.save();
-                self.note = format!("created {id}");
+
+        match create_task(&mut self.manager, &mut self.task_store, req) {
+            Ok(task_id) => {
+                // AGENTS.md first; setup runs visibly in the shell after select
+                // so the user can see script output (silent CommandRunner hid
+                // failures behind the "created task" note).
+                let task = self.task_store.get(&task_id).cloned();
+                if let Some(task) = &task {
+                    if let Some(home_m) = task.home_member() {
+                        if let Some(entry) = self.manager.registry.get(&home_m.worktree_id) {
+                            let _ = write_home_agents_md_at(
+                                self.manager.git(),
+                                task,
+                                &entry.repo_root,
+                            );
+                        }
+                    }
+                }
+                self.note = format!("created task {task_id}");
                 self.refresh(window, cx);
-                self.select(Selection::Worktree(id), window, cx);
+                self.select(
+                    Selection::Task {
+                        task_id,
+                        member_id: None,
+                    },
+                    window,
+                    cx,
+                );
+                self.run_visible_setup_hooks(window, cx);
             }
             Err(e) => {
                 self.note = format!("create failed: {e}");
@@ -386,29 +451,497 @@ impl HarnessWorkspace {
         }
     }
 
-    pub(crate) fn set_avatar_color(&mut self, id: &str, color: u8, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(e) = self.manager.registry.get(id) {
-            let initials = e.avatar.initials.clone();
-            let _ = self
+    /// Run task + per-member setup hooks in the visible shell tab.
+    ///
+    /// Waits for the tmux session (the shell tab is created async by select)
+    /// then sends each command so stdout/stderr appear in the terminal. Without
+    /// tmux, falls back to a silent runner and surfaces the result in the note.
+    fn run_visible_setup_hooks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(r) = self.resolve() else { return };
+        let Some(task_id) = r.task_id.clone() else { return };
+        let Some(task) = self.task_store.get(&task_id).cloned() else {
+            return;
+        };
+
+        let task_hooks = TaskHooks::load(&self.data_dir, &task.slug);
+        let member_paths = task.member_paths();
+        let mut members: Vec<(HookEnv, Vec<PathBuf>)> = Vec::new();
+        for m in &task.members {
+            let Some(entry) = self.manager.registry.get(&m.worktree_id) else {
+                continue;
+            };
+            let env = HookEnv {
+                repo_root: entry.repo_root.clone(),
+                worktree: m.path.clone(),
+                branch: m.branch.clone(),
+                task_slug: task.slug.clone(),
+                task_id: Some(task_id.clone()),
+                home_worktree: task.home_path().map(|p| p.to_path_buf()),
+            };
+            match HooksConfig::load(&entry.repo_root, &self.data_dir, &m.repo) {
+                Ok(hooks) => {
+                    if !hooks.setup.is_empty() {
+                        members.push((env, hooks.setup));
+                    }
+                }
+                Err(e) => {
+                    self.note = format!("hooks load {}: {e}", m.repo);
+                    cx.notify();
+                }
+            }
+        }
+        let has_task_setup = task_hooks.setup.is_some();
+        if !has_task_setup && members.is_empty() {
+            return;
+        }
+        // Prefer a plain shell tab so setup output isn't mixed into an agent.
+        let pane_key = r.key.clone();
+        if self
+            .panes
+            .get(&pane_key)
+            .is_none_or(|p| !p.tabs.iter().any(|t| t.agent.is_none() && matches!(t.content, TabContent::Terminal(_))))
+        {
+            self.open_tab(TabKind::Shell, window, cx);
+        }
+        let Some(pane) = self.panes.get_mut(&pane_key) else {
+            return;
+        };
+        let Some(tab) = pane
+            .tabs
+            .iter()
+            .find(|t| t.agent.is_none() && matches!(t.content, TabContent::Terminal(_)))
+            .map(|t| t.id)
+        else {
+            return;
+        };
+        pane.active = tab;
+        self.save_panes();
+        self.focus_active_pane(window, cx);
+
+        if !self.has_tmux {
+            // No visible session to drive — run once and report.
+            let mut errors = Vec::new();
+            let task_dir = self.data_dir.join("tasks").join(&task.slug);
+            let _ = std::fs::create_dir_all(&task_dir);
+            if let Err(e) =
+                task_hooks.run_setup(self.manager.git().runner(), &task_dir, &member_paths)
+            {
+                errors.push(format!("task setup: {e}"));
+            }
+            for m in &task.members {
+                let Some(entry) = self.manager.registry.get(&m.worktree_id) else {
+                    continue;
+                };
+                let env = HookEnv {
+                    repo_root: entry.repo_root.clone(),
+                    worktree: m.path.clone(),
+                    branch: m.branch.clone(),
+                    task_slug: task.slug.clone(),
+                    task_id: Some(task_id.clone()),
+                    home_worktree: task.home_path().map(|p| p.to_path_buf()),
+                };
+                if let Ok(hooks) = HooksConfig::load(&entry.repo_root, &self.data_dir, &m.repo) {
+                    if let Err(e) = hooks.run_setup(self.manager.git().runner(), &env) {
+                        errors.push(format!("setup {}: {e}", m.repo));
+                    }
+                }
+            }
+            self.note = if errors.is_empty() {
+                "setup finished".into()
+            } else {
+                errors.join("; ")
+            };
+            cx.notify();
+            return;
+        }
+
+        let runner_path = self
+            .data_dir
+            .join("tasks")
+            .join(&task.slug)
+            .join(".setup-run.sh");
+        if let Err(e) = write_visible_setup_runner(
+            &runner_path,
+            task_hooks.setup.as_deref(),
+            &member_paths,
+            &members,
+        ) {
+            self.note = format!("write setup runner: {e}");
+            cx.notify();
+            return;
+        }
+        let invoke = visible_setup_shell_line(&runner_path);
+
+        let session = crate::tmux::session_name(&pane_key, tab);
+        self.note = "running setup… (see shell)".into();
+        cx.notify();
+
+        cx.spawn_in(window, async move |view, cx| {
+            // The shell tab creates its tmux session asynchronously; wait for it
+            // before send-keys or the line vanishes into a missing session.
+            for _ in 0..40 {
+                let live = crate::tmux::live_sessions();
+                if crate::tmux::is_live(&session, &live) {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+            }
+            // Settle so the interactive shell has painted its first prompt.
+            // One send-keys only — rapid multi-line dumps race fish/zsh and
+            // leave later commands unexecuted in the typeahead buffer.
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(400))
+                .await;
+
+            crate::tmux::send_keys(&session, &invoke);
+
+            let _ = view.update(cx, |ws, cx| {
+                ws.note = "setup finished (see shell)".into();
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Leave hooks-edit mode and restore a normal project editor on Main.
+    ///
+    /// Opening a Local script used to call `open_abs_path` on a path under
+    /// `~/.openorchestra/hooks/…`, which poisons the hosted zed Project (empty
+    /// file tree). Exiting always rebuilds the Main editor against the repo
+    /// root so the project panel works again.
+    pub(crate) fn exit_hooks_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((repo, _, _)) = self.hooks_edit.take() else {
+            return;
+        };
+        if matches!(&self.selection, Selection::Main(n) if n == &repo)
+            && let Some(repo_root) = self.repo_root_for_name(&repo)
+        {
+            let _ = self.replace_editor_workspace(&repo_root, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Replace (or create) the active pane's Editor tab with a workspace rooted
+    /// at `root`. Returns the hosted workspace.
+    fn replace_editor_workspace(
+        &mut self,
+        root: &std::path::Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<::workspace::Workspace>> {
+        let key = self.resolve()?.key;
+        let hosted = match crate::workspace_host::workspace_for(root, window, cx) {
+            Ok(ws) => {
+                crate::workspace_host::probe(&ws, window, cx);
+                cx.observe(&ws, |_, _, cx| cx.notify()).detach();
+                ws
+            }
+            Err(e) => {
+                self.note = format!("could not open project: {e}");
+                cx.notify();
+                return None;
+            }
+        };
+        if let Some(pane) = self.panes.get_mut(&key) {
+            if let Some(tab) = pane
+                .tabs
+                .iter_mut()
+                .find(|t| matches!(t.content, TabContent::Editor(_)))
+            {
+                let id = tab.id;
+                tab.content = TabContent::Editor(hosted.clone());
+                pane.active = id;
+                self.focus_active_pane(window, cx);
+                self.save_panes();
+                return Some(hosted);
+            }
+        }
+        // No editor tab yet — fall through to the normal open path.
+        self.open_tab(TabKind::Editor, window, cx);
+        let pane = self.panes.get_mut(&key)?;
+        if let Some(tab) = pane
+            .tabs
+            .iter_mut()
+            .find(|t| matches!(t.content, TabContent::Editor(_)))
+        {
+            let id = tab.id;
+            tab.content = TabContent::Editor(hosted.clone());
+            pane.active = id;
+            self.focus_active_pane(window, cx);
+            self.save_panes();
+            Some(hosted)
+        } else {
+            None
+        }
+    }
+
+    /// Ensure a project hooks script exists and open it in the editor.
+    ///
+    /// Generates the layer's TOML if needed; the user only edits the shell
+    /// script. Repo scripts open in a workspace rooted at the main checkout;
+    /// Local scripts open in a workspace rooted at the local hooks dir so the
+    /// project panel is not pointed at an out-of-tree abs path.
+    pub(crate) fn open_project_hooks(
+        &mut self,
+        repo: &str,
+        phase: HookScriptPhase,
+        layer: HookLayer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(repo_root) = self.repo_root_for_name(repo) else {
+            self.note = format!("project ‘{repo}’ not found");
+            cx.notify();
+            return;
+        };
+        let script = match ensure_hook_script(
+            layer,
+            phase,
+            &repo_root,
+            &self.data_dir,
+            repo,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                self.note = format!("hooks: {e}");
+                cx.notify();
+                return;
+            }
+        };
+        self.hooks_edit = Some((repo.to_string(), layer, phase));
+        if !matches!(&self.selection, Selection::Main(n) if n == repo) {
+            // select() clears hooks_edit — restore after.
+            self.select(Selection::Main(repo.to_string()), window, cx);
+            self.hooks_edit = Some((repo.to_string(), layer, phase));
+        }
+        let editor_root = match layer {
+            HookLayer::Repo => repo_root.clone(),
+            HookLayer::Local => local_hooks_base(&self.data_dir, repo),
+        };
+        let rel = match layer {
+            HookLayer::Repo => format!(".openorchestra/scripts/{}", phase.file_name()),
+            HookLayer::Local => format!("scripts/{}", phase.file_name()),
+        };
+        let Some(hosted) = self.replace_editor_workspace(&editor_root, window, cx) else {
+            return;
+        };
+        crate::workspace_host::open_file_at(&hosted, &editor_root, &rel, None, window, cx);
+        let layer_label = match layer {
+            HookLayer::Repo => "repo",
+            HookLayer::Local => "local",
+        };
+        self.note = format!(
+            "editing {} {} ({})",
+            phase.label(),
+            layer_label,
+            script.display()
+        );
+        cx.notify();
+    }
+
+    /// Drop the machine-local hooks override for `repo` and reopen the repo
+    /// setup script (committed layer) so editing continues without local files.
+    pub(crate) fn clear_project_local_hooks(
+        &mut self,
+        repo: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match clear_local_hooks(&self.data_dir, repo) {
+            Ok(()) => {
+                self.note = format!("cleared local hooks for ‘{repo}’");
+                self.open_project_hooks(
+                    repo,
+                    HookScriptPhase::Setup,
+                    HookLayer::Repo,
+                    window,
+                    cx,
+                );
+            }
+            Err(e) => {
+                self.note = format!("clear local hooks: {e}");
+                cx.notify();
+            }
+        }
+    }
+
+    /// Open a changed file from the DIFF panel in an editor tab.
+    ///
+    /// Reuses an existing editor tab when one is already open; otherwise opens
+    /// a new editor for the focused worktree. For unified task diffs the
+    /// display path is `repo/rel` — the matching member is focused quietly
+    /// (without recomputing the diff) so the editor roots on that worktree.
+    pub(crate) fn open_diff_file(
+        &mut self,
+        display_path: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Leaving hooks mode first: otherwise the Repo/Local chrome stays up
+        // and we reopen into the poisoned/wrong-rooted hooks editor.
+        self.exit_hooks_edit(window, cx);
+
+        let abs = if let Some(uf) = self
+            .unified_diff
+            .files
+            .iter()
+            .find(|f| format!("{}/{}", f.repo, f.file.path) == display_path)
+        {
+            let member_id = uf.member_id.clone();
+            let rel = uf.file.path.clone();
+            let Some(member_path) = self
                 .manager
                 .registry
-                .set_avatar(id, worktrees::Avatar { initials, color });
-            let _ = self.manager.registry.save();
+                .get(&member_id)
+                .map(|e| e.path.clone())
+            else {
+                self.note = format!("worktree {member_id} not found");
+                cx.notify();
+                return;
+            };
+            self.focus_task_member_quietly(&member_id, window, cx);
+            member_path.join(rel)
+        } else {
+            let Some(r) = self.resolve() else { return };
+            r.editor_path.join(display_path)
+        };
+
+        let Some(hosted) = self.ensure_editor_tab(window, cx) else {
+            return;
+        };
+        hosted.update(cx, |ws, cx| {
+            ws.open_abs_path(
+                abs.clone(),
+                ::workspace::OpenOptions::default(),
+                window,
+                cx,
+            )
+            .detach();
+        });
+        self.note = format!("opened {}", abs.display());
+        cx.notify();
+    }
+
+    /// Point the task selection at `member_id` without recomputing the DIFF
+    /// (which would collapse the file the user just asked to edit).
+    fn focus_task_member_quietly(
+        &mut self,
+        member_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match &self.selection {
+            Selection::Task { .. } => {
+                if let Selection::Task { member_id: mid, .. } = &mut self.selection {
+                    *mid = Some(member_id.to_string());
+                }
+            }
+            Selection::Worktree(id) => {
+                let task_id = self
+                    .manager
+                    .registry
+                    .get(id)
+                    .and_then(|e| e.task_id.clone());
+                if let Some(task_id) = task_id {
+                    self.selection = Selection::Task {
+                        task_id,
+                        member_id: Some(member_id.to_string()),
+                    };
+                }
+            }
+            Selection::Main(_) => {
+                // Hooks editing selects Main; opening a unified-diff file must
+                // still land in the task member's editor, not the main checkout.
+                if let Some(task_id) = self
+                    .manager
+                    .registry
+                    .get(member_id)
+                    .and_then(|e| e.task_id.clone())
+                {
+                    self.selection = Selection::Task {
+                        task_id,
+                        member_id: Some(member_id.to_string()),
+                    };
+                    self.ensure_pane(window, cx);
+                }
+            }
         }
-        self.refresh(window, cx);
+    }
+
+    /// Activate an existing editor tab, or open a new one. Returns the hosted
+    /// zed Workspace so the caller can open a path into it.
+    fn ensure_editor_tab(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<::workspace::Workspace>> {
+        let key = self.resolve()?.key;
+        if let Some(pane) = self.panes.get(&key) {
+            if let Some(tab) = pane
+                .tabs
+                .iter()
+                .find(|t| matches!(t.content, TabContent::Editor(_)))
+            {
+                let id = tab.id;
+                let hosted = match &tab.content {
+                    TabContent::Editor(ws) => ws.clone(),
+                    _ => unreachable!(),
+                };
+                if let Some(pane) = self.panes.get_mut(&key) {
+                    pane.active = id;
+                }
+                self.focus_active_pane(window, cx);
+                self.save_panes();
+                return Some(hosted);
+            }
+        }
+        self.open_tab(TabKind::Editor, window, cx);
+        let pane = self.panes.get(&key)?;
+        match &pane.active_tab()?.content {
+            TabContent::Editor(ws) => Some(ws.clone()),
+            _ => None,
+        }
     }
 
     pub(crate) fn archive(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
-        match self.manager.archive(&id) {
-            Ok(()) => self.note = format!("archived {id}"),
-            Err(e) => self.note = format!("archive failed: {e}"),
+        // If this worktree belongs to a multi-member task, archive the whole task.
+        let task_id = self
+            .manager
+            .registry
+            .get(&id)
+            .and_then(|e| e.task_id.clone())
+            .or_else(|| {
+                // id might already be a task id
+                self.task_store.get(&id).map(|t| t.id.clone())
+            });
+
+        if let Some(tid) = task_id {
+            if let Some(task) = self.task_store.get(&tid).cloned() {
+                self.run_teardown_hooks(&task);
+                let pane_key = format!("task:{tid}");
+                for m in &task.members {
+                    self.teardown_sessions(&m.worktree_id);
+                    self.panes.remove(&m.worktree_id);
+                }
+                self.teardown_sessions(&pane_key);
+                self.panes.remove(&pane_key);
+                match archive_task(&mut self.manager, &mut self.task_store, &tid) {
+                    Ok(()) => self.note = format!("archived task {tid}"),
+                    Err(e) => self.note = format!("archive failed: {e}"),
+                }
+            }
+        } else {
+            self.run_member_teardown(&id);
+            match self.manager.archive(&id) {
+                Ok(()) => self.note = format!("archived {id}"),
+                Err(e) => self.note = format!("archive failed: {e}"),
+            }
+            self.teardown_sessions(&id);
+            self.panes.remove(&id);
         }
-        // Archiving stops the worktree's agents (freeing resources) and
-        // purges its tab record, so unarchiving later starts fresh instead of
-        // leaking a detached session or resurrecting a stale one.
-        self.teardown_sessions(&id);
-        self.panes.remove(&id);
         self.refresh(window, cx);
         if let Some(name) = self.data.repos.first().map(|r| r.name.clone()) {
             self.select(Selection::Main(name), window, cx);
@@ -417,19 +950,68 @@ impl HarnessWorkspace {
 
     pub(crate) fn delete(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
-        match self.manager.delete(&id) {
-            Ok(()) => self.note = format!("deleted {id}"),
-            Err(e) => self.note = format!("delete failed: {e}"),
+        let task_id = self
+            .manager
+            .registry
+            .get(&id)
+            .and_then(|e| e.task_id.clone())
+            .or_else(|| self.task_store.get(&id).map(|t| t.id.clone()));
+
+        if let Some(tid) = task_id {
+            if let Some(task) = self.task_store.get(&tid).cloned() {
+                self.run_teardown_hooks(&task);
+                let pane_key = format!("task:{tid}");
+                for m in &task.members {
+                    self.teardown_sessions(&m.worktree_id);
+                    self.panes.remove(&m.worktree_id);
+                }
+                self.teardown_sessions(&pane_key);
+                self.panes.remove(&pane_key);
+                match delete_task(&mut self.manager, &mut self.task_store, &tid) {
+                    Ok(()) => self.note = format!("deleted task {tid}"),
+                    Err(e) => self.note = format!("delete failed: {e}"),
+                }
+            }
+        } else {
+            self.run_member_teardown(&id);
+            match self.manager.delete(&id) {
+                Ok(()) => self.note = format!("deleted {id}"),
+                Err(e) => self.note = format!("delete failed: {e}"),
+            }
+            self.teardown_sessions(&id);
+            self.panes.remove(&id);
         }
-        // Teardown first (it reads the persisted record); then drop the live
-        // pane client. Otherwise a later worktree with the same id could
-        // reattach to this one's still-running agent session.
-        self.teardown_sessions(&id);
-        self.panes.remove(&id);
         self.pending_delete = None;
         self.refresh(window, cx);
         if let Some(name) = self.data.repos.first().map(|r| r.name.clone()) {
             self.select(Selection::Main(name), window, cx);
+        }
+    }
+
+    fn run_teardown_hooks(&mut self, task: &worktrees::Task) {
+        let task_hooks = TaskHooks::load(&self.data_dir, &task.slug);
+        let member_paths = task.member_paths();
+        let task_dir = self.data_dir.join("tasks").join(&task.slug);
+        let _ = task_hooks.run_teardown(self.manager.git().runner(), &task_dir, &member_paths);
+        for m in &task.members {
+            self.run_member_teardown(&m.worktree_id);
+        }
+    }
+
+    fn run_member_teardown(&mut self, worktree_id: &str) {
+        let Some(entry) = self.manager.registry.get(worktree_id).cloned() else {
+            return;
+        };
+        let env = HookEnv {
+            repo_root: entry.repo_root.clone(),
+            worktree: entry.path.clone(),
+            branch: entry.branch.clone(),
+            task_slug: entry.task_slug.clone(),
+            task_id: entry.task_id.clone(),
+            home_worktree: None,
+        };
+        if let Ok(hooks) = HooksConfig::load(&entry.repo_root, &self.data_dir, &entry.repo) {
+            let _ = hooks.run_teardown(self.manager.git().runner(), &env);
         }
     }
 

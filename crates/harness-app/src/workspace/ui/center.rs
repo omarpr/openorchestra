@@ -50,31 +50,10 @@ impl HarnessWorkspace {
                     if std::env::var_os("HARNESS_PROBE_PAINT").is_some() {
                         log::info!("paint: center renders Editor tab");
                     }
-                    // `Workspace::render` draws panes and docks but attaches
-                    // NONE of its action handlers — in zed, the *window root*
-                    // (MultiWorkspace) calls `workspace.actions(...)` on its
-                    // own wrapper and sets the "Workspace" key context there.
-                    // We are that window root here, so we carry the same
-                    // duties: without this wrapper every workspace action
-                    // (⌘P, ⌘⇧F, dock toggles, ...) dispatches into a tree
-                    // with no matching handler and no matching key context,
-                    // and dies silently.
-                    ws.update(cx, |workspace, cx| workspace.actions(div(), window, cx))
+                    let editor = ws
+                        .update(cx, |workspace, cx| workspace.actions(div(), window, cx))
                         .key_context("Workspace")
-                        // Make the wrapper itself focusable, so focus (and thus
-                        // the "Workspace" context + these action handlers) can
-                        // rest here with no file open. Clicking the empty editor
-                        // area lands focus here too.
                         .track_focus(&self.editor_host_focus)
-                        // `.flex()`, because gpui divs default to `display:
-                        // Block`, and taffy's block layout does not resolve
-                        // child percentage *heights*. zed's own window root
-                        // wraps the workspace in `h_flex()` for this reason.
-                        // Without it the whole hosted workspace is silently
-                        // content-sized: panes look fine (they have intrinsic
-                        // content), but the dock caches its panel as a
-                        // childless leaf whose content height is zero — an
-                        // invisible file tree with healthy state.
                         .flex()
                         .size_full()
                         .child(ws.clone())
@@ -89,8 +68,20 @@ impl HarnessWorkspace {
                                 .absolute()
                                 .size_full(),
                             )
-                        })
-                        .into_any_element()
+                        });
+                    // Hooks chrome sits above the hosted workspace when the
+                    // user is editing a project setup/teardown script.
+                    if self.hooks_edit.is_some() {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .size_full()
+                            .child(self.render_hooks_bar(hx, cx))
+                            .child(div().flex_1().min_h_0().child(editor))
+                            .into_any_element()
+                    } else {
+                        editor.into_any_element()
+                    }
                 }
                 TabContent::Chat(c) => c.clone().into_any_element(),
                 // `None`: a tab fills the center, so the surface never has to
@@ -132,6 +123,134 @@ impl HarnessWorkspace {
             .child(div().flex_1().h_full().min_h_0().child(content))
             .child(self.render_status_bar(hx, Some(&r), cx))
             .into_any_element()
+    }
+
+    /// Chrome above the editor when editing a project hook script: pick
+    /// Repo vs Local and Setup vs Teardown without exposing TOML.
+    fn render_hooks_bar(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some((repo, layer, phase)) = self.hooks_edit.clone() else {
+            return div();
+        };
+        let chip = |id: &'static str,
+                    label: &'static str,
+                    active: bool,
+                    repo: String,
+                    next_phase: HookScriptPhase,
+                    next_layer: HookLayer| {
+            div()
+                .id(id)
+                .px_1p5()
+                .py_0p5()
+                .rounded_md()
+                .text_xs()
+                .text_color(if active { hx.tx0 } else { hx.tx2 })
+                .bg(if active { hx.surface } else { hx.bg1 })
+                .border_1()
+                .border_color(if active { hx.accent } else { hx.border })
+                .cursor_pointer()
+                .hover(|d| d.bg(hx.surface_hover))
+                .child(label)
+                .on_click(cx.listener(move |ws, _, window, cx| {
+                    ws.open_project_hooks(&repo, next_phase, next_layer, window, cx);
+                }))
+        };
+
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_2()
+            .h(px(32.0))
+            .px_3()
+            .bg(hx.bg1)
+            .border_b_1()
+            .border_color(hx.border)
+            .child(
+                div()
+                    .text_xs()
+                    .font_family(hx.font_mono)
+                    .text_color(hx.tx2)
+                    .child(format!("{repo} hooks")),
+            )
+            .child(div().flex_1())
+            .child(chip(
+                "hooks-repo",
+                "Repo",
+                layer == HookLayer::Repo,
+                repo.clone(),
+                phase,
+                HookLayer::Repo,
+            ))
+            .child(chip(
+                "hooks-local",
+                "Local",
+                layer == HookLayer::Local,
+                repo.clone(),
+                phase,
+                HookLayer::Local,
+            ))
+            .child(
+                div()
+                    .w(px(1.0))
+                    .h(px(14.0))
+                    .bg(hx.border),
+            )
+            .child(chip(
+                "hooks-setup",
+                "Setup",
+                phase == HookScriptPhase::Setup,
+                repo.clone(),
+                HookScriptPhase::Setup,
+                layer,
+            ))
+            .child(chip(
+                "hooks-teardown",
+                "Teardown",
+                phase == HookScriptPhase::Teardown,
+                repo.clone(),
+                HookScriptPhase::Teardown,
+                layer,
+            ))
+            .when(layer == HookLayer::Local, |d| {
+                let clear_repo = repo.clone();
+                d.child(
+                    div()
+                        .id("hooks-clear-local")
+                        .px_1p5()
+                        .py_0p5()
+                        .rounded_md()
+                        .text_xs()
+                        .text_color(hx.red)
+                        .border_1()
+                        .border_color(hx.border)
+                        .cursor_pointer()
+                        .tooltip(tip("Remove local override (back to repo scripts)"))
+                        .hover(|h| h.bg(hx.surface_hover))
+                        .child("Clear local")
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            ws.clear_project_local_hooks(&clear_repo, window, cx);
+                        })),
+                )
+            })
+            .child(
+                div()
+                    .id("hooks-done")
+                    .ml_1()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded_md()
+                    .text_xs()
+                    .text_color(hx.tx1)
+                    .border_1()
+                    .border_color(hx.border)
+                    .cursor_pointer()
+                    .tooltip(tip("Leave hooks editor and restore the project file tree"))
+                    .hover(|h| h.bg(hx.surface_hover))
+                    .child("Done")
+                    .on_click(cx.listener(|ws, _, window, cx| {
+                        ws.exit_hooks_edit(window, cx);
+                    })),
+            )
     }
 
     pub(crate) fn render_empty_center(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -208,8 +327,17 @@ impl HarnessWorkspace {
             .hover(|d| d.text_color(hx.tx1))
             .on_click(cx.listener(move |ws, _, window, cx| {
                 let Some(r) = ws.resolve() else { return };
+                let leaving_hooks = ws.hooks_edit.is_some()
+                    && ws
+                        .panes
+                        .get(&r.key)
+                        .and_then(|p| p.tabs.iter().find(|t| t.id == id))
+                        .is_some_and(|t| !matches!(t.content, TabContent::Editor(_)));
                 if let Some(pane) = ws.panes.get_mut(&r.key) {
                     pane.active = id;
+                }
+                if leaving_hooks {
+                    ws.exit_hooks_edit(window, cx);
                 }
                 ws.focus_active_pane(window, cx);
                 cx.notify();

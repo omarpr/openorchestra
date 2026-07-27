@@ -146,6 +146,10 @@ pub struct WorktreeEntry {
     /// before this field existed load as [`AgentKind::Pi`].
     #[serde(default)]
     pub agent_kind: AgentKind,
+    /// Owning task id when this worktree is a task member. Absent on legacy
+    /// entries until migration backfills it.
+    #[serde(default)]
+    pub task_id: Option<String>,
 }
 
 impl WorktreeEntry {

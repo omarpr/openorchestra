@@ -57,7 +57,18 @@ impl HarnessWorkspace {
     }
 
     /// The unified-diff block for one file.
+    ///
+    /// `path` is the panel's identity key: a worktree-relative path, or
+    /// `repo/rel` for a unified task diff. Git headers only carry `rel`, so
+    /// unified keys are resolved back to the member-relative path first.
     pub(crate) fn unified_for_file(&self, path: &str) -> String {
+        let lookup = self
+            .unified_diff
+            .files
+            .iter()
+            .find(|f| format!("{}/{}", f.repo, f.file.path) == path)
+            .map(|f| f.file.path.as_str())
+            .unwrap_or(path);
         let mut blocks: Vec<String> = Vec::new();
         let mut cur = String::new();
         for line in self.diff.unified.lines() {
@@ -72,7 +83,11 @@ impl HarnessWorkspace {
         }
         blocks
             .into_iter()
-            .find(|b| b.lines().next().is_some_and(|h| h.contains(&format!("b/{path}")) || h.ends_with(path)))
+            .find(|b| {
+                b.lines().next().is_some_and(|h| {
+                    h.contains(&format!("b/{lookup}")) || h.ends_with(lookup)
+                })
+            })
             .unwrap_or_default()
     }
 
@@ -728,164 +743,261 @@ impl HarnessWorkspace {
         };
         if self.diff.files.is_empty() {
             files = files.child(div().px_2().py_1().text_xs().text_color(hx.tx2).child("no changes vs merge-base"));
-        }
-        for (i, file) in self.diff.files.iter().enumerate() {
-            let path = file.path.clone();
-            // Two-pane has one focused file and shows it beside the list;
-            // the narrow layout expands any number of them in place.
-            let expanded = self.expanded.contains(&file.path);
-            let open = if two_pane {
-                self.focused_file().as_deref() == Some(path.as_str())
-            } else {
-                expanded
-            };
-            let reviewed = worktree_key
-                .as_deref()
-                .is_some_and(|k| self.review.is_reviewed(k, &file.path));
-            let badge_color = match file.change {
-                Change::Added => hx.green,
-                Change::Deleted => hx.red,
-                Change::Renamed => hx.accent,
-                _ => hx.amber,
-            };
-            let check_path = path.clone();
-            let toggle_path = path.clone();
-            let md_path = path.clone();
-
-            files = files.child(
-                div()
-                    .id(("difffile", i))
-                    .flex()
-                    .w_full()
-                    .items_center()
-                    .gap_2()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .when(open, |d| d.bg(hx.surface))
-                    .cursor_pointer()
-                    .hover(|d| d.bg(hx.surface))
-                    .on_click(cx.listener(move |ws, _, _, cx| {
-                        if two_pane {
-                            ws.diff_focus = Some(toggle_path.clone());
-                        } else if !ws.expanded.remove(&toggle_path) {
-                            ws.expanded.insert(toggle_path.clone());
-                        }
-                        cx.notify();
-                    }))
-                    // Reviewed checkbox. Ticking it collapses the file: the
-                    // point of marking it is to get it out of the way, and
-                    // leaving it open would defeat that.
-                    .child(
+        } else if !self.unified_diff.files.is_empty() {
+            // Unified task diff: group by project instead of prefixing every
+            // path with the repo name.
+            let mut last_repo: Option<&str> = None;
+            for (i, uf) in self.unified_diff.files.iter().enumerate() {
+                if last_repo != Some(uf.repo.as_str()) {
+                    last_repo = Some(&uf.repo);
+                    files = files.child(
                         div()
-                            .id(("reviewed", i))
+                            .flex()
                             .flex_none()
-                            .w(px(14.0))
-                            .text_xs()
-                            .font_family(hx.font_mono)
-                            .text_color(if reviewed { hx.green } else { hx.tx2 })
-                            .cursor_pointer()
-                            .tooltip(tip(if reviewed { "Mark not reviewed" } else { "Mark reviewed" }))
-                            .hover(|d| d.text_color(hx.green))
-                            .child(if reviewed { "☑" } else { "☐" })
-                            .on_click(cx.listener(move |ws, _, _, cx| {
-                                cx.stop_propagation();
-                                let Some(r) = ws.resolve() else { return };
-                                let now = !ws.review.is_reviewed(&r.key, &check_path);
-                                ws.review.set_reviewed(&r.key, &check_path, now);
-                                ws.review.save(&ws.review_path);
-                                if now {
-                                    ws.expanded.remove(&check_path);
-                                }
-                                cx.notify();
-                            })),
-                    )
-                    // Disclosure marker, so expanded state reads without
-                    // relying on the row background alone. Two-pane has nothing
-                    // to disclose — the diff is already beside the list — so it
-                    // would only be a chevron that never means anything.
-                    .when(!two_pane, |d| {
-                        d.child(
-                            div()
-                                .flex_none()
-                                .w(px(8.0))
-                                .text_xs()
-                                .text_color(hx.tx2)
-                                .child(if expanded { "▾" } else { "▸" }),
-                        )
-                    })
-                    .child(div().flex_none().w(px(12.0)).text_xs().font_family(hx.font_mono).text_color(badge_color).child(file.change.badge().to_string()))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_xs()
-                            .font_family(hx.font_mono)
-                            // Reviewed files recede rather than vanish — still
-                            // findable, visibly done.
-                            .text_color(if reviewed { hx.tx2 } else { hx.tx1 })
-                            // `overflow_hidden` alone does not stop wrapping —
-                            // it clipped the *second* line, so a name one
-                            // character too long broke across two rows with
-                            // space to spare. Ellipsis in the middle keeps the
-                            // filename readable, which is the end of a path that
-                            // identifies it.
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_ellipsis_middle()
-                            .child(file.path.clone()),
-                    )
-                    // The markdown preview belongs to a file, so its toggle
-                    // lives on that file's row, not the panel header.
-                    .when(open && crate::markdown_preview::is_markdown(&file.path), |d| {
-                        let previewing =
-                            self.md_preview.as_ref().is_some_and(|(f, _)| f == &md_path);
-                        let p = md_path.clone();
-                        d.child(
-                            div()
-                                .id(("md-toggle", i))
-                                .flex_none()
-                                .px_1()
-                                .rounded_md()
-                                .text_xs()
-                                .text_color(if previewing { hx.accent } else { hx.tx2 })
-                                .cursor_pointer()
-                                .tooltip(tip("Toggle Markdown preview"))
-                                .hover(|h| h.bg(hx.surface_hover))
-                                .child(if previewing { "◨" } else { "◧" })
-                                .on_click(cx.listener(move |ws, _, _, cx| {
-                                    cx.stop_propagation();
-                                    ws.toggle_md_preview(&p, cx);
-                                })),
-                        )
-                    })
-                    .child(div().flex_none().text_xs().font_family(hx.font_mono).text_color(hx.green).child(format!("+{}", file.adds)))
-                    .child(div().flex_none().text_xs().font_family(hx.font_mono).text_color(hx.red).child(format!("−{}", file.dels))),
-            );
-
-            // Only the narrow layout nests the body under its row; two-pane
-            // draws it in the column beside the list.
-            if expanded && !two_pane {
-                match self.md_preview.as_ref().filter(|(f, _)| f == &path) {
-                    Some((_, md)) => {
-                        files = files.child(
-                            div()
-                                .w_full()
-                                .h(px(360.0))
-                                .my_1()
-                                .rounded_md()
-                                .bg(hx.bg0)
-                                .border_1()
-                                .border_color(hx.border)
-                                .child(md.clone()),
-                        );
-                    }
-                    None => files = files.child(self.render_diff_body(hx, &path, true, cx)),
+                            .items_center()
+                            .w_full()
+                            .px_2()
+                            .pt_2()
+                            .pb_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(hx.tx2)
+                                    .child(uf.repo.clone()),
+                            ),
+                    );
                 }
+                let key = format!("{}/{}", uf.repo, uf.file.path);
+                files = self.append_diff_file_row(
+                    files,
+                    hx,
+                    i,
+                    &key,
+                    &uf.file.path,
+                    &uf.file,
+                    worktree_key.as_deref(),
+                    two_pane,
+                    cx,
+                );
+            }
+        } else {
+            for (i, file) in self.diff.files.iter().enumerate() {
+                let path = file.path.clone();
+                files = self.append_diff_file_row(
+                    files,
+                    hx,
+                    i,
+                    &path,
+                    &path,
+                    file,
+                    worktree_key.as_deref(),
+                    two_pane,
+                    cx,
+                );
             }
         }
 
         files.into_any_element()
+    }
+
+    /// Append one changed-file row (and, in accordion mode, its body) to the
+    /// file list. `key` is the stable identity; `display_path` is what the row
+    /// shows (relative under a project group for unified diffs).
+    fn append_diff_file_row(
+        &self,
+        mut files: gpui::Stateful<gpui::Div>,
+        hx: &HarnessTheme,
+        i: usize,
+        key: &str,
+        display_path: &str,
+        file: &worktrees::DiffFile,
+        worktree_key: Option<&str>,
+        two_pane: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let expanded = self.expanded.contains(key);
+        let open = if two_pane {
+            self.focused_file().as_deref() == Some(key)
+        } else {
+            expanded
+        };
+        let reviewed = worktree_key.is_some_and(|k| self.review.is_reviewed(k, key));
+        let badge_color = match file.change {
+            Change::Added => hx.green,
+            Change::Deleted => hx.red,
+            Change::Renamed => hx.accent,
+            _ => hx.amber,
+        };
+        let check_path = key.to_string();
+        let toggle_path = key.to_string();
+        let edit_path = key.to_string();
+        let md_path = key.to_string();
+        let md_check = display_path.to_string();
+        let body_key = key.to_string();
+
+        files = files.child(
+            div()
+                .id(("difffile", i))
+                .flex()
+                .w_full()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .when(open, |d| d.bg(hx.surface))
+                .cursor_pointer()
+                .hover(|d| d.bg(hx.surface))
+                .on_click(cx.listener(move |ws, _, _, cx| {
+                    if two_pane {
+                        ws.diff_focus = Some(toggle_path.clone());
+                    } else if !ws.expanded.remove(&toggle_path) {
+                        ws.expanded.insert(toggle_path.clone());
+                    }
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .id(("reviewed", i))
+                        .flex_none()
+                        .w(px(14.0))
+                        .text_xs()
+                        .font_family(hx.font_mono)
+                        .text_color(if reviewed { hx.green } else { hx.tx2 })
+                        .cursor_pointer()
+                        .tooltip(tip(if reviewed {
+                            "Mark not reviewed"
+                        } else {
+                            "Mark reviewed"
+                        }))
+                        .hover(|d| d.text_color(hx.green))
+                        .child(if reviewed { "☑" } else { "☐" })
+                        .on_click(cx.listener(move |ws, _, _, cx| {
+                            cx.stop_propagation();
+                            let Some(r) = ws.resolve() else { return };
+                            let now = !ws.review.is_reviewed(&r.key, &check_path);
+                            ws.review.set_reviewed(&r.key, &check_path, now);
+                            ws.review.save(&ws.review_path);
+                            if now {
+                                ws.expanded.remove(&check_path);
+                            }
+                            cx.notify();
+                        })),
+                )
+                // Open in editor — separate from the row click so expanding /
+                // focusing the inline diff stays a pure review gesture.
+                .child(
+                    div()
+                        .id(("edit-file", i))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w(px(14.0))
+                        .text_color(hx.tx2)
+                        .cursor_pointer()
+                        .tooltip(tip("edit file"))
+                        .hover(|d| d.text_color(hx.accent))
+                        .child(
+                            ::ui::Icon::new(::ui::IconName::File)
+                                .size(::ui::IconSize::Indicator),
+                        )
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            cx.stop_propagation();
+                            ws.open_diff_file(&edit_path, window, cx);
+                        })),
+                )
+                .when(!two_pane, |d| {
+                    d.child(
+                        div()
+                            .flex_none()
+                            .w(px(8.0))
+                            .text_xs()
+                            .text_color(hx.tx2)
+                            .child(if expanded { "▾" } else { "▸" }),
+                    )
+                })
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(12.0))
+                        .text_xs()
+                        .font_family(hx.font_mono)
+                        .text_color(badge_color)
+                        .child(file.change.badge().to_string()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_xs()
+                        .font_family(hx.font_mono)
+                        .text_color(if reviewed { hx.tx2 } else { hx.tx1 })
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis_middle()
+                        .child(display_path.to_string()),
+                )
+                .when(open && crate::markdown_preview::is_markdown(&md_check), |d| {
+                    let previewing =
+                        self.md_preview.as_ref().is_some_and(|(f, _)| f == &md_path);
+                    let p = md_path.clone();
+                    d.child(
+                        div()
+                            .id(("md-toggle", i))
+                            .flex_none()
+                            .px_1()
+                            .rounded_md()
+                            .text_xs()
+                            .text_color(if previewing { hx.accent } else { hx.tx2 })
+                            .cursor_pointer()
+                            .tooltip(tip("Toggle Markdown preview"))
+                            .hover(|h| h.bg(hx.surface_hover))
+                            .child(if previewing { "◨" } else { "◧" })
+                            .on_click(cx.listener(move |ws, _, _, cx| {
+                                cx.stop_propagation();
+                                ws.toggle_md_preview(&p, cx);
+                            })),
+                    )
+                })
+                .child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .font_family(hx.font_mono)
+                        .text_color(hx.green)
+                        .child(format!("+{}", file.adds)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .font_family(hx.font_mono)
+                        .text_color(hx.red)
+                        .child(format!("−{}", file.dels)),
+                ),
+        );
+
+        if expanded && !two_pane {
+            match self.md_preview.as_ref().filter(|(f, _)| f == &body_key) {
+                Some((_, md)) => {
+                    files = files.child(
+                        div()
+                            .w_full()
+                            .h(px(360.0))
+                            .my_1()
+                            .rounded_md()
+                            .bg(hx.bg0)
+                            .border_1()
+                            .border_color(hx.border)
+                            .child(md.clone()),
+                    );
+                }
+                None => files = files.child(self.render_diff_body(hx, &body_key, true, cx)),
+            }
+        }
+        files
     }
 
     /// Which file the two-pane layout is showing.
