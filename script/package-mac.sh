@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
-# Build openOrchestra.app — a double-clickable macOS bundle.
+# Build openOrchestra.app — a double-clickable macOS bundle — and optionally a
+# universal DMG published to GitHub Releases.
 # Run on a Mac (after `make setup` has installed the toolchain).
 #
-#   ./script/package-mac.sh          # release build + bundle → dist/openOrchestra.app
+#   ./script/package-mac.sh                        # host-arch .app → dist/  (fast, default)
+#   ./script/package-mac.sh --universal            # arm64 + x86_64 .app
+#   ./script/package-mac.sh --universal --dmg      # ...and a .dmg beside it
+#   ./script/package-mac.sh --universal --dmg --publish   # ...and a GitHub Release
 #
 # The bundle is ad-hoc signed for local use; Gatekeeper may still require a
 # right-click → Open the first time (unsigned/undistributed app).
+#
+# Design + the measurements behind it:
+#   docs/superpowers/specs/2026-07-26-universal-dmg-packaging-design.md
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -13,17 +20,111 @@ APP_NAME="openOrchestra"
 CRATE="$ROOT/crates/harness-app"
 APP="$ROOT/dist/$APP_NAME.app"
 
-echo "==> building release binary (this takes a few minutes cold)"
-( cd "$CRATE" && cargo build --release )
+say() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
+usage() {
+  sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+universal=0
+make_dmg=0
+publish=0
+
+while (($#)); do
+  case "$1" in
+    --universal) universal=1 ;;
+    --dmg)       make_dmg=1 ;;
+    --publish)   publish=1 ;;
+    -h|--help)   usage; exit 0 ;;
+    *)           die "unknown flag: $1 (try --help)" ;;
+  esac
+  shift
+done
+
+# Publishing without building the artifact would upload nothing. Flags stay
+# single-purpose (no implicit enabling) so the Makefile spells out its intent.
+if ((publish)) && ((!make_dmg)); then
+  die "--publish requires --dmg"
+fi
+
+# ---------------------------------------------------------------------------
+# Version. Single source of truth is the crate manifest; the commit count is
+# the monotonically-increasing build number macOS wants in CFBundleVersion.
+# ---------------------------------------------------------------------------
+VERSION="$(sed -n '/^\[package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p;}' "$CRATE/Cargo.toml" | head -1)"
+[ -n "$VERSION" ] || die "could not parse version from $CRATE/Cargo.toml"
+BUILD="$(git -C "$ROOT" rev-list --count HEAD)"
+FULL="$VERSION+$BUILD"
+TAG="v$FULL"
+
+# ---------------------------------------------------------------------------
+# Preflight. Check everything that can fail *before* starting a 40-minute
+# build, so a missing `gh` login doesn't surface after the compile.
+# ---------------------------------------------------------------------------
+if ((publish)); then
+  command -v gh >/dev/null 2>&1 || die "gh is required to publish: brew install gh"
+  gh auth status >/dev/null 2>&1 || die "gh is not authenticated: run 'gh auth login'"
+  [ -z "$(git -C "$ROOT" status --porcelain)" ] \
+    || die "working tree is dirty — a published build must be reproducible from its tag"
+  if git -C "$ROOT" rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+    die "tag $TAG already exists — bump version in $CRATE/Cargo.toml, or commit first"
+  fi
+fi
+
+say "version $VERSION (build $BUILD)"
+
+# ---------------------------------------------------------------------------
+# Build. The native slice is built WITHOUT --target on purpose: cargo keys its
+# output directory on the flag rather than the resolved triple, so passing
+# --target aarch64-apple-darwin would ignore the several GB already compiled in
+# target/release and rebuild the arch we already have. Only the Intel slice is
+# genuinely cold.
+# ---------------------------------------------------------------------------
 BIN="$CRATE/target/release/harness-app"
-[ -f "$BIN" ] || { echo "error: binary not found at $BIN"; exit 1; }
 
-echo "==> assembling $APP"
+if ((universal)); then
+  if ! rustup target list --installed | grep -qx x86_64-apple-darwin; then
+    say "adding rust target x86_64-apple-darwin"
+    rustup target add x86_64-apple-darwin
+  fi
+
+  say "building native slice (reuses target/release)"
+  ( cd "$CRATE" && cargo build --release )
+
+  say "building x86_64 slice (cold the first time — ~3-5 min, then incremental)"
+  ( cd "$CRATE" && cargo build --release --target x86_64-apple-darwin )
+
+  X86_BIN="$CRATE/target/x86_64-apple-darwin/release/harness-app"
+  [ -f "$BIN" ]     || die "native binary not found at $BIN"
+  [ -f "$X86_BIN" ] || die "x86_64 binary not found at $X86_BIN"
+
+  say "lipo → universal binary"
+  UNIVERSAL_BIN="$CRATE/target/harness-app-universal"
+  lipo -create -output "$UNIVERSAL_BIN" "$BIN" "$X86_BIN"
+  BIN="$UNIVERSAL_BIN"
+  ARCH_TAG="universal"
+else
+  say "building release binary (this takes a few minutes cold)"
+  ( cd "$CRATE" && cargo build --release )
+  [ -f "$BIN" ] || die "binary not found at $BIN"
+  ARCH_TAG="$(uname -m)"
+fi
+
+# ---------------------------------------------------------------------------
+# Assemble the bundle. Order matters: strip and lipo must both precede
+# codesign, since any mutation of the bundle invalidates the signature.
+# ---------------------------------------------------------------------------
+say "assembling $APP"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/$APP_NAME"
 chmod +x "$APP/Contents/MacOS/$APP_NAME"
+
+# Strip the bundled copy, never the cargo artifact — stripping in target/ would
+# make the next incremental build think it needs to relink.
+strip -x "$APP/Contents/MacOS/$APP_NAME"
+
 cp "$ROOT/assets/openOrchestra.icns" "$APP/Contents/Resources/$APP_NAME.icns"
 # Notification sounds (UNNotificationSound resolves bundle resources by name).
 # All of them, not a named one: the settings picker offers every bundled sound,
@@ -38,8 +139,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleName</key>               <string>${APP_NAME}</string>
   <key>CFBundleDisplayName</key>        <string>openOrchestra</string>
   <key>CFBundleIdentifier</key>         <string>ai.openorchestra.app</string>
-  <key>CFBundleVersion</key>            <string>0.1.0</string>
-  <key>CFBundleShortVersionString</key> <string>0.1.0</string>
+  <key>CFBundleVersion</key>            <string>${BUILD}</string>
+  <key>CFBundleShortVersionString</key> <string>${VERSION}</string>
   <key>CFBundlePackageType</key>        <string>APPL</string>
   <key>CFBundleExecutable</key>         <string>${APP_NAME}</string>
   <key>CFBundleIconFile</key>           <string>${APP_NAME}</string>
@@ -51,13 +152,58 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 
 # Ad-hoc sign so it launches without "damaged app" complaints on local machines.
+# Replacing this with Developer ID + notarytool + stapler is the one change
+# needed to make downloads open on a plain double-click; see the spec.
 if command -v codesign >/dev/null 2>&1; then
-  echo "==> ad-hoc signing"
+  say "ad-hoc signing"
   codesign --force --deep --sign - "$APP" || echo "(codesign failed; app still runnable via right-click → Open)"
 fi
 
 # Refresh the icon cache so Finder shows the new icon immediately.
 touch "$APP"
 
-echo "==> done: $APP"
-echo "    open it with:  open \"$APP\""
+say "built: $APP"
+lipo -info "$APP/Contents/MacOS/$APP_NAME" 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# DMG. Stage the bundle next to an /Applications symlink so the mounted volume
+# is the conventional drag-to-install window.
+# ---------------------------------------------------------------------------
+DMG="$ROOT/dist/$APP_NAME-$FULL-$ARCH_TAG.dmg"
+
+if ((make_dmg)); then
+  say "creating $(basename "$DMG")"
+  STAGE="$ROOT/dist/.dmg-stage"
+  rm -rf "$STAGE"
+  mkdir -p "$STAGE"
+  cp -R "$APP" "$STAGE/"
+  ln -s /Applications "$STAGE/Applications"
+  rm -f "$DMG"
+  hdiutil create -volname "$APP_NAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+  rm -rf "$STAGE"
+  say "verifying image"
+  hdiutil verify "$DMG" >/dev/null || die "hdiutil verify failed for $DMG"
+  say "built: $DMG ($(du -h "$DMG" | cut -f1))"
+fi
+
+# ---------------------------------------------------------------------------
+# Publish. Outward-facing and awkward to retract, so it never happens as a side
+# effect of a build — only under an explicit --publish.
+# ---------------------------------------------------------------------------
+if ((publish)); then
+  say "publishing GitHub Release $TAG"
+  gh release create "$TAG" "$DMG" \
+    --title "$APP_NAME $VERSION ($BUILD)" \
+    --generate-notes \
+    --notes "**First launch:** right-click the app → **Open**, then confirm. macOS
+quarantines apps from unidentified developers, so a plain double-click will say
+the app is damaged. This is expected — the build is ad-hoc signed, not notarized.
+
+Universal binary: Apple Silicon and Intel."
+  say "published: $(gh release view "$TAG" --json url --jq .url)"
+fi
+
+say "done"
+if ((!publish)); then
+  echo "    open it with:  open \"$APP\""
+fi

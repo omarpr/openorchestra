@@ -71,8 +71,17 @@ make run     # build and launch the debug binary
 make build   # build the app
 make test    # headless crate tests
 make app     # release bundle into dist/openOrchestra.app
+make dmg     # universal (arm64+x86_64) bundle + .dmg into dist/
+make release # universal bundle + .dmg, published to GitHub Releases
 make doctor  # report which build/runtime tools are present
 ```
+
+`make dmg` and `make release` compile a second time for `x86_64-apple-darwin`.
+Crate sources are shared, so nothing re-downloads, but the Intel slice is a cold
+build of the whole zed cone the first time. `make release` refuses to run on a
+dirty tree or an existing tag — a published build must be reproducible from its
+tag. Version comes from `crates/harness-app/Cargo.toml`; the build number is the
+commit count.
 
 ### The one build gotcha
 

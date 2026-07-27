@@ -39,7 +39,8 @@ of GitHub Releases, which has a 2 GB per-asset limit and costs the repo nothing.
 architecture-independent, so the x86_64 build re-downloads nothing. But
 `crates/harness-app/target/release` (7.0 GB, 1390 rlibs) is arm64 machine code
 and cannot be reused. The Intel slice is a genuinely cold compile of the whole
-zed cone: **20–40 minutes** the first time, incremental thereafter.
+zed cone — measured at **3m28s**, incremental thereafter. (An earlier estimate
+of 20–40 minutes in this document was wrong; the cone parallelises well.)
 
 **Build locally, not in CI.** GitHub Actions starts with none of that 9.8 GB
 warm cache, GitHub's per-repo cache ceiling is 10 GB (which the zed cone alone
@@ -160,6 +161,24 @@ targets:
 Publishing is never a side effect of a build: it is outward-facing and awkward
 to retract, so it requires the explicit `--publish`. Equally, the default path
 stays a single fast compile so day-to-day `make app` does not get slower.
+
+## Measured outcome (2026-07-26, build 128)
+
+Implemented and verified. Actuals against the estimates above:
+
+| | estimated | measured |
+| --- | --- | --- |
+| x86_64 cold compile | 20–40 min | **3m28s** |
+| universal DMG | ~105 MB | **116 MB** |
+| host-arch `.app` (with new `strip -x`) | — | 164 MB → **135 MB** |
+
+The DMG overshooting to 116 MB puts it further above GitHub's 100 MB file limit
+than predicted, confirming the decision to publish via Releases rather than
+commit it.
+
+`hdiutil create`/`attach`/`detach` emit deprecation warnings on this macOS
+version, pointing at `diskutil image`. Deliberately not adopted: `hdiutil` still
+works and is available on older macOS, and the replacement is not.
 
 ## Verification
 

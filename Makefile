@@ -4,13 +4,15 @@
 #   make run     — verify prerequisites, then build & run the GPUI app
 #   make build   — verify prerequisites, then build the GPUI app
 #   make app     — build openOrchestra.app (macOS bundle → dist/)
+#   make dmg     — universal (arm64+x86_64) bundle + .dmg → dist/  (two compiles)
+#   make release — universal bundle + .dmg, published to GitHub Releases
 #   make doctor  — report which build/runtime tools are present
 #   make icon    — regenerate the app icon from script/gen-icon.py
 #   make test    — headless workspace tests (harness-app excluded by design)
 
 APP_DIR := crates/harness-app
 
-.PHONY: setup run build check test app icon doctor
+.PHONY: setup run build check test app dmg release icon doctor
 
 setup:
 	bash ./script/setup-macos.sh
@@ -29,6 +31,12 @@ test:
 
 app: setup
 	bash ./script/package-mac.sh
+
+dmg: setup
+	bash ./script/package-mac.sh --universal --dmg
+
+release: setup
+	bash ./script/package-mac.sh --universal --dmg --publish
 
 icon:
 	python3 script/gen-icon.py
