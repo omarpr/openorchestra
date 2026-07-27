@@ -25,7 +25,7 @@ pub use git::{
 pub use hooks::{
     classify_hook_script, clear_local_hooks, committed_hooks_path, ensure_hook_script,
     format_visible_setup_runner, hook_script_path, local_hooks_base, local_hooks_path,
-    local_scripts_dir, merge_hooks_replace, repo_scripts_dir, shell_export_line,
+    local_scripts_dir, merge_hooks_replace, repo_hooks_base, repo_scripts_dir, shell_export_line,
     visible_setup_shell_line, write_visible_setup_runner, HookEnv, HookLayer, HookPhase,
     HookScriptPhase, HooksConfig, HooksError, HooksFile, TaskHooks,
 };

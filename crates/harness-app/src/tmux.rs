@@ -71,13 +71,20 @@ pub fn agent_script(cmd: &AgentCommand) -> String {
 /// - otherwise (fresh tab, newly-minted unique name): `new-session -A -d …`
 ///   creates it *detached* (the name can't already exist, so `-A` never attaches
 ///   early), then `set-option`, then `attach-session` as the pane's foreground
-///   client. `-c CWD` and the optional `sh -lc SCRIPT` agent command ride on the
-///   new-session.
+///   client. `-c CWD`, one `-e K=V` per `env` entry, and the optional
+///   `sh -lc SCRIPT` agent command ride on the new-session.
+///
+/// `env` becomes the session's inherited environment, so the pane's shell has
+/// `HARNESS_*` from its first prompt without anything being typed into it. It
+/// is ignored on the `attach_only` path: the session already exists with the
+/// environment it was created with, and `set-environment` would only reach
+/// panes created later, not the shell already running.
 pub fn client_args(
     session: &str,
     cwd: &Path,
     command: Option<&AgentCommand>,
     attach_only: bool,
+    env: &[(String, String)],
 ) -> Vec<String> {
     if attach_only {
         return vec![
@@ -97,6 +104,14 @@ pub fn client_args(
         "-c".into(),
         cwd.to_string_lossy().into_owned(),
     ];
+    // Sorted so the argv is stable across runs (and testable); tmux takes one
+    // -e per variable. No shell quoting here — tmux receives argv directly.
+    let mut env: Vec<_> = env.iter().collect();
+    env.sort_by(|a, b| a.0.cmp(&b.0));
+    for (k, v) in env {
+        args.push("-e".into());
+        args.push(format!("{k}={v}"));
+    }
     if let Some(cmd) = command {
         args.push("sh".into());
         args.push("-lc".into());
@@ -300,7 +315,7 @@ mod tests {
     #[test]
     fn client_args_fresh_agent() {
         let c = cmd();
-        let a = client_args("harness_k_7", Path::new("/repo"), Some(&c), false);
+        let a = client_args("harness_k_7", Path::new("/repo"), Some(&c), false, &[]);
         // Fresh tab creates the session detached so `set-option` can run before
         // the attach — `-A -d` on a brand-new name won't attach early.
         assert_eq!(a[0], "new-session");
@@ -322,15 +337,44 @@ mod tests {
 
     #[test]
     fn client_args_fresh_shell_has_no_command() {
-        let a = client_args("harness_k_9", Path::new("/repo"), None, false);
+        let a = client_args("harness_k_9", Path::new("/repo"), None, false, &[]);
         assert!(a.iter().any(|x| x == "-c"));
         assert!(!a.iter().any(|x| x == "sh"), "shell tab must have no sh -lc: {a:?}");
         assert!(hides_status_bar(&a, "harness_k_9"), "status bar not hidden: {a:?}");
     }
 
     #[test]
+    fn client_args_passes_env_to_new_session_so_the_shell_inherits_it() {
+        let env = vec![
+            ("HARNESS_WORKTREE".to_string(), "/wt/a b".to_string()),
+            ("HARNESS_BRANCH".to_string(), "feat/x".to_string()),
+        ];
+        let a = client_args("harness_k_4", Path::new("/repo"), None, false, &env);
+        // One -e per var, sorted, unquoted — tmux gets argv, not a shell line.
+        let es: Vec<&String> = a
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i > &0 && a[i - 1] == "-e")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(es, vec!["HARNESS_BRANCH=feat/x", "HARNESS_WORKTREE=/wt/a b"]);
+        // On new-session, before the command sequence separator.
+        let first_sep = a.iter().position(|x| x == ";").expect("separator");
+        assert!(a[..first_sep].iter().any(|x| x == "-e"), "{a:?}");
+    }
+
+    #[test]
+    fn client_args_attach_only_ignores_env() {
+        // A live session already has the environment it was created with, and
+        // set-environment would not reach the shell already running in it.
+        let env = vec![("HARNESS_BRANCH".to_string(), "feat/x".to_string())];
+        let a = client_args("harness_k_5", Path::new("/repo"), None, true, &env);
+        assert!(!a.iter().any(|x| x == "-e"), "{a:?}");
+    }
+
+    #[test]
     fn client_args_attach_only_sets_status_then_attaches() {
-        let a = client_args("harness_k_7", Path::new("/repo"), None, true);
+        let a = client_args("harness_k_7", Path::new("/repo"), None, true, &[]);
         assert_eq!(
             a,
             vec![
@@ -350,9 +394,9 @@ mod tests {
         // Every path must turn on mouse reporting for its session — without it
         // tmux (always on the alternate screen) leaves the scroll wheel inert.
         let c = cmd();
-        let fresh_agent = client_args("harness_k_1", Path::new("/repo"), Some(&c), false);
-        let fresh_shell = client_args("harness_k_2", Path::new("/repo"), None, false);
-        let restored = client_args("harness_k_3", Path::new("/repo"), None, true);
+        let fresh_agent = client_args("harness_k_1", Path::new("/repo"), Some(&c), false, &[]);
+        let fresh_shell = client_args("harness_k_2", Path::new("/repo"), None, false, &[]);
+        let restored = client_args("harness_k_3", Path::new("/repo"), None, true, &[]);
         assert!(enables_mouse(&fresh_agent, "harness_k_1"), "{fresh_agent:?}");
         assert!(enables_mouse(&fresh_shell, "harness_k_2"), "{fresh_shell:?}");
         assert!(enables_mouse(&restored, "harness_k_3"), "{restored:?}");

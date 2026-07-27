@@ -466,7 +466,6 @@ impl HarnessWorkspace {
         let task_hooks = TaskHooks::load(&self.data_dir, &task.slug);
         let member_paths = task.member_paths();
         let mut members: Vec<(HookEnv, Vec<PathBuf>)> = Vec::new();
-        let mut parent_env: Option<HookEnv> = None;
         for m in &task.members {
             let Some(entry) = self.manager.registry.get(&m.worktree_id) else {
                 continue;
@@ -479,9 +478,6 @@ impl HarnessWorkspace {
                 task_id: Some(task_id.clone()),
                 home_worktree: task.home_path().map(|p| p.to_path_buf()),
             };
-            if parent_env.is_none() || m.repo == task.home_repo {
-                parent_env = Some(env.clone());
-            }
             match HooksConfig::load(&entry.repo_root, &self.data_dir, &m.repo) {
                 Ok(hooks) => {
                     if !hooks.setup.is_empty() {
@@ -498,15 +494,6 @@ impl HarnessWorkspace {
         if !has_task_setup && members.is_empty() {
             return;
         }
-        let parent_env = parent_env.unwrap_or_else(|| HookEnv {
-            repo_root: PathBuf::new(),
-            worktree: PathBuf::new(),
-            branch: String::new(),
-            task_slug: task.slug.clone(),
-            task_id: Some(task_id.clone()),
-            home_worktree: task.home_path().map(|p| p.to_path_buf()),
-        });
-
         // Prefer a plain shell tab so setup output isn't mixed into an agent.
         let pane_key = r.key.clone();
         if self
@@ -583,7 +570,7 @@ impl HarnessWorkspace {
             cx.notify();
             return;
         }
-        let invoke = visible_setup_shell_line(&runner_path, &parent_env);
+        let invoke = visible_setup_shell_line(&runner_path);
 
         let session = crate::tmux::session_name(&pane_key, tab);
         self.note = "running setup… (see shell)".into();

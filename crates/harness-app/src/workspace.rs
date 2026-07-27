@@ -1845,6 +1845,11 @@ struct Prefs {
     /// them. Absent means expanded, which is also what a fresh install gets.
     #[serde(default)]
     collapsed: std::collections::BTreeSet<String>,
+    /// Sidebar sections whose body is collapsed, keyed by header label
+    /// ("STATS", "TASKS", "PROJECTS"). Set-not-map for the same reason as
+    /// [`Prefs::collapsed`]: absent means expanded, which is the default.
+    #[serde(default)]
+    collapsed_sections: std::collections::BTreeSet<String>,
     sidebar_width: f32,
     diff_width: f32,
     /// Where the diff surface lives (dock vs. center tab).
@@ -1888,6 +1893,7 @@ impl Default for Prefs {
             pet_enabled: true,
             shortcuts: Default::default(),
             collapsed: Default::default(),
+            collapsed_sections: Default::default(),
             sidebar_width: 280.0,
             diff_width: 340.0,
             diff_location: DiffLocation::Dock,
@@ -2519,7 +2525,42 @@ mod collapsed_prefs_tests {
 
         let back = load_prefs(&path);
         assert!(back.collapsed.is_empty(), "absent = nothing collapsed");
+        assert!(
+            back.collapsed_sections.is_empty(),
+            "absent = every sidebar section expanded"
+        );
         assert!(!back.dark, "the rest of the file still parses");
+    }
+
+    #[test]
+    fn a_collapsed_sidebar_section_survives_a_disk_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+
+        let mut prefs = Prefs::default();
+        prefs.collapsed_sections.insert("STATS".to_string());
+        save_prefs_to(&path, &prefs);
+
+        let back = load_prefs(&path);
+        assert!(back.collapsed_sections.contains("STATS"));
+        assert!(
+            !back.collapsed_sections.contains("TASKS"),
+            "an untouched section stays expanded"
+        );
+
+        // Same set-not-map discipline as projects: expanding shrinks the file.
+        prefs.collapsed_sections.remove("STATS");
+        save_prefs_to(&path, &prefs);
+        assert!(load_prefs(&path).collapsed_sections.is_empty());
+    }
+
+    #[test]
+    fn section_labels_are_the_persistence_keys() {
+        // section_header writes SidebarSection::label() into the prefs set, so
+        // renaming a header silently orphans everyone's saved collapse state.
+        // This pins the three keys the file format depends on.
+        use crate::workspace::ui::sidebar::SidebarSection::*;
+        assert_eq!([Stats.label(), Tasks.label(), Projects.label()], ["STATS", "TASKS", "PROJECTS"]);
     }
 }
 

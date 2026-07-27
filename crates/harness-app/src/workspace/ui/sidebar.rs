@@ -3,42 +3,126 @@
 
 use super::super::*;
 
+/// The sidebar's three top-level sections, in render order.
+///
+/// They exist as one type so every header goes through
+/// [`HarnessWorkspace::section_header`] — height, separators, disclosure and
+/// collapse state cannot drift apart the way three hand-rolled headers did.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SidebarSection {
+    Stats,
+    Tasks,
+    Projects,
+}
+
+impl SidebarSection {
+    /// Also the persistence key in `Prefs::collapsed_sections`.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Stats => "STATS",
+            Self::Tasks => "TASKS",
+            Self::Projects => "PROJECTS",
+        }
+    }
+}
+
+/// Every section header is this tall — the value TASKS was missing, which is
+/// why it read as cramped next to STATS and PROJECTS.
+const SECTION_HEADER_H: f32 = 34.0;
+
 impl HarnessWorkspace {
 
-    /// PROJECTS section title with a trailing `+` that adds a git repository —
-    /// same header affordance as TASKS.
-    fn projects_header(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
+    /// A section's trailing `+` button. Stops propagation so adding a task or
+    /// project never also toggles the section it lives in.
+    fn section_add_button(
+        &self,
+        hx: &HarnessTheme,
+        id: &'static str,
+        tip_text: &'static str,
+        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         div()
+            .id(id)
+            .size(px(20.0))
             .flex()
             .flex_none()
             .items_center()
-            .justify_between()
-            .h(px(34.0))
+            .justify_center()
+            .rounded_md()
+            .text_color(hx.tx1)
+            .cursor_pointer()
+            .tooltip(tip(tip_text))
+            .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
+            .child("+")
+            .on_click(cx.listener(move |ws, _, window, cx| {
+                cx.stop_propagation();
+                on_click(ws, window, cx);
+            }))
+    }
+
+    pub(crate) fn section_collapsed(&self, section: SidebarSection) -> bool {
+        self.prefs.collapsed_sections.contains(section.label())
+    }
+
+    /// One sidebar section header: disclosure caret, label, optional trailing
+    /// action. The whole strip is the click target.
+    ///
+    /// STATS is the only section without a top border — it sits directly under
+    /// the window chrome, which already draws that edge. Every other section
+    /// carries one so the sidebar reads as stacked bands.
+    fn section_header(
+        &self,
+        hx: &HarnessTheme,
+        section: SidebarSection,
+        action: Option<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let collapsed = self.section_collapsed(section);
+        let label = section.label();
+        div()
+            .id(label)
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_2()
+            .h(px(SECTION_HEADER_H))
             .px_3()
+            .when(section != SidebarSection::Stats, |d| d.border_t_1())
             .border_b_1()
             .border_color(hx.border)
+            .cursor_pointer()
+            .hover(|d| d.bg(hx.surface))
+            .tooltip(tip(if collapsed {
+                "Expand section"
+            } else {
+                "Collapse section"
+            }))
+            .on_click(cx.listener(move |ws, _, _, cx| {
+                // Same set-not-map discipline as project collapse: expanding
+                // removes the entry rather than persisting `false`.
+                if !ws.prefs.collapsed_sections.remove(label) {
+                    ws.prefs.collapsed_sections.insert(label.to_string());
+                }
+                ws.save_prefs(cx);
+                cx.notify();
+            }))
             .child(
                 div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(hx.tx2)
+                    .child(if collapsed { "▸" } else { "▾" }),
+            )
+            .child(
+                div()
+                    .flex_1()
                     .text_xs()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(hx.tx2)
-                    .child("PROJECTS"),
+                    .child(label),
             )
-            .child(
-                div()
-                    .id("project-plus")
-                    .size(px(20.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_md()
-                    .text_color(hx.tx1)
-                    .cursor_pointer()
-                    .tooltip(tip("Add a git repository as a project"))
-                    .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
-                    .child("+")
-                    .on_click(cx.listener(|ws, _, window, cx| ws.add_project(window, cx))),
-            )
+            .children(action)
     }
 
     /// The resource band atop the sidebar: openOrchestra's whole CPU/memory
@@ -116,25 +200,35 @@ impl HarnessWorkspace {
             .child(series("MEM", mem_label, mem_hist, hx.green))
     }
 
-    /// A sidebar section label — the small bordered strip that heads STATS
-    /// (and any other label-only region). PROJECTS uses [`Self::projects_header`]
-    /// so it can carry an add action.
-    fn section_header(&self, hx: &HarnessTheme, label: &'static str) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .h(px(34.0))
-            .px_3()
-            .border_b_1()
-            .border_color(hx.border)
-            .child(
-                div()
-                    .text_xs()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(hx.tx2)
-                    .child(label),
-            )
+    /// PROJECTS' trailing `+` — adds a git repository.
+    fn projects_add_button(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
+        self.section_add_button(
+            hx,
+            "project-plus",
+            "Add a git repository as a project",
+            |ws, window, cx| ws.add_project(window, cx),
+            cx,
+        )
+        .into_any_element()
+    }
+
+    /// TASKS' trailing `+` — opens the inline new-task editor, expanding the
+    /// section first so the editor it reveals is actually on screen.
+    fn tasks_add_button(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
+        self.section_add_button(hx, "task-plus", "New task", |ws, window, cx| {
+            if ws.prefs.collapsed_sections.remove(SidebarSection::Tasks.label()) {
+                ws.save_prefs(cx);
+            }
+            if ws.new_task_repos.is_empty()
+                && let Some(r) = ws.data.repos.first()
+            {
+                ws.new_task_repos = vec![r.name.clone()];
+                ws.new_task_home = r.name.clone();
+                ws.new_target_repo = r.name.clone();
+            }
+            ws.begin_edit(EditKind::NewName, "", "task name…", window, cx);
+        }, cx)
+        .into_any_element()
     }
 
     pub(crate) fn render_sidebar(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -148,13 +242,16 @@ impl HarnessWorkspace {
             .border_r_1()
             .border_color(hx.border)
             .overflow_hidden()
-            .child(self.section_header(hx, "STATS"))
-            .child(self.render_resource_band(hx, cx));
+            .child(self.section_header(hx, SidebarSection::Stats, None, cx));
+        if !self.section_collapsed(SidebarSection::Stats) {
+            column = column.child(self.render_resource_band(hx, cx));
+        }
 
         if self.data.repos.is_empty() {
-            column = column
-                .child(self.projects_header(hx, cx))
-                .child(
+            let action = self.projects_add_button(hx, cx);
+            column = column.child(self.section_header(hx, SidebarSection::Projects, Some(action), cx));
+            if !self.section_collapsed(SidebarSection::Projects) {
+                column = column.child(
                     div()
                         .flex()
                         .flex_col()
@@ -170,78 +267,62 @@ impl HarnessWorkspace {
                                 .child("Open a git repository to begin."),
                         ),
                 );
+            }
             return column
                 .child(div().flex_1())
                 .when(!self.archived_repos.is_empty(), |d| d.child(self.render_archived(hx, cx)));
         }
 
-        let mut tasks_col = div().flex().flex_col().flex_none();
-        tasks_col = tasks_col.child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .px_3()
-                .child(
-                    div()
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(hx.tx2)
-                        .child("TASKS"),
-                )
-                .child(
-                    div()
-                        .id("task-plus")
-                        .size(px(20.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_md()
-                        .text_color(hx.tx1)
-                        .cursor_pointer()
-                        .tooltip(tip("New task"))
-                        .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
-                        .child("+")
-                        .on_click(cx.listener(|ws, _, window, cx| {
-                            if ws.new_task_repos.is_empty() {
-                                if let Some(r) = ws.data.repos.first() {
-                                    ws.new_task_repos = vec![r.name.clone()];
-                                    ws.new_task_home = r.name.clone();
-                                    ws.new_target_repo = r.name.clone();
-                                }
-                            }
-                            ws.begin_edit(EditKind::NewName, "", "task name…", window, cx);
-                        })),
-                ),
-        );
-        if matches!(self.edit_kind(), Some(EditKind::NewName))
-            && let Some(editor) = self.edit_editor()
-        {
-            tasks_col = tasks_col
-                .child(div().mx_2().my_0p5().child(self.render_input(hx, editor, cx)))
-                .child(self.render_new_task_members(hx, cx))
-                .child(
-                    div()
-                        .mx_2()
-                        .mb_1()
-                        .text_color(hx.tx2)
-                        .text_size(px(10.0))
-                        .child("name · #branch · @base · click repo chip to toggle / set ★ home"),
-                );
-        }
-        for task in &self.data.tasks {
-            tasks_col = tasks_col.child(self.render_task_row(hx, task, cx));
+        let tasks_action = self.tasks_add_button(hx, cx);
+        let mut tasks_col = div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .child(self.section_header(hx, SidebarSection::Tasks, Some(tasks_action), cx));
+        if !self.section_collapsed(SidebarSection::Tasks) {
+            // Body gets its own top padding now that the header owns the rule.
+            tasks_col = tasks_col.child(div().h(px(4.0)));
+            if matches!(self.edit_kind(), Some(EditKind::NewName))
+                && let Some(editor) = self.edit_editor()
+            {
+                tasks_col = tasks_col
+                    .child(div().mx_2().my_0p5().child(self.render_input(hx, editor, cx)))
+                    .child(self.render_new_task_members(hx, cx))
+                    .child(
+                        div()
+                            .mx_2()
+                            .mb_1()
+                            .text_color(hx.tx2)
+                            .text_size(px(10.0))
+                            .child("name · #branch · @base · click repo chip to toggle / set ★ home"),
+                    );
+            }
+            for task in &self.data.tasks {
+                tasks_col = tasks_col.child(self.render_task_row(hx, task, cx));
+            }
         }
 
-        let mut projects = div().flex().flex_col().flex_1().min_h_0().overflow_hidden().pt_1();
-        projects = projects.child(self.projects_header(hx, cx));
-        for repo in &self.data.repos {
-            projects = projects.child(self.render_repo_group(hx, repo, cx));
+        // Expanded, PROJECTS takes the leftover height and scrolls; collapsed,
+        // it must shrink to its header so a spacer can hold ARCHIVED down.
+        let projects_collapsed = self.section_collapsed(SidebarSection::Projects);
+        let projects_action = self.projects_add_button(hx, cx);
+        let mut projects = div()
+            .flex()
+            .flex_col()
+            .when(projects_collapsed, |d| d.flex_none())
+            .when(!projects_collapsed, |d| d.flex_1().min_h_0().overflow_hidden())
+            .child(self.section_header(hx, SidebarSection::Projects, Some(projects_action), cx));
+        if !projects_collapsed {
+            projects = projects.child(div().h(px(4.0)));
+            for repo in &self.data.repos {
+                projects = projects.child(self.render_repo_group(hx, repo, cx));
+            }
         }
 
         column
             .child(tasks_col)
             .child(projects)
+            .when(projects_collapsed, |d| d.child(div().flex_1()))
             .when(!self.archived_repos.is_empty(), |d| d.child(self.render_archived(hx, cx)))
     }
 
@@ -372,11 +453,22 @@ impl HarnessWorkspace {
                     .child(
                         div()
                             .size(px(22.0))
+                            // Without flex_none the 22px box is a shrinkable
+                            // flex item: a long task name squeezed it narrower
+                            // than its height, so the initials sat left of
+                            // centre in a box that was no longer square.
+                            .flex_none()
                             .rounded_md()
                             .bg(rgb(color))
                             .flex()
                             .items_center()
                             .justify_center()
+                            // Collapse the line box onto the glyphs. A default
+                            // line height pads asymmetrically around the
+                            // baseline (ascent > cap height, descent unused by
+                            // all-caps initials), which reads as the text
+                            // riding high inside the swatch.
+                            .line_height(px(22.0))
                             .text_xs()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(rgb(0xffffff))

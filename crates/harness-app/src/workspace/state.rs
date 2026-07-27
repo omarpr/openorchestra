@@ -401,6 +401,36 @@ impl HarnessWorkspace {
         })
     }
 
+    /// `HARNESS_*` for a resolved target, as `new-session -e` pairs.
+    ///
+    /// This is the same context hook scripts get, handed to the tmux session so
+    /// the pane's shell inherits it instead of having `export` lines typed into
+    /// it after setup runs. Empty for a target with no task: the vars describe a
+    /// task's worktree layout and mean nothing on a bare `main` checkout.
+    pub(crate) fn pane_env(&self, r: &Resolved) -> Vec<(String, String)> {
+        let Some(task_id) = &r.task_id else {
+            return Vec::new();
+        };
+        let Some(task) = self.task_store.get(task_id) else {
+            return Vec::new();
+        };
+        let Some(home) = task.home_member() else {
+            return Vec::new();
+        };
+        let Some(entry) = self.manager.registry.get(&home.worktree_id) else {
+            return Vec::new();
+        };
+        let env = worktrees::HookEnv {
+            repo_root: entry.repo_root.clone(),
+            worktree: home.path.clone(),
+            branch: home.branch.clone(),
+            task_slug: task.slug.clone(),
+            task_id: Some(task_id.clone()),
+            home_worktree: task.home_path().map(|p| p.to_path_buf()),
+        };
+        env.to_map().into_iter().collect()
+    }
+
     pub(crate) fn ensure_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(r) = self.resolve() else { return };
         self.pane_clock = self.pane_clock.wrapping_add(1);
@@ -530,6 +560,7 @@ impl HarnessWorkspace {
                 let session = self.has_tmux.then(|| crate::terminal_pane::TerminalSession {
                     name: crate::tmux::session_name(&r.key, tab_id),
                     attach_only: false,
+                    env: self.pane_env(&r),
                 });
                 (
                     TabContent::Terminal(
@@ -547,6 +578,7 @@ impl HarnessWorkspace {
                 let session = self.has_tmux.then(|| crate::terminal_pane::TerminalSession {
                     name: crate::tmux::session_name(&r.key, tab_id),
                     attach_only: false,
+                    env: self.pane_env(&r),
                 });
                 (
                     TabContent::Terminal(cx.new(|cx| {
@@ -1564,7 +1596,13 @@ impl HarnessWorkspace {
         let mark = if alive { agent } else { None };
         let session = self
             .has_tmux
-            .then(|| crate::terminal_pane::TerminalSession { name, attach_only: alive });
+            .then(|| crate::terminal_pane::TerminalSession {
+                name,
+                attach_only: alive,
+                // Ignored when reattaching; a dead session is recreated here and
+                // should come back with the same environment a fresh tab gets.
+                env: self.pane_env(&r),
+            });
         // Restore never passes a command: a live session is reattached
         // (attach_only ignores it), a dead one is a plain shell.
         let content = TabContent::Terminal(cx.new(|cx| {
