@@ -550,8 +550,8 @@ impl HarnessWorkspace {
                     .child(div().flex_1().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx0).child(repo.name.clone()))
                     .child(div().text_xs().text_color(hx.tx2).child(format!("{count} {}", if count == 1 { "tree" } else { "trees" }))),
             )
-            // Archive is restorable; trash forgets the project (files kept)
-            // behind a two-click confirm.
+            // Archive / hooks / trash. Hooks opens the setup script in the
+            // editor (TOML is harness-managed).
             .child(
                 header_icon(repo.name.len(), "▦", "Archive project", false).on_click(
                     cx.listener(move |ws, _, window, cx| {
@@ -559,6 +559,21 @@ impl HarnessWorkspace {
                         ws.archive_repo(archive_repo.clone(), window, cx);
                     }),
                 ),
+            )
+            .child(
+                header_icon(repo.name.len() + 500, "ƒ", "Edit setup scripts", false).on_click({
+                    let hooks_repo = repo.name.clone();
+                    cx.listener(move |ws, _, window, cx| {
+                        cx.stop_propagation();
+                        ws.open_project_hooks(
+                            &hooks_repo,
+                            HookScriptPhase::Setup,
+                            HookLayer::Repo,
+                            window,
+                            cx,
+                        );
+                    })
+                }),
             )
             .child(
                 header_icon(repo.name.len() + 1000, "✕", "Remove project (files kept)", trash_pending)

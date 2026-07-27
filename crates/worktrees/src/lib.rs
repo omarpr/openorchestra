@@ -23,8 +23,11 @@ pub use git::{
     Change, Diff, DiffFile, GitError, GitStatus, GitWorktrees, PushState, WorktreeListEntry,
 };
 pub use hooks::{
-    committed_hooks_path, local_hooks_path, merge_hooks_replace, HookEnv, HookPhase, HooksConfig,
-    HooksError, HooksFile, TaskHooks,
+    classify_hook_script, clear_local_hooks, committed_hooks_path, ensure_hook_script,
+    format_visible_setup_runner, hook_script_path, local_hooks_base, local_hooks_path,
+    local_scripts_dir, merge_hooks_replace, repo_scripts_dir, shell_export_line,
+    visible_setup_shell_line, write_visible_setup_runner, HookEnv, HookLayer, HookPhase,
+    HookScriptPhase, HooksConfig, HooksError, HooksFile, TaskHooks,
 };
 pub use registry::{
     AVATAR_PALETTE_LEN, AgentKind, Avatar, Registry, RegistryError, RepoGroup, WorktreeEntry,

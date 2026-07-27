@@ -7,6 +7,7 @@ impl HarnessWorkspace {
 
     pub(crate) fn select(&mut self, sel: Selection, window: &mut Window, cx: &mut Context<Self>) {
         self.selection = sel;
+        self.hooks_edit = None;
         self.pending_delete = None;
         self.pending_repo_trash = None;
         self.menu = None;
@@ -144,7 +145,15 @@ impl HarnessWorkspace {
             format!("added ‘{name}’")
         };
         self.refresh(window, cx);
-        self.select(Selection::Main(name), window, cx);
+        self.select(Selection::Main(name.clone()), window, cx);
+        // Offer setup-script editing right after add — TOML stays hidden.
+        self.open_project_hooks(
+            &name,
+            HookScriptPhase::Setup,
+            HookLayer::Repo,
+            window,
+            cx,
+        );
     }
 
     /// The tracked git root for a repo group, by its display name.
@@ -407,39 +416,11 @@ impl HarnessWorkspace {
 
         match create_task(&mut self.manager, &mut self.task_store, req) {
             Ok(task_id) => {
-                // Task-level setup, then per-member hooks, then AGENTS.md.
+                // AGENTS.md first; setup runs visibly in the shell after select
+                // so the user can see script output (silent CommandRunner hid
+                // failures behind the "created task" note).
                 let task = self.task_store.get(&task_id).cloned();
                 if let Some(task) = &task {
-                    let task_hooks = TaskHooks::load(&self.data_dir, &task.slug);
-                    let member_paths = task.member_paths();
-                    let task_dir = self.data_dir.join("tasks").join(&task.slug);
-                    let _ = std::fs::create_dir_all(&task_dir);
-                    if let Err(e) =
-                        task_hooks.run_setup(self.manager.git().runner(), &task_dir, &member_paths)
-                    {
-                        self.note = format!("task setup: {e}");
-                    }
-                    for m in &task.members {
-                        let Some(entry) = self.manager.registry.get(&m.worktree_id) else {
-                            continue;
-                        };
-                        let env = HookEnv {
-                            repo_root: entry.repo_root.clone(),
-                            worktree: m.path.clone(),
-                            branch: m.branch.clone(),
-                            task_slug: task.slug.clone(),
-                            task_id: Some(task_id.clone()),
-                            home_worktree: task.home_path().map(|p| p.to_path_buf()),
-                        };
-                        match HooksConfig::load(&entry.repo_root, &self.data_dir, &m.repo) {
-                            Ok(hooks) => {
-                                if let Err(e) = hooks.run_setup(self.manager.git().runner(), &env) {
-                                    self.note = format!("setup {}: {e}", m.repo);
-                                }
-                            }
-                            Err(e) => self.note = format!("hooks load {}: {e}", m.repo),
-                        }
-                    }
                     if let Some(home_m) = task.home_member() {
                         if let Some(entry) = self.manager.registry.get(&home_m.worktree_id) {
                             let _ = write_home_agents_md_at(
@@ -460,7 +441,6 @@ impl HarnessWorkspace {
                     window,
                     cx,
                 );
-                // Run remaining setup commands visibly in the shell if any were noted.
                 self.run_visible_setup_hooks(window, cx);
             }
             Err(e) => {
@@ -470,14 +450,22 @@ impl HarnessWorkspace {
         }
     }
 
-    /// Send pending setup shell commands into the task's shell tab (best-effort).
-    fn run_visible_setup_hooks(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
-        // Hooks already ran via CommandRunner above. Visible replay is optional;
-        // leave a note if setup scripts exist for discoverability.
+    /// Run task + per-member setup hooks in the visible shell tab.
+    ///
+    /// Waits for the tmux session (the shell tab is created async by select)
+    /// then sends each command so stdout/stderr appear in the terminal. Without
+    /// tmux, falls back to a silent runner and surfaces the result in the note.
+    fn run_visible_setup_hooks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(r) = self.resolve() else { return };
-        let Some(task_id) = &r.task_id else { return };
-        let Some(task) = self.task_store.get(task_id) else { return };
-        let mut cmds = Vec::new();
+        let Some(task_id) = r.task_id.clone() else { return };
+        let Some(task) = self.task_store.get(&task_id).cloned() else {
+            return;
+        };
+
+        let task_hooks = TaskHooks::load(&self.data_dir, &task.slug);
+        let member_paths = task.member_paths();
+        let mut members: Vec<(HookEnv, Vec<PathBuf>)> = Vec::new();
+        let mut parent_env: Option<HookEnv> = None;
         for m in &task.members {
             let Some(entry) = self.manager.registry.get(&m.worktree_id) else {
                 continue;
@@ -490,18 +478,229 @@ impl HarnessWorkspace {
                 task_id: Some(task_id.clone()),
                 home_worktree: task.home_path().map(|p| p.to_path_buf()),
             };
-            if let Ok(hooks) = HooksConfig::load(&entry.repo_root, &self.data_dir, &m.repo) {
-                cmds.extend(hooks.setup_shell_commands(&env));
+            if parent_env.is_none() || m.repo == task.home_repo {
+                parent_env = Some(env.clone());
             }
-        }
-        if !cmds.is_empty() && self.has_tmux {
-            if let Some(pane) = self.panes.get(&r.key) {
-                if let Some(tab) = pane.tabs.first() {
-                    let session = crate::tmux::session_name(&r.key, tab.id);
-                    for cmd in cmds {
-                        crate::tmux::send_keys(&session, &cmd);
+            match HooksConfig::load(&entry.repo_root, &self.data_dir, &m.repo) {
+                Ok(hooks) => {
+                    if !hooks.setup.is_empty() {
+                        members.push((env, hooks.setup));
                     }
                 }
+                Err(e) => {
+                    self.note = format!("hooks load {}: {e}", m.repo);
+                    cx.notify();
+                }
+            }
+        }
+        let has_task_setup = task_hooks.setup.is_some();
+        if !has_task_setup && members.is_empty() {
+            return;
+        }
+        let parent_env = parent_env.unwrap_or_else(|| HookEnv {
+            repo_root: PathBuf::new(),
+            worktree: PathBuf::new(),
+            branch: String::new(),
+            task_slug: task.slug.clone(),
+            task_id: Some(task_id.clone()),
+            home_worktree: task.home_path().map(|p| p.to_path_buf()),
+        });
+
+        // Prefer a plain shell tab so setup output isn't mixed into an agent.
+        let pane_key = r.key.clone();
+        if self
+            .panes
+            .get(&pane_key)
+            .is_none_or(|p| !p.tabs.iter().any(|t| t.agent.is_none() && matches!(t.content, TabContent::Terminal(_))))
+        {
+            self.open_tab(TabKind::Shell, window, cx);
+        }
+        let Some(pane) = self.panes.get_mut(&pane_key) else {
+            return;
+        };
+        let Some(tab) = pane
+            .tabs
+            .iter()
+            .find(|t| t.agent.is_none() && matches!(t.content, TabContent::Terminal(_)))
+            .map(|t| t.id)
+        else {
+            return;
+        };
+        pane.active = tab;
+        self.save_panes();
+        self.focus_active_pane(window, cx);
+
+        if !self.has_tmux {
+            // No visible session to drive — run once and report.
+            let mut errors = Vec::new();
+            let task_dir = self.data_dir.join("tasks").join(&task.slug);
+            let _ = std::fs::create_dir_all(&task_dir);
+            if let Err(e) =
+                task_hooks.run_setup(self.manager.git().runner(), &task_dir, &member_paths)
+            {
+                errors.push(format!("task setup: {e}"));
+            }
+            for m in &task.members {
+                let Some(entry) = self.manager.registry.get(&m.worktree_id) else {
+                    continue;
+                };
+                let env = HookEnv {
+                    repo_root: entry.repo_root.clone(),
+                    worktree: m.path.clone(),
+                    branch: m.branch.clone(),
+                    task_slug: task.slug.clone(),
+                    task_id: Some(task_id.clone()),
+                    home_worktree: task.home_path().map(|p| p.to_path_buf()),
+                };
+                if let Ok(hooks) = HooksConfig::load(&entry.repo_root, &self.data_dir, &m.repo) {
+                    if let Err(e) = hooks.run_setup(self.manager.git().runner(), &env) {
+                        errors.push(format!("setup {}: {e}", m.repo));
+                    }
+                }
+            }
+            self.note = if errors.is_empty() {
+                "setup finished".into()
+            } else {
+                errors.join("; ")
+            };
+            cx.notify();
+            return;
+        }
+
+        let runner_path = self
+            .data_dir
+            .join("tasks")
+            .join(&task.slug)
+            .join(".setup-run.sh");
+        if let Err(e) = write_visible_setup_runner(
+            &runner_path,
+            task_hooks.setup.as_deref(),
+            &member_paths,
+            &members,
+        ) {
+            self.note = format!("write setup runner: {e}");
+            cx.notify();
+            return;
+        }
+        let invoke = visible_setup_shell_line(&runner_path, &parent_env);
+
+        let session = crate::tmux::session_name(&pane_key, tab);
+        self.note = "running setup… (see shell)".into();
+        cx.notify();
+
+        cx.spawn_in(window, async move |view, cx| {
+            // The shell tab creates its tmux session asynchronously; wait for it
+            // before send-keys or the line vanishes into a missing session.
+            for _ in 0..40 {
+                let live = crate::tmux::live_sessions();
+                if crate::tmux::is_live(&session, &live) {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+            }
+            // Settle so the interactive shell has painted its first prompt.
+            // One send-keys only — rapid multi-line dumps race fish/zsh and
+            // leave later commands unexecuted in the typeahead buffer.
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(400))
+                .await;
+
+            crate::tmux::send_keys(&session, &invoke);
+
+            let _ = view.update(cx, |ws, cx| {
+                ws.note = "setup finished (see shell)".into();
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Ensure a project hooks script exists and open it in the editor.
+    ///
+    /// Generates the layer's TOML if needed; the user only edits the shell
+    /// script. Selects the project's main checkout so the editor roots there.
+    pub(crate) fn open_project_hooks(
+        &mut self,
+        repo: &str,
+        phase: HookScriptPhase,
+        layer: HookLayer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(repo_root) = self.repo_root_for_name(repo) else {
+            self.note = format!("project ‘{repo}’ not found");
+            cx.notify();
+            return;
+        };
+        let script = match ensure_hook_script(
+            layer,
+            phase,
+            &repo_root,
+            &self.data_dir,
+            repo,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                self.note = format!("hooks: {e}");
+                cx.notify();
+                return;
+            }
+        };
+        self.hooks_edit = Some((repo.to_string(), layer, phase));
+        if !matches!(&self.selection, Selection::Main(n) if n == repo) {
+            // select() clears hooks_edit — restore after.
+            self.select(Selection::Main(repo.to_string()), window, cx);
+            self.hooks_edit = Some((repo.to_string(), layer, phase));
+        }
+        let Some(hosted) = self.ensure_editor_tab(window, cx) else {
+            return;
+        };
+        hosted.update(cx, |ws, cx| {
+            ws.open_abs_path(
+                script.clone(),
+                ::workspace::OpenOptions::default(),
+                window,
+                cx,
+            )
+            .detach();
+        });
+        let layer_label = match layer {
+            HookLayer::Repo => "repo",
+            HookLayer::Local => "local",
+        };
+        self.note = format!(
+            "editing {} {} ({})",
+            phase.label(),
+            layer_label,
+            script.display()
+        );
+        cx.notify();
+    }
+
+    /// Drop the machine-local hooks override for `repo` and reopen the repo
+    /// setup script (committed layer) so editing continues without local files.
+    pub(crate) fn clear_project_local_hooks(
+        &mut self,
+        repo: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match clear_local_hooks(&self.data_dir, repo) {
+            Ok(()) => {
+                self.note = format!("cleared local hooks for ‘{repo}’");
+                self.open_project_hooks(
+                    repo,
+                    HookScriptPhase::Setup,
+                    HookLayer::Repo,
+                    window,
+                    cx,
+                );
+            }
+            Err(e) => {
+                self.note = format!("clear local hooks: {e}");
+                cx.notify();
             }
         }
     }

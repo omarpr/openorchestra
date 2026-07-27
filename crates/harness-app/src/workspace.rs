@@ -26,9 +26,10 @@ use editor::Editor;
 use agent_runtime::{AgentKind, AgentSignal, AgentState, Bus, StatusFileSource, WaitFidelity};
 use forge::{BranchKey, BranchStatus, CheckStatus, ForgeUpdate, GhCli, Poller, PollerConfig};
 use worktrees::{
-    Change, CreateTaskMember, CreateTaskRequest, GitWorktrees, HookEnv, HooksConfig, Manager,
-    Registry, SystemRunner, TaskHooks, TaskStore, archive_task, create_task, delete_task,
-    migrate_worktrees_to_tasks, write_home_agents_md_at,
+    Change, CreateTaskMember, CreateTaskRequest, GitWorktrees, HookEnv, HookLayer, HookScriptPhase,
+    HooksConfig, Manager, Registry, SystemRunner, TaskHooks, TaskStore, archive_task, clear_local_hooks,
+    create_task, delete_task, ensure_hook_script, migrate_worktrees_to_tasks, visible_setup_shell_line,
+    write_home_agents_md_at, write_visible_setup_runner,
 };
 
 use crate::data::{UnifiedDiff, WorkspaceData, compute_diff};
@@ -643,6 +644,9 @@ pub struct HarnessWorkspace {
     /// field would have cost the accordion its multi-expand; keeping both means
     /// neither layout has to be reconciled when the other is in use.
     diff_focus: Option<String>,
+    /// Active project-hooks editor context (repo name, layer, phase). Drives
+    /// the Repo/Local · Setup/Teardown chrome above the hosted editor.
+    hooks_edit: Option<(String, HookLayer, HookScriptPhase)>,
     /// Selected diff rows: which file, and an inclusive row range within that
     /// file's body. Scoped per file because indices restart in each body.
     diff_selection: Option<(String, usize, usize)>,
@@ -918,6 +922,7 @@ impl HarnessWorkspace {
             new_task_home,
             expanded: std::collections::HashSet::new(),
             diff_focus: None,
+            hooks_edit: None,
             diff_selection: None,
             diff_selecting: false,
             review: crate::diff_review::ReviewNotes::load(
