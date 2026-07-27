@@ -666,6 +666,7 @@ impl HarnessWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.exit_hooks_edit(window, cx);
         self.edit_prompt = None;
         if new_tab {
             self.open_tab(TabKind::Editor, window, cx);

@@ -232,6 +232,25 @@ impl HarnessWorkspace {
                         })),
                 )
             })
+            .child(
+                div()
+                    .id("hooks-done")
+                    .ml_1()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded_md()
+                    .text_xs()
+                    .text_color(hx.tx1)
+                    .border_1()
+                    .border_color(hx.border)
+                    .cursor_pointer()
+                    .tooltip(tip("Leave hooks editor and restore the project file tree"))
+                    .hover(|h| h.bg(hx.surface_hover))
+                    .child("Done")
+                    .on_click(cx.listener(|ws, _, window, cx| {
+                        ws.exit_hooks_edit(window, cx);
+                    })),
+            )
     }
 
     pub(crate) fn render_empty_center(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -308,8 +327,17 @@ impl HarnessWorkspace {
             .hover(|d| d.text_color(hx.tx1))
             .on_click(cx.listener(move |ws, _, window, cx| {
                 let Some(r) = ws.resolve() else { return };
+                let leaving_hooks = ws.hooks_edit.is_some()
+                    && ws
+                        .panes
+                        .get(&r.key)
+                        .and_then(|p| p.tabs.iter().find(|t| t.id == id))
+                        .is_some_and(|t| !matches!(t.content, TabContent::Editor(_)));
                 if let Some(pane) = ws.panes.get_mut(&r.key) {
                     pane.active = id;
+                }
+                if leaving_hooks {
+                    ws.exit_hooks_edit(window, cx);
                 }
                 ws.focus_active_pane(window, cx);
                 cx.notify();

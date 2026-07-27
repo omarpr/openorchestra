@@ -6,8 +6,9 @@ use super::*;
 impl HarnessWorkspace {
 
     pub(crate) fn select(&mut self, sel: Selection, window: &mut Window, cx: &mut Context<Self>) {
+        // Heal any hooks-poisoned Main editor before leaving this selection.
+        self.exit_hooks_edit(window, cx);
         self.selection = sel;
-        self.hooks_edit = None;
         self.pending_delete = None;
         self.pending_repo_trash = None;
         self.menu = None;
@@ -617,10 +618,84 @@ impl HarnessWorkspace {
         .detach();
     }
 
+    /// Leave hooks-edit mode and restore a normal project editor on Main.
+    ///
+    /// Opening a Local script used to call `open_abs_path` on a path under
+    /// `~/.openorchestra/hooks/…`, which poisons the hosted zed Project (empty
+    /// file tree). Exiting always rebuilds the Main editor against the repo
+    /// root so the project panel works again.
+    pub(crate) fn exit_hooks_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((repo, _, _)) = self.hooks_edit.take() else {
+            return;
+        };
+        if matches!(&self.selection, Selection::Main(n) if n == &repo)
+            && let Some(repo_root) = self.repo_root_for_name(&repo)
+        {
+            let _ = self.replace_editor_workspace(&repo_root, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Replace (or create) the active pane's Editor tab with a workspace rooted
+    /// at `root`. Returns the hosted workspace.
+    fn replace_editor_workspace(
+        &mut self,
+        root: &std::path::Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<::workspace::Workspace>> {
+        let key = self.resolve()?.key;
+        let hosted = match crate::workspace_host::workspace_for(root, window, cx) {
+            Ok(ws) => {
+                crate::workspace_host::probe(&ws, window, cx);
+                cx.observe(&ws, |_, _, cx| cx.notify()).detach();
+                ws
+            }
+            Err(e) => {
+                self.note = format!("could not open project: {e}");
+                cx.notify();
+                return None;
+            }
+        };
+        if let Some(pane) = self.panes.get_mut(&key) {
+            if let Some(tab) = pane
+                .tabs
+                .iter_mut()
+                .find(|t| matches!(t.content, TabContent::Editor(_)))
+            {
+                let id = tab.id;
+                tab.content = TabContent::Editor(hosted.clone());
+                pane.active = id;
+                self.focus_active_pane(window, cx);
+                self.save_panes();
+                return Some(hosted);
+            }
+        }
+        // No editor tab yet — fall through to the normal open path.
+        self.open_tab(TabKind::Editor, window, cx);
+        let pane = self.panes.get_mut(&key)?;
+        if let Some(tab) = pane
+            .tabs
+            .iter_mut()
+            .find(|t| matches!(t.content, TabContent::Editor(_)))
+        {
+            let id = tab.id;
+            tab.content = TabContent::Editor(hosted.clone());
+            pane.active = id;
+            self.focus_active_pane(window, cx);
+            self.save_panes();
+            Some(hosted)
+        } else {
+            None
+        }
+    }
+
     /// Ensure a project hooks script exists and open it in the editor.
     ///
     /// Generates the layer's TOML if needed; the user only edits the shell
-    /// script. Selects the project's main checkout so the editor roots there.
+    /// script. Repo scripts open in a workspace rooted at the main checkout;
+    /// Local scripts open in a workspace rooted at the local hooks dir so the
+    /// project panel is not pointed at an out-of-tree abs path.
     pub(crate) fn open_project_hooks(
         &mut self,
         repo: &str,
@@ -654,18 +729,18 @@ impl HarnessWorkspace {
             self.select(Selection::Main(repo.to_string()), window, cx);
             self.hooks_edit = Some((repo.to_string(), layer, phase));
         }
-        let Some(hosted) = self.ensure_editor_tab(window, cx) else {
+        let editor_root = match layer {
+            HookLayer::Repo => repo_root.clone(),
+            HookLayer::Local => local_hooks_base(&self.data_dir, repo),
+        };
+        let rel = match layer {
+            HookLayer::Repo => format!(".openorchestra/scripts/{}", phase.file_name()),
+            HookLayer::Local => format!("scripts/{}", phase.file_name()),
+        };
+        let Some(hosted) = self.replace_editor_workspace(&editor_root, window, cx) else {
             return;
         };
-        hosted.update(cx, |ws, cx| {
-            ws.open_abs_path(
-                script.clone(),
-                ::workspace::OpenOptions::default(),
-                window,
-                cx,
-            )
-            .detach();
-        });
+        crate::workspace_host::open_file_at(&hosted, &editor_root, &rel, None, window, cx);
         let layer_label = match layer {
             HookLayer::Repo => "repo",
             HookLayer::Local => "local",
@@ -717,6 +792,10 @@ impl HarnessWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Leaving hooks mode first: otherwise the Repo/Local chrome stays up
+        // and we reopen into the poisoned/wrong-rooted hooks editor.
+        self.exit_hooks_edit(window, cx);
+
         let abs = if let Some(uf) = self
             .unified_diff
             .files
@@ -735,7 +814,7 @@ impl HarnessWorkspace {
                 cx.notify();
                 return;
             };
-            self.focus_task_member_quietly(&member_id);
+            self.focus_task_member_quietly(&member_id, window, cx);
             member_path.join(rel)
         } else {
             let Some(r) = self.resolve() else { return };
@@ -760,10 +839,17 @@ impl HarnessWorkspace {
 
     /// Point the task selection at `member_id` without recomputing the DIFF
     /// (which would collapse the file the user just asked to edit).
-    fn focus_task_member_quietly(&mut self, member_id: &str) {
-        match &mut self.selection {
-            Selection::Task { member_id: mid, .. } => {
-                *mid = Some(member_id.to_string());
+    fn focus_task_member_quietly(
+        &mut self,
+        member_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match &self.selection {
+            Selection::Task { .. } => {
+                if let Selection::Task { member_id: mid, .. } = &mut self.selection {
+                    *mid = Some(member_id.to_string());
+                }
             }
             Selection::Worktree(id) => {
                 let task_id = self
@@ -778,7 +864,22 @@ impl HarnessWorkspace {
                     };
                 }
             }
-            _ => {}
+            Selection::Main(_) => {
+                // Hooks editing selects Main; opening a unified-diff file must
+                // still land in the task member's editor, not the main checkout.
+                if let Some(task_id) = self
+                    .manager
+                    .registry
+                    .get(member_id)
+                    .and_then(|e| e.task_id.clone())
+                {
+                    self.selection = Selection::Task {
+                        task_id,
+                        member_id: Some(member_id.to_string()),
+                    };
+                    self.ensure_pane(window, cx);
+                }
+            }
         }
     }
 
