@@ -5,49 +5,39 @@ use super::super::*;
 
 impl HarnessWorkspace {
 
-    /// The sidebar footer: the only way in when nothing is open, so it gets
-    /// its own region rather than floating as the last item in a scrolling
-    /// list.
-    ///
-    /// It sits in a padded, top-bordered strip because the sidebar column is
-    /// `overflow_hidden` and full height — a button flush against that edge had
-    /// its own border clipped off by the container.
-    pub(crate) fn add_project_button(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
+    /// PROJECTS section title with a trailing `+` that adds a git repository —
+    /// same header affordance as TASKS.
+    fn projects_header(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_none()
-            .p_2()
-            .border_t_1()
+            .items_center()
+            .justify_between()
+            .h(px(34.0))
+            .px_3()
+            .border_b_1()
             .border_color(hx.border)
             .child(
                 div()
-                    .id("add-project")
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(hx.tx2)
+                    .child("PROJECTS"),
+            )
+            .child(
+                div()
+                    .id("project-plus")
+                    .size(px(20.0))
                     .flex()
-                    .flex_1()
                     .items_center()
                     .justify_center()
-                    .gap_1p5()
-                    .h(px(30.0))
                     .rounded_md()
-                    .bg(hx.surface)
-                    .border_1()
-                    .border_color(hx.border2)
-                    .text_sm()
                     .text_color(hx.tx1)
                     .cursor_pointer()
-                    // Carries a tooltip like the app's other actionable controls,
-                    // naming the fuller action the short label can't.
                     .tooltip(tip("Add a git repository as a project"))
-                    .hover(|d| {
-                        d.bg(hx.surface_hover)
-                            .border_color(hx.accent)
-                            .text_color(hx.tx0)
-                    })
-                    .on_click(cx.listener(|ws, _, window, cx| ws.add_project(window, cx)))
-                    // Icon and label as separate children so the gap is real
-                    // spacing rather than a space character in the glyph run.
-                    .child(div().text_color(hx.accent).child("＋"))
-                    .child("Add project"),
+                    .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
+                    .child("+")
+                    .on_click(cx.listener(|ws, _, window, cx| ws.add_project(window, cx))),
             )
     }
 
@@ -126,8 +116,9 @@ impl HarnessWorkspace {
             .child(series("MEM", mem_label, mem_hist, hx.green))
     }
 
-    /// A sidebar section label — the small bordered strip that heads each
-    /// region (STATS, PROJECTS). Kept in one place so the two read identically.
+    /// A sidebar section label — the small bordered strip that heads STATS
+    /// (and any other label-only region). PROJECTS uses [`Self::projects_header`]
+    /// so it can carry an add action.
     fn section_header(&self, hx: &HarnessTheme, label: &'static str) -> impl IntoElement {
         div()
             .flex()
@@ -158,38 +149,343 @@ impl HarnessWorkspace {
             .border_color(hx.border)
             .overflow_hidden()
             .child(self.section_header(hx, "STATS"))
-            .child(self.render_resource_band(hx, cx))
-            .child(self.section_header(hx, "PROJECTS"));
+            .child(self.render_resource_band(hx, cx));
 
         if self.data.repos.is_empty() {
-            column = column.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap_2()
-                    .mt(px(40.0))
-                    .px_3()
-                    .child(div().text_sm().text_color(hx.tx1).child("No projects yet"))
-                    .child(div().text_xs().text_color(hx.tx2).child("Open a git repository to begin.")),
-            );
-            // Spacer so the footer sits at the bottom here too. Without it the
-            // top-bordered strip would float mid-column, reading as a divider
-            // across nothing.
+            column = column
+                .child(self.projects_header(hx, cx))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap_2()
+                        .mt(px(40.0))
+                        .px_3()
+                        .child(div().text_sm().text_color(hx.tx1).child("No projects yet"))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(hx.tx2)
+                                .child("Open a git repository to begin."),
+                        ),
+                );
             return column
                 .child(div().flex_1())
-                .when(!self.archived_repos.is_empty(), |d| d.child(self.render_archived(hx, cx)))
-                .child(self.add_project_button(hx, cx));
+                .when(!self.archived_repos.is_empty(), |d| d.child(self.render_archived(hx, cx)));
         }
 
-        let mut groups = div().flex().flex_col().flex_1().overflow_hidden().pt_1();
-        for repo in &self.data.repos {
-            groups = groups.child(self.render_repo_group(hx, repo, cx));
+        let mut tasks_col = div().flex().flex_col().flex_none();
+        tasks_col = tasks_col.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .px_3()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(hx.tx2)
+                        .child("TASKS"),
+                )
+                .child(
+                    div()
+                        .id("task-plus")
+                        .size(px(20.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_md()
+                        .text_color(hx.tx1)
+                        .cursor_pointer()
+                        .tooltip(tip("New task"))
+                        .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
+                        .child("+")
+                        .on_click(cx.listener(|ws, _, window, cx| {
+                            if ws.new_task_repos.is_empty() {
+                                if let Some(r) = ws.data.repos.first() {
+                                    ws.new_task_repos = vec![r.name.clone()];
+                                    ws.new_task_home = r.name.clone();
+                                    ws.new_target_repo = r.name.clone();
+                                }
+                            }
+                            ws.begin_edit(EditKind::NewName, "", "task name…", window, cx);
+                        })),
+                ),
+        );
+        if matches!(self.edit_kind(), Some(EditKind::NewName))
+            && let Some(editor) = self.edit_editor()
+        {
+            tasks_col = tasks_col
+                .child(div().mx_2().my_0p5().child(self.render_input(hx, editor, cx)))
+                .child(self.render_new_task_members(hx, cx))
+                .child(
+                    div()
+                        .mx_2()
+                        .mb_1()
+                        .text_color(hx.tx2)
+                        .text_size(px(10.0))
+                        .child("name · #branch · @base · click repo chip to toggle / set ★ home"),
+                );
         }
+        for task in &self.data.tasks {
+            tasks_col = tasks_col.child(self.render_task_row(hx, task, cx));
+        }
+
+        let mut projects = div().flex().flex_col().flex_1().min_h_0().overflow_hidden().pt_1();
+        projects = projects.child(self.projects_header(hx, cx));
+        for repo in &self.data.repos {
+            projects = projects.child(self.render_repo_group(hx, repo, cx));
+        }
+
         column
-            .child(groups)
+            .child(tasks_col)
+            .child(projects)
             .when(!self.archived_repos.is_empty(), |d| d.child(self.render_archived(hx, cx)))
-            .child(self.add_project_button(hx, cx))
+    }
+
+    fn render_new_task_members(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut row = div().flex().flex_wrap().gap_1().mx_2().mb_1();
+        for (i, repo) in self.data.repos.iter().enumerate() {
+            let name = repo.name.clone();
+            let selected = self.new_task_repos.iter().any(|n| n == &name);
+            let is_home = self.new_task_home == name;
+            let label = if is_home {
+                format!("★ {}", repo.name)
+            } else if selected {
+                repo.name.clone()
+            } else {
+                format!("+ {}", repo.name)
+            };
+            row = row.child(
+                div()
+                    .id(("new-task-repo", i))
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded_md()
+                    .text_size(px(10.0))
+                    .font_family(hx.font_mono)
+                    .bg(if selected { hx.surface } else { hx.bg1 })
+                    .text_color(if is_home {
+                        hx.accent
+                    } else if selected {
+                        hx.tx0
+                    } else {
+                        hx.tx2
+                    })
+                    .border_1()
+                    .border_color(if selected { hx.border2 } else { hx.border })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |ws, _, _, cx| {
+                        if let Some(pos) = ws.new_task_repos.iter().position(|n| n == &name) {
+                            if ws.new_task_home == name && ws.new_task_repos.len() > 1 {
+                                ws.new_task_repos.remove(pos);
+                                ws.new_task_home = ws.new_task_repos[0].clone();
+                            } else {
+                                ws.new_task_home = name.clone();
+                            }
+                        } else {
+                            ws.new_task_repos.push(name.clone());
+                            if ws.new_task_repos.len() == 1 {
+                                ws.new_task_home = name.clone();
+                            }
+                        }
+                        ws.new_target_repo = ws.new_task_home.clone();
+                        cx.notify();
+                    }))
+                    .child(label),
+            );
+        }
+        row
+    }
+
+    fn render_task_row(
+        &self,
+        hx: &HarnessTheme,
+        task: &crate::data::TaskView,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let task_id = task.id.clone();
+        let selected = matches!(
+            &self.selection,
+            Selection::Task { task_id: tid, .. } if tid == &task.id
+        );
+        let renaming = matches!(self.edit_kind(), Some(EditKind::Rename(rid)) if rid == &task.id);
+        let color = SWATCHES[(task.color as usize) % SWATCHES.len()];
+        let tid_click = task_id.clone();
+        let menu_id = task_id.clone();
+
+        let name_el: AnyElement = if let Some(editor) = renaming.then(|| self.edit_editor()).flatten() {
+            self.render_input(hx, editor, cx).into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_sm()
+                .text_color(hx.tx0)
+                .overflow_hidden()
+                .child(task.name.clone())
+                .into_any_element()
+        };
+
+        let mut block = div()
+            .flex()
+            .flex_col()
+            .mx_1()
+            .mb_1()
+            .rounded_md()
+            .when(selected, |d| d.bg(hx.surface))
+            .child(
+                div()
+                    .id(("task-row", task.id.len()))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .cursor_pointer()
+                    .hover(|d| d.bg(hx.surface_hover))
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        ws.select(
+                            Selection::Task {
+                                task_id: tid_click.clone(),
+                                member_id: None,
+                            },
+                            window,
+                            cx,
+                        );
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            let pos = ev.position;
+                            ws.menu = Some(CardMenu {
+                                id: menu_id.clone(),
+                                x: pos.x,
+                                y: pos.y,
+                            });
+                            cx.notify();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .size(px(22.0))
+                            .rounded_md()
+                            .bg(rgb(color))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(0xffffff))
+                            .child(task.initials.clone()),
+                    )
+                    .child(name_el)
+                    .when(task.dirty > 0, |d| {
+                        d.child(
+                            div()
+                                .text_xs()
+                                .font_family(hx.font_mono)
+                                .text_color(hx.amber)
+                                .child(format!("~{}", task.dirty)),
+                        )
+                    }),
+            );
+        let mut members = div()
+            .flex()
+            .flex_col()
+            .ml(px(12.0))
+            .pl_1()
+            .border_l_1()
+            .border_color(hx.border);
+        for (i, m) in task.members.iter().enumerate() {
+            let tid = task.id.clone();
+            let mid = m.worktree_id.clone();
+            let mem_selected = matches!(
+                &self.selection,
+                Selection::Task { task_id: t, member_id: Some(id) }
+                    if t == &task.id && id == &m.worktree_id
+            );
+            let label = if m.is_home {
+                format!("★ {}", m.repo)
+            } else {
+                m.repo.clone()
+            };
+            let agent = self
+                .agent_status
+                .get(&m.path)
+                .copied()
+                .unwrap_or(AgentState::Unknown);
+            let mut badges = div().flex().items_center().gap_1();
+            if m.ahead > 0 {
+                badges = badges.child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(hx.green)
+                        .child(format!("↑{}", m.ahead)),
+                );
+            }
+            if m.behind > 0 {
+                badges = badges.child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(hx.amber)
+                        .child(format!("↓{}", m.behind)),
+                );
+            }
+            if m.dirty > 0 {
+                badges = badges.child(
+                    div()
+                        .text_size(px(10.0))
+                        .font_family(hx.font_mono)
+                        .text_color(hx.amber)
+                        .child(format!("~{}", m.dirty)),
+                );
+            }
+            members = members.child(
+                div()
+                    .id(("task-mem", i + task.id.len() * 17))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .when(mem_selected, |d| d.bg(hx.surface))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(hx.surface_hover))
+                    .on_click(cx.listener(move |ws, _, window, cx| {
+                        ws.select(
+                            Selection::Task {
+                                task_id: tid.clone(),
+                                member_id: Some(mid.clone()),
+                            },
+                            window,
+                            cx,
+                        );
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(if m.is_home { hx.accent } else { hx.tx1 })
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .font_family(hx.font_mono)
+                            .text_color(hx.tx2)
+                            .child(m.branch.clone()),
+                    )
+                    .child(badges)
+                    .child(agent_pill(hx, agent)),
+            );
+        }
+        block = block.child(members);
+        block
     }
 
     pub(crate) fn render_repo_group(
@@ -200,15 +496,14 @@ impl HarnessWorkspace {
     ) -> impl IntoElement {
         let collapsed = self.prefs.collapsed.contains(&repo.name);
         let repo_name = repo.name.clone();
-        let plus_repo = repo.name.clone();
         let archive_repo = repo.name.clone();
         let trash_repo = repo.name.clone();
         let trash_pending = self.pending_repo_trash.as_deref() == Some(repo.name.as_str());
         let count = repo.worktrees.len();
 
         // A small icon button in the repo header (archive, trash), styled like
-        // the `+`. `danger` tints it red — used to flag the trash's armed
-        // (click-again-to-confirm) state.
+        // the section `+` controls. `danger` tints it red — used to flag the
+        // trash's armed (click-again-to-confirm) state.
         let header_icon =
             |id_seed: usize, glyph: &'static str, tip_text: &'static str, danger: bool| {
                 div()
@@ -255,9 +550,8 @@ impl HarnessWorkspace {
                     .child(div().flex_1().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx0).child(repo.name.clone()))
                     .child(div().text_xs().text_color(hx.tx2).child(format!("{count} {}", if count == 1 { "tree" } else { "trees" }))),
             )
-            // Archive and trash sit before the +, per-project. Archive is
-            // restorable; trash forgets the project (files kept) behind a
-            // two-click confirm.
+            // Archive is restorable; trash forgets the project (files kept)
+            // behind a two-click confirm.
             .child(
                 header_icon(repo.name.len(), "▦", "Archive project", false).on_click(
                     cx.listener(move |ws, _, window, cx| {
@@ -272,28 +566,6 @@ impl HarnessWorkspace {
                         cx.stop_propagation();
                         ws.trash_repo(trash_repo.clone(), window, cx);
                     })),
-            )
-            .child(
-                div()
-                    .id(("repo-plus", repo.name.len()))
-                    .size(px(20.0))
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .rounded_md()
-                    .text_color(hx.tx1)
-                    .cursor_pointer()
-                    // Icon-only control: the tooltip is its accessible name, the
-                    // same affordance the tab ×, steppers, etc. carry.
-                    .tooltip(tip("New worktree"))
-                    .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
-                    .on_click(cx.listener(move |ws, _, window, cx| {
-                        cx.stop_propagation();
-                        ws.new_target_repo = plus_repo.clone();
-                        ws.begin_edit(EditKind::NewName, "", "worktree name…", window, cx);
-                    }))
-                    .child("+"),
             );
 
         let mut group = div().flex().flex_col().child(header);
@@ -306,25 +578,8 @@ impl HarnessWorkspace {
                 .pl_1()
                 .border_l_1()
                 .border_color(hx.border);
+            // Projects foot: main checkout only (tasks own the worktree cards).
             body = body.child(self.render_main_entry(hx, repo, cx));
-            if matches!(self.edit_kind(), Some(EditKind::NewName))
-                && self.new_target_repo == repo.name
-                && let Some(editor) = self.edit_editor() {
-                    body = body
-                        .child(div().mx_1().my_0p5().child(self.render_input(hx, editor, cx)))
-                        // The optional syntax is invisible otherwise (M5a).
-                        .child(
-                            div()
-                                .mx_2()
-                                .mb_1()
-                                .text_color(hx.tx2)
-                                .text_size(px(10.0))
-                                .child("name  ·  #branch  ·  @base-ref"),
-                        );
-                }
-            for card in &repo.worktrees {
-                body = body.child(self.render_card(hx, card, cx));
-            }
             group = group.child(body);
         }
         group
@@ -484,197 +739,6 @@ impl HarnessWorkspace {
             .child(badges)
     }
 
-    pub(crate) fn render_card(
-        &self,
-        hx: &HarnessTheme,
-        card: &crate::data::WorktreeView,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let selected = self.selection == Selection::Worktree(card.id.clone());
-        let id = card.id.clone();
-        let renaming = matches!(self.edit_kind(), Some(EditKind::Rename(rid)) if rid == &id);
-        let avatar_open = matches!(self.edit_kind(), Some(EditKind::Avatar(aid)) if aid == &id);
-
-        let avatar_id = id.clone();
-        let avatar = div()
-            .id(("avatar", card.id.len()))
-            .size(px(26.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded_md()
-            .bg(avatar_color(card.color))
-            .text_xs()
-            .font_weight(gpui::FontWeight::BOLD)
-            .text_color(rgb(0xffffff))
-            .cursor_pointer()
-            .on_click(cx.listener(move |ws, _, window, cx| {
-                cx.stop_propagation();
-                let cur = ws
-                    .manager
-                    .registry
-                    .get(&avatar_id)
-                    .map(|e| e.avatar.initials.clone())
-                    .unwrap_or_default();
-                ws.begin_edit(EditKind::Avatar(avatar_id.clone()), &cur, "AB", window, cx);
-            }))
-            .child(card.initials.clone());
-
-        let name_el: AnyElement = if let Some(editor) = renaming.then(|| self.edit_editor()).flatten() {
-            self.render_input(hx, editor, cx).into_any_element()
-        } else {
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_sm()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(hx.tx0)
-                .overflow_hidden()
-                .child(card.name.clone())
-                .into_any_element()
-        };
-
-        let agent = self.agent_status.get(&card.path).copied().unwrap_or(AgentState::Unknown);
-        let header = div().flex().items_center().gap_2().child(avatar).child(name_el).child(agent_pill(hx, agent));
-
-        let fs = self.forge_status.get(&card.branch);
-        let mut badges = div().flex().items_center().gap_2().mt_1();
-        if let Some(pr) = fs.and_then(|s| s.pr.as_ref()) {
-            let c = match pr.state {
-                PrState::Open => hx.green,
-                PrState::Draft => hx.tx1,
-                PrState::Merged => rgb(0xa877f5),
-                PrState::Closed => hx.red,
-            };
-            badges = badges.child(div().text_xs().font_family(hx.font_mono).text_color(c).child(format!("#{}", pr.number)));
-        }
-        if card.ahead > 0 {
-            badges = badges.child(div().text_xs().text_color(hx.green).child(format!("↑{}", card.ahead)));
-        }
-        if card.behind > 0 {
-            badges = badges.child(div().text_xs().text_color(hx.amber).child(format!("↓{}", card.behind)));
-        }
-        if card.dirty > 0 {
-            badges = badges.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .text_xs()
-                    .text_color(hx.amber)
-                    .child(div().size(px(5.0)).rounded_full().bg(hx.amber))
-                    .child(format!("~{}", card.dirty)),
-            );
-        }
-        if let Some((c, label)) = fs.and_then(|s| ci_summary(hx, &s.checks)) {
-            badges = badges.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .text_xs()
-                    .text_color(c)
-                    .child(div().size(px(5.0)).rounded_full().bg(c))
-                    .child(label),
-            );
-        }
-
-        let mut card_div = div()
-            .id(("card", card.id.len() + 7))
-            .relative()
-            .flex()
-            .flex_col()
-            .mx_1()
-            .my_0p5()
-            .p_2()
-            .rounded_md()
-            .when(selected, |d| d.bg(hx.surface).border_l_1().border_color(hx.accent))
-            .cursor_pointer()
-            .hover(|d| d.bg(hx.surface))
-            .on_click(cx.listener({
-                let id = id.clone();
-                move |ws, _, window, cx| ws.select(Selection::Worktree(id.clone()), window, cx)
-            }))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener({
-                    let id = id.clone();
-                    move |ws, ev: &MouseDownEvent, _window, cx| {
-                        cx.stop_propagation();
-                        ws.pending_delete = None;
-                        ws.menu = Some(CardMenu {
-                            id: id.clone(),
-                            x: ev.position.x,
-                            y: ev.position.y,
-                        });
-                        cx.notify();
-                    }
-                }),
-            )
-            // GPUI routes non-primary (right/middle) *clicks* through the
-            // aux-click path (div.rs special-cases `has_aux_click_listeners`),
-            // which is distinct from the raw right on_mouse_down listener above.
-            // Wiring both makes the menu robust to whichever path the platform
-            // actually delivers.
-            .on_aux_click(cx.listener({
-                let id = id.clone();
-                move |ws, ev: &gpui::ClickEvent, _window, cx| {
-                    cx.stop_propagation();
-                    ws.pending_delete = None;
-                    let pos = ev.position();
-                    ws.menu = Some(CardMenu { id: id.clone(), x: pos.x, y: pos.y });
-                    cx.notify();
-                }
-            }))
-            .child(header)
-            .child(div().mt_1().text_xs().font_family(hx.font_mono).text_color(hx.tx1).overflow_hidden().child(card.branch.clone()))
-            .child(badges);
-
-        if avatar_open {
-            card_div = card_div.child(self.render_avatar_popover(hx, &id, cx));
-        }
-        card_div
-    }
-
-    pub(crate) fn render_avatar_popover(
-        &self,
-        hx: &HarnessTheme,
-        id: &str,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let mut swatches = div().flex().flex_wrap().gap_1();
-        for ix in 0..8u8 {
-            let sid = id.to_string();
-            swatches = swatches.child(
-                div()
-                    .id(("swatch", ix as usize))
-                    .size(px(22.0))
-                    .rounded_md()
-                    .bg(avatar_color(ix))
-                    .cursor_pointer()
-                    .hover(|d| d.border_1().border_color(hx.tx0))
-                    .on_click(cx.listener(move |ws, _, window, cx| {
-                        cx.stop_propagation();
-                        ws.set_avatar_color(&sid, ix, window, cx);
-                    })),
-            );
-        }
-        div()
-            .absolute()
-            .top(px(40.0))
-            .left(px(8.0))
-            .w(px(212.0))
-            .p_2()
-            .rounded_md()
-            .bg(hx.surface2)
-            .border_1()
-            .border_color(hx.border2)
-            .child(div().text_xs().text_color(hx.tx2).mb_1().child("INITIALS"))
-            .children(self.edit_editor().map(|editor| self.render_input(hx, editor, cx)))
-            .child(div().text_xs().text_color(hx.tx2).mt_2().mb_1().child("COLOR"))
-            .child(swatches)
-    }
 
     /// The chrome around an inline edit's `Editor`. The wrapper carries the
     /// `HarnessInput` key context (so escape→`menu::Cancel` outranks the
@@ -734,8 +798,24 @@ impl HarnessWorkspace {
             )
             .child(self.menu_item(hx, "Rename", false, cx.listener(move |ws, _, window, cx| {
                 cx.stop_propagation();
-                let name = ws.manager.registry.get(&rename_id).map(|e| e.name.clone()).unwrap_or_default();
-                ws.select(Selection::Worktree(rename_id.clone()), window, cx);
+                let name = ws
+                    .task_store
+                    .get(&rename_id)
+                    .map(|t| t.name.clone())
+                    .or_else(|| ws.manager.registry.get(&rename_id).map(|e| e.name.clone()))
+                    .unwrap_or_default();
+                if ws.task_store.get(&rename_id).is_some() {
+                    ws.select(
+                        Selection::Task {
+                            task_id: rename_id.clone(),
+                            member_id: None,
+                        },
+                        window,
+                        cx,
+                    );
+                } else {
+                    ws.select(Selection::Worktree(rename_id.clone()), window, cx);
+                }
                 ws.begin_edit(EditKind::Rename(rename_id.clone()), &name, "name…", window, cx);
             })))
             .child(self.menu_item(hx, "Archive", false, cx.listener(move |ws, _, window, cx| {

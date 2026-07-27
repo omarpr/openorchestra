@@ -18,7 +18,12 @@ impl HarnessWorkspace {
     }
 
     pub(crate) fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.data = WorkspaceData::build(self.manager.git(), &self.manager.registry, &self.repo_roots);
+        self.data = WorkspaceData::build(
+            self.manager.git(),
+            &self.manager.registry,
+            &self.task_store,
+            &self.repo_roots,
+        );
 
         let items: Vec<(PathBuf, String, PathBuf)> = self
             .data
@@ -278,22 +283,21 @@ impl HarnessWorkspace {
             EditKind::Rename(id) => {
                 let name = text.trim();
                 if !name.is_empty() {
-                    let _ = self.manager.registry.rename(&id, name);
-                    let _ = self.manager.registry.save();
-                }
-                self.refresh(window, cx);
-            }
-            EditKind::Avatar(id) => {
-                let initials = text.trim().to_uppercase();
-                if !initials.is_empty()
-                    && let Some(e) = self.manager.registry.get(&id) {
-                        let color = e.avatar.color;
-                        let _ = self
-                            .manager
-                            .registry
-                            .set_avatar(&id, worktrees::Avatar { initials, color });
+                    if self.task_store.get(&id).is_some() {
+                        let _ = self.task_store.rename(&id, name);
+                        let _ = self.task_store.save();
+                        // Keep member worktree display names in sync.
+                        if let Some(task) = self.task_store.get(&id) {
+                            for m in &task.members {
+                                let _ = self.manager.registry.rename(&m.worktree_id, name);
+                            }
+                            let _ = self.manager.registry.save();
+                        }
+                    } else {
+                        let _ = self.manager.registry.rename(&id, name);
                         let _ = self.manager.registry.save();
                     }
+                }
                 self.refresh(window, cx);
             }
             EditKind::AgentCmd(kind) => {
@@ -339,42 +343,122 @@ impl HarnessWorkspace {
 
     /// Also fix the note so it names the branch and base actually used.
     pub(crate) fn create_named(&mut self, input: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let target = self.new_target_repo.clone();
-        let Some(repo) = self.data.repos.iter().find(|r| r.name == target).or_else(|| self.data.repos.first()) else {
+        if self.data.repos.is_empty() {
             self.note = "add a project first".to_string();
             cx.notify();
             return;
-        };
-        let spec = NewWorktree::parse(input, &repo.compare_ref);
+        }
+        // Members: prefer explicit multi-select; fall back to new_target_repo.
+        let mut member_names = self.new_task_repos.clone();
+        if member_names.is_empty() {
+            member_names.push(self.new_target_repo.clone());
+        }
+        member_names.retain(|n| self.data.repos.iter().any(|r| &r.name == n));
+        if member_names.is_empty() {
+            if let Some(r) = self.data.repos.first() {
+                member_names.push(r.name.clone());
+            }
+        }
+        let mut home = self.new_task_home.clone();
+        if !member_names.iter().any(|n| n == &home) {
+            home = member_names[0].clone();
+        }
+
+        let primary = self
+            .data
+            .repos
+            .iter()
+            .find(|r| r.name == home)
+            .or_else(|| self.data.repos.first())
+            .unwrap();
+        let spec = NewWorktree::parse(input, &primary.compare_ref);
         let name = spec.name.as_str();
         let slug = slugify(name);
-        let req = CreateRequest {
-            repo: repo.name.clone(),
-            repo_root: repo.repo_root.clone(),
-            task_slug: slug.clone(),
-            branch: spec.branch.clone().unwrap_or_else(|| format!("feat/{slug}")),
-            base_ref: Some(spec.base_ref.clone()),
-            created_at: now_stamp(),
-            // OpenCode is the default (§4.5). It has the best signal of any
-            // adapter we have: `permission.updated` over its local SSE stream
-            // is a real, out-of-band "blocked on you" event, so its fidelity is
-            // Exact and it may raise notifications — where pi's is BestEffort,
-            // approximated from a status file an extension has to write. Less
-            // machinery and a truer answer.
-            //
-            // pi stays a first-class peer rather than the default because what
-            // it uniquely offers is the training loop (§4.4), not the signal.
-            // Choosing per worktree is the natural next step in the create
-            // dialog; until then this is the one that works with no setup.
+        let branch = spec
+            .branch
+            .clone()
+            .unwrap_or_else(|| format!("feat/{slug}"));
+        let created_at = now_stamp();
+
+        let members: Vec<CreateTaskMember> = member_names
+            .iter()
+            .filter_map(|n| {
+                let repo = self.data.repos.iter().find(|r| &r.name == n)?;
+                Some(CreateTaskMember {
+                    repo: repo.name.clone(),
+                    repo_root: repo.repo_root.clone(),
+                    branch: branch.clone(),
+                    base_ref: Some(repo.compare_ref.clone()),
+                })
+            })
+            .collect();
+
+        let req = CreateTaskRequest {
+            name: name.to_string(),
+            slug: slug.clone(),
+            home_repo: home.clone(),
+            members,
+            created_at,
             agent_kind: AgentKind::OpenCode,
         };
-        match self.manager.create(req) {
-            Ok(id) => {
-                let _ = self.manager.registry.rename(&id, name);
-                let _ = self.manager.registry.save();
-                self.note = format!("created {id}");
+
+        match create_task(&mut self.manager, &mut self.task_store, req) {
+            Ok(task_id) => {
+                // Task-level setup, then per-member hooks, then AGENTS.md.
+                let task = self.task_store.get(&task_id).cloned();
+                if let Some(task) = &task {
+                    let task_hooks = TaskHooks::load(&self.data_dir, &task.slug);
+                    let member_paths = task.member_paths();
+                    let task_dir = self.data_dir.join("tasks").join(&task.slug);
+                    let _ = std::fs::create_dir_all(&task_dir);
+                    if let Err(e) =
+                        task_hooks.run_setup(self.manager.git().runner(), &task_dir, &member_paths)
+                    {
+                        self.note = format!("task setup: {e}");
+                    }
+                    for m in &task.members {
+                        let Some(entry) = self.manager.registry.get(&m.worktree_id) else {
+                            continue;
+                        };
+                        let env = HookEnv {
+                            repo_root: entry.repo_root.clone(),
+                            worktree: m.path.clone(),
+                            branch: m.branch.clone(),
+                            task_slug: task.slug.clone(),
+                            task_id: Some(task_id.clone()),
+                            home_worktree: task.home_path().map(|p| p.to_path_buf()),
+                        };
+                        match HooksConfig::load(&entry.repo_root, &self.data_dir, &m.repo) {
+                            Ok(hooks) => {
+                                if let Err(e) = hooks.run_setup(self.manager.git().runner(), &env) {
+                                    self.note = format!("setup {}: {e}", m.repo);
+                                }
+                            }
+                            Err(e) => self.note = format!("hooks load {}: {e}", m.repo),
+                        }
+                    }
+                    if let Some(home_m) = task.home_member() {
+                        if let Some(entry) = self.manager.registry.get(&home_m.worktree_id) {
+                            let _ = write_home_agents_md_at(
+                                self.manager.git(),
+                                task,
+                                &entry.repo_root,
+                            );
+                        }
+                    }
+                }
+                self.note = format!("created task {task_id}");
                 self.refresh(window, cx);
-                self.select(Selection::Worktree(id), window, cx);
+                self.select(
+                    Selection::Task {
+                        task_id,
+                        member_id: None,
+                    },
+                    window,
+                    cx,
+                );
+                // Run remaining setup commands visibly in the shell if any were noted.
+                self.run_visible_setup_hooks(window, cx);
             }
             Err(e) => {
                 self.note = format!("create failed: {e}");
@@ -383,29 +467,191 @@ impl HarnessWorkspace {
         }
     }
 
-    pub(crate) fn set_avatar_color(&mut self, id: &str, color: u8, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(e) = self.manager.registry.get(id) {
-            let initials = e.avatar.initials.clone();
-            let _ = self
+    /// Send pending setup shell commands into the task's shell tab (best-effort).
+    fn run_visible_setup_hooks(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        // Hooks already ran via CommandRunner above. Visible replay is optional;
+        // leave a note if setup scripts exist for discoverability.
+        let Some(r) = self.resolve() else { return };
+        let Some(task_id) = &r.task_id else { return };
+        let Some(task) = self.task_store.get(task_id) else { return };
+        let mut cmds = Vec::new();
+        for m in &task.members {
+            let Some(entry) = self.manager.registry.get(&m.worktree_id) else {
+                continue;
+            };
+            let env = HookEnv {
+                repo_root: entry.repo_root.clone(),
+                worktree: m.path.clone(),
+                branch: m.branch.clone(),
+                task_slug: task.slug.clone(),
+                task_id: Some(task_id.clone()),
+                home_worktree: task.home_path().map(|p| p.to_path_buf()),
+            };
+            if let Ok(hooks) = HooksConfig::load(&entry.repo_root, &self.data_dir, &m.repo) {
+                cmds.extend(hooks.setup_shell_commands(&env));
+            }
+        }
+        if !cmds.is_empty() && self.has_tmux {
+            if let Some(pane) = self.panes.get(&r.key) {
+                if let Some(tab) = pane.tabs.first() {
+                    let session = crate::tmux::session_name(&r.key, tab.id);
+                    for cmd in cmds {
+                        crate::tmux::send_keys(&session, &cmd);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Open a changed file from the DIFF panel in an editor tab.
+    ///
+    /// Reuses an existing editor tab when one is already open; otherwise opens
+    /// a new editor for the focused worktree. For unified task diffs the
+    /// display path is `repo/rel` — the matching member is focused quietly
+    /// (without recomputing the diff) so the editor roots on that worktree.
+    pub(crate) fn open_diff_file(
+        &mut self,
+        display_path: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let abs = if let Some(uf) = self
+            .unified_diff
+            .files
+            .iter()
+            .find(|f| format!("{}/{}", f.repo, f.file.path) == display_path)
+        {
+            let member_id = uf.member_id.clone();
+            let rel = uf.file.path.clone();
+            let Some(member_path) = self
                 .manager
                 .registry
-                .set_avatar(id, worktrees::Avatar { initials, color });
-            let _ = self.manager.registry.save();
+                .get(&member_id)
+                .map(|e| e.path.clone())
+            else {
+                self.note = format!("worktree {member_id} not found");
+                cx.notify();
+                return;
+            };
+            self.focus_task_member_quietly(&member_id);
+            member_path.join(rel)
+        } else {
+            let Some(r) = self.resolve() else { return };
+            r.editor_path.join(display_path)
+        };
+
+        let Some(hosted) = self.ensure_editor_tab(window, cx) else {
+            return;
+        };
+        hosted.update(cx, |ws, cx| {
+            ws.open_abs_path(
+                abs.clone(),
+                ::workspace::OpenOptions::default(),
+                window,
+                cx,
+            )
+            .detach();
+        });
+        self.note = format!("opened {}", abs.display());
+        cx.notify();
+    }
+
+    /// Point the task selection at `member_id` without recomputing the DIFF
+    /// (which would collapse the file the user just asked to edit).
+    fn focus_task_member_quietly(&mut self, member_id: &str) {
+        match &mut self.selection {
+            Selection::Task { member_id: mid, .. } => {
+                *mid = Some(member_id.to_string());
+            }
+            Selection::Worktree(id) => {
+                let task_id = self
+                    .manager
+                    .registry
+                    .get(id)
+                    .and_then(|e| e.task_id.clone());
+                if let Some(task_id) = task_id {
+                    self.selection = Selection::Task {
+                        task_id,
+                        member_id: Some(member_id.to_string()),
+                    };
+                }
+            }
+            _ => {}
         }
-        self.refresh(window, cx);
+    }
+
+    /// Activate an existing editor tab, or open a new one. Returns the hosted
+    /// zed Workspace so the caller can open a path into it.
+    fn ensure_editor_tab(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<::workspace::Workspace>> {
+        let key = self.resolve()?.key;
+        if let Some(pane) = self.panes.get(&key) {
+            if let Some(tab) = pane
+                .tabs
+                .iter()
+                .find(|t| matches!(t.content, TabContent::Editor(_)))
+            {
+                let id = tab.id;
+                let hosted = match &tab.content {
+                    TabContent::Editor(ws) => ws.clone(),
+                    _ => unreachable!(),
+                };
+                if let Some(pane) = self.panes.get_mut(&key) {
+                    pane.active = id;
+                }
+                self.focus_active_pane(window, cx);
+                self.save_panes();
+                return Some(hosted);
+            }
+        }
+        self.open_tab(TabKind::Editor, window, cx);
+        let pane = self.panes.get(&key)?;
+        match &pane.active_tab()?.content {
+            TabContent::Editor(ws) => Some(ws.clone()),
+            _ => None,
+        }
     }
 
     pub(crate) fn archive(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
-        match self.manager.archive(&id) {
-            Ok(()) => self.note = format!("archived {id}"),
-            Err(e) => self.note = format!("archive failed: {e}"),
+        // If this worktree belongs to a multi-member task, archive the whole task.
+        let task_id = self
+            .manager
+            .registry
+            .get(&id)
+            .and_then(|e| e.task_id.clone())
+            .or_else(|| {
+                // id might already be a task id
+                self.task_store.get(&id).map(|t| t.id.clone())
+            });
+
+        if let Some(tid) = task_id {
+            if let Some(task) = self.task_store.get(&tid).cloned() {
+                self.run_teardown_hooks(&task);
+                let pane_key = format!("task:{tid}");
+                for m in &task.members {
+                    self.teardown_sessions(&m.worktree_id);
+                    self.panes.remove(&m.worktree_id);
+                }
+                self.teardown_sessions(&pane_key);
+                self.panes.remove(&pane_key);
+                match archive_task(&mut self.manager, &mut self.task_store, &tid) {
+                    Ok(()) => self.note = format!("archived task {tid}"),
+                    Err(e) => self.note = format!("archive failed: {e}"),
+                }
+            }
+        } else {
+            self.run_member_teardown(&id);
+            match self.manager.archive(&id) {
+                Ok(()) => self.note = format!("archived {id}"),
+                Err(e) => self.note = format!("archive failed: {e}"),
+            }
+            self.teardown_sessions(&id);
+            self.panes.remove(&id);
         }
-        // Archiving stops the worktree's agents (freeing resources) and
-        // purges its tab record, so unarchiving later starts fresh instead of
-        // leaking a detached session or resurrecting a stale one.
-        self.teardown_sessions(&id);
-        self.panes.remove(&id);
         self.refresh(window, cx);
         if let Some(name) = self.data.repos.first().map(|r| r.name.clone()) {
             self.select(Selection::Main(name), window, cx);
@@ -414,19 +660,68 @@ impl HarnessWorkspace {
 
     pub(crate) fn delete(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
-        match self.manager.delete(&id) {
-            Ok(()) => self.note = format!("deleted {id}"),
-            Err(e) => self.note = format!("delete failed: {e}"),
+        let task_id = self
+            .manager
+            .registry
+            .get(&id)
+            .and_then(|e| e.task_id.clone())
+            .or_else(|| self.task_store.get(&id).map(|t| t.id.clone()));
+
+        if let Some(tid) = task_id {
+            if let Some(task) = self.task_store.get(&tid).cloned() {
+                self.run_teardown_hooks(&task);
+                let pane_key = format!("task:{tid}");
+                for m in &task.members {
+                    self.teardown_sessions(&m.worktree_id);
+                    self.panes.remove(&m.worktree_id);
+                }
+                self.teardown_sessions(&pane_key);
+                self.panes.remove(&pane_key);
+                match delete_task(&mut self.manager, &mut self.task_store, &tid) {
+                    Ok(()) => self.note = format!("deleted task {tid}"),
+                    Err(e) => self.note = format!("delete failed: {e}"),
+                }
+            }
+        } else {
+            self.run_member_teardown(&id);
+            match self.manager.delete(&id) {
+                Ok(()) => self.note = format!("deleted {id}"),
+                Err(e) => self.note = format!("delete failed: {e}"),
+            }
+            self.teardown_sessions(&id);
+            self.panes.remove(&id);
         }
-        // Teardown first (it reads the persisted record); then drop the live
-        // pane client. Otherwise a later worktree with the same id could
-        // reattach to this one's still-running agent session.
-        self.teardown_sessions(&id);
-        self.panes.remove(&id);
         self.pending_delete = None;
         self.refresh(window, cx);
         if let Some(name) = self.data.repos.first().map(|r| r.name.clone()) {
             self.select(Selection::Main(name), window, cx);
+        }
+    }
+
+    fn run_teardown_hooks(&mut self, task: &worktrees::Task) {
+        let task_hooks = TaskHooks::load(&self.data_dir, &task.slug);
+        let member_paths = task.member_paths();
+        let task_dir = self.data_dir.join("tasks").join(&task.slug);
+        let _ = task_hooks.run_teardown(self.manager.git().runner(), &task_dir, &member_paths);
+        for m in &task.members {
+            self.run_member_teardown(&m.worktree_id);
+        }
+    }
+
+    fn run_member_teardown(&mut self, worktree_id: &str) {
+        let Some(entry) = self.manager.registry.get(worktree_id).cloned() else {
+            return;
+        };
+        let env = HookEnv {
+            repo_root: entry.repo_root.clone(),
+            worktree: entry.path.clone(),
+            branch: entry.branch.clone(),
+            task_slug: entry.task_slug.clone(),
+            task_id: entry.task_id.clone(),
+            home_worktree: None,
+        };
+        if let Ok(hooks) = HooksConfig::load(&entry.repo_root, &self.data_dir, &entry.repo) {
+            let _ = hooks.run_teardown(self.manager.git().runner(), &env);
         }
     }
 

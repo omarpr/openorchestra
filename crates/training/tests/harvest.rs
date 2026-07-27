@@ -33,6 +33,7 @@ fn entry() -> WorktreeEntry {
         created_at: "2026-07-19T00:00:00Z".into(),
         archived: true,
         agent_kind: AgentKind::Pi,
+        task_id: None,
     }
 }
 

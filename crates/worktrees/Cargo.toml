@@ -7,6 +7,7 @@ description = "Git worktree manager + on-disk registry (architecture §6.1, Spik
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "1"
 
 [dev-dependencies]
 tempfile = "3"

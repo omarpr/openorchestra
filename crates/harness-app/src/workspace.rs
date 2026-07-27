@@ -16,22 +16,24 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, PathPromptOptions,
-    Pixels, Render, Rgba, Styled, Window, div, prelude::*, px, rgb, rgba,
+    AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
+    PathPromptOptions, Pixels, Render, Rgba, Styled, Window, div, prelude::*, px, rgb, rgba,
 };
 
 use editor::Editor;
 
-use agent_runtime::{
-    AgentKind, AgentSignal, AgentState, Bus, StatusFileSource, WaitFidelity,
+use agent_runtime::{AgentKind, AgentSignal, AgentState, Bus, StatusFileSource, WaitFidelity};
+use forge::{BranchKey, BranchStatus, CheckStatus, ForgeUpdate, GhCli, Poller, PollerConfig};
+use worktrees::{
+    Change, CreateTaskMember, CreateTaskRequest, GitWorktrees, HookEnv, HooksConfig, Manager,
+    Registry, SystemRunner, TaskHooks, TaskStore, archive_task, create_task, delete_task,
+    migrate_worktrees_to_tasks, write_home_agents_md_at,
 };
-use forge::{BranchKey, BranchStatus, CheckStatus, ForgeUpdate, GhCli, Poller, PollerConfig, PrState};
-use worktrees::{Change, CreateRequest, GitWorktrees, Manager, Registry, SystemRunner};
 
-use crate::data::{compute_diff, WorkspaceData};
+use crate::data::{UnifiedDiff, WorkspaceData, compute_diff};
 use crate::terminal_pane::TerminalPane;
-use crate::theme::{theme, tint, HarnessTheme};
+use crate::theme::{HarnessTheme, theme, tint};
 
 const SWATCHES: [u32; 8] = [
     0x5b9bff, 0x4ec26b, 0xa877f5, 0xe0a83b, 0xf0616d, 0x22b8cf, 0xf27bb0, 0x8b93a0,
@@ -126,11 +128,19 @@ pub fn readable_diff_lines(unified: &str) -> Vec<DiffRow> {
             continue;
         }
         if let Some(rest) = line.strip_prefix("rename from ") {
-            out.push(row(DiffLineKind::Context, None, format!("renamed from {rest}")));
+            out.push(row(
+                DiffLineKind::Context,
+                None,
+                format!("renamed from {rest}"),
+            ));
             continue;
         }
         if let Some(rest) = line.strip_prefix("rename to ") {
-            out.push(row(DiffLineKind::Context, None, format!("renamed to {rest}")));
+            out.push(row(
+                DiffLineKind::Context,
+                None,
+                format!("renamed to {rest}"),
+            ));
             continue;
         }
 
@@ -150,7 +160,11 @@ pub fn readable_diff_lines(unified: &str) -> Vec<DiffRow> {
 
         // `\ No newline at end of file` is git commentary, not content.
         if line.starts_with('\\') {
-            out.push(row(DiffLineKind::Context, None, line.trim_start_matches('\\').trim().to_string()));
+            out.push(row(
+                DiffLineKind::Context,
+                None,
+                line.trim_start_matches('\\').trim().to_string(),
+            ));
             continue;
         }
 
@@ -176,7 +190,6 @@ pub fn readable_diff_lines(unified: &str) -> Vec<DiffRow> {
     }
     out
 }
-
 
 /// Cap on rendered diff lines.
 ///
@@ -240,11 +253,18 @@ impl Tab {
     }
 }
 
-#[derive(Clone, PartialEq)]
-#[derive(Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub(crate) enum Selection {
+    /// Projects foot — main checkout.
     Main(String),
+    /// Legacy single worktree id (still used when resolving members).
     Worktree(String),
+    /// Task-centric selection. `member_id` is the focused member worktree id
+    /// for the editor; agent/shell always use the task home. `None` = home.
+    Task {
+        task_id: String,
+        member_id: Option<String>,
+    },
 }
 
 /// What an active inline edit targets. The text itself lives in the backing
@@ -252,12 +272,10 @@ pub(crate) enum Selection {
 /// carries which thing is being edited so the commit knows where to write.
 #[derive(Clone)]
 pub(crate) enum EditKind {
-    /// New worktree name, created under `new_target_repo`.
+    /// New worktree/task name. Members come from `new_task_repos` / `new_task_home`.
     NewName,
-    /// Rename worktree `id`.
+    /// Rename worktree or task `id`.
     Rename(String),
-    /// Edit worktree `id`'s avatar initials.
-    Avatar(String),
     /// Edit an agent's launch command in settings (kind string).
     AgentCmd(String),
     /// Name a new custom agent in settings. Commit inserts a custom
@@ -428,12 +446,17 @@ const MAX_LIVE_PANES: usize = 6;
 
 pub(crate) struct Resolved {
     key: String,
+    /// Agent / shell cwd (task home or main / single worktree).
     path: PathBuf,
+    /// Editor project root — may differ from `path` when a non-home member is focused.
+    editor_path: PathBuf,
     /// Which agent this entry runs, or `None` for the read-only `main`
     /// checkout, which gets a plain shell (D8).
     agent_kind: Option<AgentKind>,
     compare_ref: String,
     branch: String,
+    /// When set, DIFF is the unified multi-member changeset for this task.
+    task_id: Option<String>,
 }
 
 struct ToolStatus {
@@ -444,12 +467,21 @@ struct ToolStatus {
 
 pub struct HarnessWorkspace {
     manager: Manager<SystemRunner>,
+    task_store: TaskStore,
+    /// `~/.openorchestra` — hooks, tasks scripts, etc.
+    data_dir: PathBuf,
     data: WorkspaceData,
     repo_roots: Vec<PathBuf>,
     repos_path: PathBuf,
     selection: Selection,
     panes: HashMap<String, PaneSet>,
     diff: worktrees::Diff,
+    /// Multi-member task changeset (when selection is a Task).
+    unified_diff: UnifiedDiff,
+    /// Repos included when creating a new task (order: first = default home).
+    new_task_repos: Vec<String>,
+    /// Home repo for the pending task create (must be in `new_task_repos`).
+    new_task_home: String,
     /// Files whose diff is expanded. A set, not a single selection: reviewing
     /// usually means comparing two files, and collapsing one to look at
     /// another loses your place in the first.
@@ -545,13 +577,12 @@ pub struct HarnessWorkspace {
 /// How many samples the sidebar sparkline retains (≈2 min at the 2 s cadence).
 const RESOURCE_HISTORY: usize = 60;
 
-
 // The chrome view's methods are split across the `workspace/` module by
 // feature area; each file is an `impl HarnessWorkspace` block. Only the
 // constructor, shared types, the Render/Focusable roots, and free
 // helpers live here.
-mod state;
 mod actions;
+mod state;
 mod ui;
 
 impl HarnessWorkspace {
@@ -576,17 +607,28 @@ impl HarnessWorkspace {
         let mut repo_roots = load_repos(&repos_path);
         // Auto-add the launch dir if it's inside a git repo.
         if let Ok(root) = git.repo_root(&launch_hint)
-            && !repo_roots.contains(&root) {
-                repo_roots.push(root);
-                save_repos(&repos_path, &repo_roots);
-            }
+            && !repo_roots.contains(&root)
+        {
+            repo_roots.push(root);
+            save_repos(&repos_path, &repo_roots);
+        }
 
-        let registry = Registry::load(&reg_path).unwrap_or_else(|e| {
+        let mut registry = Registry::load(&reg_path).unwrap_or_else(|e| {
             log::warn!("registry load failed ({e}); starting empty");
             Registry::new_at(&reg_path)
         });
+        let tasks_path = data_dir.join("tasks.json");
+        let mut task_store = TaskStore::load(&tasks_path).unwrap_or_else(|e| {
+            log::warn!("tasks load failed ({e}); starting empty");
+            TaskStore::new_at(&tasks_path)
+        });
+        match migrate_worktrees_to_tasks(&mut registry, &mut task_store) {
+            Ok(n) if n > 0 => log::info!("migrated {n} worktrees to single-member tasks"),
+            Ok(_) => {}
+            Err(e) => log::warn!("worktree→task migration failed: {e}"),
+        }
         let manager = Manager::new(registry, git, data_dir.join("worktrees"));
-        let data = WorkspaceData::build(manager.git(), &manager.registry, &repo_roots);
+        let data = WorkspaceData::build(manager.git(), &manager.registry, &task_store, &repo_roots);
 
         let mut branches: Vec<BranchKey> = manager
             .registry
@@ -604,7 +646,8 @@ impl HarnessWorkspace {
                 branch: repo.default_branch.clone(),
             });
         }
-        let (poller, forge_rx) = Poller::spawn(Arc::new(GhCli::new()), branches, PollerConfig::default());
+        let (poller, forge_rx) =
+            Poller::spawn(Arc::new(GhCli::new()), branches, PollerConfig::default());
 
         // One bus for every adapter's signal (§4.6). The sidebar pill, the
         // status bar, and the notifier each take their own subscription, so it
@@ -642,16 +685,31 @@ impl HarnessWorkspace {
             .first()
             .map(|r| Selection::Main(r.name.clone()))
             .unwrap_or_else(|| Selection::Main(String::new()));
-        let new_target_repo = data.repos.first().map(|r| r.name.clone()).unwrap_or_default();
+        let new_target_repo = data
+            .repos
+            .first()
+            .map(|r| r.name.clone())
+            .unwrap_or_default();
+        let new_task_repos = if new_target_repo.is_empty() {
+            Vec::new()
+        } else {
+            vec![new_target_repo.clone()]
+        };
+        let new_task_home = new_target_repo.clone();
 
         let mut this = Self {
             manager,
+            task_store,
+            data_dir: data_dir.clone(),
             data,
             repo_roots,
             repos_path,
             selection,
             panes: HashMap::new(),
             diff: worktrees::Diff::default(),
+            unified_diff: UnifiedDiff::default(),
+            new_task_repos,
+            new_task_home,
             expanded: std::collections::HashSet::new(),
             diff_selection: None,
             diff_selecting: false,
@@ -778,7 +836,8 @@ impl HarnessWorkspace {
         // remembered choice) and the quit has already begun.
         let weak = cx.weak_entity();
         window.on_window_should_close(cx, move |_window, cx| {
-            weak.update(cx, |ws, cx| ws.request_quit(cx)).unwrap_or(true)
+            weak.update(cx, |ws, cx| ws.request_quit(cx))
+                .unwrap_or(true)
         });
 
         // Notification "View" clicks: the platform delegate pushes worktree
@@ -786,54 +845,67 @@ impl HarnessWorkspace {
         // app at the OS level already — cx.activate makes the dev-fallback
         // path behave the same.
         let nav_rx = crate::notifier::nav_rx();
-        cx.spawn_in(window, async move |view, cx| loop {
-            match nav_rx.try_recv() {
-                Ok(id) => {
-                    let ok = view.update_in(cx, |ws, window, cx| {
-                        ws.select(Selection::Worktree(id.clone()), window, cx);
-                        cx.activate(true);
-                    });
-                    if ok.is_err() {
-                        break;
+        cx.spawn_in(window, async move |view, cx| {
+            loop {
+                match nav_rx.try_recv() {
+                    Ok(id) => {
+                        let ok = view.update_in(cx, |ws, window, cx| {
+                            ws.select(Selection::Worktree(id.clone()), window, cx);
+                            cx.activate(true);
+                        });
+                        if ok.is_err() {
+                            break;
+                        }
                     }
+                    Err(crossbeam_channel::TryRecvError::Empty) => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(250))
+                            .await;
+                    }
+                    Err(crossbeam_channel::TryRecvError::Disconnected) => break,
                 }
-                Err(crossbeam_channel::TryRecvError::Empty) => {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(250))
-                        .await;
-                }
-                Err(crossbeam_channel::TryRecvError::Disconnected) => break,
             }
         })
         .detach();
 
-        cx.spawn(async move |view, cx| loop {
-            match forge_rx.try_recv() {
-                Ok(update) => {
-                    if view.update(cx, |ws, cx| ws.apply_forge(update, cx)).is_err() {
-                        break;
+        cx.spawn(async move |view, cx| {
+            loop {
+                match forge_rx.try_recv() {
+                    Ok(update) => {
+                        if view
+                            .update(cx, |ws, cx| ws.apply_forge(update, cx))
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
+                    Err(e) if e.is_empty() => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(400))
+                            .await
+                    }
+                    Err(_) => break,
                 }
-                Err(e) if e.is_empty() => {
-                    cx.background_executor().timer(Duration::from_millis(400)).await
-                }
-                Err(_) => break,
             }
         })
         .detach();
 
         if let Some(status_rx) = status_rx {
-            cx.spawn(async move |view, cx| loop {
-                match status_rx.try_recv() {
-                    Ok(ev) => {
-                        if view.update(cx, |ws, cx| ws.apply_agent(ev, cx)).is_err() {
-                            break;
+            cx.spawn(async move |view, cx| {
+                loop {
+                    match status_rx.try_recv() {
+                        Ok(ev) => {
+                            if view.update(cx, |ws, cx| ws.apply_agent(ev, cx)).is_err() {
+                                break;
+                            }
                         }
+                        Err(e) if e.is_empty() => {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(400))
+                                .await
+                        }
+                        Err(_) => break,
                     }
-                    Err(e) if e.is_empty() => {
-                        cx.background_executor().timer(Duration::from_millis(400)).await
-                    }
-                    Err(_) => break,
                 }
             })
             .detach();
@@ -843,19 +915,23 @@ impl HarnessWorkspace {
         // poll cadence is the debounce — a burst of edits in one agent turn
         // collapses to one recompute per tick, and the `diff_gen` guard drops
         // any overlap. State-preserving so an in-progress review is not reset.
-        cx.spawn(async move |view, cx| loop {
-            match diff_dirty_rx.try_recv() {
-                Ok(_) => {
-                    // Coalesce everything already queued this instant.
-                    while diff_dirty_rx.try_recv().is_ok() {}
-                    if view.update(cx, |ws, cx| ws.refresh_diff_live(cx)).is_err() {
-                        break;
+        cx.spawn(async move |view, cx| {
+            loop {
+                match diff_dirty_rx.try_recv() {
+                    Ok(_) => {
+                        // Coalesce everything already queued this instant.
+                        while diff_dirty_rx.try_recv().is_ok() {}
+                        if view.update(cx, |ws, cx| ws.refresh_diff_live(cx)).is_err() {
+                            break;
+                        }
                     }
+                    Err(e) if e.is_empty() => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(250))
+                            .await
+                    }
+                    Err(_) => break,
                 }
-                Err(e) if e.is_empty() => {
-                    cx.background_executor().timer(Duration::from_millis(250)).await
-                }
-                Err(_) => break,
             }
         })
         .detach();
@@ -865,13 +941,15 @@ impl HarnessWorkspace {
         // would show forever; every few seconds, drop any such pill whose pid is
         // gone. The probe is a couple of tiny file reads only when a non-terminal
         // pill exists, so an idle app does no work.
-        cx.spawn(async move |view, cx| loop {
-            cx.background_executor().timer(Duration::from_secs(3)).await;
-            if view
-                .update(cx, |ws, cx| ws.reconcile_agent_liveness(cx))
-                .is_err()
-            {
-                break;
+        cx.spawn(async move |view, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(3)).await;
+                if view
+                    .update(cx, |ws, cx| ws.reconcile_agent_liveness(cx))
+                    .is_err()
+                {
+                    break;
+                }
             }
         })
         .detach();
@@ -888,13 +966,15 @@ impl HarnessWorkspace {
                 let (returned, raw) = cx
                     .background_spawn(async move {
                         let mut sys = sys;
-                        let raw =
-                            crate::resource_monitor::sample_once(&mut sys, sampler_has_tmux);
+                        let raw = crate::resource_monitor::sample_once(&mut sys, sampler_has_tmux);
                         (sys, raw)
                     })
                     .await;
                 sys = returned;
-                if view.update(cx, |ws, cx| ws.apply_resource(raw, cx)).is_err() {
+                if view
+                    .update(cx, |ws, cx| ws.apply_resource(raw, cx))
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -904,7 +984,6 @@ impl HarnessWorkspace {
         this
     }
 }
-
 
 impl Focusable for HarnessWorkspace {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
@@ -969,8 +1048,11 @@ impl Render for HarnessWorkspace {
                     // Collapsing hides the splitter too — a resize handle for
                     // a panel that isn't there is just a dead strip of chrome.
                     .when(self.prefs.sidebar_open, |d| {
-                        d.child(self.render_sidebar(&hx, cx))
-                            .child(self.splitter(&hx, Drag::Sidebar, cx))
+                        d.child(self.render_sidebar(&hx, cx)).child(self.splitter(
+                            &hx,
+                            Drag::Sidebar,
+                            cx,
+                        ))
                     })
                     .child(self.render_center(&hx, window, cx))
                     .when(self.prefs.diff_open, |d| {
@@ -985,12 +1067,14 @@ impl Render for HarnessWorkspace {
             // renders underneath it — "settings don't open" while the state
             // toggles perfectly. Absolute positioning takes it out of flow;
             // being last takes it to the top.
-            .when(self.settings_open, |d| d.child(self.render_settings(&hx, cx)))
+            .when(self.settings_open, |d| {
+                d.child(self.render_settings(&hx, cx))
+            })
             // Drag tracking lives on the root so the pointer can leave the
             // 6px handle mid-drag without the resize stopping.
-            .on_action(cx.listener(|ws, _: &crate::CopyDiffSelection, _, cx| {
-                ws.copy_diff_selection(cx)
-            }))
+            .on_action(
+                cx.listener(|ws, _: &crate::CopyDiffSelection, _, cx| ws.copy_diff_selection(cx)),
+            )
             .on_action(cx.listener(|ws, _: &crate::NewTerminal, window, cx| {
                 ws.open_tab(TabKind::Shell, window, cx)
             }))
@@ -1025,11 +1109,15 @@ impl Render for HarnessWorkspace {
             // ROOT-LEFT does, the platform isn't delivering right-clicks.
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|_ws, _e: &MouseDownEvent, _w, _cx| eprintln!("[diag] ROOT mouse_down LEFT")),
+                cx.listener(|_ws, _e: &MouseDownEvent, _w, _cx| {
+                    eprintln!("[diag] ROOT mouse_down LEFT")
+                }),
             )
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(|_ws, _e: &MouseDownEvent, _w, _cx| eprintln!("[diag] ROOT mouse_down RIGHT")),
+                cx.listener(|_ws, _e: &MouseDownEvent, _w, _cx| {
+                    eprintln!("[diag] ROOT mouse_down RIGHT")
+                }),
             )
             .on_mouse_move(cx.listener(|ws, ev: &MouseMoveEvent, _, cx| ws.drag_move(ev, cx)))
             .on_mouse_up(
@@ -1041,7 +1129,11 @@ impl Render for HarnessWorkspace {
             );
 
         if let Some(m) = &self.menu {
-            let menu = CardMenu { id: m.id.clone(), x: m.x, y: m.y };
+            let menu = CardMenu {
+                id: m.id.clone(),
+                x: m.x,
+                y: m.y,
+            };
             root = root.child(
                 div()
                     .id("menu-backdrop")
@@ -1146,9 +1238,16 @@ impl HarnessWorkspace {
                     .border_1()
                     .border_color(if remember { hx.accent } else { hx.border2 })
                     .when(remember, |d| d.bg(hx.accent))
-                    .when(remember, |d| d.child(div().text_xs().text_color(rgb(0xffffff)).child("✓"))),
+                    .when(remember, |d| {
+                        d.child(div().text_xs().text_color(rgb(0xffffff)).child("✓"))
+                    }),
             )
-            .child(div().text_sm().text_color(hx.tx1).child("Remember my choice"));
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(hx.tx1)
+                    .child("Remember my choice"),
+            );
 
         let button = |id: &'static str, label: String, danger: bool| {
             div()
@@ -1161,11 +1260,18 @@ impl HarnessWorkspace {
                 .rounded_md()
                 .border_1()
                 .border_color(if danger { hx.border2 } else { hx.accent })
-                .bg(if danger { hx.surface } else { tint(hx.accent, 0.16) })
+                .bg(if danger {
+                    hx.surface
+                } else {
+                    tint(hx.accent, 0.16)
+                })
                 .text_sm()
                 .text_color(if danger { hx.tx0 } else { hx.accent })
                 .cursor_pointer()
-                .hover(|d| d.border_color(if danger { hx.red } else { hx.accent }).text_color(if danger { hx.red } else { hx.accent }))
+                .hover(|d| {
+                    d.border_color(if danger { hx.red } else { hx.accent })
+                        .text_color(if danger { hx.red } else { hx.accent })
+                })
                 .child(label)
         };
 
@@ -1181,26 +1287,34 @@ impl HarnessWorkspace {
             .border_color(hx.border2)
             .shadow_lg()
             // A click inside the card must not reach the dismiss backdrop.
-            .on_mouse_down(MouseButton::Left, cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()))
-            .child(div().text_lg().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx0).child("Quit openOrchestra?"))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
+            )
             .child(
                 div()
-                    .text_sm()
-                    .text_color(hx.tx1)
-                    .child(format!("{count_label} Keep them running in the background, or close them?")),
+                    .text_lg()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(hx.tx0)
+                    .child("Quit openOrchestra?"),
             )
+            .child(div().text_sm().text_color(hx.tx1).child(format!(
+                "{count_label} Keep them running in the background, or close them?"
+            )))
             .child(checkbox)
             .child(
                 div()
                     .flex()
                     .gap_2()
                     .mt_1()
-                    .child(button("close-keep", "Keep running".into(), false).on_click(
-                        cx.listener(|ws, _, _, cx| ws.resolve_quit(true, cx)),
-                    ))
-                    .child(button("close-kill", "Close terminals".into(), true).on_click(
-                        cx.listener(|ws, _, _, cx| ws.resolve_quit(false, cx)),
-                    )),
+                    .child(
+                        button("close-keep", "Keep running".into(), false)
+                            .on_click(cx.listener(|ws, _, _, cx| ws.resolve_quit(true, cx))),
+                    )
+                    .child(
+                        button("close-kill", "Close terminals".into(), true)
+                            .on_click(cx.listener(|ws, _, _, cx| ws.resolve_quit(false, cx))),
+                    ),
             );
 
         div()
@@ -1214,7 +1328,10 @@ impl HarnessWorkspace {
             .justify_center()
             .bg(rgba(0x00000099))
             // Clicking outside the card cancels the quit — the safe default.
-            .on_mouse_down(MouseButton::Left, cx.listener(|ws, _, _, cx| ws.cancel_quit(cx)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|ws, _, _, cx| ws.cancel_quit(cx)),
+            )
             .child(card)
             .into_any_element()
     }
@@ -1259,10 +1376,6 @@ fn ci_summary(hx: &HarnessTheme, checks: &[forge::CheckRun]) -> Option<(Rgba, &'
     } else {
         None
     }
-}
-
-fn avatar_color(ix: u8) -> Rgba {
-    rgb(SWATCHES[(ix as usize) % SWATCHES.len()])
 }
 
 fn detect_tools() -> ToolStatus {
@@ -1617,7 +1730,7 @@ mod new_worktree_tests {
 
 #[cfg(test)]
 mod diff_render_tests {
-    use super::{readable_diff_lines, DiffLineKind, NewWorktree, Prefs};
+    use super::{DiffLineKind, NewWorktree, Prefs, readable_diff_lines};
 
     /// Verbatim shape of the noise a new file produces — the case that
     /// prompted this: five metadata lines before any content.
@@ -1636,10 +1749,18 @@ index 0000000..2cf3f44
     fn git_metadata_preamble_is_replaced_by_a_single_file_header() {
         let rows = readable_diff_lines(NEW_FILE);
         assert_eq!(rows[0].kind, DiffLineKind::FileHeader);
-        assert_eq!(rows[0].text, "agent-schema/README.md", "header names the file");
+        assert_eq!(
+            rows[0].text, "agent-schema/README.md",
+            "header names the file"
+        );
 
         for noise in [
-            "diff --git", "new file mode", "index 0000000", "--- /dev/null", "+++ b/", "@@",
+            "diff --git",
+            "new file mode",
+            "index 0000000",
+            "--- /dev/null",
+            "+++ b/",
+            "@@",
         ] {
             assert!(
                 !rows.iter().any(|r| r.text.contains(noise)),
@@ -1671,9 +1792,16 @@ index 0000000..2cf3f44
         let diff = "@@ -10,4 +20,4 @@\n ctx\n-gone\n+added\n ctx2\n";
         let rows = readable_diff_lines(diff);
         let n = |k: DiffLineKind| -> Vec<Option<u32>> {
-            rows.iter().filter(|r| r.kind == k).map(|r| r.number).collect()
+            rows.iter()
+                .filter(|r| r.kind == k)
+                .map(|r| r.number)
+                .collect()
         };
-        assert_eq!(n(DiffLineKind::Removed), vec![Some(11)], "old-file numbering");
+        assert_eq!(
+            n(DiffLineKind::Removed),
+            vec![Some(11)],
+            "old-file numbering"
+        );
         assert_eq!(n(DiffLineKind::Added), vec![Some(21)], "new-file numbering");
         assert_eq!(n(DiffLineKind::Context), vec![Some(20), Some(22)]);
     }
@@ -1744,13 +1872,21 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
 
     #[test]
     fn panel_sizes_are_clamped_so_a_drag_cannot_make_one_unrecoverable() {
-        let squashed = Prefs { sidebar_width: 0.0, diff_width: -50.0, ..Prefs::default() }
-            .sanitized();
+        let squashed = Prefs {
+            sidebar_width: 0.0,
+            diff_width: -50.0,
+            ..Prefs::default()
+        }
+        .sanitized();
         assert!(squashed.sidebar_width >= 180.0);
         assert!(squashed.diff_width >= 220.0);
 
-        let huge = Prefs { sidebar_width: 9999.0, diff_width: 9999.0, ..Prefs::default() }
-            .sanitized();
+        let huge = Prefs {
+            sidebar_width: 9999.0,
+            diff_width: 9999.0,
+            ..Prefs::default()
+        }
+        .sanitized();
         assert!(huge.sidebar_width <= 640.0);
         assert!(huge.diff_width <= 800.0);
     }
@@ -1763,17 +1899,39 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
         let mut archived: Vec<PathBuf> = vec![];
 
         // Archive /a: leaves active, lands in archived.
-        assert!(relocate_root(&mut active, &mut archived, std::path::Path::new("/a")));
+        assert!(relocate_root(
+            &mut active,
+            &mut archived,
+            std::path::Path::new("/a")
+        ));
         assert_eq!(active, vec![PathBuf::from("/b")]);
         assert_eq!(archived, vec![PathBuf::from("/a")]);
 
         // Absent root: no-op, reports false.
-        assert!(!relocate_root(&mut active, &mut archived, std::path::Path::new("/zzz")));
+        assert!(!relocate_root(
+            &mut active,
+            &mut archived,
+            std::path::Path::new("/zzz")
+        ));
 
         // Restore /a back, then a redundant restore can't duplicate it.
-        assert!(relocate_root(&mut archived, &mut active, std::path::Path::new("/a")));
-        assert!(!relocate_root(&mut archived, &mut active, std::path::Path::new("/a")));
-        assert_eq!(active.iter().filter(|p| p.as_path() == std::path::Path::new("/a")).count(), 1);
+        assert!(relocate_root(
+            &mut archived,
+            &mut active,
+            std::path::Path::new("/a")
+        ));
+        assert!(!relocate_root(
+            &mut archived,
+            &mut active,
+            std::path::Path::new("/a")
+        ));
+        assert_eq!(
+            active
+                .iter()
+                .filter(|p| p.as_path() == std::path::Path::new("/a"))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1788,7 +1946,7 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
 
 #[cfg(test)]
 mod collapsed_prefs_tests {
-    use super::{load_prefs, save_prefs_to, Prefs};
+    use super::{Prefs, load_prefs, save_prefs_to};
 
     #[test]
     fn a_collapsed_project_survives_a_disk_round_trip() {
@@ -1800,7 +1958,10 @@ mod collapsed_prefs_tests {
         save_prefs_to(&path, &prefs);
 
         let back = load_prefs(&path);
-        assert!(back.collapsed.contains("acme"), "collapsed project persists");
+        assert!(
+            back.collapsed.contains("acme"),
+            "collapsed project persists"
+        );
         assert!(
             !back.collapsed.contains("other"),
             "an untouched project stays expanded"
@@ -1841,7 +2002,7 @@ mod collapsed_prefs_tests {
 
 #[cfg(test)]
 mod agent_prefs_tests {
-    use super::{agent_catalog, valid_agent_slug, AgentKind, AgentPref, Prefs};
+    use super::{AgentKind, AgentPref, Prefs, agent_catalog, valid_agent_slug};
 
     fn with_custom(slug: &str, command: &str) -> Prefs {
         let mut prefs = Prefs::default();
@@ -1862,7 +2023,10 @@ mod agent_prefs_tests {
         let prefs = with_custom("cursor-agent", "cursor-agent");
         let json = serde_json::to_string(&prefs).unwrap();
         let back: Prefs = serde_json::from_str(&json).unwrap();
-        let entry = back.agents.get("cursor-agent").expect("custom entry persists");
+        let entry = back
+            .agents
+            .get("cursor-agent")
+            .expect("custom entry persists");
         assert!(entry.custom, "custom flag round-trips");
         assert_eq!(entry.command.as_deref(), Some("cursor-agent"));
         assert!(entry.signal.is_none(), "no signal by default");
@@ -1877,7 +2041,10 @@ mod agent_prefs_tests {
             install: HookInstall::ClaudeLocalSettings,
         });
         let json = serde_json::to_string(&prefs).unwrap();
-        assert!(json.contains("\"exact\""), "fidelity serializes as snake_case");
+        assert!(
+            json.contains("\"exact\""),
+            "fidelity serializes as snake_case"
+        );
         assert!(
             json.contains("\"claude_local_settings\""),
             "install dialect serializes as snake_case"
@@ -1896,7 +2063,11 @@ mod agent_prefs_tests {
     fn the_catalog_is_the_built_ins_then_the_custom_agents() {
         let prefs = with_custom("cursor-agent", "cursor-agent");
         let catalog = agent_catalog(&prefs);
-        assert_eq!(&catalog[..5], &AgentKind::known()[..], "built-ins come first, in order");
+        assert_eq!(
+            &catalog[..5],
+            &AgentKind::known()[..],
+            "built-ins come first, in order"
+        );
         assert_eq!(
             catalog.last(),
             Some(&AgentKind::Other("cursor-agent".to_string())),
@@ -1925,12 +2096,27 @@ mod agent_prefs_tests {
     fn slug_validation_rejects_bad_names_and_collisions() {
         let prefs = with_custom("cursor-agent", "cursor-agent");
         assert!(valid_agent_slug("aider", &prefs), "a fresh slug is fine");
-        assert!(valid_agent_slug("my_agent-2", &prefs), "underscores and digits are fine");
+        assert!(
+            valid_agent_slug("my_agent-2", &prefs),
+            "underscores and digits are fine"
+        );
         assert!(!valid_agent_slug("", &prefs), "empty is rejected");
-        assert!(!valid_agent_slug("has space", &prefs), "spaces are rejected");
-        assert!(!valid_agent_slug("bad/slash", &prefs), "slashes are rejected");
-        assert!(!valid_agent_slug("pi", &prefs), "a built-in kind cannot be re-added");
-        assert!(!valid_agent_slug("cursor-agent", &prefs), "an existing custom cannot be re-added");
+        assert!(
+            !valid_agent_slug("has space", &prefs),
+            "spaces are rejected"
+        );
+        assert!(
+            !valid_agent_slug("bad/slash", &prefs),
+            "slashes are rejected"
+        );
+        assert!(
+            !valid_agent_slug("pi", &prefs),
+            "a built-in kind cannot be re-added"
+        );
+        assert!(
+            !valid_agent_slug("cursor-agent", &prefs),
+            "an existing custom cannot be re-added"
+        );
     }
 
     #[test]
@@ -1947,7 +2133,13 @@ mod agent_prefs_tests {
         );
         // Mirrors the settings "reset" action.
         prefs.agents.retain(|_, a| a.custom);
-        assert!(prefs.agents.contains_key("cursor-agent"), "custom agent stays");
-        assert!(!prefs.agents.contains_key("codex"), "built-in override is dropped");
+        assert!(
+            prefs.agents.contains_key("cursor-agent"),
+            "custom agent stays"
+        );
+        assert!(
+            !prefs.agents.contains_key("codex"),
+            "built-in override is dropped"
+        );
     }
 }

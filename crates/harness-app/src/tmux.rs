@@ -192,6 +192,17 @@ pub fn kill_session(name: &str) {
     let _ = Command::new("tmux").args(["kill-session", "-t", name]).output();
 }
 
+/// Send a command line to a live session and press Enter. Best-effort — used
+/// to surface setup hooks in the visible shell tab.
+pub fn send_keys(session: &str, command: &str) {
+    let _ = Command::new("tmux")
+        .args(["send-keys", "-t", session, "-l", command])
+        .output();
+    let _ = Command::new("tmux")
+        .args(["send-keys", "-t", session, "Enter"])
+        .output();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
