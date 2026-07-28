@@ -193,7 +193,11 @@ impl<R: CommandRunner> GitWorktrees<R> {
     ) -> Result<(), GitError> {
         let path_str = path.to_string_lossy();
         // `--` keeps caller-influenced positionals from ever parsing as flags.
-        let mut args = vec!["worktree", "add", "-b", branch, "--", &path_str];
+        // `--no-track`: the base is a remote-tracking ref (`origin/<default>`),
+        // and git's default `branch.autoSetupMerge` would make the new branch
+        // track *it* — leaving every task branch claiming `origin/master` as
+        // its upstream. See `push_state` for what that breaks.
+        let mut args = vec!["worktree", "add", "--no-track", "-b", branch, "--", &path_str];
         if let Some(base) = base_ref {
             args.push(base);
         }
@@ -393,6 +397,27 @@ impl<R: CommandRunner> GitWorktrees<R> {
             .map(|o| o.stdout.trim().to_string())
             .filter(|s| !s.is_empty());
 
+        // An upstream only counts as *published* when it is this branch's own
+        // name on the remote. A worktree branched off `origin/<default>`
+        // inherits that branch as its upstream — git's `branch.autoSetupMerge`
+        // default — so `feat/x` comes into the world tracking `origin/master`.
+        // Treating that as published makes the caller send a bare `git push`,
+        // which under `push.default = simple` fails with "the upstream branch
+        // of your current branch does not match the name of your current
+        // branch", and under `upstream`/`matching` would quietly land the
+        // task's commits on the default branch. Reporting `None` routes it to
+        // the publish path instead, which sets the upstream correctly.
+        //
+        // `branch.<b>.merge` is the exact test. Comparing the abbreviated names
+        // would call a branch `x` tracking `origin/feat/x` a match.
+        let upstream = upstream.filter(|_| {
+            let Ok(branch) = self.current_branch(worktree) else {
+                return false;
+            };
+            self.git_ok(worktree, &["config", "--get", &format!("branch.{branch}.merge")])
+                .is_ok_and(|o| upstream_is_own_branch(o.stdout.trim(), &branch))
+        });
+
         let base = upstream.clone().unwrap_or_else(|| fallback.to_string());
         let range = format!("{base}..HEAD");
         let unpushed = self
@@ -430,7 +455,15 @@ impl<R: CommandRunner> GitWorktrees<R> {
         publish_to: Option<(&str, &str)>,
     ) -> Result<String, GitError> {
         let out = match publish_to {
-            Some((remote, branch)) => self.git_ok(worktree, &["push", "-u", remote, branch])?,
+            // Fully-qualified refspec rather than a bare branch name: `git push
+            // -u <remote> <branch>` still consults `push.default`, and on a
+            // branch that inherited someone else's upstream that is how commits
+            // end up on the wrong remote branch. `HEAD:refs/heads/<branch>` can
+            // only ever mean this branch, there.
+            Some((remote, branch)) => {
+                let refspec = format!("HEAD:refs/heads/{branch}");
+                self.git_ok(worktree, &["push", "-u", remote, &refspec])?
+            }
             None => self.git_ok(worktree, &["push"])?,
         };
         Ok(out.stderr.trim().to_string())
@@ -459,6 +492,12 @@ impl<R: CommandRunner> GitWorktrees<R> {
             unified,
         })
     }
+}
+
+/// Whether a `branch.<name>.merge` value names the branch's own counterpart on
+/// the remote, rather than some other branch it was created from.
+fn upstream_is_own_branch(merge_ref: &str, branch: &str) -> bool {
+    merge_ref == format!("refs/heads/{branch}")
 }
 
 /// Parse `git worktree list --porcelain` (records separated by blank lines).

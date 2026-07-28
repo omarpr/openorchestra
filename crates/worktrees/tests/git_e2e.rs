@@ -306,3 +306,70 @@ fn push_state_is_zero_in_a_repo_with_no_remote() {
     assert_eq!(st, worktrees::PushState::default());
     assert_eq!(g.default_remote(&repo_root), None);
 }
+
+#[test]
+fn a_worktree_branched_off_a_remote_ref_does_not_inherit_its_upstream() {
+    // The production path: `add_worktree` is called with the repo's compare ref
+    // (`origin/<default>`) as the base. Git's default `branch.autoSetupMerge`
+    // would make the new branch track *that*, so `feat/x` would be born
+    // claiming `origin/main` as its upstream — and pushing it would either fail
+    // or land the task's commits on main.
+    let tmp = tempfile::tempdir().unwrap();
+    let (_origin, work) = init_repo_with_origin(tmp.path());
+    let g = GitWorktrees::new(SystemRunner);
+
+    let wt = tmp.path().join("wt");
+    g.add_worktree(&work, &wt, "feat/from-remote", Some("origin/main")).unwrap();
+
+    assert_eq!(
+        git_out(&wt, &["config", "--get", "branch.feat/from-remote.merge"]).trim(),
+        "",
+        "the branch must not have inherited a tracking ref"
+    );
+    let st = g.push_state(&wt, "origin/main");
+    assert_eq!(st.upstream, None, "nothing published yet");
+
+    // And publishing still records the branch's own upstream.
+    fs::write(wt.join("c.txt"), "c\n").unwrap();
+    git(&wt, &["add", "."]);
+    git(&wt, &["commit", "-m", "three"]);
+    g.push(&wt, Some(("origin", "feat/from-remote"))).unwrap();
+    let after = g.push_state(&wt, "origin/main");
+    assert_eq!(after.upstream.as_deref(), Some("origin/feat/from-remote"));
+    assert_eq!(after.unpushed, 0);
+}
+
+#[test]
+fn an_upstream_pointing_at_another_branch_is_not_treated_as_published() {
+    // Worktrees created before `--no-track` carry this state on disk, so the
+    // fix cannot live at creation time alone. `@{upstream}` resolves happily to
+    // `origin/main`; reporting it as published sends a bare `git push`, which
+    // fails under `push.default = simple` and would otherwise push this
+    // branch's commits onto main.
+    let tmp = tempfile::tempdir().unwrap();
+    let (_origin, work) = init_repo_with_origin(tmp.path());
+    let g = GitWorktrees::new(SystemRunner);
+
+    let wt = tmp.path().join("legacy");
+    g.add_worktree(&work, &wt, "feat/legacy", Some("origin/main")).unwrap();
+    git(&wt, &["config", "branch.feat/legacy.remote", "origin"]);
+    git(&wt, &["config", "branch.feat/legacy.merge", "refs/heads/main"]);
+
+    // Precondition: git really does resolve an upstream here.
+    assert_eq!(
+        git_out(&wt, &["rev-parse", "--abbrev-ref", "@{upstream}"]).trim(),
+        "origin/main",
+        "test setup should reproduce the inherited-upstream state"
+    );
+
+    fs::write(wt.join("d.txt"), "d\n").unwrap();
+    git(&wt, &["add", "."]);
+    git(&wt, &["commit", "-m", "four"]);
+
+    let st = g.push_state(&wt, "origin/main");
+    assert_eq!(
+        st.upstream, None,
+        "an upstream naming a different branch must route to publish, not push"
+    );
+    assert_eq!(st.unpushed, 1, "counted against the fallback instead");
+}
