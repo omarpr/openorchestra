@@ -546,6 +546,34 @@ pub(crate) struct CommentDraft {
     at: gpui::Point<Pixels>,
 }
 
+/// What the diff panel measures against.
+///
+/// Both options end at the working tree; they differ in where the range starts.
+/// The panel used to hard-code the second one, which meant a task's own commits
+/// were mixed in with its uncommitted edits and nothing on screen said so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DiffBase {
+    /// `HEAD` → working tree: what you have changed and not committed.
+    #[default]
+    Uncommitted,
+    /// Merge-base with the repo's default branch → working tree: everything
+    /// this branch changes, which is what a PR would show.
+    DefaultBranch,
+}
+
+impl DiffBase {
+    /// Menu label. `compare_ref` names the real ref rather than a fixed
+    /// "main", so a repo with no remote reads `vs master`, not `vs
+    /// origin/master`.
+    pub(crate) fn label(self, compare_ref: &str) -> String {
+        match self {
+            Self::Uncommitted => "Uncommitted".to_string(),
+            Self::DefaultBranch => format!("vs {compare_ref}"),
+        }
+    }
+}
+
 pub(crate) struct CardMenu {
     id: String,
     x: Pixels,
@@ -700,6 +728,8 @@ pub struct HarnessWorkspace {
     menu: Option<CardMenu>,
     /// Open "new tab" menu, anchored under the `+` in the tab strip.
     tab_menu: Option<Pixels>,
+    /// Open diff-base menu, anchored under its button in the diff header.
+    diff_base_menu: Option<gpui::Point<Pixels>>,
     /// The quit confirmation is open (keep vs. close terminals). Present only
     /// while the user is deciding; carries the "remember my choice" checkbox.
     close_prompt: Option<ClosePrompt>,
@@ -952,6 +982,7 @@ impl HarnessWorkspace {
             new_target_repo,
             menu: None,
             tab_menu: None,
+            diff_base_menu: None,
             close_prompt: None,
             edit_prompt: None,
             pending_delete: None,
@@ -1545,6 +1576,27 @@ impl Render for HarnessWorkspace {
                 .child(self.render_tab_menu(&hx, x, cx));
         }
 
+        if let Some(at) = self.diff_base_menu {
+            root = root
+                .child(
+                    // Click-anywhere-else dismisses, same as the card menu.
+                    div()
+                        .id("diff-base-backdrop")
+                        .absolute()
+                        .top(px(0.0))
+                        .left(px(0.0))
+                        .size_full()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|ws, _, _, cx| {
+                                ws.diff_base_menu = None;
+                                cx.notify();
+                            }),
+                        ),
+                )
+                .child(self.render_diff_base_menu(&hx, at, cx));
+        }
+
         if self.edit_prompt.is_some() {
             root = root.child(self.render_edit_prompt(&hx, cx));
         }
@@ -1850,6 +1902,11 @@ struct Prefs {
     /// [`Prefs::collapsed`]: absent means expanded, which is the default.
     #[serde(default)]
     collapsed_sections: std::collections::BTreeSet<String>,
+    /// What the diff panel compares against. Absent in older prefs files, which
+    /// is why it defaults rather than migrating: they land on `Uncommitted`,
+    /// the new default, exactly like a fresh install.
+    #[serde(default)]
+    diff_base: DiffBase,
     sidebar_width: f32,
     diff_width: f32,
     /// Where the diff surface lives (dock vs. center tab).
@@ -1894,6 +1951,7 @@ impl Default for Prefs {
             shortcuts: Default::default(),
             collapsed: Default::default(),
             collapsed_sections: Default::default(),
+            diff_base: DiffBase::default(),
             sidebar_width: 280.0,
             diff_width: 340.0,
             diff_location: DiffLocation::Dock,
@@ -2475,7 +2533,7 @@ diff --git a/y.rs b/y.rs\n@@ -1,1 +1,2 @@\n other\n+new\n",
 
 #[cfg(test)]
 mod collapsed_prefs_tests {
-    use super::{Prefs, load_prefs, save_prefs_to};
+    use super::{DiffBase, Prefs, load_prefs, save_prefs_to};
 
     #[test]
     fn a_collapsed_project_survives_a_disk_round_trip() {
@@ -2530,6 +2588,53 @@ mod collapsed_prefs_tests {
             "absent = every sidebar section expanded"
         );
         assert!(!back.dark, "the rest of the file still parses");
+    }
+
+    #[test]
+    fn the_diff_base_maps_to_the_ref_the_panel_measures_from() {
+        use crate::workspace::state::diff_base_ref;
+        // `HEAD` is what collapses the merge-base to a working-tree diff — the
+        // path the main entry has always taken.
+        assert_eq!(diff_base_ref(DiffBase::Uncommitted, "origin/master"), "HEAD");
+        assert_eq!(
+            diff_base_ref(DiffBase::DefaultBranch, "origin/master"),
+            "origin/master"
+        );
+        // A compare ref that is already HEAD (the main entry) is unchanged by
+        // either setting, so main keeps behaving as it always has.
+        assert_eq!(diff_base_ref(DiffBase::Uncommitted, "HEAD"), "HEAD");
+        assert_eq!(diff_base_ref(DiffBase::DefaultBranch, "HEAD"), "HEAD");
+    }
+
+    #[test]
+    fn the_diff_base_label_names_the_real_ref() {
+        // Not a hard-coded "main": a repo with no remote must not be told it is
+        // comparing against origin.
+        assert_eq!(DiffBase::Uncommitted.label("origin/master"), "Uncommitted");
+        assert_eq!(
+            DiffBase::DefaultBranch.label("origin/master"),
+            "vs origin/master"
+        );
+        assert_eq!(DiffBase::DefaultBranch.label("master"), "vs master");
+    }
+
+    #[test]
+    fn a_prefs_file_without_a_diff_base_lands_on_uncommitted() {
+        // The new default reaches existing installs the same way a fresh one
+        // gets it, with no migration step.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        std::fs::write(&path, r#"{"dark":true}"#).unwrap();
+        assert_eq!(load_prefs(&path).diff_base, DiffBase::Uncommitted);
+
+        let mut prefs = Prefs::default();
+        prefs.diff_base = DiffBase::DefaultBranch;
+        save_prefs_to(&path, &prefs);
+        assert_eq!(
+            load_prefs(&path).diff_base,
+            DiffBase::DefaultBranch,
+            "and a chosen base survives a restart"
+        );
     }
 
     #[test]

@@ -373,3 +373,70 @@ fn an_upstream_pointing_at_another_branch_is_not_treated_as_published() {
     );
     assert_eq!(st.unpushed, 1, "counted against the fallback instead");
 }
+
+#[test]
+fn untracked_files_appear_in_the_diff_without_being_staged() {
+    // The default view compares HEAD to the working tree, and a file you just
+    // created is part of the working tree. `git diff` alone never lists it, so
+    // the panel would omit brand new files exactly when you want them.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_root = tmp.path().join("app");
+    init_repo(&repo_root);
+    let g = GitWorktrees::new(SystemRunner);
+
+    fs::write(repo_root.join("README.md"), "base\nedited\n").unwrap();
+    fs::write(repo_root.join("brand-new.rs"), "fn main() {}\nfn other() {}\n").unwrap();
+    fs::write(repo_root.join(".gitignore"), "ignored.log\n").unwrap();
+    fs::write(repo_root.join("ignored.log"), "noise\n").unwrap();
+    git(&repo_root, &["add", ".gitignore"]);
+    git(&repo_root, &["commit", "-m", "ignore"]);
+
+    let diff = g.diff_including_untracked(&repo_root, "HEAD").unwrap();
+    let paths: Vec<&str> = diff.files.iter().map(|f| f.path.as_str()).collect();
+    assert!(paths.contains(&"README.md"), "tracked edit still listed: {paths:?}");
+    assert!(paths.contains(&"brand-new.rs"), "untracked file listed: {paths:?}");
+    assert!(!paths.contains(&"ignored.log"), ".gitignore respected: {paths:?}");
+
+    let new_file = diff.files.iter().find(|f| f.path == "brand-new.rs").unwrap();
+    assert_eq!(new_file.change, Change::Added);
+    assert_eq!(new_file.adds, 2, "both lines counted");
+    assert_eq!(new_file.dels, 0);
+    assert!(diff.unified.contains("brand-new.rs"), "content reaches the scrollable view");
+
+    // Looking at a diff must not stage anything: `git add -N` would have made
+    // this work for free and left the user's index modified.
+    assert_eq!(
+        git_out(&repo_root, &["status", "--porcelain", "brand-new.rs"]).trim(),
+        "?? brand-new.rs",
+        "the file must still be untracked afterwards"
+    );
+}
+
+#[test]
+fn a_flood_of_untracked_files_is_capped_and_reported() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_root = tmp.path().join("app");
+    init_repo(&repo_root);
+    let g = GitWorktrees::new(SystemRunner);
+
+    let extra = 5;
+    for i in 0..worktrees::MAX_UNTRACKED_FILES + extra {
+        fs::write(repo_root.join(format!("f{i:04}.txt")), "x\n").unwrap();
+    }
+
+    let diff = g.diff_including_untracked(&repo_root, "HEAD").unwrap();
+    assert_eq!(diff.files.len(), worktrees::MAX_UNTRACKED_FILES, "capped");
+    assert_eq!(diff.untracked_elided, extra, "and says how many it left out");
+}
+
+#[test]
+fn a_clean_worktree_has_nothing_elided() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_root = tmp.path().join("app");
+    init_repo(&repo_root);
+    let g = GitWorktrees::new(SystemRunner);
+
+    let diff = g.diff_including_untracked(&repo_root, "HEAD").unwrap();
+    assert!(diff.files.is_empty());
+    assert_eq!(diff.untracked_elided, 0);
+}

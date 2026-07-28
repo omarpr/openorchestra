@@ -152,9 +152,11 @@ fn new_repo_view(git: &GitWorktrees<SystemRunner>, name: &str, root: &Path) -> R
     }
 }
 
-/// Diff for a selected path against its compare ref.
+/// Diff for a selected path against its compare ref, untracked files included —
+/// both ends of the range are the working tree, and a file you just created is
+/// part of it.
 pub fn compute_diff(git: &GitWorktrees<SystemRunner>, path: &Path, compare_ref: &str) -> Diff {
-    git.diff(path, compare_ref).unwrap_or_default()
+    git.diff_including_untracked(path, compare_ref).unwrap_or_default()
 }
 
 /// One file in a unified multi-member diff, tagged with its member worktree.
@@ -170,6 +172,8 @@ pub struct UnifiedDiffFile {
 pub struct UnifiedDiff {
     pub files: Vec<UnifiedDiffFile>,
     pub unified: String,
+    /// Untracked files elided across all members (see `MAX_UNTRACKED_FILES`).
+    pub untracked_elided: usize,
 }
 
 impl UnifiedDiff {
@@ -179,8 +183,10 @@ impl UnifiedDiff {
     ) -> Self {
         let mut files = Vec::new();
         let mut unified = String::new();
+        let mut untracked_elided = 0;
         for (id, repo, path, compare) in members {
             let diff = compute_diff(git, path, compare);
+            untracked_elided += diff.untracked_elided;
             if !diff.unified.is_empty() {
                 if !unified.is_empty() {
                     unified.push_str("\n");
@@ -196,6 +202,10 @@ impl UnifiedDiff {
                 });
             }
         }
-        UnifiedDiff { files, unified }
+        UnifiedDiff {
+            files,
+            unified,
+            untracked_elided,
+        }
     }
 }

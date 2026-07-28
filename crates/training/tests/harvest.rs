@@ -180,6 +180,7 @@ fn diff() -> Diff {
             DiffFile { path: "src/new.rs".into(), change: Change::Added, adds: 8, dels: 0 },
         ],
         unified: "--- a/src/nav.rs\n+++ b/src/nav.rs\n".into(),
+        untracked_elided: 0,
     }
 }
 

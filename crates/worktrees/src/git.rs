@@ -9,7 +9,7 @@
 //! *working tree* (merge-base → working tree), capturing both committed and
 //! uncommitted work in the task.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::runner::{CommandOutput, CommandRunner};
 
@@ -87,6 +87,10 @@ pub struct Diff {
     pub files: Vec<DiffFile>,
     /// Full unified diff text (for the scrollable diff view).
     pub unified: String,
+    /// Untracked files past [`MAX_UNTRACKED_FILES`] that this diff does not
+    /// describe. Non-zero means the panel must say so rather than imply the
+    /// list is complete.
+    pub untracked_elided: usize,
 }
 
 impl Diff {
@@ -490,9 +494,94 @@ impl<R: CommandRunner> GitWorktrees<R> {
             base,
             files,
             unified,
+            untracked_elided: 0,
         })
     }
+
+    /// Paths git can see but is not tracking, with `.gitignore` respected.
+    /// Sorted, so the diff's file list does not reshuffle between refreshes.
+    pub fn untracked_files(&self, worktree: &Path) -> Vec<PathBuf> {
+        let Ok(out) = self.git_ok(worktree, &["ls-files", "--others", "--exclude-standard"]) else {
+            return Vec::new();
+        };
+        let mut paths: Vec<PathBuf> = out
+            .stdout
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(PathBuf::from)
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    /// One untracked file rendered as a diff against nothing.
+    ///
+    /// `--no-index` exits 1 to mean "the two paths differ", which is the whole
+    /// point here, so this cannot go through `git_ok`. Binary files need no
+    /// special case: git reports "Binary files … differ" and the add count
+    /// falls out as zero.
+    fn untracked_diff(&self, worktree: &Path, path: &Path) -> Option<(DiffFile, String)> {
+        let shown = path.to_string_lossy().into_owned();
+        let out = self
+            .runner
+            .run(
+                Some(worktree),
+                &self.git,
+                &["diff", "--no-index", "--", "/dev/null", &shown],
+            )
+            .ok()?;
+        if out.stdout.is_empty() {
+            return None;
+        }
+        let adds = out
+            .stdout
+            .lines()
+            .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
+            .count();
+        Some((
+            DiffFile {
+                path: shown,
+                change: Change::Added,
+                adds,
+                dels: 0,
+            },
+            out.stdout,
+        ))
+    }
+
+    /// [`diff`](Self::diff) plus the untracked files, which `git diff` never
+    /// lists.
+    ///
+    /// Both ends of the range are the working tree, and a file you just created
+    /// is part of it — without this, the panel's default view would omit brand
+    /// new files until they were staged, which is precisely when you most want
+    /// to see them. The index is never touched: `git add -N` would produce this
+    /// for free, but a viewer that stages your files as a side effect of being
+    /// looked at is not one you can trust.
+    pub fn diff_including_untracked(
+        &self,
+        worktree: &Path,
+        base_ref: &str,
+    ) -> Result<Diff, GitError> {
+        let mut diff = self.diff(worktree, base_ref)?;
+        let untracked = self.untracked_files(worktree);
+        let shown = untracked.len().min(MAX_UNTRACKED_FILES);
+        for path in &untracked[..shown] {
+            if let Some((file, unified)) = self.untracked_diff(worktree, path) {
+                diff.files.push(file);
+                diff.unified.push_str(&unified);
+            }
+        }
+        diff.untracked_elided = untracked.len() - shown;
+        Ok(diff)
+    }
 }
+
+/// How many untracked files a diff will describe before it stops and reports
+/// the remainder. An un-ignored `node_modules` or build directory runs to
+/// thousands, and each file costs its own `git diff --no-index`.
+pub const MAX_UNTRACKED_FILES: usize = 100;
 
 /// Whether a `branch.<name>.merge` value names the branch's own counterpart on
 /// the remote, rather than some other branch it was created from.

@@ -22,6 +22,7 @@ mod tasks;
 
 pub use git::{
     Change, Diff, DiffFile, GitError, GitStatus, GitWorktrees, PushState, WorktreeListEntry,
+    MAX_UNTRACKED_FILES,
 };
 pub use hooks::{
     classify_hook_script, clear_local_hooks, committed_hooks_path, ensure_hook_script,

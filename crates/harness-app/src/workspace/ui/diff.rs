@@ -657,6 +657,120 @@ impl HarnessWorkspace {
         )
     }
 
+    /// The diff-base button: what the panel is measuring against, and the
+    /// handle for changing it.
+    fn render_diff_base_button(
+        &self,
+        hx: &HarnessTheme,
+        r: &Resolved,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let label = self.prefs.diff_base.label(&r.compare_ref);
+        div()
+            .id("diff-base")
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_1()
+            .h(px(20.0))
+            .px_1p5()
+            .rounded_md()
+            .bg(hx.surface)
+            .text_xs()
+            .font_family(hx.font_mono)
+            .text_color(hx.tx1)
+            .cursor_pointer()
+            .tooltip(tip("What the diff is measured against"))
+            .hover(|d| d.bg(hx.surface_hover).text_color(hx.tx0))
+            .child(label)
+            .child(div().text_color(hx.tx2).child("▾"))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|ws, ev: &MouseDownEvent, _, cx| {
+                    // Anchored at the click, like the tab strip's `+` menu. Down
+                    // rather than click so the backdrop's own mouse-down (which
+                    // closes it) cannot swallow the toggle.
+                    cx.stop_propagation();
+                    ws.diff_base_menu = match ws.diff_base_menu {
+                        Some(_) => None,
+                        None => Some(ev.position),
+                    };
+                    cx.notify();
+                }),
+            )
+    }
+
+    /// The two-row diff-base menu, anchored under its button.
+    pub(crate) fn render_diff_base_menu(
+        &self,
+        hx: &HarnessTheme,
+        at: gpui::Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let compare = self
+            .resolve()
+            .map(|r| r.compare_ref)
+            .unwrap_or_else(|| "HEAD".to_string());
+        let active = self.prefs.diff_base;
+        let row = |base: DiffBase, hint: &'static str, cx: &mut Context<Self>| {
+            let selected = base == active;
+            div()
+                .id(gpui::SharedString::from(format!("diff-base-{}", base.label(&compare))))
+                .flex()
+                .flex_col()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .cursor_pointer()
+                .hover(|d| d.bg(hx.surface_hover))
+                .on_click(cx.listener(move |ws, _, _, cx| {
+                    cx.stop_propagation();
+                    ws.set_diff_base(base, cx);
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .text_sm()
+                        .text_color(if selected { hx.tx0 } else { hx.tx1 })
+                        .child(div().w(px(10.0)).flex_none().text_xs().text_color(hx.accent).child(
+                            if selected { "✓" } else { " " },
+                        ))
+                        .child(base.label(&compare)),
+                )
+                .child(
+                    div()
+                        .pl(px(14.0))
+                        .text_xs()
+                        .text_color(hx.tx2)
+                        .child(hint),
+                )
+        };
+
+        div()
+            .absolute()
+            .left(at.x)
+            .top(at.y + px(12.0))
+            .w(px(230.0))
+            .p(px(4.0))
+            .rounded_md()
+            .bg(hx.surface2)
+            .border_1()
+            .border_color(hx.border2)
+            .flex()
+            .flex_col()
+            .gap_1()
+            // Same reason as the card menu: the dismiss backdrop listens on
+            // mouse-down, and a click is down-then-up.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
+            )
+            .child(row(DiffBase::Uncommitted, "changes you have not committed", cx))
+            .child(row(DiffBase::DefaultBranch, "everything this branch changes", cx))
+    }
+
     fn render_diff_header(
         &self,
         hx: &HarnessTheme,
@@ -690,22 +804,37 @@ impl HarnessWorkspace {
                     .justify_between()
                     .px_3()
                     .py_2()
-                    .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx0).child(
-                        if self.diff_pending {
-                            "Changed files  …".to_string()
-                        } else {
-                            let total = self.diff.files.len();
-                            let done = self.review.reviewed_count(
-                                &r.key,
-                                self.diff.files.iter().map(|f| f.path.as_str()),
-                            );
-                            if done > 0 {
-                                format!("Changed files  {done}/{total} reviewed")
-                            } else {
-                                format!("Changed files  {total}")
-                            }
-                        },
-                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .min_w_0()
+                            // The base sits before the count, because it is what
+                            // the count *means*: "3 changed files" answers
+                            // nothing until you know 3 since when.
+                            .child(self.render_diff_base_button(hx, r, cx))
+                            .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx0).child(
+                                if self.diff_pending {
+                                    "Changed files  …".to_string()
+                                } else {
+                                    let total = self.diff.files.len();
+                                    let done = self.review.reviewed_count(
+                                        &r.key,
+                                        self.diff.files.iter().map(|f| f.path.as_str()),
+                                    );
+                                    let elided = self.diff.untracked_elided;
+                                    match (done, elided) {
+                                        // Never imply the list is complete when
+                                        // it is not.
+                                        (0, 0) => format!("Changed files  {total}"),
+                                        (0, n) => format!("Changed files  {total}  (+{n} untracked not shown)"),
+                                        (d, 0) => format!("Changed files  {d}/{total} reviewed"),
+                                        (d, n) => format!("Changed files  {d}/{total} reviewed  (+{n} untracked not shown)"),
+                                    }
+                                },
+                            )),
+                    )
                     .child(
                         div()
                             .flex()

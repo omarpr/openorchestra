@@ -3,6 +3,21 @@
 
 use super::*;
 
+/// The ref the diff panel measures from, for a given base and repo.
+///
+/// `Uncommitted` maps to `HEAD`, which collapses `GitWorktrees::diff`'s
+/// `merge-base HEAD HEAD` to `HEAD` and leaves `git diff HEAD` — the working
+/// tree. That is not a new code path: it is the one the main entry has always
+/// taken, which is why main showed uncommitted work while tasks showed the
+/// whole branch. The toggle makes the choice deliberate instead of a side
+/// effect of which row you clicked.
+pub(crate) fn diff_base_ref(base: DiffBase, compare_ref: &str) -> &str {
+    match base {
+        DiffBase::Uncommitted => "HEAD",
+        DiffBase::DefaultBranch => compare_ref,
+    }
+}
+
 impl HarnessWorkspace {
 
     pub(crate) fn apply_forge(&mut self, update: ForgeUpdate, cx: &mut Context<Self>) {
@@ -375,6 +390,23 @@ impl HarnessWorkspace {
                 member_id,
             } => self.resolve_task(task_id, member_id.as_deref()),
         }
+    }
+
+    /// Switch what the diff panel measures against, and recompute.
+    ///
+    /// App-wide and persisted: one setting to reason about, and it survives a
+    /// restart. `recompute_diff` bumps `diff_gen`, so a computation still in
+    /// flight for the base just left is discarded rather than landing late.
+    pub(crate) fn set_diff_base(&mut self, base: DiffBase, cx: &mut Context<Self>) {
+        self.diff_base_menu = None;
+        if self.prefs.diff_base == base {
+            cx.notify();
+            return;
+        }
+        self.prefs.diff_base = base;
+        self.save_prefs(cx);
+        self.recompute_diff(cx);
+        cx.notify();
     }
 
     fn resolve_task(&self, task_id: &str, member_id: Option<&str>) -> Option<Resolved> {
@@ -1397,6 +1429,9 @@ impl HarnessWorkspace {
         let generation = self.diff_gen;
         self.diff_pending = true;
 
+        // Copied out before the closures below: they run on a background
+        // thread and cannot borrow `self`.
+        let diff_base = self.prefs.diff_base;
         if let Some(task_id) = r.task_id.clone() {
             let members: Vec<(String, String, PathBuf, String)> = self
                 .task_store
@@ -1412,6 +1447,9 @@ impl HarnessWorkspace {
                                 .find(|r| r.name == m.repo)
                                 .map(|r| r.compare_ref.clone())
                                 .unwrap_or_else(|| "HEAD".into());
+                            // Per member, so a multi-repo task honours the
+                            // setting in every one of its repos.
+                            let compare = diff_base_ref(diff_base, &compare).to_string();
                             (m.worktree_id.clone(), m.repo.clone(), m.path.clone(), compare)
                         })
                         .collect()
@@ -1446,6 +1484,7 @@ impl HarnessWorkspace {
                         base: String::new(),
                         files,
                         unified: computed.unified.clone(),
+                        untracked_elided: computed.untracked_elided,
                     };
                     ws.unified_diff = computed;
                     ws.row_cache.borrow_mut().clear();
@@ -1457,7 +1496,10 @@ impl HarnessWorkspace {
             return;
         }
 
-        let (path, compare_ref) = (r.path.clone(), r.compare_ref.clone());
+        let (path, compare_ref) = (
+            r.path.clone(),
+            diff_base_ref(diff_base, &r.compare_ref).to_string(),
+        );
         cx.spawn(async move |view, cx| {
             let computed = cx
                 .background_spawn(async move {
