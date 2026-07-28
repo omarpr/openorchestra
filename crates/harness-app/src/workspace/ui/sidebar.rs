@@ -401,27 +401,60 @@ impl HarnessWorkspace {
             self.render_input(hx, editor, cx).into_any_element()
         } else {
             div()
-                .flex_1()
+                .w_full()
                 .min_w_0()
                 .text_sm()
                 .text_color(hx.tx0)
+                .whitespace_nowrap()
                 .overflow_hidden()
+                .text_ellipsis()
                 .child(task.name.clone())
                 .into_any_element()
         };
 
         let mut block = div()
+            // Unique per task: `("task-row", task.id.len())` gave every task
+            // whose id happened to be the same length one shared element
+            // identity, and hover state is tracked per identity.
+            .id(gpui::SharedString::from(format!("task-block-{}", task.id)))
             .flex()
             .flex_col()
             .mx_1()
             .mb_1()
             .rounded_md()
+            // Rows paint their own hover background; without clipping they
+            // square off the corners this block just rounded.
+            .overflow_hidden()
             .when(selected, |d| d.bg(hx.surface))
+            // A task and its repos are one card, so hovering anywhere lifts the
+            // whole block one step on the surface ramp. The row under the cursor
+            // then takes a second step, which keeps it clear what a click hits —
+            // the repo rows are individually selectable.
+            .hover(|d| d.bg(hx.surface))
+            // Rename/Archive/Delete all act on the task, so the menu opens from
+            // anywhere in the block, including the repo rows — which previously
+            // had no right-click of their own and so looked inert.
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    let pos = ev.position;
+                    ws.menu = Some(CardMenu {
+                        id: menu_id.clone(),
+                        x: pos.x,
+                        y: pos.y,
+                    });
+                    cx.notify();
+                }),
+            )
             .child(
                 div()
-                    .id(("task-row", task.id.len()))
+                    .id(gpui::SharedString::from(format!("task-row-{}", task.id)))
                     .flex()
-                    .items_center()
+                    // Two lines now (name over branch), so the avatar and the
+                    // dirty count sit with the name rather than centring
+                    // themselves against the pair.
+                    .items_start()
                     .gap_2()
                     .px_2()
                     .py_1()
@@ -437,19 +470,6 @@ impl HarnessWorkspace {
                             cx,
                         );
                     }))
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            let pos = ev.position;
-                            ws.menu = Some(CardMenu {
-                                id: menu_id.clone(),
-                                x: pos.x,
-                                y: pos.y,
-                            });
-                            cx.notify();
-                        }),
-                    )
                     .child(
                         div()
                             .size(px(22.0))
@@ -474,10 +494,33 @@ impl HarnessWorkspace {
                             .text_color(rgb(0xffffff))
                             .child(task.initials.clone()),
                     )
-                    .child(name_el)
+                    // Name over branch in one column, so the branch starts at
+                    // the name's first letter without hand-tuned padding that
+                    // would drift if the avatar ever resized.
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(name_el)
+                            .when_some(task_branch(task), |d, branch| {
+                                d.child(
+                                    div()
+                                        .text_size(px(10.0))
+                                        .font_family(hx.font_mono)
+                                        .text_color(hx.tx2)
+                                        .whitespace_nowrap()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .child(branch.to_string()),
+                                )
+                            }),
+                    )
                     .when(task.dirty > 0, |d| {
                         d.child(
                             div()
+                                .flex_none()
                                 .text_xs()
                                 .font_family(hx.font_mono)
                                 .text_color(hx.amber)
@@ -492,7 +535,7 @@ impl HarnessWorkspace {
             .pl_1()
             .border_l_1()
             .border_color(hx.border);
-        for (i, m) in task.members.iter().enumerate() {
+        for m in task.members.iter() {
             let tid = task.id.clone();
             let mid = m.worktree_id.clone();
             let mem_selected = matches!(
@@ -510,7 +553,11 @@ impl HarnessWorkspace {
                 .get(&m.path)
                 .copied()
                 .unwrap_or(AgentState::Unknown);
-            let mut badges = div().flex().items_center().gap_1();
+            // flex_none throughout the row's trailing items: the status pill was
+            // being pushed past the sidebar's right edge because every item here
+            // was shrinkable in principle and none of them could actually shrink
+            // (text sets its own min width), so the row overflowed instead.
+            let mut badges = div().flex().flex_none().items_center().gap_1();
             if m.ahead > 0 {
                 badges = badges.child(
                     div()
@@ -538,7 +585,10 @@ impl HarnessWorkspace {
             }
             members = members.child(
                 div()
-                    .id(("task-mem", i + task.id.len() * 17))
+                    .id(gpui::SharedString::from(format!(
+                        "task-mem-{}-{}",
+                        task.id, m.worktree_id
+                    )))
                     .flex()
                     .items_center()
                     .gap_2()
@@ -547,6 +597,8 @@ impl HarnessWorkspace {
                     .rounded_md()
                     .when(mem_selected, |d| d.bg(hx.surface))
                     .cursor_pointer()
+                    // The second step of the hover: the block is already lifted
+                    // to `surface`, so this marks which row a click would take.
                     .hover(|d| d.bg(hx.surface_hover))
                     .on_click(cx.listener(move |ws, _, window, cx| {
                         ws.select(
@@ -561,17 +613,31 @@ impl HarnessWorkspace {
                     .child(
                         div()
                             .flex_1()
+                            .min_w_0()
                             .text_xs()
                             .text_color(if m.is_home { hx.accent } else { hx.tx1 })
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
                             .child(label),
                     )
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .font_family(hx.font_mono)
-                            .text_color(hx.tx2)
-                            .child(m.branch.clone()),
-                    )
+                    // Only a repo that has drifted off the task's branch shows
+                    // one: the branch is a task-level fact, printed once under
+                    // the task name, and repeating it on every row is what left
+                    // no room for the pill.
+                    .when_some(member_branch(task, m), |d, branch| {
+                        d.child(
+                            div()
+                                .min_w_0()
+                                .text_size(px(10.0))
+                                .font_family(hx.font_mono)
+                                .text_color(hx.tx2)
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .child(branch.to_string()),
+                        )
+                    })
                     .child(badges)
                     .child(agent_pill(hx, agent)),
             );
@@ -777,12 +843,24 @@ impl HarnessWorkspace {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .child(div().text_sm().text_color(hx.tx0).child("main"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(hx.tx0)
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child("main"),
+                    )
                     // The main checkout usually sits on the default branch, but
                     // it can be on a feature branch — show where HEAD actually
                     // is. Only the default branch earns the "default ·" tag; any
                     // other branch is shown by name so it never reads as master.
-                    .child(div().text_xs().text_color(hx.tx2).child(if repo.head_branch == repo.default_branch {
+                    //
+                    // Clipped like the task rows: `min_w_0` above lets the column
+                    // shrink, but without this the text paints straight over the
+                    // status pill instead of ellipsing.
+                    .child(div().text_xs().text_color(hx.tx2).whitespace_nowrap().overflow_hidden().text_ellipsis().child(if repo.head_branch == repo.default_branch {
                         format!("default · {}", repo.default_branch)
                     } else {
                         repo.head_branch.clone()
@@ -964,6 +1042,33 @@ impl HarnessWorkspace {
     }
 }
 
+/// The branch shown under a task's name.
+///
+/// A task's members are all created on one `feat/<slug>` branch, so the branch
+/// is a property of the task rather than of each repo in it. Printing it once,
+/// under the name, says that — and it is what leaves the repo rows narrow
+/// enough for their status pill to stay inside the sidebar. The home member is
+/// the reference because it is the task's own checkout.
+fn task_branch(task: &crate::data::TaskView) -> Option<&str> {
+    task.members
+        .iter()
+        .find(|m| m.is_home)
+        .or_else(|| task.members.first())
+        .map(|m| m.branch.as_str())
+}
+
+/// The branch to show on one repo row: `None` when it is the task's own.
+///
+/// A member can be moved to some other branch after the task is created, and
+/// that divergence is worth seeing; agreeing with the task is not.
+fn member_branch<'a>(
+    task: &'a crate::data::TaskView,
+    member: &'a crate::data::TaskMemberView,
+) -> Option<&'a str> {
+    let branch = member.branch.as_str();
+    (task_branch(task) != Some(branch)).then_some(branch)
+}
+
 /// A bar sparkline for the resource band. Each sample is a thin vertical bar,
 /// its height the value relative to the visible window's own peak — so the
 /// shape reads even as the absolute scale (a few % vs. a whole core) shifts.
@@ -1054,5 +1159,77 @@ impl Render for ResourceTooltip {
             );
         }
         col
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::{TaskMemberView, TaskView};
+    use std::path::PathBuf;
+
+    fn member(repo: &str, branch: &str, is_home: bool) -> TaskMemberView {
+        TaskMemberView {
+            worktree_id: format!("{repo}-id"),
+            repo: repo.to_string(),
+            branch: branch.to_string(),
+            path: PathBuf::from(format!("/wt/{repo}")),
+            ahead: 0,
+            behind: 0,
+            dirty: 0,
+            is_home,
+        }
+    }
+
+    fn task(members: Vec<TaskMemberView>) -> TaskView {
+        TaskView {
+            id: "t1".into(),
+            name: "tmux-zshrc-fix".into(),
+            initials: "TZ".into(),
+            color: 0,
+            members,
+            dirty: 0,
+        }
+    }
+
+    #[test]
+    fn the_task_branch_comes_from_the_home_member() {
+        // Not simply the first: member order is registry order, and the home
+        // checkout is the one the task is named for.
+        let t = task(vec![
+            member("lithepg", "hotfix/x", false),
+            member("omar-harness", "feat/tmux-zshrc-fix", true),
+        ]);
+        assert_eq!(task_branch(&t), Some("feat/tmux-zshrc-fix"));
+    }
+
+    #[test]
+    fn a_task_with_no_home_member_falls_back_to_the_first() {
+        let t = task(vec![member("lithepg", "feat/a", false)]);
+        assert_eq!(task_branch(&t), Some("feat/a"));
+        assert_eq!(task_branch(&task(vec![])), None, "no members, no branch line");
+    }
+
+    #[test]
+    fn a_repo_row_repeats_no_branch_it_shares_with_its_task() {
+        // Repeating `feat/<slug>` on every row is what pushed the status pill
+        // off the right edge of the sidebar.
+        let t = task(vec![
+            member("omar-harness", "feat/tmux-zshrc-fix", true),
+            member("lithepg", "feat/tmux-zshrc-fix", false),
+        ]);
+        for m in &t.members {
+            assert_eq!(member_branch(&t, m), None, "{} should stay bare", m.repo);
+        }
+    }
+
+    #[test]
+    fn a_repo_that_has_drifted_off_the_task_branch_shows_its_own() {
+        let t = task(vec![
+            member("omar-harness", "feat/tmux-zshrc-fix", true),
+            member("lithepg", "hotfix/urgent", false),
+        ]);
+        assert_eq!(member_branch(&t, &t.members[0]), None);
+        assert_eq!(member_branch(&t, &t.members[1]), Some("hotfix/urgent"));
     }
 }
