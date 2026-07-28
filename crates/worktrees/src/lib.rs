@@ -15,6 +15,7 @@
 
 mod git;
 mod hooks;
+mod login_shell;
 mod registry;
 mod runner;
 mod tasks;
@@ -29,6 +30,7 @@ pub use hooks::{
     visible_setup_shell_line, write_visible_setup_runner, HookEnv, HookLayer, HookPhase,
     HookScriptPhase, HooksConfig, HooksError, HooksFile, TaskHooks,
 };
+pub use login_shell::interactive_login_command;
 pub use registry::{
     AVATAR_PALETTE_LEN, AgentKind, Avatar, Registry, RegistryError, RepoGroup, WorktreeEntry,
 };

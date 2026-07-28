@@ -12,11 +12,12 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::runner::CommandRunner;
+use crate::runner::{CommandOutput, CommandRunner};
 
 /// Repo-persisted vs machine-local hook layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -548,6 +549,21 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+/// Run one shell line the way the user's terminal would.
+///
+/// Hook scripts are the code most likely to reach for a tool that only exists
+/// after `.zshrc` runs — `nvm`, `bun`, `conda`, a `pyenv` shim — so they get the
+/// same login+interactive shell as everything else rather than a bare `sh -lc`.
+fn run_in_login_shell<R: CommandRunner>(
+    runner: &R,
+    cwd: Option<&Path>,
+    cmdline: &str,
+) -> io::Result<CommandOutput> {
+    let (program, args) = crate::login_shell::interactive_login_command(cmdline);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    runner.run(cwd, &program, &args)
+}
+
 fn run_scripts<R: CommandRunner>(
     runner: &R,
     scripts: &[PathBuf],
@@ -562,7 +578,7 @@ fn run_scripts<R: CommandRunner>(
             "{exports}exec {}",
             shell_quote(&script.to_string_lossy())
         );
-        let out = runner.run(Some(&env.worktree), "sh", &["-lc", &cmdline])?;
+        let out = run_in_login_shell(runner, Some(&env.worktree), &cmdline)?;
         if !out.success() {
             return Err(HooksError::ScriptFailed {
                 script: script.clone(),
@@ -649,7 +665,7 @@ fn run_task_script<R: CommandRunner>(
     member_paths: &[(String, PathBuf)],
 ) -> Result<(), HooksError> {
     let cmdline = task_hook_command(script, member_paths);
-    let out = runner.run(Some(cwd), "sh", &["-lc", &cmdline])?;
+    let out = run_in_login_shell(runner, Some(cwd), &cmdline)?;
     if !out.success() {
         return Err(HooksError::ScriptFailed {
             script: script.to_path_buf(),

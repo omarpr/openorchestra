@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use agent_runtime::AgentCommand;
+use worktrees::interactive_login_command;
 
 /// The `harness_<slug>_` stem every session for a given key shares. The
 /// resource monitor keys off this to attribute a live session back to its
@@ -35,10 +36,14 @@ pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// The script passed to `sh -lc`: inline env, the quoted agent argv, then drop
-/// to a login shell so quitting the agent leaves a usable shell in the same
+/// The script the pane's login shell runs: inline env, the quoted agent argv,
+/// then drop to a shell so quitting the agent leaves a usable shell in the same
 /// (still-persistent) session.
-pub fn agent_script(cmd: &AgentCommand) -> String {
+///
+/// Env goes on as a command prefix (`K=v prog args`) rather than a preceding
+/// `export`, so these values win over anything the user's `.zshrc` sets for the
+/// agent process without leaking into the shell left behind afterwards.
+pub fn agent_command_line(cmd: &AgentCommand) -> String {
     let mut parts: Vec<String> = Vec::new();
     for (k, v) in &cmd.env {
         parts.push(format!("{k}={}", shell_quote(v)));
@@ -47,9 +52,19 @@ pub fn agent_script(cmd: &AgentCommand) -> String {
     for arg in &cmd.args {
         parts.push(shell_quote(arg));
     }
-    // Run the agent, then drop to a login shell so the session survives the
-    // agent exiting and stays reattachable.
-    format!("{}; exec \"$SHELL\" -l", parts.join(" "))
+    parts.join(" ")
+}
+
+/// [`agent_command_line`] plus the shell left behind when the agent exits. Used
+/// on the tmux path, where the session must outlive the agent to stay
+/// reattachable; the direct-spawn path respawns a shell in-process instead.
+pub fn agent_script(cmd: &AgentCommand) -> String {
+    // Run the agent, then drop to a login *interactive* shell so the session
+    // survives the agent exiting and stays reattachable. `-i` is explicit
+    // because it is what makes zsh read `.zshrc`: this shell does get a tty (so
+    // it would be interactive anyway), but leaving that implicit is what hid
+    // the missing-`.zshrc` bug everywhere else.
+    format!("{}; exec \"$SHELL\" -li", agent_command_line(cmd))
 }
 
 /// Args after `tmux` for the client the pane runs. tmux splits its argv on a
@@ -72,7 +87,7 @@ pub fn agent_script(cmd: &AgentCommand) -> String {
 ///   creates it *detached* (the name can't already exist, so `-A` never attaches
 ///   early), then `set-option`, then `attach-session` as the pane's foreground
 ///   client. `-c CWD`, one `-e K=V` per `env` entry, and the optional
-///   `sh -lc SCRIPT` agent command ride on the new-session.
+///   `$SHELL -lic SCRIPT` agent command ride on the new-session.
 ///
 /// `env` becomes the session's inherited environment, so the pane's shell has
 /// `HARNESS_*` from its first prompt without anything being typed into it. It
@@ -113,9 +128,12 @@ pub fn client_args(
         args.push(format!("{k}={v}"));
     }
     if let Some(cmd) = command {
-        args.push("sh".into());
-        args.push("-lc".into());
-        args.push(agent_script(cmd));
+        // The user's own shell, login + interactive, so the agent starts with
+        // the environment their terminal would have given it (see
+        // `worktrees::interactive_login_command`).
+        let (program, shell_args) = interactive_login_command(&agent_script(cmd));
+        args.push(program);
+        args.extend(shell_args);
     }
     args.extend([
         ";".into(),
@@ -295,7 +313,25 @@ mod tests {
         let s = agent_script(&cmd());
         assert!(s.contains("HARNESS_AGENT_SCHEMA='/tmp/a b/schema'"), "{s}");
         assert!(s.contains("'/usr/bin/pi' '--mode' 'tui'"), "{s}");
-        assert!(s.trim_end().ends_with(r#"exec "$SHELL" -l"#), "{s}");
+        // `-li`, not `-l`: the replacement shell is only guaranteed to read
+        // `.zshrc` if it is interactive, and relying on "stdin happens to be a
+        // tty" is what made this class of bug invisible in the first place.
+        assert!(s.trim_end().ends_with(r#"exec "$SHELL" -li"#), "{s}");
+    }
+
+    #[test]
+    fn the_agent_runs_under_a_login_interactive_shell() {
+        // The whole point: `sh -lc` never reads `.zshrc`, so the agent started
+        // without the user's exports, aliases or version-manager shims — and
+        // with a PATH that /etc/profile's path_helper had reordered.
+        let c = cmd();
+        let a = client_args("harness_k_7", Path::new("/repo"), Some(&c), false, &[]);
+        let first_sep = a.iter().position(|x| x == ";").expect("command separator");
+        let (program, args) = worktrees::interactive_login_command(&agent_script(&c));
+        assert_eq!(a[first_sep - 3], program, "must be the user's shell, not sh: {a:?}");
+        assert_eq!(a[first_sep - 2], args[0], "must be login + interactive: {a:?}");
+        assert_ne!(a[first_sep - 3], "sh", "sh reorders PATH via path_helper");
+        assert_ne!(a[first_sep - 2], "-lc", "-lc skips .zshrc");
     }
 
     // The status bar is hidden per-session before the client attaches. Helper:
@@ -326,8 +362,6 @@ mod tests {
         assert!(a.iter().any(|x| x == "harness_k_7"));
         // The agent script rides on the new-session command, before the first `;`.
         let first_sep = a.iter().position(|x| x == ";").expect("command separator");
-        assert_eq!(a[first_sep - 3], "sh");
-        assert_eq!(a[first_sep - 2], "-lc");
         assert!(a[first_sep - 1].contains("/usr/bin/pi"));
         // Ends by attaching as the pane's foreground client.
         assert_eq!(a[a.len() - 3], "attach-session");
@@ -339,7 +373,13 @@ mod tests {
     fn client_args_fresh_shell_has_no_command() {
         let a = client_args("harness_k_9", Path::new("/repo"), None, false, &[]);
         assert!(a.iter().any(|x| x == "-c"));
-        assert!(!a.iter().any(|x| x == "sh"), "shell tab must have no sh -lc: {a:?}");
+        // No command at all: tmux then spawns `default-shell` itself, as a
+        // login shell on a tty — already interactive, so it reads `.zshrc`.
+        // Wrapping it would only add a redundant shell level.
+        assert!(
+            !a.iter().any(|x| x == "-lc" || x == "-lic"),
+            "shell tab must not be wrapped in a `-c` shell: {a:?}"
+        );
         assert!(hides_status_bar(&a, "harness_k_9"), "status bar not hidden: {a:?}");
     }
 

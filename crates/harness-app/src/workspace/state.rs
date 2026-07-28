@@ -525,10 +525,13 @@ impl HarnessWorkspace {
             .get(kind.as_str())
             .and_then(|p| p.command.clone())
         {
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+            // Login + interactive: an override is a line the user typed, so it
+            // has to resolve the way it would in their terminal — including
+            // aliases and shell functions, which only exist once `.zshrc` runs.
+            let (shell, args) = worktrees::interactive_login_command(&cmd);
             return Some(agent_runtime::AgentCommand {
                 program: shell.into(),
-                args: vec!["-lc".into(), cmd],
+                args,
                 env: runtime_env,
                 label: kind.as_str().to_string(),
             });

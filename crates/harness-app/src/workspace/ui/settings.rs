@@ -646,7 +646,7 @@ impl HarnessWorkspace {
                     .text_xs()
                     .text_color(hx.tx2)
                     .pb_1()
-                    .child("Click a command to edit it (runs via $SHELL -lc; empty restores the default). Custom agents can enable status hooks for busy/idle notifications. Enter saves, Esc cancels."),
+                    .child("Click a command to edit it (runs via $SHELL -lic, so your aliases and ~/.zshrc apply; empty restores the default). Custom agents can enable status hooks for busy/idle notifications. Enter saves, Esc cancels."),
             )
             .child(agents);
         // The reset button is always shown for discoverability, but stays

@@ -94,9 +94,12 @@ impl TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (shell, spawned, env) = match session {
-            // tmux-backed: run a tmux client; the agent (and its env, inlined into
-            // the script) live in the tmux server, so this pane's env is empty.
+        // No pty-level env on any path: every agent invocation is a shell line
+        // with its env inlined as a command prefix, which both survives the trip
+        // through tmux and takes precedence over the user's rc files.
+        let (shell, spawned) = match session {
+            // tmux-backed: run a tmux client; the agent and its env live in the
+            // tmux server.
             Some(sess) => {
                 let label = agent
                     .as_ref()
@@ -116,24 +119,29 @@ impl TerminalPane {
                         title_override: Some(label.clone()),
                     },
                     format!("{label} (tmux {})", sess.name),
-                    Vec::new(),
                 )
             }
-            // No tmux: today's direct spawn.
+            // No tmux: direct spawn. Still routed through the user's login
+            // interactive shell rather than exec'ing the binary, so the agent
+            // sees the same environment it would in a terminal — `.zshrc`
+            // exports included. Its own env rides along inlined in the command
+            // line (as on the tmux path), where it takes precedence over
+            // anything the rc files set.
             None => match agent {
                 Some(cmd) => {
                     let spawned = format!("{} ({})", cmd.label, cmd.program.display());
+                    let (program, args) =
+                        worktrees::interactive_login_command(&crate::tmux::agent_command_line(&cmd));
                     (
                         Shell::WithArguments {
-                            program: cmd.program.to_string_lossy().into_owned(),
-                            args: cmd.args,
+                            program,
+                            args,
                             title_override: Some(cmd.label),
                         },
                         spawned,
-                        cmd.env,
                     )
                 }
-                None => (Shell::System, "$SHELL".to_string(), Vec::new()),
+                None => (Shell::System, "$SHELL".to_string()),
             },
         };
 
@@ -145,9 +153,7 @@ impl TerminalPane {
             Some(self.worktree_root.clone()),
             None,
             shell,
-            // The adapter's env (e.g. HARNESS_AGENT_SCHEMA, so the pi tool
-            // extension finds the contract from inside a packaged .app).
-            env.into_iter().collect(),
+            Default::default(),
             SettingsCursorShape::default(),
             // Off, not On: with alternate-scroll on, spinning the wheel inside a
             // full-screen TUI (Claude Code, pi, vim) that hasn't enabled mouse
