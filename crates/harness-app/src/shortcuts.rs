@@ -282,7 +282,7 @@ pub fn entries() -> Vec<Entry> {
         Entry::new(s("cmd-alt-g"), Scope::Editor, "Toggle git blame gutter", ::git::Blame),
 
         // ---- Inline inputs ------------------------------------------------
-        // Rename / new-worktree / avatar / agent-command / review-comment
+        // Rename / avatar / agent-command / review-comment / new-task dialog
         // fields are single-line editors. Enter reaches the global
         // menu::Confirm (a single-line editor has no Newline binding), but
         // escape would otherwise hit the Editor-scoped clear-selection; this

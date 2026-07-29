@@ -219,14 +219,7 @@ impl HarnessWorkspace {
             if ws.prefs.collapsed_sections.remove(SidebarSection::Tasks.label()) {
                 ws.save_prefs(cx);
             }
-            if ws.new_task_repos.is_empty()
-                && let Some(r) = ws.data.repos.first()
-            {
-                ws.new_task_repos = vec![r.name.clone()];
-                ws.new_task_home = r.name.clone();
-                ws.new_target_repo = r.name.clone();
-            }
-            ws.begin_edit(EditKind::NewName, "", "task name…", window, cx);
+            ws.open_new_task(window, cx);
         }, cx)
         .into_any_element()
     }
@@ -282,21 +275,6 @@ impl HarnessWorkspace {
         if !self.section_collapsed(SidebarSection::Tasks) {
             // Body gets its own top padding now that the header owns the rule.
             tasks_col = tasks_col.child(div().h(px(4.0)));
-            if matches!(self.edit_kind(), Some(EditKind::NewName))
-                && let Some(editor) = self.edit_editor()
-            {
-                tasks_col = tasks_col
-                    .child(div().mx_2().my_0p5().child(self.render_input(hx, editor, cx)))
-                    .child(self.render_new_task_members(hx, cx))
-                    .child(
-                        div()
-                            .mx_2()
-                            .mb_1()
-                            .text_color(hx.tx2)
-                            .text_size(px(10.0))
-                            .child("name · #branch · @base · click repo chip to toggle / set ★ home"),
-                    );
-            }
             for task in &self.data.tasks {
                 tasks_col = tasks_col.child(self.render_task_row(hx, task, cx));
             }
@@ -324,61 +302,6 @@ impl HarnessWorkspace {
             .child(projects)
             .when(projects_collapsed, |d| d.child(div().flex_1()))
             .when(!self.archived_repos.is_empty(), |d| d.child(self.render_archived(hx, cx)))
-    }
-
-    fn render_new_task_members(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut row = div().flex().flex_wrap().gap_1().mx_2().mb_1();
-        for (i, repo) in self.data.repos.iter().enumerate() {
-            let name = repo.name.clone();
-            let selected = self.new_task_repos.iter().any(|n| n == &name);
-            let is_home = self.new_task_home == name;
-            let label = if is_home {
-                format!("★ {}", repo.name)
-            } else if selected {
-                repo.name.clone()
-            } else {
-                format!("+ {}", repo.name)
-            };
-            row = row.child(
-                div()
-                    .id(("new-task-repo", i))
-                    .px_1p5()
-                    .py_0p5()
-                    .rounded_md()
-                    .text_size(px(10.0))
-                    .font_family(hx.font_mono)
-                    .bg(if selected { hx.surface } else { hx.bg1 })
-                    .text_color(if is_home {
-                        hx.accent
-                    } else if selected {
-                        hx.tx0
-                    } else {
-                        hx.tx2
-                    })
-                    .border_1()
-                    .border_color(if selected { hx.border2 } else { hx.border })
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |ws, _, _, cx| {
-                        if let Some(pos) = ws.new_task_repos.iter().position(|n| n == &name) {
-                            if ws.new_task_home == name && ws.new_task_repos.len() > 1 {
-                                ws.new_task_repos.remove(pos);
-                                ws.new_task_home = ws.new_task_repos[0].clone();
-                            } else {
-                                ws.new_task_home = name.clone();
-                            }
-                        } else {
-                            ws.new_task_repos.push(name.clone());
-                            if ws.new_task_repos.len() == 1 {
-                                ws.new_task_home = name.clone();
-                            }
-                        }
-                        ws.new_target_repo = ws.new_task_home.clone();
-                        cx.notify();
-                    }))
-                    .child(label),
-            );
-        }
-        row
     }
 
     fn render_task_row(
