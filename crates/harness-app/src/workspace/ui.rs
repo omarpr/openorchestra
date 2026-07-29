@@ -6,6 +6,7 @@ mod center;
 mod chrome;
 mod diff;
 mod diff_edit;
+mod new_task;
 mod preflight;
 mod settings;
 /// `pub(crate)` for `SidebarSection` alone — its variant labels are the keys

@@ -272,11 +272,19 @@ impl HarnessWorkspace {
 
     /// Enter in an inline edit field (routed from the global `menu::Confirm`).
     pub(crate) fn confirm_edit(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        if self.new_task.is_some() {
+            self.submit_new_task(window, cx);
+            return;
+        }
         self.commit_edit(window, cx);
     }
 
     /// Escape in an inline edit field (routed from `menu::Cancel`): abandon it.
     pub(crate) fn cancel_edit(&mut self, _: &menu::Cancel, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.new_task.is_some() {
+            self.close_new_task(cx);
+            return;
+        }
         self.edit = None;
         cx.notify();
     }
@@ -285,14 +293,6 @@ impl HarnessWorkspace {
         let Some(active) = self.edit.take() else { return };
         let text = active.editor.read(cx).text(cx);
         match active.kind {
-            EditKind::NewName => {
-                let name = text.trim().to_string();
-                if !name.is_empty() {
-                    self.create_named(&name, window, cx);
-                } else {
-                    cx.notify();
-                }
-            }
             EditKind::Rename(id) => {
                 let name = text.trim();
                 if !name.is_empty() {
@@ -354,8 +354,114 @@ impl HarnessWorkspace {
         }
     }
 
-    /// Also fix the note so it names the branch and base actually used.
-    pub(crate) fn create_named(&mut self, input: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// Include or exclude a project in the pending new-task membership.
+    /// Keeps at least one member; demoting home promotes the first remaining.
+    pub(crate) fn toggle_new_task_repo(&mut self, name: &str, cx: &mut Context<Self>) {
+        if let Some(pos) = self.new_task_repos.iter().position(|n| n == name) {
+            if self.new_task_repos.len() <= 1 {
+                // Cannot drop the last included project.
+                return;
+            }
+            self.new_task_repos.remove(pos);
+            if self.new_task_home == name {
+                self.new_task_home = self.new_task_repos[0].clone();
+            }
+        } else {
+            self.new_task_repos.push(name.to_string());
+            if self.new_task_repos.len() == 1 {
+                self.new_task_home = name.to_string();
+            }
+        }
+        self.new_target_repo = self.new_task_home.clone();
+        cx.notify();
+    }
+
+    /// Mark an included project as home for the pending new task.
+    pub(crate) fn set_new_task_home(&mut self, name: &str, cx: &mut Context<Self>) {
+        if !self.new_task_repos.iter().any(|n| n == name) {
+            return;
+        }
+        self.new_task_home = name.to_string();
+        self.new_target_repo = self.new_task_home.clone();
+        cx.notify();
+    }
+
+    /// Open the centered new-task dialog (TASKS `+`).
+    pub(crate) fn open_new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.data.repos.is_empty() {
+            self.note = "add a project first".to_string();
+            cx.notify();
+            return;
+        }
+        if self.new_task_repos.is_empty()
+            && let Some(r) = self.data.repos.first()
+        {
+            self.new_task_repos = vec![r.name.clone()];
+            self.new_task_home = r.name.clone();
+            self.new_target_repo = r.name.clone();
+        }
+        let description = cx.new(|cx| {
+            let mut e = Editor::single_line(window, cx);
+            e.set_placeholder_text("short task description…", window, cx);
+            e
+        });
+        // Re-render when the description changes so the branch placeholder
+        // (feat/{slug}) stays in sync.
+        let _desc_sub = cx.subscribe(&description, |_ws, _editor, event, cx| {
+            if matches!(event, editor::EditorEvent::BufferEdited) {
+                cx.notify();
+            }
+        });
+        let auto = "feat/task".to_string();
+        let branch = cx.new(|cx| {
+            let mut e = Editor::single_line(window, cx);
+            e.set_placeholder_text(auto.as_str(), window, cx);
+            e
+        });
+        window.focus(&description.focus_handle(cx), cx);
+        self.new_task = Some(NewTaskDialog {
+            description,
+            branch,
+            auto_branch_shown: auto,
+            _desc_sub,
+        });
+        self.edit = None;
+        self.menu = None;
+        cx.notify();
+    }
+
+    pub(crate) fn close_new_task(&mut self, cx: &mut Context<Self>) {
+        self.new_task = None;
+        cx.notify();
+    }
+
+    pub(crate) fn submit_new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dialog) = self.new_task.as_ref() else { return };
+        let name = dialog.description.read(cx).text(cx);
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            self.note = "enter a short task description".to_string();
+            cx.notify();
+            return;
+        }
+        let branch_raw = dialog.branch.read(cx).text(cx);
+        let branch = {
+            let t = branch_raw.trim();
+            if t.is_empty() { None } else { Some(t.to_string()) }
+        };
+        self.new_task = None;
+        self.create_named(&name, branch.as_deref(), window, cx);
+    }
+
+    /// Create a task from an explicit description and optional branch override.
+    /// Empty branch → `feat/{slug}` from the description.
+    pub(crate) fn create_named(
+        &mut self,
+        name: &str,
+        branch: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.data.repos.is_empty() {
             self.note = "add a project first".to_string();
             cx.notify();
@@ -377,19 +483,11 @@ impl HarnessWorkspace {
             home = member_names[0].clone();
         }
 
-        let primary = self
-            .data
-            .repos
-            .iter()
-            .find(|r| r.name == home)
-            .or_else(|| self.data.repos.first())
-            .unwrap();
-        let spec = NewWorktree::parse(input, &primary.compare_ref);
-        let name = spec.name.as_str();
         let slug = slugify(name);
-        let branch = spec
-            .branch
-            .clone()
+        let branch = branch
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+            .map(|b| b.to_string())
             .unwrap_or_else(|| format!("feat/{slug}"));
         let created_at = now_stamp();
 

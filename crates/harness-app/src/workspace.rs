@@ -412,8 +412,6 @@ pub(crate) enum Selection {
 /// carries which thing is being edited so the commit knows where to write.
 #[derive(Clone)]
 pub(crate) enum EditKind {
-    /// New worktree/task name. Members come from `new_task_repos` / `new_task_home`.
-    NewName,
     /// Rename worktree or task `id`.
     Rename(String),
     /// Edit an agent's launch command in settings (kind string).
@@ -429,6 +427,18 @@ pub(crate) enum EditKind {
 struct ActiveEdit {
     kind: EditKind,
     editor: Entity<Editor>,
+}
+
+/// Centered "New task" dialog: description + optional branch + project members.
+struct NewTaskDialog {
+    description: Entity<Editor>,
+    branch: Entity<Editor>,
+    /// Last auto-branch string pushed into the branch field's placeholder, so
+    /// we only call `set_placeholder_text` when the description's slug changes.
+    auto_branch_shown: String,
+    /// Keeps the dialog view refreshing while the description is typed so the
+    /// branch placeholder can track `feat/{slug}`.
+    _desc_sub: gpui::Subscription,
 }
 
 /// The name an agent goes by in front of users — notification titles, rows.
@@ -724,6 +734,8 @@ pub struct HarnessWorkspace {
     /// The active inline edit, if any. `Editor`-backed, so it carries its own
     /// focus, caret, and selection — no more hand-rolled caret blink.
     edit: Option<ActiveEdit>,
+    /// Centered new-task dialog (description, branch, members).
+    new_task: Option<NewTaskDialog>,
     new_target_repo: String,
     menu: Option<CardMenu>,
     /// Open "new tab" menu, anchored under the `+` in the tab strip.
@@ -979,6 +991,7 @@ impl HarnessWorkspace {
             panes_path,
             has_tmux,
             edit: None,
+            new_task: None,
             new_target_repo,
             menu: None,
             tab_menu: None,
@@ -1601,6 +1614,11 @@ impl Render for HarnessWorkspace {
             root = root.child(self.render_edit_prompt(&hx, cx));
         }
 
+        if self.new_task.is_some() {
+            self.sync_new_task_branch_placeholder(window, cx);
+            root = root.child(self.render_new_task_dialog(&hx, cx));
+        }
+
         if self.close_prompt.is_some() {
             root = root.child(self.render_close_prompt(&hx, cx));
         }
@@ -2074,53 +2092,6 @@ fn now_stamp() -> String {
     format!("{secs}")
 }
 
-/// What the new-worktree input asked for (M5a).
-///
-/// The plain case stays plain — typing a name is all most tasks need, and it
-/// behaves exactly as before. Two optional suffixes cover the cases the
-/// auto-derived branch and base could not express:
-///
-/// ```text
-///   fix login bug                     -> branch feat/fix-login-bug, base = compare ref
-///   fix login bug #hotfix/login       -> explicit branch
-///   fix login bug @v2.1               -> explicit base ref
-///   fix login bug #hotfix/login @v2.1 -> both
-/// ```
-///
-/// Chosen over a bespoke modal deliberately: it delivers the same capability
-/// against far less unstable GPUI surface, and the sidebar input already
-/// exists and is already focused when you press `+`.
-#[derive(Debug, PartialEq)]
-struct NewWorktree {
-    name: String,
-    branch: Option<String>,
-    base_ref: String,
-}
-
-impl NewWorktree {
-    fn parse(input: &str, default_base: &str) -> NewWorktree {
-        let mut name_parts: Vec<&str> = Vec::new();
-        let mut branch = None;
-        let mut base_ref = None;
-
-        for token in input.split_whitespace() {
-            match token.split_at_checked(1) {
-                // A bare "#" or "@" carries no value; treat it as part of the
-                // name rather than silently swallowing it.
-                Some(("#", rest)) if !rest.is_empty() => branch = Some(rest.to_string()),
-                Some(("@", rest)) if !rest.is_empty() => base_ref = Some(rest.to_string()),
-                _ => name_parts.push(token),
-            }
-        }
-
-        NewWorktree {
-            name: name_parts.join(" "),
-            branch,
-            base_ref: base_ref.unwrap_or_else(|| default_base.to_string()),
-        }
-    }
-}
-
 /// A minimal text tooltip — a styled popover label shown on hover, so
 /// icon-only controls (the tab `×`, the reviewed checkbox, the font-size
 /// steppers) carry a readable name. Native apps have no ARIA; a hover label
@@ -2132,6 +2103,8 @@ struct TextTooltip {
 impl Render for TextTooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let hx = theme(cx);
+        // Cap width so longer help (new-task info) wraps instead of spanning
+        // the whole window; short tips stay compact because content shrinks.
         div()
             .bg(hx.surface2)
             .border_1()
@@ -2139,6 +2112,7 @@ impl Render for TextTooltip {
             .rounded_md()
             .px_1p5()
             .py_0p5()
+            .max_w(px(280.0))
             .text_xs()
             .text_color(hx.tx0)
             .child(self.text.clone())
@@ -2155,39 +2129,14 @@ fn tip(
 }
 
 #[cfg(test)]
-mod new_worktree_tests {
-    use super::NewWorktree;
+mod slugify_tests {
+    use super::slugify;
 
     #[test]
-    fn a_plain_name_keeps_the_previous_behavior() {
-        let spec = NewWorktree::parse("fix login bug", "origin/main");
-        assert_eq!(spec.name, "fix login bug");
-        assert_eq!(spec.branch, None, "branch stays auto-derived");
-        assert_eq!(spec.base_ref, "origin/main");
-    }
-
-    #[test]
-    fn an_explicit_branch_and_base_are_picked_up_in_any_order() {
-        let spec = NewWorktree::parse("fix login @v2.1 #hotfix/login bug", "origin/main");
-        assert_eq!(spec.name, "fix login bug");
-        assert_eq!(spec.branch.as_deref(), Some("hotfix/login"));
-        assert_eq!(spec.base_ref, "v2.1");
-    }
-
-    #[test]
-    fn bare_markers_stay_part_of_the_name() {
-        // Otherwise a name containing a stray "#" would silently vanish.
-        let spec = NewWorktree::parse("issue # 42 @", "origin/main");
-        assert_eq!(spec.name, "issue # 42 @");
-        assert_eq!(spec.branch, None);
-        assert_eq!(spec.base_ref, "origin/main");
-    }
-
-    #[test]
-    fn the_last_marker_of_each_kind_wins() {
-        let spec = NewWorktree::parse("x #a #b @c @d", "origin/main");
-        assert_eq!(spec.branch.as_deref(), Some("b"));
-        assert_eq!(spec.base_ref, "d");
+    fn slugify_makes_feat_branch_placeholders() {
+        assert_eq!(slugify("fix login bug"), "fix-login-bug");
+        assert_eq!(slugify(""), "task");
+        assert_eq!(slugify("  Hello, World!  "), "hello-world");
     }
 }
 
@@ -2195,7 +2144,7 @@ mod new_worktree_tests {
 mod diff_render_tests {
     use super::{
         load_prefs, readable_diff_lines, reordered, save_prefs_to, target_line_for_row,
-        use_two_pane, DiffLineKind, DiffLocation, NewWorktree, Prefs, DIFF_TWO_PANE_MIN,
+        use_two_pane, DiffLineKind, DiffLocation, Prefs, DIFF_TWO_PANE_MIN,
     };
 
     /// Verbatim shape of the noise a new file produces — the case that
@@ -2519,15 +2468,6 @@ diff --git a/y.rs b/y.rs\n@@ -1,1 +1,2 @@\n other\n+new\n",
                 .count(),
             1
         );
-    }
-
-    #[test]
-    fn worktree_spec_still_parses() {
-        // Guards the M5a syntax against regressions from this refactor.
-        let spec = NewWorktree::parse("fix bug #hot/fix @v2", "origin/main");
-        assert_eq!(spec.name, "fix bug");
-        assert_eq!(spec.branch.as_deref(), Some("hot/fix"));
-        assert_eq!(spec.base_ref, "v2");
     }
 }
 
