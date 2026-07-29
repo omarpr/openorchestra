@@ -67,9 +67,14 @@ if ((publish)); then
   gh auth status >/dev/null 2>&1 || die "gh is not authenticated: run 'gh auth login'"
   [ -z "$(git -C "$ROOT" status --porcelain)" ] \
     || die "working tree is dirty — a published build must be reproducible from its tag"
+  # The changelog is cut against the previous release tag, so a stale tag cache
+  # would silently widen the range.
+  git -C "$ROOT" fetch --tags --quiet || true
   if git -C "$ROOT" rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
     die "tag $TAG already exists — bump version in $CRATE/Cargo.toml, or commit first"
   fi
+  REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
+  [ -n "$REPO" ] || die "could not determine the GitHub repository"
 fi
 
 say "version $VERSION (build $BUILD)"
@@ -190,16 +195,53 @@ fi
 # Publish. Outward-facing and awkward to retract, so it never happens as a side
 # effect of a build — only under an explicit --publish.
 # ---------------------------------------------------------------------------
-if ((publish)); then
-  say "publishing GitHub Release $TAG"
-  gh release create "$TAG" "$DMG" \
-    --title "$APP_NAME $VERSION ($BUILD)" \
-    --generate-notes \
-    --notes "**First launch:** right-click the app → **Open**, then confirm. macOS
+INSTALL_NOTE="**First launch:** right-click the app → **Open**, then confirm. macOS
 quarantines apps from unidentified developers, so a plain double-click will say
 the app is damaged. This is expected — the build is ad-hoc signed, not notarized.
 
 Universal binary: Apple Silicon and Intel."
+
+# ---------------------------------------------------------------------------
+# Release notes. GitHub's --generate-notes lists *pull requests* only, so work
+# pushed straight to master disappears from the changelog no matter who wrote
+# it. Build the notes from the commits instead, resolving each author to their
+# GitHub handle so everyone who shipped in the range is credited.
+# ---------------------------------------------------------------------------
+release_notes() {
+  local prev range sha subject author handle
+  local -a handles=()
+
+  prev="$(git -C "$ROOT" describe --tags --abbrev=0 HEAD 2>/dev/null || true)"
+  range="${prev:+$prev..}HEAD"
+
+  printf '%s\n\n' "$INSTALL_NOTE"
+  printf "## What's Changed\n"
+  while IFS=$'\x1f' read -r sha subject author; do
+    handle="$(gh api "repos/$REPO/commits/$sha" --jq '.author.login // empty' 2>/dev/null || true)"
+    handle="${handle:+@$handle}"
+    handle="${handle:-$author}"
+    handles+=("$handle")
+    printf '* %s by %s in https://github.com/%s/commit/%s\n' \
+      "$subject" "$handle" "$REPO" "${sha:0:7}"
+  done < <(git -C "$ROOT" log --no-merges --reverse --format=$'%H\x1f%s\x1f%an' "$range")
+
+  printf '\n## Contributors\n'
+  printf '%s\n' "${handles[@]}" | sort | uniq -c | sort -rn | while read -r count handle; do
+    printf '* %s — %s commit%s\n' "$handle" "$count" "$([ "$count" -eq 1 ] || echo s)"
+  done
+
+  if [ -n "$prev" ]; then
+    printf '\n**Full Changelog**: https://github.com/%s/compare/%s...%s\n' "$REPO" "$prev" "$TAG"
+  else
+    printf '\n**Full Changelog**: https://github.com/%s/commits/%s\n' "$REPO" "$TAG"
+  fi
+}
+
+if ((publish)); then
+  say "publishing GitHub Release $TAG"
+  gh release create "$TAG" "$DMG" \
+    --title "$APP_NAME $VERSION ($BUILD)" \
+    --notes "$(release_notes)"
   say "published: $(gh release view "$TAG" --json url --jq .url)"
 fi
 
