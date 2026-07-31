@@ -517,6 +517,59 @@ async fn probe_editor_keys(hosted: &Entity<Workspace>, cx: &mut gpui::AsyncWindo
         if copied == original { "MATCH" } else { "MISMATCH" },
     );
 
+    // ⌘F — the in-buffer find bar.
+    //
+    // Probed at both layers for the same reason ⌘⇧D is: the BufferSearchBar has
+    // always been installed on the pane toolbar, so "⌘F does nothing" meant the
+    // CHORD never matched, not that the bar was missing. A probe that only
+    // dispatched the action would have reported success the whole time.
+    //
+    //   chord deploys                 → works
+    //   chord no, action deploys      → the bar is fine, the BINDING does not
+    //                                   match (scope / focus)
+    //   neither                       → no BufferSearchBar on this toolbar
+    let dismissed = |hosted: &Entity<Workspace>, cx: &mut gpui::AsyncWindowContext| {
+        hosted
+            .update(cx, |ws, cx| {
+                ws.active_pane()
+                    .read(cx)
+                    .toolbar()
+                    .read(cx)
+                    .item_of_type::<search::BufferSearchBar>()
+                    .map(|bar| bar.read(cx).is_dismissed())
+            })
+    };
+    let before = dismissed(hosted, cx);
+    let f = gpui::Keystroke::parse("cmd-f").expect("parses");
+    let _ = cx.update(|window, cx| window.dispatch_keystroke(f, cx));
+    cx.background_executor().timer(pause).await;
+    let after_chord = dismissed(hosted, cx);
+    let _ = cx.update(|window, cx| {
+        window.dispatch_action(Box::new(search::buffer_search::Deploy::find()), cx)
+    });
+    cx.background_executor().timer(pause).await;
+    let after_action = dismissed(hosted, cx);
+    log::info!(
+        "HARNESS_PROBE_EDITOR_KEYS: cmd-f search bar dismissed {before:?} \
+         -> {after_chord:?} (chord) -> {after_action:?} (action)"
+    );
+    // Escape back out, so the bar does not eat the keystrokes the probes below
+    // are about to send.
+    let esc = gpui::Keystroke::parse("escape").expect("parses");
+    let _ = cx.update(|window, cx| window.dispatch_keystroke(esc, cx));
+    cx.background_executor().timer(pause).await;
+    log::info!(
+        "HARNESS_PROBE_EDITOR_KEYS: escape dismissed the find bar = {:?}",
+        dismissed(hosted, cx)
+    );
+    // Re-focus the buffer: escape leaves focus wherever the bar put it.
+    let _ = hosted.update_in(cx, |ws, window, cx| {
+        if let Some(editor) = ws.active_item(cx).and_then(|i| i.act_as::<editor::Editor>(cx)) {
+            editor.update(cx, |_, cx| cx.focus_self(window));
+        }
+    });
+    cx.background_executor().timer(pause).await;
+
     // Type over the selection, then ⌘Z: the buffer must return to its
     // original text. Undo through the keymap, not the action.
     let x = gpui::Keystroke::parse("x").expect("parses");

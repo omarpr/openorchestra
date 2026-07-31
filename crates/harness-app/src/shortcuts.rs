@@ -35,6 +35,12 @@ pub enum Scope {
     EditorFull,
     /// Inside a modal picker (file finder). zed's own context name.
     Picker,
+    /// The in-buffer find bar (⌘F), at the bar itself. zed's own context name.
+    SearchBar,
+    /// The find bar's query box. Matches AT the editor node (like
+    /// `Picker > Editor`) so escape/tab can beat the Editor-scoped bindings
+    /// that would otherwise clear a selection or indent instead.
+    SearchBarInput,
 }
 
 impl Scope {
@@ -60,6 +66,13 @@ impl Scope {
             // enter→Newline wins. This predicate matches at the editor node
             // itself (deepest), and catalog order breaks the tie our way.
             Scope::Picker => Some("Picker > Editor"),
+            Scope::SearchBar => Some("BufferSearchBar"),
+            // Same shape and same reason as `Picker > Editor`: the find bar's
+            // query box IS an editor, so a bare "BufferSearchBar" matches at
+            // the bar node — SHALLOWER than the query editor — and the
+            // Editor-scoped escape/tab win. This matches at the editor node
+            // itself, and catalog order breaks the tie our way.
+            Scope::SearchBarInput => Some("BufferSearchBar > Editor"),
         }
     }
 
@@ -71,6 +84,7 @@ impl Scope {
             Scope::EditorFull => "Text editing (buffers)",
             Scope::Input => "Inline input",
             Scope::Picker => "File finder",
+            Scope::SearchBar | Scope::SearchBarInput => "Find in file",
         }
     }
 }
@@ -235,6 +249,52 @@ pub fn entries() -> Vec<Entry> {
             zed_actions::preview::markdown::OpenPreviewToTheSide,
         ),
 
+        // ---- Find in file (⌘F) ---------------------------------------------
+        // The BufferSearchBar is already installed on every pane toolbar
+        // (workspace_host.rs) and `search::init` runs in main.rs — until now
+        // nothing was BOUND to it, which is why ⌘F did nothing with a file
+        // open. Scoped to full buffers, not every Editor: our inline
+        // single-line inputs (rename, agent command, review comment) are
+        // editors too, and ⌘F must not deploy a find bar inside one.
+        Entry::new(
+            s("cmd-f"),
+            Scope::EditorFull,
+            "Find in this file",
+            ::search::buffer_search::Deploy::find(),
+        ),
+        // Next-match from the buffer, so you can page through hits without
+        // going back to the query box. zed puts previous-match on ⇧⌘G at
+        // `Pane` scope; we do NOT, because `Pane` is deeper than `Workspace`
+        // and would silently shadow our git-panel ⇧⌘G. ⇧enter in the find bar
+        // is previous-match instead.
+        Entry::new(
+            s("cmd-g"),
+            Scope::EditorFull,
+            "Next match",
+            ::search::SelectNextMatch,
+        ),
+        Entry::new(
+            s("enter"),
+            Scope::SearchBar,
+            "Next match (find bar)",
+            ::search::SelectNextMatch,
+        ),
+        Entry::new(
+            s("shift-enter"),
+            Scope::SearchBar,
+            "Previous match (find bar)",
+            ::search::SelectPreviousMatch,
+        ),
+        Entry::new(
+            s("cmd-f"),
+            Scope::SearchBar,
+            "Back to the query box",
+            ::search::FocusSearch,
+        ),
+        // escape/tab for the find bar live at the BOTTOM of the catalog, with
+        // the other `> Editor` predicates — they tie with the Editor-scoped
+        // escape and tab on depth, so only catalog order separates them.
+
         // ---- Text editing -------------------------------------------------
         // ⌘C here deliberately shadows the global diff-copy: context depth
         // wins, so inside a buffer ⌘C copies editor text.
@@ -289,6 +349,25 @@ pub fn entries() -> Vec<Entry> {
         // deeper predicate rebinds it to Cancel so escape abandons the edit.
         // Placed AFTER the Editor escape so catalog order gives it priority.
         Entry::new(s("escape"), Scope::Input, "Cancel the edit", menu::Cancel),
+
+        // ---- Find bar (the `> Editor` half) ---------------------------------
+        // The query box IS an editor, so these tie with the Editor-scoped
+        // escape (clear selection) and tab (indent) on context depth. Without
+        // them escape would clear a selection instead of closing the find bar,
+        // and tab would indent the query instead of returning to the buffer.
+        // Their position here — after the Editor entries — is what wins the tie.
+        Entry::new(
+            s("escape"),
+            Scope::SearchBarInput,
+            "Close the find bar",
+            ::search::buffer_search::Dismiss,
+        ),
+        Entry::new(
+            s("tab"),
+            Scope::SearchBarInput,
+            "Back to the buffer",
+            ::search::buffer_search::FocusEditor,
+        ),
 
         // ---- Pickers ------------------------------------------------------
         // Without this, ⌘P opens the file finder and only ⌘P closes it again —
