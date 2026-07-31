@@ -56,39 +56,27 @@ impl HarnessWorkspace {
             .child(tool_chip(hx, "pi", self.tools.pi, false))
     }
 
-    /// The unified-diff block for one file.
+    /// Where one file's diff has to be fetched from: its worktree, the base the
+    /// summary pinned, and the file record naming it to git.
     ///
-    /// `path` is the panel's identity key: a worktree-relative path, or
-    /// `repo/rel` for a unified task diff. Git headers only carry `rel`, so
-    /// unified keys are resolved back to the member-relative path first.
-    pub(crate) fn unified_for_file(&self, path: &str) -> String {
-        let lookup = self
+    /// `key` is the panel's identity key: a worktree-relative path, or
+    /// `repo/rel` for a unified task diff. Git only knows `rel`, so a unified
+    /// key resolves back through the member that contributed it — which is also
+    /// what supplies that member's own worktree and base.
+    fn file_diff_source(&self, key: &str) -> Option<(PathBuf, String, worktrees::DiffFile)> {
+        if let Some(f) = self
             .unified_diff
             .files
             .iter()
-            .find(|f| format!("{}/{}", f.repo, f.file.path) == path)
-            .map(|f| f.file.path.as_str())
-            .unwrap_or(path);
-        let mut blocks: Vec<String> = Vec::new();
-        let mut cur = String::new();
-        for line in self.diff.unified.lines() {
-            if line.starts_with("diff --git") && !cur.is_empty() {
-                blocks.push(std::mem::take(&mut cur));
-            }
-            cur.push_str(line);
-            cur.push('\n');
+            .find(|f| format!("{}/{}", f.repo, f.file.path) == key)
+        {
+            return Some((f.worktree.clone(), f.base.clone(), f.file.clone()));
         }
-        if !cur.is_empty() {
-            blocks.push(cur);
-        }
-        blocks
-            .into_iter()
-            .find(|b| {
-                b.lines().next().is_some_and(|h| {
-                    h.contains(&format!("b/{lookup}")) || h.ends_with(lookup)
-                })
-            })
-            .unwrap_or_default()
+        // The flattened list keys by the same `key`, so its record already
+        // names the file the way git does in the single-worktree case.
+        let file = self.diff.files.iter().find(|f| f.path == key)?.clone();
+        let r = self.resolve()?;
+        Some((r.path, self.diff.base.clone(), file))
     }
 
     /// The review toolbar above the file list: how many comments there are,
@@ -150,23 +138,78 @@ impl HarnessWorkspace {
             )
     }
 
-    /// Parsed rows for `file`, cached for the life of the current diff.
+    /// Parsed rows for `file`, fetched on demand and cached for the life of the
+    /// current diff. `None` means the fetch is still running.
     ///
-    /// Parsing is the expensive half of drawing a body: re-deriving 3 000 rows
-    /// on every frame spends milliseconds re-computing something that has not
-    /// changed since the last `git diff`. The cache is keyed by file and emptied
-    /// wholesale when a new diff lands, so an entry can never outlive the text it
-    /// describes. `RefCell` because rendering takes `&self` — the view is
-    /// single-threaded and nothing re-enters this.
-    pub(crate) fn parsed_rows(&self, file: &str) -> std::sync::Arc<Vec<DiffRow>> {
-        if let Some(hit) = self.row_cache.borrow().get(file) {
-            return hit.clone();
+    /// Two costs are being avoided, and they are different. *Parsing* is the
+    /// expensive half of drawing a body — re-deriving 3 000 rows every frame
+    /// spends milliseconds re-computing something that has not changed since
+    /// the last `git diff` — which is what the cache is for. *Fetching* is the
+    /// expensive half of opening a large branch: a changeset of tens of
+    /// thousands of lines used to be read in full before the panel could draw
+    /// anything, to show the one file on screen. Now each file's body is read
+    /// when it is first looked at.
+    ///
+    /// The cache is emptied wholesale when a new diff lands, so an entry can
+    /// never outlive the text it describes, and a fetch carries the `diff_gen`
+    /// it started under so a slow one cannot populate the cache for a diff the
+    /// user has already moved off. `RefCell` because rendering takes `&self` —
+    /// the view is single-threaded and nothing re-enters this.
+    pub(crate) fn parsed_rows(
+        &self,
+        file: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<std::sync::Arc<Vec<DiffRow>>> {
+        match self.row_cache.borrow().get(file) {
+            Some(FileRows::Ready(rows)) => return Some(rows.clone()),
+            Some(FileRows::Fetching) => return None,
+            None => {}
         }
-        let rows = std::sync::Arc::new(readable_diff_lines(&self.unified_for_file(file)));
+        let (worktree, base, record) = self.file_diff_source(file)?;
+        // Claimed before the spawn, so the frames drawn while this runs find
+        // `Fetching` and do not start a second one.
         self.row_cache
             .borrow_mut()
-            .insert(file.to_string(), rows.clone());
-        rows
+            .insert(file.to_string(), FileRows::Fetching);
+
+        let generation = self.diff_gen;
+        let key = file.to_string();
+        cx.spawn(async move |view, cx| {
+            let text = cx
+                .background_spawn(async move {
+                    crate::data::compute_file_diff(
+                        &GitWorktrees::new(SystemRunner),
+                        &worktree,
+                        &base,
+                        &record,
+                    )
+                })
+                .await;
+            let _ = view.update(cx, |ws, cx| {
+                if ws.diff_gen != generation {
+                    return;
+                }
+                let rows = std::sync::Arc::new(readable_diff_lines(&text));
+                ws.row_cache.borrow_mut().insert(key, FileRows::Ready(rows));
+                cx.notify();
+            });
+        })
+        .detach();
+        None
+    }
+
+    /// Rows for `file` only if they are already parsed.
+    ///
+    /// For the paths that act on a body the user is *looking at* — copying a
+    /// selection, resolving an edit target — where the rows must already be
+    /// cached because the interaction required them on screen. Never fetches:
+    /// these are called from event handlers, where a miss means "no selection
+    /// to act on", not "wait for git".
+    pub(crate) fn cached_rows(&self, file: &str) -> Option<std::sync::Arc<Vec<DiffRow>>> {
+        match self.row_cache.borrow().get(file) {
+            Some(FileRows::Ready(rows)) => Some(rows.clone()),
+            _ => None,
+        }
     }
 
     /// The unified diff body, rendered inline beneath the file it belongs
@@ -182,11 +225,14 @@ impl HarnessWorkspace {
     /// `bounded` is the narrow layout, where a body is expanded *inside* the
     /// file list's own scroll area and so needs a definite height; the two-pane
     /// layout gives it the whole right column.
+    ///
+    /// `body_width` is what split view is vetoed against — see `use_split`.
     pub(crate) fn render_diff_body(
         &self,
         hx: &HarnessTheme,
         file: &str,
         bounded: bool,
+        body_width: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let _started = std::time::Instant::now();
@@ -215,12 +261,23 @@ impl HarnessWorkspace {
                 let Some((file, from, _)) = ws.diff_selection.clone() else {
                     return;
                 };
-                let rows = ws.parsed_rows(&file);
+                // A selection cannot exist without the rows being on screen,
+                // so a miss here means there is nothing to target.
+                let Some(rows) = ws.cached_rows(&file) else {
+                    return;
+                };
                 let line = target_line_for_row(&rows, from);
                 ws.request_edit(file, line, window, cx);
             }));
 
-        let rows = self.parsed_rows(file);
+        let Some(rows) = self.parsed_rows(file, cx) else {
+            // The fetch is in flight. Distinct from "—": this file has changes,
+            // its text is simply not here yet.
+            return wrapper
+                .flex_none()
+                .child(div().p_2().text_color(hx.tx2).child("loading diff…"))
+                .into_any_element();
+        };
         if rows.is_empty() {
             return wrapper
                 .flex_none()
@@ -234,13 +291,29 @@ impl HarnessWorkspace {
         // it is *building elements* that had to be bounded, not iterating.
         let worktree_key = self.resolve().map(|r| r.key);
         let shown = rows.len().min(MAX_DIFF_LINES);
+        let split = use_split(self.prefs.diff_view, body_width);
         let mut items: Vec<BodyItem> = Vec::with_capacity(shown);
-        for ix in 0..shown {
-            items.push(BodyItem::Row(ix));
+        // A note hangs off whichever row the line belongs to, which in split
+        // view is the pair's anchor — the same row a click on that line acts on,
+        // so a comment appears under the line that opened it.
+        let push_note = |items: &mut Vec<BodyItem>, ix: usize| {
             if let (Some(k), Some(n)) = (worktree_key.as_deref(), rows[ix].number)
                 && self.review.get(k, file, n).is_some()
             {
                 items.push(BodyItem::Note(n));
+            }
+        };
+        if split {
+            for sr in split_rows(&rows[..shown]) {
+                items.push(BodyItem::Split(sr));
+                if let Some(ix) = sr.anchor() {
+                    push_note(&mut items, ix);
+                }
+            }
+        } else {
+            for ix in 0..shown {
+                items.push(BodyItem::Row(ix));
+                push_note(&mut items, ix);
             }
         }
         if rows.len() > shown {
@@ -281,9 +354,19 @@ impl HarnessWorkspace {
         // collapses to a 15 px strip in an empty pane. `Infer` is also what
         // zed's own project panel uses, for the same reason.
         .with_sizing_behavior(gpui::ListSizingBehavior::Infer)
-        // Long lines may exceed the list's width instead of being squeezed into
-        // it; the container scrolls sideways to reach them.
-        .with_horizontal_sizing_behavior(gpui::ListHorizontalSizingBehavior::Unconstrained);
+        // Unified: long lines may exceed the list's width instead of being
+        // squeezed into it, and the container scrolls sideways to reach them.
+        //
+        // Split: the opposite is required. Two columns are only halves of
+        // something if that something is the list's own width — let rows size
+        // to their content and each pair's halves land wherever the longer line
+        // puts them, so the divider stops being a straight line down the body.
+        // The cost is that a line wider than its column is clipped there.
+        .with_horizontal_sizing_behavior(if split {
+            gpui::ListHorizontalSizingBehavior::FitList
+        } else {
+            gpui::ListHorizontalSizingBehavior::Unconstrained
+        });
 
         // 15 px is `DIFF_ROW_H`, the height every item is drawn at — uniform_list
         // measures the first item and assumes the rest match, which is exactly
@@ -325,6 +408,7 @@ impl HarnessWorkspace {
     ) -> AnyElement {
         let transparent = Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
         let ix = match item {
+            BodyItem::Split(sr) => return self.render_split_item(hx, file, rows, sr, cx),
             BodyItem::Truncated(n) => {
                 // Never truncate silently — a diff that just stops looks like
                 // the change is smaller than it is.
@@ -506,6 +590,161 @@ impl HarnessWorkspace {
             .into_any_element()
     }
 
+    /// One side-by-side line: old on the left, new on the right.
+    ///
+    /// Drawn at `DIFF_ROW_H` like every other body item, because `uniform_list`
+    /// measures the first one and assumes the rest match — the same contract
+    /// hunk rules and review notes are held to.
+    ///
+    /// A file header or hunk rule spans both columns, so it delegates straight
+    /// back to the unified renderer rather than being drawn twice.
+    fn render_split_item(
+        &self,
+        hx: &HarnessTheme,
+        file: &str,
+        rows: &std::sync::Arc<Vec<DiffRow>>,
+        sr: SplitRow,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (left, right) = match sr {
+            SplitRow::Full(ix) => {
+                return self.render_body_item(hx, file, rows, BodyItem::Row(ix), cx);
+            }
+            SplitRow::Pair { left, right } => (left, right),
+        };
+
+        // Both halves select the same underlying row, so clicking either side
+        // of a modification highlights the whole line — the pair is one line as
+        // far as review is concerned.
+        let anchor = sr.anchor();
+        let selected = anchor.is_some_and(|ix| {
+            self.diff_selection
+                .as_ref()
+                .is_some_and(|(f, from, to)| f == file && ix >= *from && ix <= *to)
+        });
+
+        let mut row = div().id(("splitrow", anchor.unwrap_or(usize::MAX))).flex().h(px(DIFF_ROW_H));
+        if let Some(ix) = anchor {
+            let row_file = file.to_string();
+            let move_file = file.to_string();
+            let dbl_file = file.to_string();
+            let dbl_rows = rows.clone();
+            row = row
+                .cursor_pointer()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |ws, ev: &MouseDownEvent, window, cx| {
+                        if ev.click_count >= 2 {
+                            ws.diff_selecting = false;
+                            let line = target_line_for_row(&dbl_rows, ix);
+                            ws.request_edit(dbl_file.clone(), line, window, cx);
+                            return;
+                        }
+                        ws.diff_selecting = true;
+                        ws.select_diff_row(&row_file, ix, ev.modifiers.shift, cx);
+                    }),
+                )
+                .on_mouse_move(cx.listener(move |ws, _: &MouseMoveEvent, _, cx| {
+                    if ws.diff_selecting {
+                        ws.extend_diff_selection(&move_file, ix, cx);
+                    }
+                }));
+        }
+
+        row.child(self.render_split_half(hx, file, rows, left, false, selected, cx))
+            .child(div().flex_none().w(px(1.0)).h_full().bg(hx.border))
+            .child(self.render_split_half(hx, file, rows, right, true, selected, cx))
+            .into_any_element()
+    }
+
+    /// One column of a split line. `None` is the empty cell opposite a pure
+    /// insertion or deletion — tinted, so an unbalanced hunk reads as "nothing
+    /// was here" rather than as a blank the renderer forgot to fill.
+    ///
+    /// Exactly half the body: `w_1_2` plus `overflow_hidden`, which is what
+    /// clips a line wider than its column. `FitList` on the list above makes
+    /// the halves true halves.
+    #[allow(clippy::too_many_arguments)]
+    fn render_split_half(
+        &self,
+        hx: &HarnessTheme,
+        file: &str,
+        rows: &std::sync::Arc<Vec<DiffRow>>,
+        ix: Option<usize>,
+        is_new: bool,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let transparent = Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+        let half = div().flex().flex_none().w_1_2().h_full().overflow_hidden();
+
+        let Some(ix) = ix else {
+            return half.bg(tint(hx.tx2, 0.06)).into_any_element();
+        };
+        let r = &rows[ix];
+        let (fg, bg, marker) = match r.kind {
+            DiffLineKind::Added => (rgb(DIFF_ADD_TX), tint(hx.green, 0.13), "+"),
+            DiffLineKind::Removed => (rgb(DIFF_DEL_TX), tint(hx.red, 0.13), "−"),
+            _ => (hx.tx2, transparent, " "),
+        };
+        let bg = if selected { tint(hx.accent, 0.22) } else { bg };
+
+        let line_no = r.number;
+        let comment_file = file.to_string();
+        // Comments belong to the working file, so only the new side offers the
+        // affordance: a removed line's number addresses a line that is gone,
+        // and a comment pinned to it could not be shown against anything.
+        let commentable = is_new && line_no.is_some() && r.kind != DiffLineKind::Removed;
+        let has_comment = commentable
+            && line_no.is_some_and(|n| {
+                self.resolve()
+                    .is_some_and(|res| self.review.get(&res.key, file, n).is_some())
+            });
+
+        let mut gutter = div()
+            .id(("splitgutter", ix * 2 + usize::from(is_new)))
+            .flex_none()
+            .w(px(46.0))
+            .pr_1()
+            .flex()
+            .items_center()
+            .gap_1()
+            .when(has_comment, |d| d.bg(tint(hx.amber, 0.18)))
+            .text_color(if has_comment { hx.amber } else { hx.tx2 })
+            .child(div().flex_none().w(px(8.0)).child(if has_comment { "▸" } else { "" }))
+            .child(
+                div()
+                    .flex_1()
+                    .child(line_no.map(|n| n.to_string()).unwrap_or_default()),
+            );
+        if commentable {
+            gutter = gutter
+                .cursor_pointer()
+                .tooltip(tip(if has_comment { "Edit comment" } else { "Comment on line" }))
+                .hover(|d| d.bg(hx.surface).text_color(hx.accent))
+                .on_click(cx.listener(move |ws, ev: &gpui::ClickEvent, window, cx| {
+                    cx.stop_propagation();
+                    if let Some(line) = line_no {
+                        ws.begin_comment(comment_file.clone(), line, ev.position(), window, cx);
+                    }
+                }));
+        }
+
+        half.bg(bg)
+            .child(gutter)
+            .child(div().flex_none().w(px(10.0)).text_color(fg).child(marker))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .pr_2()
+                    .text_color(fg)
+                    .whitespace_nowrap()
+                    .child(r.text.clone()),
+            )
+            .into_any_element()
+    }
+
     /// The dock: fixed width and its own left border, wrapping the shared
     /// surface. Everything inside is identical to the tab — only the chrome
     /// that makes it a *dock* lives here.
@@ -542,6 +781,17 @@ impl HarnessWorkspace {
         );
         let (adds, dels) = self.diff.totals();
         let review_count = self.review.count(&r.key);
+        // What the body actually gets, which is what split view is vetoed
+        // against. Decided from the persisted dock width for the same reason
+        // `use_two_pane` is: a tab always fills the center, so it is treated as
+        // unbounded rather than requiring a layout pass to measure.
+        let surface_w = dock_width.unwrap_or(f32::INFINITY);
+        let body_w = if two_pane {
+            // The splitter is 6px (see `splitter`).
+            surface_w - self.prefs.diff_list_width - 6.0
+        } else {
+            surface_w
+        };
 
         let mut panel = div()
             .flex()
@@ -559,7 +809,7 @@ impl HarnessWorkspace {
             // selected line is one of the two edit-intent triggers, and gpui
             // routes key events along the focus path only.
             .track_focus(&self.diff_surface_focus)
-            .child(self.render_diff_header(hx, &r, adds, dels, cx));
+            .child(self.render_diff_header(hx, &r, adds, dels, body_w, cx));
         if review_count > 0 {
             panel = panel.child(self.render_review_bar(hx, review_count, cx));
         }
@@ -571,12 +821,12 @@ impl HarnessWorkspace {
                     .h_full()
                     .min_h_0()
                     .min_w_0()
-                    .child(self.render_file_list(hx, true, cx))
+                    .child(self.render_file_list(hx, true, body_w, cx))
                     .child(self.splitter(hx, Drag::DiffList, cx))
-                    .child(self.render_focused_diff(hx, cx)),
+                    .child(self.render_focused_diff(hx, body_w, cx)),
             )
         } else {
-            panel.child(self.render_file_list(hx, false, cx))
+            panel.child(self.render_file_list(hx, false, body_w, cx))
         };
         panel.into_any_element()
     }
@@ -700,6 +950,66 @@ impl HarnessWorkspace {
             )
     }
 
+    /// The unified/split toggle.
+    ///
+    /// `available` is the width the body will get: below the split threshold
+    /// the split half is drawn inactive and says why, rather than silently
+    /// accepting a click that changes nothing on screen.
+    fn render_diff_view_toggle(
+        &self,
+        hx: &HarnessTheme,
+        available: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let current = self.prefs.diff_view;
+        let too_narrow = available < SPLIT_MIN_W;
+        let mut row = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_0p5()
+            .p(px(1.0))
+            .rounded_md()
+            .bg(hx.surface);
+        for view in [DiffView::Unified, DiffView::Split] {
+            let selected = current == view;
+            // Split is vetoed by width, not un-picked by it: the pref stays,
+            // so widening the dock restores the layout the user asked for.
+            let vetoed = view == DiffView::Split && too_narrow;
+            let tooltip = if vetoed {
+                "Too narrow to split — widen the diff panel"
+            } else {
+                match view {
+                    DiffView::Unified => "One column, with +/− markers",
+                    DiffView::Split => "Old and new side by side",
+                }
+            };
+            row = row.child(
+                div()
+                    .id(gpui::SharedString::from(format!("diff-view-{}", view.label())))
+                    .flex()
+                    .items_center()
+                    .h(px(18.0))
+                    .px_1p5()
+                    .rounded_md()
+                    .text_xs()
+                    .when(selected, |d| d.bg(hx.surface2).text_color(hx.tx0))
+                    .when(!selected, |d| {
+                        d.text_color(if vetoed { hx.tx2 } else { hx.tx1 })
+                            .hover(|h| h.bg(hx.surface_hover).text_color(hx.tx0))
+                    })
+                    .cursor_pointer()
+                    .tooltip(tip(tooltip))
+                    .child(view.label())
+                    .on_click(cx.listener(move |ws, _, _, cx| {
+                        cx.stop_propagation();
+                        ws.set_diff_view(view, cx);
+                    })),
+            );
+        }
+        row
+    }
+
     /// The two-row diff-base menu, anchored under its button.
     pub(crate) fn render_diff_base_menu(
         &self,
@@ -777,6 +1087,7 @@ impl HarnessWorkspace {
         r: &Resolved,
         adds: usize,
         dels: usize,
+        body_width: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
@@ -843,6 +1154,7 @@ impl HarnessWorkspace {
                             .text_xs()
                             .font_family(hx.font_mono)
                             .children(self.render_push_control(hx, r, cx))
+                            .child(self.render_diff_view_toggle(hx, body_width, cx))
                             .child(div().text_color(hx.green).child(format!("+{adds}")))
                             .child(div().text_color(hx.red).child(format!("−{dels}"))),
                     ),
@@ -854,7 +1166,13 @@ impl HarnessWorkspace {
     /// In two-pane it is the left column and a click *selects*; in the narrow
     /// layout it is the whole surface and a click *expands* the file's diff
     /// beneath its own row, so the diff stays next to the name it belongs to.
-    fn render_file_list(&self, hx: &HarnessTheme, two_pane: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_file_list(
+        &self,
+        hx: &HarnessTheme,
+        two_pane: bool,
+        body_width: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let worktree_key = self.resolve().map(|r| r.key);
         let mut files = div()
             .id("diff-files")
@@ -907,6 +1225,7 @@ impl HarnessWorkspace {
                     &uf.file,
                     worktree_key.as_deref(),
                     two_pane,
+                    body_width,
                     cx,
                 );
             }
@@ -922,6 +1241,7 @@ impl HarnessWorkspace {
                     file,
                     worktree_key.as_deref(),
                     two_pane,
+                    body_width,
                     cx,
                 );
             }
@@ -933,6 +1253,7 @@ impl HarnessWorkspace {
     /// Append one changed-file row (and, in accordion mode, its body) to the
     /// file list. `key` is the stable identity; `display_path` is what the row
     /// shows (relative under a project group for unified diffs).
+    #[allow(clippy::too_many_arguments)]
     fn append_diff_file_row(
         &self,
         mut files: gpui::Stateful<gpui::Div>,
@@ -943,6 +1264,7 @@ impl HarnessWorkspace {
         file: &worktrees::DiffFile,
         worktree_key: Option<&str>,
         two_pane: bool,
+        body_width: f32,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let expanded = self.expanded.contains(key);
@@ -1123,7 +1445,9 @@ impl HarnessWorkspace {
                             .child(md.clone()),
                     );
                 }
-                None => files = files.child(self.render_diff_body(hx, &body_key, true, cx)),
+                None => {
+                    files = files.child(self.render_diff_body(hx, &body_key, true, body_width, cx))
+                }
             }
         }
         files
@@ -1142,7 +1466,12 @@ impl HarnessWorkspace {
     }
 
     /// The right-hand column: the focused file's diff, or its Markdown preview.
-    fn render_focused_diff(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_focused_diff(
+        &self,
+        hx: &HarnessTheme,
+        body_width: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(file) = self.focused_file() else {
             return div()
                 .flex()
@@ -1179,7 +1508,7 @@ impl HarnessWorkspace {
             // vertical axis stays hidden so the list keeps its definite height.
             None => container
                 .overflow_x_scroll()
-                .child(self.render_diff_body(hx, &file, false, cx))
+                .child(self.render_diff_body(hx, &file, false, body_width, cx))
                 .into_any_element(),
         }
     }

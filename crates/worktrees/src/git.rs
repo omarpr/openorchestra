@@ -76,6 +76,18 @@ pub struct DiffFile {
     pub change: Change,
     pub adds: usize,
     pub dels: usize,
+    /// Untracked — git never lists it in a range diff, so fetching its body
+    /// needs `--no-index` against `/dev/null` rather than `diff <base>`.
+    /// The viewer cannot infer this from [`Change::Added`], which a staged new
+    /// file also reports.
+    pub untracked: bool,
+    /// The path this file had at the base, when it was renamed.
+    ///
+    /// Needed because bodies are fetched per path: `git diff <base> -- <new>`
+    /// alone cannot see a rename — at the base nothing existed under that name,
+    /// so the whole file reads as an addition. Both ends have to be named for
+    /// git to pair them back up.
+    pub renamed_from: Option<String>,
 }
 
 /// A worktree's diff against its merge-base.
@@ -85,8 +97,6 @@ pub struct Diff {
     /// be resolved — e.g. a fresh repo with no default branch).
     pub base: String,
     pub files: Vec<DiffFile>,
-    /// Full unified diff text (for the scrollable diff view).
-    pub unified: String,
     /// Untracked files past [`MAX_UNTRACKED_FILES`] that this diff does not
     /// describe. Non-zero means the panel must say so rather than imply the
     /// list is complete.
@@ -473,9 +483,16 @@ impl<R: CommandRunner> GitWorktrees<R> {
         Ok(out.stderr.trim().to_string())
     }
 
-    /// Diff the worktree against `merge-base(base_ref, HEAD)` (§6.1 D10). Reads
-    /// per-file numstat + name-status and the full unified diff. If the merge
-    /// base cannot be resolved, returns an empty diff (not an error).
+    /// Diff the worktree against `merge-base(base_ref, HEAD)` (§6.1 D10).
+    ///
+    /// **Summary only** — per-file numstat + name-status, no bodies. Reading
+    /// the full unified text here is what made a large branch expensive: a
+    /// changeset of tens of thousands of lines was fetched, held in memory, and
+    /// re-split per file, all to draw the one file on screen. Bodies come from
+    /// [`file_diff`](Self::file_diff), one file at a time, when the viewer asks.
+    ///
+    /// If the merge base cannot be resolved, returns an empty diff (not an
+    /// error).
     pub fn diff(&self, worktree: &Path, base_ref: &str) -> Result<Diff, GitError> {
         let base = match self.git_ok(worktree, &["merge-base", base_ref, "HEAD"]) {
             Ok(out) => out.stdout.trim().to_string(),
@@ -487,15 +504,64 @@ impl<R: CommandRunner> GitWorktrees<R> {
 
         let numstat = self.git_ok(worktree, &["diff", "--numstat", &base])?;
         let name_status = self.git_ok(worktree, &["diff", "--name-status", &base])?;
-        let unified = self.git_ok(worktree, &["diff", &base])?.stdout;
 
         let files = merge_diff(&numstat.stdout, &name_status.stdout);
         Ok(Diff {
             base,
             files,
-            unified,
             untracked_elided: 0,
         })
+    }
+
+    /// One file's unified diff, fetched on demand.
+    ///
+    /// `base` is the *resolved* merge-base from [`Diff::base`], not a ref: the
+    /// range was already pinned when the summary was computed, and re-resolving
+    /// it here would let a commit landing mid-review silently move the goalposts
+    /// between the file list and the body beside it.
+    ///
+    /// An untracked file has no `base` side at all, so it goes through
+    /// `--no-index` against `/dev/null`, which exits 1 to mean "these differ" —
+    /// the expected outcome — and so cannot go through `git_ok`.
+    ///
+    /// `renamed_from` names the file's path at the base, and must be passed for
+    /// a renamed file or the diff comes back as a whole-file addition.
+    pub fn file_diff(
+        &self,
+        worktree: &Path,
+        base: &str,
+        path: &str,
+        untracked: bool,
+        renamed_from: Option<&str>,
+    ) -> String {
+        if untracked {
+            return self
+                .runner
+                .run(
+                    Some(worktree),
+                    &self.git,
+                    &["diff", "--no-index", "--", "/dev/null", path],
+                )
+                .map(|o| o.stdout)
+                .unwrap_or_default();
+        }
+        if base.is_empty() {
+            return String::new();
+        }
+        // Both ends named, so rename detection has a pair to work with; git
+        // needs `--find-renames` explicitly once the pathspec is narrowed.
+        let mut args = vec!["diff", base];
+        if renamed_from.is_some() {
+            args.push("--find-renames");
+        }
+        args.push("--");
+        if let Some(old) = renamed_from {
+            args.push(old);
+        }
+        args.push(path);
+        self.git_ok(worktree, &args)
+            .map(|o| o.stdout)
+            .unwrap_or_default()
     }
 
     /// Paths git can see but is not tracking, with `.gitignore` respected.
@@ -515,39 +581,37 @@ impl<R: CommandRunner> GitWorktrees<R> {
         paths
     }
 
-    /// One untracked file rendered as a diff against nothing.
+    /// The summary row for one untracked file: its path and how many lines it
+    /// adds.
     ///
-    /// `--no-index` exits 1 to mean "the two paths differ", which is the whole
-    /// point here, so this cannot go through `git_ok`. Binary files need no
-    /// special case: git reports "Binary files … differ" and the add count
-    /// falls out as zero.
-    fn untracked_diff(&self, worktree: &Path, path: &Path) -> Option<(DiffFile, String)> {
-        let shown = path.to_string_lossy().into_owned();
-        let out = self
-            .runner
-            .run(
-                Some(worktree),
-                &self.git,
-                &["diff", "--no-index", "--", "/dev/null", &shown],
-            )
-            .ok()?;
-        if out.stdout.is_empty() {
-            return None;
-        }
-        let adds = out
-            .stdout
-            .lines()
-            .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
-            .count();
-        Some((
-            DiffFile {
-                path: shown,
-                change: Change::Added,
-                adds,
-                dels: 0,
-            },
-            out.stdout,
-        ))
+    /// Counted by reading the file rather than by shelling out to
+    /// `git diff --no-index`, which is what this used to do. The output of that
+    /// command was thrown away except for its line count, and a hundred
+    /// untracked files meant a hundred process spawns before the panel could
+    /// draw anything. The body still comes from git, via
+    /// [`file_diff`](Self::file_diff), if and when the file is opened.
+    ///
+    /// A NUL byte in the first block means binary, git's own heuristic; binary
+    /// files report zero adds, exactly as `git diff` does.
+    fn untracked_summary(&self, worktree: &Path, path: &Path) -> Option<DiffFile> {
+        let bytes = std::fs::read(worktree.join(path)).ok()?;
+        let binary = bytes.iter().take(8000).any(|b| *b == 0);
+        let adds = if binary {
+            0
+        } else {
+            // A trailing newline terminates the last line rather than starting
+            // an empty one, which is also how git counts.
+            bytes.iter().filter(|b| **b == b'\n').count()
+                + usize::from(!bytes.is_empty() && !bytes.ends_with(b"\n"))
+        };
+        Some(DiffFile {
+            path: path.to_string_lossy().into_owned(),
+            change: Change::Added,
+            adds,
+            dels: 0,
+            untracked: true,
+            renamed_from: None,
+        })
     }
 
     /// [`diff`](Self::diff) plus the untracked files, which `git diff` never
@@ -568,9 +632,8 @@ impl<R: CommandRunner> GitWorktrees<R> {
         let untracked = self.untracked_files(worktree);
         let shown = untracked.len().min(MAX_UNTRACKED_FILES);
         for path in &untracked[..shown] {
-            if let Some((file, unified)) = self.untracked_diff(worktree, path) {
+            if let Some(file) = self.untracked_summary(worktree, path) {
                 diff.files.push(file);
-                diff.unified.push_str(&unified);
             }
         }
         diff.untracked_elided = untracked.len() - shown;
@@ -649,11 +712,14 @@ fn merge_diff(numstat: &str, name_status: &str) -> Vec<DiffFile> {
             Some(s) if !s.is_empty() => s,
             _ => continue,
         };
-        // For renames (R100 old new) the new path is the last column.
+        // For renames (R100 old new) the new path is the last column, and what
+        // remains before it is the old one — which a per-path body fetch needs
+        // in order to see the rename at all.
         let path = match cols.next_back() {
             Some(p) => p.to_string(),
             None => continue,
         };
+        let renamed_from = cols.next().map(str::to_string).filter(|p| !p.is_empty());
         let (adds, dels) = counts
             .iter()
             .find(|(p, _, _)| *p == path)
@@ -664,6 +730,10 @@ fn merge_diff(numstat: &str, name_status: &str) -> Vec<DiffFile> {
             change: Change::from_name_status(status),
             adds,
             dels,
+            // Everything `git diff` itself lists is tracked by definition;
+            // untracked rows are appended by `diff_including_untracked`.
+            untracked: false,
+            renamed_from,
         });
     }
     files

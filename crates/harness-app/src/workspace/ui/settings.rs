@@ -438,6 +438,31 @@ impl HarnessWorkspace {
                         "A tab gives the diff the whole window; the dock keeps it beside your work.",
                     ),
             );
+
+            let view = self.prefs.diff_view;
+            let mut view_row = div().flex().gap_1p5().pb_1();
+            for value in [DiffView::Unified, DiffView::Split] {
+                let selected = view == value;
+                view_row = view_row.child(
+                    div()
+                        .id(gpui::SharedString::from(format!("diff-view-set-{}", value.label())))
+                        .child(chip(value.label().to_string(), selected, hx))
+                        .on_click(cx.listener(move |ws, _, _, cx| {
+                            cx.stop_propagation();
+                            ws.set_diff_view(value, cx);
+                        })),
+                );
+            }
+            body = body.child(section_title("Diff layout")).child(view_row).child(
+                div()
+                    .text_xs()
+                    .text_color(hx.tx2)
+                    .pb_1()
+                    .child(
+                        "Split shows old and new side by side. A panel too narrow for two \
+                         readable columns draws unified until you widen it.",
+                    ),
+            );
         }
 
         if !self.has_tmux {

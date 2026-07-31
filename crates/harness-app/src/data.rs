@@ -152,26 +152,55 @@ fn new_repo_view(git: &GitWorktrees<SystemRunner>, name: &str, root: &Path) -> R
     }
 }
 
-/// Diff for a selected path against its compare ref, untracked files included —
-/// both ends of the range are the working tree, and a file you just created is
-/// part of it.
+/// Diff **summary** for a selected path against its compare ref, untracked
+/// files included — both ends of the range are the working tree, and a file you
+/// just created is part of it.
+///
+/// Carries the changed-file list and its counts, not the bodies; see
+/// [`compute_file_diff`] for one file's text.
 pub fn compute_diff(git: &GitWorktrees<SystemRunner>, path: &Path, compare_ref: &str) -> Diff {
     git.diff_including_untracked(path, compare_ref).unwrap_or_default()
 }
 
+/// One file's unified diff, fetched on demand.
+///
+/// The counterpart to [`compute_diff`], which now returns a summary only: this
+/// is what turns a row in the changed-files list into something to read, and it
+/// is the only place a diff body is ever produced.
+pub fn compute_file_diff(
+    git: &GitWorktrees<SystemRunner>,
+    worktree: &Path,
+    base: &str,
+    file: &DiffFile,
+) -> String {
+    git.file_diff(
+        worktree,
+        base,
+        &file.path,
+        file.untracked,
+        file.renamed_from.as_deref(),
+    )
+}
+
 /// One file in a unified multi-member diff, tagged with its member worktree.
+///
+/// Carries the member's worktree path and resolved base alongside the file, so
+/// fetching this one file's body later needs no walk back through the task's
+/// member list — and cannot fetch it against a base the summary was not
+/// computed with.
 #[derive(Clone)]
 pub struct UnifiedDiffFile {
     pub member_id: String,
     pub repo: String,
     pub file: DiffFile,
+    pub worktree: PathBuf,
+    pub base: String,
 }
 
 /// Aggregated changeset across task members.
 #[derive(Clone, Default)]
 pub struct UnifiedDiff {
     pub files: Vec<UnifiedDiffFile>,
-    pub unified: String,
     /// Untracked files elided across all members (see `MAX_UNTRACKED_FILES`).
     pub untracked_elided: usize,
 }
@@ -182,29 +211,22 @@ impl UnifiedDiff {
         members: &[(String, String, PathBuf, String)], // id, repo, path, compare_ref
     ) -> Self {
         let mut files = Vec::new();
-        let mut unified = String::new();
         let mut untracked_elided = 0;
         for (id, repo, path, compare) in members {
             let diff = compute_diff(git, path, compare);
             untracked_elided += diff.untracked_elided;
-            if !diff.unified.is_empty() {
-                if !unified.is_empty() {
-                    unified.push_str("\n");
-                }
-                unified.push_str(&format!("# {repo}\n"));
-                unified.push_str(&diff.unified);
-            }
             for file in diff.files {
                 files.push(UnifiedDiffFile {
                     member_id: id.clone(),
                     repo: repo.clone(),
                     file,
+                    worktree: path.clone(),
+                    base: diff.base.clone(),
                 });
             }
         }
         UnifiedDiff {
             files,
-            unified,
             untracked_elided,
         }
     }

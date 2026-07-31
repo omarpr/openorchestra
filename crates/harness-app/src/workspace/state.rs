@@ -777,6 +777,19 @@ impl HarnessWorkspace {
         cx.notify();
     }
 
+    /// Switch bodies between unified and side-by-side.
+    ///
+    /// Costs nothing beyond a repaint: both layouts are derived from the same
+    /// parsed rows, so the cache survives and no diff is re-fetched.
+    pub(crate) fn set_diff_view(&mut self, view: DiffView, cx: &mut Context<Self>) {
+        if self.prefs.diff_view == view {
+            return;
+        }
+        self.prefs.diff_view = view;
+        save_prefs_to(&self.prefs_path, &self.prefs);
+        cx.notify();
+    }
+
     /// Move the diff surface between the dock and the tab strip.
     ///
     /// Switching to `Dock` closes every open Diff tab across all live panes: a
@@ -948,7 +961,9 @@ impl HarnessWorkspace {
     /// +/- markers, so a pasted selection compiles.
     pub(crate) fn copy_diff_selection(&mut self, cx: &mut Context<Self>) {
         let Some((file, from, to)) = self.diff_selection.clone() else { return };
-        let rows = readable_diff_lines(&self.unified_for_file(&file));
+        // Reads the rows the selection was made against rather than re-parsing:
+        // you cannot have selected lines in a body that was never drawn.
+        let Some(rows) = self.cached_rows(&file) else { return };
         let text: Vec<String> = rows
             .iter()
             .enumerate()
@@ -1420,6 +1435,11 @@ impl HarnessWorkspace {
             self.diff = worktrees::Diff::default();
             self.unified_diff = UnifiedDiff::default();
             self.row_cache.borrow_mut().clear();
+            // Bumped here too, not only on the path that spawns: a per-file
+            // body fetch may be in flight, and clearing the cache without
+            // invalidating it would let that fetch land afterwards and
+            // repopulate rows for a selection that no longer exists.
+            self.diff_gen = self.diff_gen.wrapping_add(1);
             self.diff_pending = false;
             cx.notify();
             return;
@@ -1478,12 +1498,17 @@ impl HarnessWorkspace {
                             change: f.file.change,
                             adds: f.file.adds,
                             dels: f.file.dels,
+                            untracked: f.file.untracked,
+                            renamed_from: f.file.renamed_from.clone(),
                         });
                     }
+                    // `base` stays empty here: a unified diff spans members
+                    // with different merge-bases, so there is no single one.
+                    // Per-file fetches read the base off `unified_diff`, which
+                    // records each member's own.
                     ws.diff = worktrees::Diff {
                         base: String::new(),
                         files,
-                        unified: computed.unified.clone(),
                         untracked_elided: computed.untracked_elided,
                     };
                     ws.unified_diff = computed;

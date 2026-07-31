@@ -108,8 +108,17 @@ pub struct DiffSummary {
     pub unified: String,
 }
 
-impl From<&Diff> for DiffSummary {
-    fn from(diff: &Diff) -> Self {
+impl DiffSummary {
+    /// Build a summary from a [`Diff`] and the full unified text.
+    ///
+    /// `unified` is passed in rather than read off the diff because
+    /// [`worktrees::Diff`] no longer carries bodies — the viewer fetches them
+    /// one file at a time, so a whole-changeset text now has to be assembled
+    /// deliberately. That is the right shape for a harvester anyway: the
+    /// supervision signal is worth paying for explicitly, and a summary that
+    /// silently carried an empty `unified` would poison the dataset in a way
+    /// nothing downstream could detect.
+    pub fn new(diff: &Diff, unified: String) -> Self {
         let (adds, dels) = diff.totals();
         DiffSummary {
             base: diff.base.clone(),
@@ -117,7 +126,7 @@ impl From<&Diff> for DiffSummary {
             adds,
             dels,
             paths: diff.files.iter().map(|f| f.path.clone()).collect(),
-            unified: diff.unified.clone(),
+            unified,
         }
     }
 }
@@ -156,7 +165,10 @@ pub struct HarvestRequest<'a> {
     /// The worktree's final merge-base diff, when it could still be computed.
     /// Archived worktrees have no directory left, so this is often `None` —
     /// which is why archiving keeps the branch (§6.1 D6).
-    pub diff: Option<&'a Diff>,
+    ///
+    /// Built by the caller via [`DiffSummary::new`], which is also where the
+    /// full unified text is supplied.
+    pub diff: Option<DiffSummary>,
 }
 
 #[derive(Debug)]
@@ -219,7 +231,7 @@ pub fn build_record(req: &HarvestRequest<'_>, session: Session) -> TrainingRecor
             provider: session.provider,
             model: session.model,
         },
-        diff: req.diff.map(DiffSummary::from),
+        diff: req.diff.clone(),
         turns: session.turns,
         stats,
     }

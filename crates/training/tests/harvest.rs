@@ -176,22 +176,40 @@ fn diff() -> Diff {
     Diff {
         base: "abc123".into(),
         files: vec![
-            DiffFile { path: "src/nav.rs".into(), change: Change::Modified, adds: 30, dels: 8 },
-            DiffFile { path: "src/new.rs".into(), change: Change::Added, adds: 8, dels: 0 },
+            DiffFile {
+                path: "src/nav.rs".into(),
+                change: Change::Modified,
+                adds: 30,
+                dels: 8,
+                untracked: false,
+                renamed_from: None,
+            },
+            DiffFile {
+                path: "src/new.rs".into(),
+                change: Change::Added,
+                adds: 8,
+                dels: 0,
+                untracked: false,
+                renamed_from: None,
+            },
         ],
-        unified: "--- a/src/nav.rs\n+++ b/src/nav.rs\n".into(),
         untracked_elided: 0,
     }
+}
+
+/// The harvested summary: the diff plus the full unified text, which the
+/// caller now supplies (see `DiffSummary::new`).
+fn diff_summary() -> training::DiffSummary {
+    training::DiffSummary::new(&diff(), "--- a/src/nav.rs\n+++ b/src/nav.rs\n".into())
 }
 
 #[test]
 fn harvests_a_full_record_from_registry_forge_and_git() {
     let e = entry();
-    let d = diff();
     let record = harvest(&HarvestRequest {
         entry: &e,
         pr_state: Some(PrState::Merged),
-        diff: Some(&d),
+        diff: Some(diff_summary()),
     })
     .unwrap();
 
@@ -264,11 +282,10 @@ fn only_decided_outcomes_survive_the_training_filter() {
 #[test]
 fn records_round_trip_through_jsonl() {
     let e = entry();
-    let d = diff();
     let record = harvest(&HarvestRequest {
         entry: &e,
         pr_state: Some(PrState::Merged),
-        diff: Some(&d),
+        diff: Some(diff_summary()),
     })
     .unwrap();
 

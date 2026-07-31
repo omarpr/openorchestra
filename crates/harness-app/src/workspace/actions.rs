@@ -1166,7 +1166,12 @@ impl HarnessWorkspace {
 
     /// Apply an in-progress drag. Called from the root element so the pointer
     /// can leave the 6px handle without dropping the drag.
-    pub(crate) fn drag_move(&mut self, ev: &MouseMoveEvent, cx: &mut Context<Self>) {
+    pub(crate) fn drag_move(
+        &mut self,
+        ev: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(drag) = self.drag else { return };
         // The button can be released outside the window, in which case no
         // mouse-up ever reaches us; treat "moving with no button" as the end.
@@ -1186,7 +1191,18 @@ impl HarnessWorkspace {
         let next = drag.start_value + delta;
         match drag.target {
             Drag::Sidebar => self.prefs.sidebar_width = next,
-            Drag::DiffPanel => self.prefs.diff_width = next,
+            // The dock's real ceiling is the window, not a constant: it may be
+            // dragged as wide as this display allows while still leaving the
+            // center pane usable. Applied before `sanitized` so the persisted
+            // width is the one actually shown.
+            Drag::DiffPanel => {
+                let ceiling = max_diff_width(
+                    f32::from(window.viewport_size().width),
+                    self.prefs.sidebar_width,
+                    self.prefs.sidebar_open,
+                );
+                self.prefs.diff_width = next.min(ceiling);
+            }
             Drag::DiffList => self.prefs.diff_list_width = next,
         }
         // Clamp every frame, not on release: a panel must never be draggable

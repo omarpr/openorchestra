@@ -111,7 +111,14 @@ fn full_lifecycle_create_status_diff_archive_delete() {
     assert!(newf.adds >= 1);
     let (adds, _dels) = diff.totals();
     assert!(adds >= 2, "committed add + uncommitted line");
-    assert!(diff.unified.contains("new.rs"), "unified text present");
+    // The summary carries no bodies; a file's diff is fetched when asked for,
+    // against the base the summary already pinned.
+    let body = mgr.git().file_diff(&nav_path, &diff.base, "new.rs", false, None);
+    assert!(body.contains("new.rs"), "the file's body is fetched on demand");
+    assert!(
+        !body.contains("README.md"),
+        "a per-file fetch must not drag in the rest of the changeset"
+    );
 
     // ---- archive nav: dir gone, branch + entry kept ----
     mgr.archive(&nav).unwrap();
@@ -401,7 +408,12 @@ fn untracked_files_appear_in_the_diff_without_being_staged() {
     assert_eq!(new_file.change, Change::Added);
     assert_eq!(new_file.adds, 2, "both lines counted");
     assert_eq!(new_file.dels, 0);
-    assert!(diff.unified.contains("brand-new.rs"), "content reaches the scrollable view");
+    assert!(
+        new_file.untracked,
+        "flagged untracked, so its body is fetched with --no-index"
+    );
+    let body = g.file_diff(&repo_root, &diff.base, "brand-new.rs", true, None);
+    assert!(body.contains("brand-new.rs"), "content reaches the scrollable view");
 
     // Looking at a diff must not stage anything: `git add -N` would have made
     // this work for free and left the user's index modified.
@@ -439,4 +451,54 @@ fn a_clean_worktree_has_nothing_elided() {
     let diff = g.diff_including_untracked(&repo_root, "HEAD").unwrap();
     assert!(diff.files.is_empty());
     assert_eq!(diff.untracked_elided, 0);
+}
+
+#[test]
+fn a_renamed_files_body_is_fetched_as_a_rename_not_as_a_fresh_file() {
+    // Bodies are fetched one path at a time now. `git diff <base> -- <new>`
+    // alone cannot see a rename — nothing existed under that name at the base —
+    // so the whole file would come back as an addition. The summary carries the
+    // old path precisely so the fetch can name both ends.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_root = tmp.path().join("app");
+    init_repo(&repo_root);
+    // Enough content that git scores the pair as a rename rather than an
+    // unrelated add/delete.
+    let body: String = (0..40).map(|i| format!("line {i}\n")).collect();
+    fs::write(repo_root.join("old.rs"), &body).unwrap();
+    git(&repo_root, &["add", "."]);
+    git(&repo_root, &["commit", "-m", "add old.rs"]);
+
+    let g = GitWorktrees::new(SystemRunner);
+    let base = git_out(&repo_root, &["rev-parse", "HEAD"]).trim().to_string();
+
+    git(&repo_root, &["mv", "old.rs", "new.rs"]);
+    fs::write(repo_root.join("new.rs"), format!("{body}line 40\n")).unwrap();
+
+    let diff = g.diff(&repo_root, "HEAD").unwrap();
+    let renamed = diff
+        .files
+        .iter()
+        .find(|f| f.path == "new.rs")
+        .expect("the renamed file is listed under its new path");
+    assert_eq!(renamed.change, Change::Renamed);
+    assert_eq!(
+        renamed.renamed_from.as_deref(),
+        Some("old.rs"),
+        "the summary records where it came from"
+    );
+
+    let with_old = g.file_diff(&repo_root, &base, "new.rs", false, renamed.renamed_from.as_deref());
+    assert!(
+        with_old.contains("rename from old.rs") && with_old.contains("rename to new.rs"),
+        "naming both ends yields a rename, got:\n{with_old}"
+    );
+
+    // The regression this guards: drop the old path and the same change reads
+    // as forty new lines out of nowhere.
+    let without_old = g.file_diff(&repo_root, &base, "new.rs", false, None);
+    assert!(
+        !without_old.contains("rename from"),
+        "precondition: a single-path fetch cannot detect the rename"
+    );
 }

@@ -199,6 +199,30 @@ pub fn readable_diff_lines(unified: &str) -> Vec<DiffRow> {
 /// the full width to whichever file is open — stays the better layout.
 const DIFF_TWO_PANE_MIN: f32 = 560.0;
 
+/// Absolute ceiling for a persisted panel width.
+///
+/// Not a layout constraint — the real one is computed against the live window
+/// in `drag_move`. This only stops a corrupt prefs file, or one written on a
+/// far larger display, from restoring a width that no longer means anything.
+/// Wide enough for a 6K monitor, so it never binds in practice.
+const MAX_PANEL_W: f32 = 6000.0;
+
+/// Space the sidebar and center pane keep between them when the diff dock is
+/// dragged wide. Below this the tab strip and terminal stop being usable, and
+/// the drag has to stop rather than let the dock swallow the window.
+const MIN_CENTER_W: f32 = 360.0;
+
+/// The widest the diff dock may be dragged in a window this wide.
+///
+/// The dock is right-anchored, so dragging left widens it: without this the
+/// drag runs until the center pane is gone. Floors at the dock's own minimum so
+/// a very narrow window still yields a draggable (if cramped) dock rather than
+/// an inverted range.
+fn max_diff_width(viewport_w: f32, sidebar_w: f32, sidebar_open: bool) -> f32 {
+    let taken = if sidebar_open { sidebar_w } else { 0.0 };
+    (viewport_w - taken - MIN_CENTER_W).max(220.0)
+}
+
 /// Whether to draw the diff surface as files-left/changes-right.
 ///
 /// Decided from the location and the persisted dock width rather than measured
@@ -232,6 +256,106 @@ fn target_line_for_row(rows: &[DiffRow], ix: usize) -> Option<u32> {
             .and_then(|r| r.number),
         DiffLineKind::FileHeader | DiffLineKind::HunkBreak => None,
     }
+}
+
+/// Body width at or below which split view falls back to unified.
+///
+/// Two columns of roughly 360 px each. Below that neither side shows enough of
+/// a line to compare against the other, and one readable column beats two
+/// unreadable ones — the same judgement `DIFF_TWO_PANE_MIN` makes about the
+/// file list, and the same one zed makes with `minimum_split_diff_width`.
+const SPLIT_MIN_W: f32 = 720.0;
+
+/// Whether to draw the body as old-and-new columns.
+///
+/// Split is a preference the width can veto, never the other way round: a
+/// narrow dock renders unified without disturbing the pref, so widening the
+/// dock brings split back rather than requiring the user to re-pick it.
+fn use_split(view: DiffView, body_width: f32) -> bool {
+    view == DiffView::Split && body_width >= SPLIT_MIN_W
+}
+
+/// One line of a split body: a row that spans both columns, or an old/new pair.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum SplitRow {
+    /// A file header or hunk rule — structure, belonging to neither side.
+    Full(usize),
+    /// Old on the left, new on the right. At least one side is always `Some`;
+    /// the other being `None` is what a pure insertion or deletion looks like.
+    Pair {
+        left: Option<usize>,
+        right: Option<usize>,
+    },
+}
+
+impl SplitRow {
+    /// The row a click on this line acts on — selection, comments, edit intent.
+    ///
+    /// The new-file side wins when both exist, because every one of those
+    /// actions is about the file as it stands now: a comment addresses the line
+    /// you would edit, and `target_line_for_row` resolves against the working
+    /// file. A deletion has no new side and falls back to the old one, which is
+    /// exactly the case `target_line_for_row` already handles.
+    pub(crate) fn anchor(self) -> Option<usize> {
+        match self {
+            SplitRow::Full(_) => None,
+            SplitRow::Pair { left, right } => right.or(left),
+        }
+    }
+}
+
+/// Pair a unified row list into side-by-side lines.
+///
+/// Context occupies both columns at once. A run of removals is zipped against
+/// the run of additions that immediately follows it — git emits a modification
+/// in exactly that shape — and the shorter run pads with `None`, so a hunk that
+/// replaces two lines with five leaves three empty cells on the left rather
+/// than sliding the rest of the file out of alignment.
+pub(crate) fn split_rows(rows: &[DiffRow]) -> Vec<SplitRow> {
+    let mut out = Vec::with_capacity(rows.len());
+    let mut i = 0;
+    while i < rows.len() {
+        match rows[i].kind {
+            DiffLineKind::FileHeader | DiffLineKind::HunkBreak => {
+                out.push(SplitRow::Full(i));
+                i += 1;
+            }
+            DiffLineKind::Context => {
+                out.push(SplitRow::Pair {
+                    left: Some(i),
+                    right: Some(i),
+                });
+                i += 1;
+            }
+            DiffLineKind::Removed => {
+                let dels_start = i;
+                while i < rows.len() && rows[i].kind == DiffLineKind::Removed {
+                    i += 1;
+                }
+                let adds_start = i;
+                while i < rows.len() && rows[i].kind == DiffLineKind::Added {
+                    i += 1;
+                }
+                let (dels, adds) = (dels_start..adds_start, adds_start..i);
+                for k in 0..dels.len().max(adds.len()) {
+                    out.push(SplitRow::Pair {
+                        left: (k < dels.len()).then(|| dels_start + k),
+                        right: (k < adds.len()).then(|| adds_start + k),
+                    });
+                }
+            }
+            // Additions with no removals before them: a pure insertion, which
+            // has nothing to sit opposite.
+            DiffLineKind::Added => {
+                out.push(SplitRow::Pair {
+                    left: None,
+                    right: Some(i),
+                });
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 /// Cap on diff lines held for one file.
@@ -294,6 +418,8 @@ impl SettingsSection {
 pub(crate) enum BodyItem {
     /// An index into the file's parsed rows.
     Row(usize),
+    /// One side-by-side line, in split view.
+    Split(SplitRow),
     /// A review note, pinned under the line it annotates.
     Note(u32),
     /// The tail marker: how many lines the cap dropped.
@@ -302,6 +428,17 @@ pub(crate) enum BodyItem {
 
 const DIFF_ADD_TX: u32 = 0x7fdd97;
 const DIFF_DEL_TX: u32 = 0xf2868f;
+
+/// A file's diff body in the row cache.
+///
+/// `Fetching` is inserted synchronously, the instant a fetch is spawned, and is
+/// what makes the request idempotent: rendering is re-entered many times while
+/// a `git diff` is in flight, and each of those frames would otherwise start
+/// its own.
+pub(crate) enum FileRows {
+    Fetching,
+    Ready(std::sync::Arc<Vec<DiffRow>>),
+}
 
 /// What a tab can hold. Tab sets are per worktree and fully dynamic (§3.4):
 /// a worktree can carry any number of terminals, editors, and chats.
@@ -784,7 +921,11 @@ pub struct HarnessWorkspace {
     push_probe_pending: bool,
     /// Parsed diff rows per file, for the life of the current diff. Rendering
     /// takes `&self`, hence the `RefCell`; the view is single-threaded.
-    row_cache: std::cell::RefCell<HashMap<String, std::sync::Arc<Vec<DiffRow>>>>,
+    ///
+    /// Bodies are fetched one file at a time now, so an entry also has to be
+    /// able to say "asked for, not here yet" — without that state every frame
+    /// of the wait would spawn another `git diff` for the same file.
+    row_cache: std::cell::RefCell<HashMap<String, FileRows>>,
     /// Where the adapters materialize their extensions and shims.
     state_dir: PathBuf,
     prefs: Prefs,
@@ -1515,7 +1656,9 @@ impl Render for HarnessWorkspace {
                     eprintln!("[diag] ROOT mouse_down RIGHT")
                 }),
             )
-            .on_mouse_move(cx.listener(|ws, ev: &MouseMoveEvent, _, cx| ws.drag_move(ev, cx)))
+            .on_mouse_move(
+                cx.listener(|ws, ev: &MouseMoveEvent, window, cx| ws.drag_move(ev, window, cx)),
+            )
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|ws, _: &MouseUpEvent, _, cx| {
@@ -1869,6 +2012,25 @@ pub(crate) enum DiffLocation {
     Tab,
 }
 
+/// How a file's changes are laid out: one column with +/− markers, or old and
+/// new side by side.
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum DiffView {
+    #[default]
+    Unified,
+    Split,
+}
+
+impl DiffView {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            DiffView::Unified => "Unified",
+            DiffView::Split => "Split",
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct Prefs {
@@ -1930,6 +2092,10 @@ struct Prefs {
     /// Where the diff surface lives (dock vs. center tab).
     #[serde(default)]
     diff_location: DiffLocation,
+    /// Unified or side-by-side bodies. Absent in older prefs files, which land
+    /// on `Unified` — what they were already showing.
+    #[serde(default)]
+    diff_view: DiffView,
     /// Width of the file-list column in the two-pane diff layout.
     #[serde(default = "default_diff_list_width")]
     diff_list_width: f32,
@@ -1973,6 +2139,7 @@ impl Default for Prefs {
             sidebar_width: 280.0,
             diff_width: 340.0,
             diff_location: DiffLocation::Dock,
+            diff_view: DiffView::default(),
             diff_list_width: 280.0,
             sidebar_open: true,
             diff_open: true,
@@ -1986,7 +2153,13 @@ impl Prefs {
     /// must not be able to render a panel unusable or invisible.
     fn sanitized(mut self) -> Self {
         self.sidebar_width = self.sidebar_width.clamp(180.0, 640.0);
-        self.diff_width = self.diff_width.clamp(220.0, 800.0);
+        // No small fixed ceiling here (it used to be 800): on a large display
+        // that is exactly the cap issue #8 hits, and a diff you cannot widen
+        // past 800 px is unreadable side-by-side. The ceiling that matters —
+        // "leave the center pane usable" — depends on the window, so it lives
+        // in `drag_move` where the viewport is known. What is left here is
+        // sanity for a hand-edited or cross-monitor prefs file.
+        self.diff_width = self.diff_width.clamp(220.0, MAX_PANEL_W);
         self.diff_list_width = self.diff_list_width.clamp(160.0, 560.0);
         self
     }
@@ -2143,8 +2316,9 @@ mod slugify_tests {
 #[cfg(test)]
 mod diff_render_tests {
     use super::{
-        load_prefs, readable_diff_lines, reordered, save_prefs_to, target_line_for_row,
-        use_two_pane, DiffLineKind, DiffLocation, Prefs, DIFF_TWO_PANE_MIN,
+        load_prefs, max_diff_width, readable_diff_lines, reordered, save_prefs_to, split_rows,
+        target_line_for_row, use_split, use_two_pane, DiffLineKind, DiffLocation, DiffView,
+        Prefs, SplitRow, DIFF_TWO_PANE_MIN, MAX_PANEL_W, MIN_CENTER_W, SPLIT_MIN_W,
     };
 
     /// Verbatim shape of the noise a new file produces — the case that
@@ -2303,7 +2477,175 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
         }
         .sanitized();
         assert!(huge.sidebar_width <= 640.0);
-        assert!(huge.diff_width <= 800.0);
+        assert!(huge.diff_width <= MAX_PANEL_W);
+    }
+
+    /// Rows for `a\nb\nc` where `b` becomes `B`, plus a trailing insertion.
+    fn paired_fixture() -> Vec<super::DiffRow> {
+        let diff = "diff --git a/x.rs b/x.rs\n@@ -1,3 +1,4 @@ fn x\n a\n-b\n+B\n c\n+d\n";
+        readable_diff_lines(diff)
+    }
+
+    #[test]
+    fn split_pairs_a_modification_across_the_two_columns() {
+        let rows = paired_fixture();
+        let split = split_rows(&rows);
+
+        // The file header and hunk rule belong to neither side.
+        assert_eq!(split[0], SplitRow::Full(0), "file header spans both columns");
+        assert_eq!(split[1], SplitRow::Full(1), "hunk rule spans both columns");
+
+        // Context sits opposite itself.
+        let ctx_a = split[2];
+        assert_eq!(
+            ctx_a,
+            SplitRow::Pair { left: Some(2), right: Some(2) },
+            "a context line is the same row on both sides"
+        );
+
+        // The removal and the addition that follows it become ONE line.
+        let modified = split[3];
+        let SplitRow::Pair { left, right } = modified else {
+            panic!("expected a pair, got {modified:?}");
+        };
+        let (l, r) = (left.expect("old side"), right.expect("new side"));
+        assert_eq!(rows[l].kind, DiffLineKind::Removed);
+        assert_eq!(rows[r].kind, DiffLineKind::Added);
+        assert_eq!(rows[l].text, "b");
+        assert_eq!(rows[r].text, "B");
+
+        // A pure insertion has nothing to sit opposite.
+        let inserted = *split.last().unwrap();
+        assert!(
+            matches!(inserted, SplitRow::Pair { left: None, right: Some(_) }),
+            "a pure insertion leaves the old column empty, got {inserted:?}"
+        );
+    }
+
+    #[test]
+    fn an_unbalanced_hunk_pads_the_shorter_side_rather_than_sliding() {
+        // Two lines replaced by four: the extra three have no old counterpart.
+        let diff = "diff --git a/x.rs b/x.rs\n@@ -1,2 +1,4 @@\n-one\n-two\n+1\n+2\n+3\n+4\n";
+        let rows = readable_diff_lines(diff);
+        let split = split_rows(&rows);
+        let pairs: Vec<SplitRow> = split
+            .into_iter()
+            .filter(|s| matches!(s, SplitRow::Pair { .. }))
+            .collect();
+
+        assert_eq!(pairs.len(), 4, "the longer side sets the line count");
+        // Both sides present for the first two, old side empty after that.
+        for (i, p) in pairs.iter().enumerate() {
+            let SplitRow::Pair { left, right } = *p else { unreachable!() };
+            assert!(right.is_some(), "every new line is shown");
+            assert_eq!(
+                left.is_some(),
+                i < 2,
+                "line {i}: only the first two have an old counterpart"
+            );
+        }
+    }
+
+    #[test]
+    fn every_row_survives_the_split_exactly_once() {
+        // The pairing must not drop or duplicate content: a diff you cannot
+        // trust to show every line is worse than no split view at all.
+        let rows = paired_fixture();
+        let mut seen: Vec<usize> = Vec::new();
+        for s in split_rows(&rows) {
+            match s {
+                SplitRow::Full(ix) => seen.push(ix),
+                SplitRow::Pair { left, right } => {
+                    // Context occupies both cells with ONE row; count it once.
+                    match (left, right) {
+                        (Some(l), Some(r)) if l == r => seen.push(l),
+                        (l, r) => seen.extend(l.into_iter().chain(r)),
+                    }
+                }
+            }
+        }
+        seen.sort_unstable();
+        assert_eq!(
+            seen,
+            (0..rows.len()).collect::<Vec<_>>(),
+            "every parsed row appears exactly once"
+        );
+    }
+
+    #[test]
+    fn a_click_on_a_modified_line_targets_the_new_side() {
+        let rows = paired_fixture();
+        let split = split_rows(&rows);
+        let modified = split[3];
+        let SplitRow::Pair { right, .. } = modified else { panic!() };
+        assert_eq!(
+            modified.anchor(),
+            right,
+            "comments and edit intent address the file as it stands now"
+        );
+        // A deletion with no counterpart falls back to the old side.
+        let deletion = SplitRow::Pair { left: Some(7), right: None };
+        assert_eq!(deletion.anchor(), Some(7));
+        assert_eq!(SplitRow::Full(0).anchor(), None, "structure is not clickable");
+    }
+
+    #[test]
+    fn split_is_a_preference_the_width_can_veto() {
+        assert!(use_split(DiffView::Split, SPLIT_MIN_W));
+        assert!(use_split(DiffView::Split, 1600.0));
+        // Too narrow for two readable columns: draw unified instead.
+        assert!(!use_split(DiffView::Split, SPLIT_MIN_W - 1.0));
+        // ...but the pref is untouched, so widening restores it.
+        assert!(!use_split(DiffView::Unified, 4000.0));
+        // A tab is treated as unbounded, like `use_two_pane` does.
+        assert!(use_split(DiffView::Split, f32::INFINITY));
+    }
+
+    #[test]
+    fn the_diff_view_survives_a_save_load_cycle() {
+        let dir = std::env::temp_dir().join(format!("harness-prefs-view-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("prefs.json");
+        let prefs = Prefs { diff_view: DiffView::Split, ..Prefs::default() };
+        save_prefs_to(&path, &prefs);
+        assert_eq!(load_prefs(&path).diff_view, DiffView::Split);
+    }
+
+    #[test]
+    fn a_prefs_file_without_a_diff_view_loads_as_unified() {
+        // What every existing install has: no `diff_view` key at all. It must
+        // land on the layout it was already showing.
+        let dir = std::env::temp_dir().join(format!("harness-prefs-noview-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("prefs.json");
+        std::fs::write(
+            &path,
+            r#"{"dark":true,"sidebar_width":280.0,"diff_width":340.0,"sidebar_open":true,"diff_open":true}"#,
+        )
+        .unwrap();
+        assert_eq!(load_prefs(&path).diff_view, DiffView::Unified);
+    }
+
+    #[test]
+    fn the_diff_dock_is_capped_by_the_window_not_by_a_constant() {
+        // The point of issue #8: on a large display the dock must be
+        // draggable far past the old 800 px cap.
+        let wide = max_diff_width(3840.0, 280.0, true);
+        assert!(wide > 800.0, "a 4K window must allow a dock wider than 800px");
+        assert_eq!(wide, 3840.0 - 280.0 - MIN_CENTER_W);
+
+        // ...but never so wide that the center pane disappears.
+        assert_eq!(
+            max_diff_width(1440.0, 280.0, true),
+            1440.0 - 280.0 - MIN_CENTER_W
+        );
+
+        // A closed sidebar gives its width back to the dock.
+        assert!(max_diff_width(1440.0, 280.0, false) > max_diff_width(1440.0, 280.0, true));
+
+        // A window too small to satisfy everyone still yields a usable range
+        // rather than an inverted one.
+        assert_eq!(max_diff_width(400.0, 280.0, true), 220.0);
     }
 
     #[test]
