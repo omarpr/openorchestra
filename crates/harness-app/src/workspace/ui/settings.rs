@@ -175,7 +175,7 @@ impl HarnessWorkspace {
         let mut options: Vec<(String, Option<String>)> = vec![(harness_label, None)];
         for meta in ::theme::ThemeRegistry::global(cx).list() {
             let name = meta.name.to_string();
-            if name == crate::harness_zed_theme::HARNESS_THEME_NAME {
+            if crate::harness_zed_theme::is_harness_theme_name(&name) {
                 continue;
             }
             let is_dark = matches!(meta.appearance, ::theme::Appearance::Dark);

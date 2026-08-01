@@ -1169,6 +1169,11 @@ impl HarnessWorkspace {
             archived_path,
             pending_repo_trash: None,
         };
+        // Appearance before panes: restore_tabs may open an Editor, which
+        // constructs a hosted Workspace that observes window appearance and
+        // reloads GlobalTheme from ThemeSettings. Sync ThemeSettings first so
+        // that reload cannot swap the editor to One Light while chrome is dark.
+        this.apply_appearance(cx);
         this.ensure_pane(window, cx);
         // What this machine can actually do, before the user infers it from an
         // empty screen. Opens when something Required is missing (and then it
@@ -1209,16 +1214,6 @@ impl HarnessWorkspace {
                 this.settings_section = *s;
             }
             log::info!("HARNESS_PROBE_SETTINGS: pane = {}", this.settings_section.label());
-        }
-        // Restore persisted appearance (zed theme + fonts). main.rs already
-        // installed the harness pair pre-window to avoid a theme flash; this
-        // only does further work when prefs carry overrides.
-        if this.prefs.zed_theme.is_some()
-            || this.prefs.font_ui.is_some()
-            || this.prefs.font_mono.is_some()
-            || this.prefs.font_size.is_some()
-        {
-            this.apply_appearance(cx);
         }
         // Test hook: drive the whole notification chain with no agent
         // installed — write real status.json transitions into the first
