@@ -32,8 +32,12 @@ const SECTION_HEADER_H: f32 = 34.0;
 
 impl HarnessWorkspace {
 
-    /// A section's trailing `+` button. Stops propagation so adding a task or
-    /// project never also toggles the section it lives in.
+    /// A section's trailing `+` button.
+    ///
+    /// Lives as a *sibling* of the collapse hit-target (see `section_header`),
+    /// not a child of it — nesting the button inside the toggle was the same
+    /// class of bug as the old Delete menu: parent click handling ate the
+    /// child's `on_click`, so PROJECTS `+` appeared dead.
     fn section_add_button(
         &self,
         hx: &HarnessTheme,
@@ -55,6 +59,12 @@ impl HarnessWorkspace {
             .tooltip(tip(tip_text))
             .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
             .child("+")
+            // Belt-and-suspenders with the sibling layout: swallow mouse-down
+            // so a future re-nest cannot revive the parent-steals-click bug.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
+            )
             .on_click(cx.listener(move |ws, _, window, cx| {
                 cx.stop_propagation();
                 on_click(ws, window, cx);
@@ -66,7 +76,11 @@ impl HarnessWorkspace {
     }
 
     /// One sidebar section header: disclosure caret, label, optional trailing
-    /// action. The whole strip is the click target.
+    /// action.
+    ///
+    /// The collapse/expand hit target is only the caret+label strip. Trailing
+    /// actions (TASKS/PROJECTS `+`) sit beside it as siblings so their clicks
+    /// never compete with the toggle.
     ///
     /// STATS is the only section without a top border — it sits directly under
     /// the window chrome, which already draws that edge. Every other section
@@ -91,36 +105,47 @@ impl HarnessWorkspace {
             .when(section != SidebarSection::Stats, |d| d.border_t_1())
             .border_b_1()
             .border_color(hx.border)
-            .cursor_pointer()
-            .hover(|d| d.bg(hx.surface))
-            .tooltip(tip(if collapsed {
-                "Expand section"
-            } else {
-                "Collapse section"
-            }))
-            .on_click(cx.listener(move |ws, _, _, cx| {
-                // Same set-not-map discipline as project collapse: expanding
-                // removes the entry rather than persisting `false`.
-                if !ws.prefs.collapsed_sections.remove(label) {
-                    ws.prefs.collapsed_sections.insert(label.to_string());
-                }
-                ws.save_prefs(cx);
-                cx.notify();
-            }))
             .child(
                 div()
-                    .flex_none()
-                    .text_xs()
-                    .text_color(hx.tx2)
-                    .child(if collapsed { "▸" } else { "▾" }),
-            )
-            .child(
-                div()
+                    .id(gpui::SharedString::from(format!("{label}-toggle")))
+                    .flex()
                     .flex_1()
-                    .text_xs()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(hx.tx2)
-                    .child(label),
+                    .min_w_0()
+                    .items_center()
+                    .gap_2()
+                    .h_full()
+                    .cursor_pointer()
+                    .hover(|d| d.bg(hx.surface))
+                    .tooltip(tip(if collapsed {
+                        "Expand section"
+                    } else {
+                        "Collapse section"
+                    }))
+                    .on_click(cx.listener(move |ws, _, _, cx| {
+                        // Same set-not-map discipline as project collapse: expanding
+                        // removes the entry rather than persisting `false`.
+                        if !ws.prefs.collapsed_sections.remove(label) {
+                            ws.prefs.collapsed_sections.insert(label.to_string());
+                        }
+                        ws.save_prefs(cx);
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(hx.tx2)
+                            .child(if collapsed { "▸" } else { "▾" }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(hx.tx2)
+                            .child(label),
+                    ),
             )
             .children(action)
     }

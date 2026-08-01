@@ -12,3 +12,5 @@ _to_delete/
 # artifact in this project that must never be committed by accident.
 training-data.jsonl
 *.training.jsonl
+
+.cursor/

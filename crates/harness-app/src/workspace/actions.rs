@@ -82,6 +82,9 @@ impl HarnessWorkspace {
     // ---- projects --------------------------------------------------------
 
     pub(crate) fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Make sure the OS file panel has a key window to attach to — without
+        // activation, `NSOpenPanel` can fail to appear and the + looks dead.
+        window.activate_window();
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -89,10 +92,28 @@ impl HarnessWorkspace {
             prompt: Some("Open".into()),
         });
         cx.spawn_in(window, async move |view, cx| {
-            if let Ok(Ok(Some(paths))) = rx.await
-                && let Some(path) = paths.into_iter().next() {
-                    let _ = view.update_in(cx, |ws, window, cx| ws.add_repo(path, window, cx));
+            match rx.await {
+                Ok(Ok(Some(paths))) => {
+                    if let Some(path) = paths.into_iter().next() {
+                        let _ = view.update_in(cx, |ws, window, cx| ws.add_repo(path, window, cx));
+                    }
                 }
+                Ok(Ok(None)) => {
+                    // User cancelled the panel — stay quiet.
+                }
+                Ok(Err(err)) => {
+                    let _ = view.update(cx, |ws, cx| {
+                        ws.note = format!("could not open folder picker: {err}");
+                        cx.notify();
+                    });
+                }
+                Err(_) => {
+                    let _ = view.update(cx, |ws, cx| {
+                        ws.note = "folder picker failed to open".to_string();
+                        cx.notify();
+                    });
+                }
+            }
         })
         .detach();
     }
