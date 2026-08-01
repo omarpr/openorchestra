@@ -200,7 +200,7 @@ impl HarnessWorkspace {
             .into_any_element()
     }
 
-    /// Info control — description vs home vs AGENTS.md.
+    /// Info control — description vs home vs multi-project context.
     fn render_new_task_info(&self, hx: &HarnessTheme) -> impl IntoElement {
         div()
             .id("new-task-info")
@@ -214,7 +214,7 @@ impl HarnessWorkspace {
             .cursor_default()
             .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
             .tooltip(tip(
-                "The description names what the task is about. Home is the project the agent runs from. AGENTS.md lists paths to the other project worktrees created for the task.",
+                "The description names what the task is about. Home is the project the agent runs from. Multi-project tasks pass sibling worktree paths to the agent via harness state (not by writing AGENTS.md).",
             ))
             .child("ⓘ")
     }

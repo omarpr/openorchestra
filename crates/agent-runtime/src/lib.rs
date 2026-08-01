@@ -27,6 +27,7 @@ mod opencode;
 mod pi;
 pub mod sse;
 mod status_file;
+mod task_context;
 
 pub use bus::Bus;
 pub use claude_code::ClaudeCodeRuntime;
@@ -39,6 +40,9 @@ pub use kimi::KimiRuntime;
 pub use opencode::OpenCodeRuntime;
 pub use pi::PiRuntime;
 pub use status_file::StatusFileSource;
+pub use task_context::{
+    apply_task_context, shell_command_with_task_context, task_context_prompt, HARNESS_TASK_CONTEXT,
+};
 
 use std::path::{Path, PathBuf};
 

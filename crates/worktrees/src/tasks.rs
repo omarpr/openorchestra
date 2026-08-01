@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::registry::{AgentKind, Registry, WorktreeEntry};
-use crate::GitWorktrees;
 use crate::{CommandRunner, CreateRequest, Manager, WorktreeError};
 
 /// One member project inside a task.
@@ -377,10 +376,20 @@ pub fn migrate_worktrees_to_tasks(
     Ok(created)
 }
 
-/// Brief harness-managed AGENTS.md for the home member worktree.
-pub fn agents_md_contents(task: &Task) -> String {
-    let mut out = String::from("<!-- openOrchestra task: do not commit -->\n");
-    out.push_str(&format!("# Task: {}\n", task.name));
+/// Absolute path of the harness-owned task context file for a slug.
+///
+/// Lives under `~/.openorchestra/tasks/<slug>/agent-context.md` — outside any
+/// project worktree, so it never dirties git.
+pub fn task_agent_context_path(tasks_root: &Path, slug: &str) -> PathBuf {
+    tasks_root.join(slug).join("agent-context.md")
+}
+
+/// Brief multi-member task context for agent launch injection.
+///
+/// Only useful when the task has sibling members; single-member tasks need no
+/// coordination file.
+pub fn task_agent_context(task: &Task) -> String {
+    let mut out = format!("# Task: {}\n", task.name);
     if let Some(home) = task.home_member() {
         out.push_str(&format!(
             "Home (cwd): {} `{}`\n",
@@ -402,17 +411,32 @@ pub fn agents_md_contents(task: &Task) -> String {
     out
 }
 
-/// Write AGENTS.md given an explicit main-checkout repo root for excludes.
-pub fn write_home_agents_md_at<R: CommandRunner>(
-    git: &GitWorktrees<R>,
-    task: &Task,
-    home_repo_root: &Path,
-) -> Result<(), TaskError> {
-    let home = task.home_member().ok_or(TaskError::NoMembers)?;
-    let agents = home.path.join("AGENTS.md");
-    fs::write(&agents, agents_md_contents(task))?;
-    let _ = git.exclude_locally(home_repo_root, &["AGENTS.md"]);
-    Ok(())
+/// Write harness-owned agent context for a multi-member task.
+///
+/// Returns `Ok(None)` for single-member tasks (no file written). Never writes
+/// into a project worktree.
+pub fn write_task_agent_context(task: &Task, tasks_root: &Path) -> Result<Option<PathBuf>, TaskError> {
+    if task.members.len() < 2 {
+        return Ok(None);
+    }
+    let path = task_agent_context_path(tasks_root, &task.slug);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, task_agent_context(task))?;
+    Ok(Some(path))
+}
+
+/// Ensure multi-member task context exists; return its path when applicable.
+pub fn ensure_task_agent_context(task: &Task, tasks_root: &Path) -> Result<Option<PathBuf>, TaskError> {
+    if task.members.len() < 2 {
+        return Ok(None);
+    }
+    let path = task_agent_context_path(tasks_root, &task.slug);
+    if path.is_file() {
+        return Ok(Some(path));
+    }
+    write_task_agent_context(task, tasks_root)
 }
 
 #[cfg(test)]
@@ -462,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn agents_md_lists_home_and_siblings() {
+    fn task_agent_context_lists_home_and_siblings() {
         let task = Task {
             id: "auth".into(),
             name: "add auth".into(),
@@ -486,9 +510,67 @@ mod tests {
             created_at: "t".into(),
             archived: false,
         };
-        let md = agents_md_contents(&task);
+        let md = task_agent_context(&task);
         assert!(md.contains("Home (cwd): jam"));
         assert!(md.contains("- api:"));
-        assert!(md.contains("openOrchestra task"));
+        assert!(!md.contains("do not commit"));
+    }
+
+    #[test]
+    fn write_task_agent_context_skips_single_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let task = Task {
+            id: "solo".into(),
+            name: "solo".into(),
+            slug: "solo".into(),
+            home_repo: "jam".into(),
+            members: vec![TaskMember {
+                repo: "jam".into(),
+                worktree_id: "jam/solo".into(),
+                path: PathBuf::from("/wt/jam/solo"),
+                branch: "feat/solo".into(),
+            }],
+            agent_kind: AgentKind::default(),
+            created_at: "t".into(),
+            archived: false,
+        };
+        assert!(write_task_agent_context(&task, dir.path())
+            .unwrap()
+            .is_none());
+        assert!(!task_agent_context_path(dir.path(), "solo").exists());
+    }
+
+    #[test]
+    fn write_task_agent_context_writes_outside_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let task = Task {
+            id: "auth".into(),
+            name: "add auth".into(),
+            slug: "auth".into(),
+            home_repo: "jam".into(),
+            members: vec![
+                TaskMember {
+                    repo: "jam".into(),
+                    worktree_id: "jam/auth".into(),
+                    path: PathBuf::from("/wt/jam/auth"),
+                    branch: "feat/auth".into(),
+                },
+                TaskMember {
+                    repo: "api".into(),
+                    worktree_id: "api/auth".into(),
+                    path: PathBuf::from("/wt/api/auth"),
+                    branch: "feat/auth".into(),
+                },
+            ],
+            agent_kind: AgentKind::default(),
+            created_at: "t".into(),
+            archived: false,
+        };
+        let path = write_task_agent_context(&task, dir.path())
+            .unwrap()
+            .expect("multi-member writes a file");
+        assert_eq!(path, task_agent_context_path(dir.path(), "auth"));
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(body.contains("- api:"));
     }
 }

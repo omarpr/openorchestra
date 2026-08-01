@@ -515,19 +515,14 @@ impl HarnessWorkspace {
 
         match create_task(&mut self.manager, &mut self.task_store, req) {
             Ok(task_id) => {
-                // AGENTS.md first; setup runs visibly in the shell after select
-                // so the user can see script output (silent CommandRunner hid
-                // failures behind the "created task" note).
+                // Multi-member coordination context lives under harness state
+                // (not project AGENTS.md). Setup runs visibly in the shell
+                // after select so the user can see script output.
                 let task = self.task_store.get(&task_id).cloned();
                 if let Some(task) = &task {
-                    if let Some(home_m) = task.home_member() {
-                        if let Some(entry) = self.manager.registry.get(&home_m.worktree_id) {
-                            let _ = write_home_agents_md_at(
-                                self.manager.git(),
-                                task,
-                                &entry.repo_root,
-                            );
-                        }
+                    let tasks_root = self.data_dir.join("tasks");
+                    if let Err(e) = write_task_agent_context(task, &tasks_root) {
+                        log::warn!("could not write task agent context: {e}");
                     }
                 }
                 self.note = format!("created task {task_id}");
