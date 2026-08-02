@@ -1387,14 +1387,16 @@ impl HarnessWorkspace {
             .zed_theme
             .as_ref()
             .and_then(|name| ::theme::ThemeRegistry::global(cx).get(name).ok());
-        match zed_theme {
+        let theme_name = match zed_theme {
             Some(zed) => {
+                let name = zed.name.to_string();
                 ::theme::GlobalTheme::update_theme(cx, zed.clone());
                 // Parsing is not coloring (see harness_zed_theme::install):
                 // the registry's HighlightMaps rebuild from the new theme.
                 ::workspace::AppState::global(cx).languages.set_theme(zed.clone());
                 let hx = crate::harness_zed_theme::harness_from_zed(&zed, font_ui, font_mono);
                 cx.set_global(hx);
+                name
             }
             None => {
                 let mut hx = if self.prefs.dark {
@@ -1404,10 +1406,21 @@ impl HarnessWorkspace {
                 };
                 hx.font_ui = font_ui;
                 hx.font_mono = font_mono;
+                let name = crate::harness_zed_theme::theme_name(&hx).to_string();
                 crate::harness_zed_theme::install(&hx, cx);
                 cx.set_global(hx);
+                name
             }
-        }
-        crate::apply_zed_settings(cx, font_ui, font_mono, self.prefs.font_size.unwrap_or(13.0));
+        };
+        // Theme name goes into ThemeSettings too — not only GlobalTheme — so a
+        // later reload_theme (Workspace window-appearance observer) keeps the
+        // editor on the same palette the chrome is already using.
+        crate::apply_zed_settings(
+            cx,
+            font_ui,
+            font_mono,
+            self.prefs.font_size.unwrap_or(13.0),
+            &theme_name,
+        );
     }
 }

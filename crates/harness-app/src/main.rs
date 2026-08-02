@@ -153,24 +153,28 @@ fn main() {
         // user's machine, which falls back to a proportional face (spaced-out
         // terminal glyphs). Pin a real macOS monospace so editor + terminal read
         // correctly.
-        // Fonts start as Menlo (a guaranteed macOS monospace) and can be
-        // changed from the settings screen; apply_zed_settings is the single
-        // place the zed settings JSON is built, so runtime font changes go
-        // through exactly the same path as startup.
-        apply_zed_settings(cx, "Zed Plex Sans", "Menlo", 13.0);
-
         // Harness design tokens (§3.4). Install them as the active zed theme
         // (Spike 3c) BEFORE creating editor panes, so editor + terminal read
         // their colors — including the rust SyntaxTheme — from one palette.
         // Honor the persisted palette (§12 cross-cutting): reading it here,
         // before the zed theme is generated, means a light-theme user never
         // sees a dark flash on launch.
+        //
+        // Fonts start as Menlo (a guaranteed macOS monospace) and can be
+        // changed from the settings screen. apply_zed_settings runs *after*
+        // install so the theme name is already in the registry when the
+        // SettingsStore observer reloads — and so ThemeSettings names the
+        // harness theme, not One Light/One Dark. A hosted Workspace observes
+        // window appearance and calls reload_theme; without this sync the
+        // editor silently reverts to the system default on first open.
         let hx = if workspace::persisted_dark_theme() {
             HarnessTheme::dark(cx)
         } else {
             HarnessTheme::light(cx)
         };
+        let theme_name = harness_zed_theme::theme_name(&hx);
         harness_zed_theme::install(&hx, cx);
+        apply_zed_settings(cx, "Zed Plex Sans", "Menlo", 13.0, theme_name);
 
         // Editor crate wiring (Spike 3). Safe out-of-tree: registers defensive
         // globals + workspace item hooks; Editor::for_buffer works without it,
@@ -235,12 +239,21 @@ fn main() {
         // The initial install() ran before AppState existed, so its set_theme
         // guard skipped — push the theme into the registry now that both
         // exist, or every HighlightMap stays empty and highlighting is
-        // silently colorless. (Toggles are covered inside install itself.)
+        // silently colorless. Keep observing GlobalTheme the way zed's main
+        // does: Workspace's appearance observer reloads the theme without
+        // going through install(), and that path must rebuild HighlightMaps
+        // too or coloring dies after the first editor open.
         {
-            use ::theme::ActiveTheme as _;
-            ::workspace::AppState::global(cx)
-                .languages
-                .set_theme(cx.theme().clone());
+            use ::theme::{ActiveTheme as _, GlobalTheme};
+            let languages = ::workspace::AppState::global(cx).languages.clone();
+            languages.set_theme(cx.theme().clone());
+            cx.observe_global::<GlobalTheme>({
+                let languages = languages.clone();
+                move |cx| {
+                    languages.set_theme(cx.theme().clone());
+                }
+            })
+            .detach();
         }
         file_finder::init(cx);
         search::init(cx);
@@ -479,8 +492,18 @@ fn main() {
 
 /// Build and apply the zed user-settings JSON. The one place it is built:
 /// startup and every runtime settings change call this, so the two can never
-/// disagree about anything but the fonts they pass.
-pub fn apply_zed_settings(cx: &mut gpui::App, ui_font: &str, mono_font: &str, font_size: f32) {
+/// disagree about anything but the fonts / theme they pass.
+///
+/// `theme` is a static ThemeSelection name (Harness Dark/Light, or a bundled
+/// zed theme). It must stay in sync with `GlobalTheme`: hosted Workspaces call
+/// `reload_theme` from the window-appearance observer, which re-reads this key.
+pub fn apply_zed_settings(
+    cx: &mut gpui::App,
+    ui_font: &str,
+    mono_font: &str,
+    font_size: f32,
+    theme: &str,
+) {
     // `git_panel.dock` — the editor's diff viewer sits LEFT, beside the file
     // tree, rather than at zed's default right edge: the harness window
     // already spends its right side on our own chrome, so a right-docked panel
@@ -493,7 +516,8 @@ pub fn apply_zed_settings(cx: &mut gpui::App, ui_font: &str, mono_font: &str, fo
     // Keep the literal free of `//` comments: it is parsed as JSON, and a
     // parse failure silently reverts EVERY setting in it (parse_status below).
     let json = format!(
-        r#"{{ "buffer_font_family": "{mono_font}", "buffer_font_size": {font_size},
+        r#"{{ "theme": "{theme}",
+             "buffer_font_family": "{mono_font}", "buffer_font_size": {font_size},
              "ui_font_family": "{ui_font}",
              "terminal": {{ "font_family": "{mono_font}", "font_size": {font_size} }},
              "project_panel": {{ "dock": "left" }},
