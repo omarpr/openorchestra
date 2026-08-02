@@ -29,7 +29,7 @@ use worktrees::{
     Change, CreateTaskMember, CreateTaskRequest, GitWorktrees, HookEnv, HookLayer, HookScriptPhase,
     HooksConfig, Manager, Registry, SystemRunner, TaskHooks, TaskStore, archive_task, clear_local_hooks,
     create_task, delete_task, ensure_hook_script, local_hooks_base, migrate_worktrees_to_tasks,
-    visible_setup_shell_line, write_home_agents_md_at, write_visible_setup_runner,
+    visible_setup_shell_line, write_task_agent_context, write_visible_setup_runner,
 };
 
 use crate::data::{UnifiedDiff, WorkspaceData, compute_diff};

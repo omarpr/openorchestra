@@ -208,6 +208,7 @@ fn script_template(phase: HookScriptPhase) -> String {
 #   HARNESS_TASK_SLUG      task slug
 #   HARNESS_TASK_ID        task id (multi-member tasks)
 #   HARNESS_HOME_WORKTREE  home member path (multi-member tasks)
+#   HARNESS_TASK_CONTEXT   path to agent-context.md (multi-member tasks)
 set -euo pipefail
 
 # Add your {phase} steps below.

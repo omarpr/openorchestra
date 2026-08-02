@@ -37,9 +37,9 @@ pub use registry::{
 };
 pub use runner::{CommandOutput, CommandRunner, SystemRunner};
 pub use tasks::{
-    agents_md_contents, archive_task, create_task, delete_task, migrate_worktrees_to_tasks,
-    write_home_agents_md_at, CreateTaskMember, CreateTaskRequest, Task, TaskError, TaskMember,
-    TaskStore,
+    archive_task, create_task, delete_task, ensure_task_agent_context, migrate_worktrees_to_tasks,
+    task_agent_context, task_agent_context_path, write_task_agent_context, CreateTaskMember,
+    CreateTaskRequest, Task, TaskError, TaskMember, TaskStore,
 };
 
 use std::path::{Path, PathBuf};

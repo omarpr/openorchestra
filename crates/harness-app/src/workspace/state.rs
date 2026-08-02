@@ -460,7 +460,16 @@ impl HarnessWorkspace {
             task_id: Some(task_id.clone()),
             home_worktree: task.home_path().map(|p| p.to_path_buf()),
         };
-        env.to_map().into_iter().collect()
+        let mut pairs: Vec<(String, String)> = env.to_map().into_iter().collect();
+        // Multi-member sibling paths for agents (harness state, not project files).
+        let tasks_root = self.data_dir.join("tasks");
+        if let Ok(Some(path)) = worktrees::ensure_task_agent_context(task, &tasks_root) {
+            pairs.push((
+                agent_runtime::HARNESS_TASK_CONTEXT.to_string(),
+                path.to_string_lossy().into_owned(),
+            ));
+        }
+        pairs
     }
 
     pub(crate) fn ensure_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -551,6 +560,15 @@ impl HarnessWorkspace {
             .as_ref()
             .map(|c| c.env.clone())
             .unwrap_or_default();
+
+        let context_path = r.task_id.as_ref().and_then(|tid| {
+            let task = self.task_store.get(tid)?;
+            let tasks_root = self.data_dir.join("tasks");
+            worktrees::ensure_task_agent_context(task, &tasks_root)
+                .ok()
+                .flatten()
+        });
+
         if let Some(cmd) = self
             .prefs
             .agents
@@ -560,16 +578,32 @@ impl HarnessWorkspace {
             // Login + interactive: an override is a line the user typed, so it
             // has to resolve the way it would in their terminal — including
             // aliases and shell functions, which only exist once `.zshrc` runs.
-            let (shell, args) = worktrees::interactive_login_command(&cmd);
+            let launch = match &context_path {
+                Some(path) => agent_runtime::shell_command_with_task_context(&cmd, path),
+                None => cmd,
+            };
+            let (shell, args) = worktrees::interactive_login_command(&launch);
+            let mut env = runtime_env;
+            if let Some(path) = &context_path {
+                env.retain(|(k, _)| k != agent_runtime::HARNESS_TASK_CONTEXT);
+                env.push((
+                    agent_runtime::HARNESS_TASK_CONTEXT.to_string(),
+                    path.to_string_lossy().into_owned(),
+                ));
+            }
             return Some(agent_runtime::AgentCommand {
                 program: shell.into(),
                 args,
-                env: runtime_env,
+                env,
                 label: kind.as_str().to_string(),
             });
         }
         if runtime_cmd.is_none() {
             log::info!("{kind} not on PATH — falling back to a plain shell");
+        }
+        let mut runtime_cmd = runtime_cmd;
+        if let (Some(cmd), Some(path)) = (runtime_cmd.as_mut(), context_path.as_ref()) {
+            agent_runtime::apply_task_context(cmd, kind, path);
         }
         runtime_cmd
     }
