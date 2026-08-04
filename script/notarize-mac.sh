@@ -212,7 +212,13 @@ check_notary_profile
 json_get() { python3 -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1],""))' "$1"; }
 
 SCRATCH=""
-cleanup() { [ -n "$SCRATCH" ] && rm -rf "$SCRATCH"; }
+# The `return 0` is load-bearing. SCRATCH is only set on the .app path, so on a
+# .dmg the test fails, && short-circuits, and 1 becomes the function's return
+# value — which an EXIT trap hands back as the exit status of the whole script.
+# A fully successful DMG notarization therefore exited 1, and package-mac.sh's
+# set -e killed the release immediately after, having already paid for both
+# round trips to Apple. Success reported as failure, at the last possible step.
+cleanup() { [ -n "$SCRATCH" ] && rm -rf "$SCRATCH"; return 0; }
 trap cleanup EXIT
 
 submit() {
