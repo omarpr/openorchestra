@@ -586,9 +586,9 @@ impl HarnessWorkspace {
         // the section `+` controls. `danger` tints it red — used to flag the
         // trash's armed (click-again-to-confirm) state.
         let header_icon =
-            |id_seed: usize, glyph: &'static str, tip_text: &'static str, danger: bool| {
+            |id_prefix: &'static str, glyph: &'static str, tip_text: &'static str, danger: bool| {
                 div()
-                    .id(("repo-icon", id_seed))
+                    .id(repo_element_id(id_prefix, &repo.name))
                     .size(px(20.0))
                     .flex()
                     .flex_none()
@@ -611,7 +611,7 @@ impl HarnessWorkspace {
             .py_1()
             .child(
                 div()
-                    .id(("repo-toggle", repo.name.len()))
+                    .id(repo_element_id(ID_TOGGLE, &repo.name))
                     .flex()
                     .flex_1()
                     .items_center()
@@ -634,7 +634,7 @@ impl HarnessWorkspace {
             // Archive / hooks / trash. Hooks opens the setup script in the
             // editor (TOML is harness-managed).
             .child(
-                header_icon(repo.name.len(), "▦", "Archive project", false).on_click(
+                header_icon(ID_ARCHIVE, "▦", "Archive project", false).on_click(
                     cx.listener(move |ws, _, window, cx| {
                         cx.stop_propagation();
                         ws.archive_repo(archive_repo.clone(), window, cx);
@@ -642,7 +642,7 @@ impl HarnessWorkspace {
                 ),
             )
             .child(
-                header_icon(repo.name.len() + 500, "ƒ", "Edit setup scripts", false).on_click({
+                header_icon(ID_HOOKS, "ƒ", "Edit setup scripts", false).on_click({
                     let hooks_repo = repo.name.clone();
                     cx.listener(move |ws, _, window, cx| {
                         cx.stop_propagation();
@@ -657,7 +657,7 @@ impl HarnessWorkspace {
                 }),
             )
             .child(
-                header_icon(repo.name.len() + 1000, "✕", "Remove project (files kept)", trash_pending)
+                header_icon(ID_TRASH, "✕", "Remove project (files kept)", trash_pending)
                     .on_click(cx.listener(move |ws, _, window, cx| {
                         cx.stop_propagation();
                         ws.trash_repo(trash_repo.clone(), window, cx);
@@ -828,7 +828,7 @@ impl HarnessWorkspace {
         }
 
         div()
-            .id(("main-entry", repo.name.len() + 1))
+            .id(repo_element_id(ID_MAIN, &repo.name))
             .flex()
             .flex_col()
             .mx_1()
@@ -963,6 +963,32 @@ impl HarnessWorkspace {
             .on_click(handler)
             .child(label.to_string())
     }
+}
+
+const ID_TOGGLE: &str = "repo-toggle";
+const ID_ARCHIVE: &str = "repo-archive";
+const ID_HOOKS: &str = "repo-hooks";
+const ID_TRASH: &str = "repo-trash";
+const ID_MAIN: &str = "main-entry";
+
+/// Every prefix a project row keys an element id under, named rather than
+/// spelled inline at the call sites so the uniqueness test below covers the
+/// same set `render_repo_group` and `render_main_entry` actually render.
+#[cfg(test)]
+const REPO_ID_PREFIXES: [&str; 5] = [ID_TOGGLE, ID_ARCHIVE, ID_HOOKS, ID_TRASH, ID_MAIN];
+
+/// The element id for one control in a project's row, keyed on the project
+/// name — never on its length.
+///
+/// GPUI tracks hover, press and click state per element id, so
+/// `("repo-toggle", repo.name.len())` gave two projects whose names were the
+/// same length one shared identity. Sharing an identity shares one
+/// `pending_mouse_down`, and on mouse-up the *first* of the pair painted clears
+/// it (its own hitbox isn't under the cursor) before the row you actually
+/// clicked can fire — so the later project was simply dead. `task-block-`
+/// documents the same trap for tasks, which is where it was fixed once already.
+fn repo_element_id(prefix: &str, repo_name: &str) -> gpui::SharedString {
+    gpui::SharedString::from(format!("{prefix}-{repo_name}"))
 }
 
 /// The branch shown under a task's name.
@@ -1144,6 +1170,23 @@ mod tests {
         for m in &t.members {
             assert_eq!(member_branch(&t, m), None, "{} should stay bare", m.repo);
         }
+    }
+
+    #[test]
+    fn two_projects_whose_names_are_the_same_length_get_different_element_ids() {
+        // GPUI tracks hover, press and click state per element id, and the
+        // *first* element painted under a shared id swallows the later one's
+        // mouse-up. Seeding on `repo.name.len()` therefore left every project
+        // after the first of a given name length unclickable.
+        let names = ["alpha", "gamma", "openorchestra"]; // alpha/gamma collide
+        let mut ids = Vec::new();
+        for name in names {
+            for prefix in REPO_ID_PREFIXES {
+                ids.push(repo_element_id(prefix, name));
+            }
+        }
+        let unique: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "element ids collide: {ids:?}");
     }
 
     #[test]
