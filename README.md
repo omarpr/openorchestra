@@ -22,7 +22,7 @@ For development iterations, `make run` builds and launches the debug binary
 directly (native notifications fall back to plain banners there — the
 notification framework requires a real app bundle).
 
-## Collaborators
+## Contributors
 
 <table>
   <tr>
@@ -36,6 +36,12 @@ notification framework requires a real app bundle).
       <a href="https://github.com/joeswiggin">
         <img src="https://avatars.githubusercontent.com/u/4819705?v=4" width="88" height="88" alt="joeswiggin"><br>
         <sub><b>joeswiggin</b></sub>
+      </a>
+    </td>
+    <td align="center">
+      <a href="https://github.com/jakesorce">
+        <img src="https://avatars.githubusercontent.com/u/801470?v=4" width="88" height="88" alt="jakesorce"><br>
+        <sub><b>jakesorce</b></sub>
       </a>
     </td>
   </tr>
