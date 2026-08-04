@@ -14,7 +14,9 @@ make setup && make app && open dist/openOrchestra.app
 - `make setup` installs/verifies the build and runtime tools (idempotent).
 - `make app` builds the release bundle into `dist/openOrchestra.app`.
 - `make dmg` builds a universal (Apple Silicon + Intel) bundle and a `.dmg`
-  beside it; `make release` publishes that DMG to GitHub Releases.
+  beside it. `make dmg-notarized` additionally signs it with Developer ID and
+  notarizes it with Apple, so the download opens on a plain double-click;
+  `make release` does that and publishes to GitHub Releases.
 - First launch will ask for notification permission — that's the
   "agent needs your attention" banners with their View button.
 
