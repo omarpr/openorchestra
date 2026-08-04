@@ -84,6 +84,31 @@ else
   warn "metal      Metal toolchain missing — run:  make setup"
 fi
 
+sec "Release signing — needed for make dmg-notarized / make release (optional)"
+# Absence here means "cannot cut a release", never "the app is broken": a
+# contributor without an Apple account still gets a working make app / make dmg.
+OO_TEAM_ID="${OO_TEAM_ID:-HLWNR3FFHW}"
+OO_NOTARY_PROFILE="${OO_NOTARY_PROFILE:-openorchestra}"
+# Match on the team ID, not the certificate name — the name is an identity that
+# does not belong in terminal output, and the team is what actually has to be
+# right. A Developer ID cert from another team is the failure being screened for.
+if security find-identity -v -p codesigning 2>/dev/null \
+     | grep -q "Developer ID Application.*($OO_TEAM_ID)"; then
+  ok "Developer ID  certificate present for team $OO_TEAM_ID"
+else
+  warn "Developer ID  no certificate for team $OO_TEAM_ID — create one at
+               https://developer.apple.com/account/resources/certificates
+               (set the team switcher first; a cert from another team is valid
+               and would publish the wrong entity in every binary)"
+fi
+if xcrun notarytool history --keychain-profile "$OO_NOTARY_PROFILE" >/dev/null 2>&1; then
+  ok "notarytool    profile '$OO_NOTARY_PROFILE' authenticates"
+else
+  warn "notarytool    profile '$OO_NOTARY_PROFILE' missing — run:
+               xcrun notarytool store-credentials $OO_NOTARY_PROFILE \\
+                 --key <AuthKey.p8> --key-id <KEYID> --issuer <ISSUERID>"
+fi
+
 echo
 if ((missing_required)); then
   printf '\033[1;31m✗ A required tool is missing.\033[0m Install it above, then re-run: make doctor\n'

@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
 # Build openOrchestra.app — a double-clickable macOS bundle — and optionally a
-# universal DMG published to GitHub Releases.
+# universal DMG, signed and notarized, published to GitHub Releases.
 # Run on a Mac (after `make setup` has installed the toolchain).
 #
 #   ./script/package-mac.sh                        # host-arch .app → dist/  (fast, default)
 #   ./script/package-mac.sh --universal            # arm64 + x86_64 .app
 #   ./script/package-mac.sh --universal --dmg      # ...and a .dmg beside it
+#   ./script/package-mac.sh --universal --dmg --notarize  # ...Developer ID + notarized
 #   ./script/package-mac.sh --universal --dmg --publish   # ...and a GitHub Release
 #
-# The bundle is ad-hoc signed for local use; Gatekeeper may still require a
-# right-click → Open the first time (unsigned/undistributed app).
+# Without --notarize the bundle is ad-hoc signed for local use and Gatekeeper
+# requires a right-click → Open on any other Mac. --publish implies --notarize,
+# so a published release is never ad-hoc signed. The signing, submission, and
+# stapling themselves live in script/notarize-mac.sh.
 #
 # Design + the measurements behind it:
 #   docs/superpowers/specs/2026-07-26-universal-dmg-packaging-design.md
+#   docs/superpowers/specs/2026-08-04-signing-notarization-design.md
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -24,17 +28,19 @@ say() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
-  sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 universal=0
 make_dmg=0
 publish=0
+notarize=0
 
 while (($#)); do
   case "$1" in
     --universal) universal=1 ;;
     --dmg)       make_dmg=1 ;;
+    --notarize)  notarize=1 ;;
     --publish)   publish=1 ;;
     -h|--help)   usage; exit 0 ;;
     *)           die "unknown flag: $1 (try --help)" ;;
@@ -42,10 +48,24 @@ while (($#)); do
   shift
 done
 
-# Publishing without building the artifact would upload nothing. Flags stay
-# single-purpose (no implicit enabling) so the Makefile spells out its intent.
+# Publishing without building the artifact would upload nothing. Flags are
+# otherwise single-purpose so the Makefile spells out its intent.
 if ((publish)) && ((!make_dmg)); then
   die "--publish requires --dmg"
+fi
+
+# The one deliberate implication. An ad-hoc signed public release is the exact
+# failure this pipeline exists to prevent, and "I forgot --notarize" is too easy
+# a way to ship one — the mistake is only visible to whoever downloads it.
+if ((publish)); then
+  notarize=1
+fi
+
+# Notarization signs the .app before the image is built, so it needs --dmg to
+# have an image to sign second. Signing a bundle nobody can install is not
+# useful on its own; --sign-only on notarize-mac.sh covers that case directly.
+if ((notarize)) && ((!make_dmg)); then
+  die "--notarize requires --dmg (or use: ./script/notarize-mac.sh --sign-only <app>)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -75,6 +95,16 @@ if ((publish)); then
   fi
   REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
   [ -n "$REPO" ] || die "could not determine the GitHub repository"
+fi
+
+# Same rule, applied to Apple: a missing certificate or an unauthenticated
+# notarytool profile should cost two seconds, not a completed build. Resolving
+# the identity here is the real check — it exercises the same code path, and the
+# team assertion, that will sign the bundle an hour from now.
+if ((notarize)); then
+  [ -x "$ROOT/script/notarize-mac.sh" ] || die "script/notarize-mac.sh is missing or not executable"
+  say "preflight: signing identity"
+  "$ROOT/script/notarize-mac.sh" --check
 fi
 
 say "version $VERSION (build $BUILD)"
@@ -156,16 +186,29 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Ad-hoc sign so it launches without "damaged app" complaints on local machines.
-# Replacing this with Developer ID + notarytool + stapler is the one change
-# needed to make downloads open on a plain double-click; see the spec.
-if command -v codesign >/dev/null 2>&1; then
-  say "ad-hoc signing"
-  codesign --force --deep --sign - "$APP" || echo "(codesign failed; app still runnable via right-click → Open)"
-fi
-
-# Refresh the icon cache so Finder shows the new icon immediately.
+# Refresh the icon cache so Finder shows the new icon immediately. Done *before*
+# signing: it is the last thing that mutates the bundle, and a mutation after
+# signing is what invalidates a signature.
 touch "$APP"
+
+# ---------------------------------------------------------------------------
+# Sign. Two mutually exclusive paths:
+#
+#   --notarize   Developer ID + hardened runtime, submitted to Apple and
+#                stapled. What a download needs to open on a plain double-click.
+#   otherwise    ad-hoc, which carries no identity at all: fine on the machine
+#                that built it, quarantined everywhere else.
+#
+# No --deep in either path. Apple deprecated it, and it pushes entitlements onto
+# nested code; this bundle holds exactly one Mach-O, so signing it directly is
+# both correct and sufficient.
+# ---------------------------------------------------------------------------
+if ((notarize)); then
+  "$ROOT/script/notarize-mac.sh" "$APP"
+elif command -v codesign >/dev/null 2>&1; then
+  say "ad-hoc signing"
+  codesign --force --sign - "$APP" || echo "(codesign failed; app still runnable via right-click → Open)"
+fi
 
 say "built: $APP"
 lipo -info "$APP/Contents/MacOS/$APP_NAME" 2>/dev/null || true
@@ -181,13 +224,24 @@ if ((make_dmg)); then
   STAGE="$ROOT/dist/.dmg-stage"
   rm -rf "$STAGE"
   mkdir -p "$STAGE"
-  cp -R "$APP" "$STAGE/"
+  # ditto, not cp -R: the app carries a stapled notarization ticket and a code
+  # signature, and ditto is the copy that preserves bundle metadata verbatim.
+  ditto "$APP" "$STAGE/$APP_NAME.app"
   ln -s /Applications "$STAGE/Applications"
   rm -f "$DMG"
   hdiutil create -volname "$APP_NAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
   rm -rf "$STAGE"
   say "verifying image"
   hdiutil verify "$DMG" >/dev/null || die "hdiutil verify failed for $DMG"
+
+  # The image gets its own signature and its own ticket. Notarizing only the app
+  # would leave the .dmg unsigned, and notarizing only the .dmg would leave an
+  # app dragged to /Applications without a ticket of its own — which fails to
+  # launch offline, or behind a firewall blocking Apple's OCSP responder.
+  if ((notarize)); then
+    "$ROOT/script/notarize-mac.sh" "$DMG"
+  fi
+
   say "built: $DMG ($(du -h "$DMG" | cut -f1))"
 fi
 
@@ -195,11 +249,22 @@ fi
 # Publish. Outward-facing and awkward to retract, so it never happens as a side
 # effect of a build — only under an explicit --publish.
 # ---------------------------------------------------------------------------
-INSTALL_NOTE="**First launch:** right-click the app → **Open**, then confirm. macOS
+# The install note is a function of how the artifact was signed. A notarized
+# build needs no instructions at all, and shipping the right-click ritual
+# alongside one would train users to bypass Gatekeeper for no reason.
+if ((notarize)); then
+  INSTALL_NOTE="**Install:** open the DMG and drag openOrchestra to Applications.
+
+Signed with Developer ID and notarized by Apple — it opens on a double-click.
+
+Universal binary: Apple Silicon and Intel."
+else
+  INSTALL_NOTE="**First launch:** right-click the app → **Open**, then confirm. macOS
 quarantines apps from unidentified developers, so a plain double-click will say
 the app is damaged. This is expected — the build is ad-hoc signed, not notarized.
 
 Universal binary: Apple Silicon and Intel."
+fi
 
 # ---------------------------------------------------------------------------
 # Release notes. GitHub's --generate-notes lists *pull requests* only, so work
