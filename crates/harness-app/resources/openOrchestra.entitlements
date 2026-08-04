@@ -3,7 +3,7 @@
 <!--
   Entitlements for the hardened runtime, which notarization requires.
 
-  This file starts EMPTY on purpose. zed's own entitlements
+  This file started EMPTY on purpose. zed's own entitlements
   (crates/zed/resources/zed.entitlements in the pinned checkout) are not a
   template: most of its entries — camera, audio input, address book, calendars,
   location, photos — exist for collab and screen-sharing features that this app
@@ -13,21 +13,46 @@
   we never use and leave nobody able to explain any line.
 
   Add an entitlement ONLY when a hardened-runtime build demonstrably fails
-  without it, and record the observed failure in a comment beside it. The
-  likeliest candidates, if they turn out to be needed at all, are:
-
-    com.apple.security.cs.allow-jit
-    com.apple.security.cs.allow-unsigned-executable-memory
-
-  both for the tree-sitter (0.26) -> wasmtime (36) path. That JIT may never
-  execute, since zed bundles native grammars — which is exactly why this is
-  settled by measurement rather than by assumption.
+  without it, and record the observed failure here. Keep the keys themselves in
+  a bare dict: AMFI's plist parser rejects comments inside the dict element, so
+  the rationale lives in this block instead.
 
   App Sandbox is NOT adopted: notarization does not require it, and it is
   incompatible with spawning agents, shells, and git across arbitrary worktrees.
 
+
+  com.apple.security.cs.allow-unsigned-executable-memory
+  ======================================================
+  Required by the tree-sitter (0.26.11) to wasmtime (36) path.
+
+  The guess this file used to carry, that the JIT might never execute because
+  we bundle native grammars, was wrong. zed's language::with_parser
+  (crates/language/src/language.rs:133 in the pinned checkout) calls
+  set_wasm_store(WasmStore::new(..)) unconditionally for every Parser it
+  constructs, so the FIRST syntax-highlighted parse of ANY file instantiates a
+  wasmtime module. Bundling native grammars does not avoid it.
+
+  Observed without this key: opening a Rust file in the editor pane killed the
+  app instantly. Not a panic, a SIGKILL from the kernel:
+
+      exception:   EXC_BAD_ACCESS, SIGKILL (Code Signature Invalid)
+      termination: CODESIGNING, indicator "Invalid Page"
+      thread 13:   WasmStore::new to ts_wasm_store_new
+                   to wasmtime_instance_new to an anonymous r-x page
+
+  allow-jit is deliberately NOT paired with this. It only covers regions mapped
+  with MAP_JIT, and wasmtime never asks for one: it mmaps ordinary anonymous
+  memory and mprotects it to READ|EXEC (wasmtime-36.0.13
+  src/runtime/vm/sys/unix/mmap.rs:147-163). Measured on the crashing path,
+  signed with the hardened runtime: empty dict gave SIGKILL; allow-jit alone
+  gave SIGKILL; this key alone ran clean; both ran clean. allow-jit would be an
+  entitlement we request and never use, so it stays out.
+
   Design: docs/superpowers/specs/2026-08-04-signing-notarization-design.md
 -->
 <plist version="1.0">
-<dict/>
+<dict>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+</dict>
 </plist>
