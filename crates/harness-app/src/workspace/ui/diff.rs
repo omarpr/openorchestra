@@ -891,6 +891,12 @@ impl HarnessWorkspace {
             div()
                 .id("push-branch")
                 .flex()
+                // Armed, this reads `push 3 → origin/<branch>?` — ~345px for a
+                // real branch name, against ~196px of header at the panel's
+                // minimum width. It is the one control here that is unbounded,
+                // so it is the one that gives ground.
+                .min_w_0()
+                .truncate()
                 .items_center()
                 .h(px(20.0))
                 .px_1p5()
@@ -1105,14 +1111,36 @@ impl HarnessWorkspace {
                     .border_b_1()
                     .border_color(hx.border)
                     .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx2).child("DIFF"))
-                    .child(div().flex_1().min_w_0().text_xs().font_family(hx.font_mono).text_color(hx.tx1).overflow_hidden().child(r.branch.clone())),
+                    // `truncate()` (= overflow_hidden + whitespace_nowrap +
+                    // text_ellipsis), not bare `overflow_hidden()`: clipping
+                    // stops a box painting outside itself but does nothing about
+                    // *wrapping*, and a long branch wrapped to three lines inside
+                    // this `h(px(34.0))` row overflowed it above and below —
+                    // painting over the row beneath.
+                    .child(div().flex_1().min_w_0().text_xs().font_family(hx.font_mono).text_color(hx.tx1).truncate().child(r.branch.clone())),
             )
             .child(
                 div()
                     .flex()
                     .flex_none()
+                    // Below ~400px the two groups cannot share a line: the left
+                    // wants ~207px and the right ~160px, against 196px of usable
+                    // width. Wrapping stacks them instead of letting them paint
+                    // over each other. `space-between` with one item on a line
+                    // degenerates to `flex-start`, so both lines left-align with
+                    // no override needed.
+                    .flex_wrap()
+                    // Hard backstop. Wrapping and shrinking between them should
+                    // keep everything inside, but the failure mode being fixed
+                    // here is content painting over its neighbours, and clipping
+                    // is a strictly better way to lose than that. The base menu
+                    // is unaffected: it renders at the workspace root
+                    // (`workspace.rs:1748`), not inside this row.
+                    .overflow_hidden()
                     .items_center()
                     .justify_between()
+                    .gap_x_2()
+                    .gap_y_1()
                     .px_3()
                     .py_2()
                     .child(
@@ -1125,7 +1153,7 @@ impl HarnessWorkspace {
                             // the count *means*: "3 changed files" answers
                             // nothing until you know 3 since when.
                             .child(self.render_diff_base_button(hx, r, cx))
-                            .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx0).child(
+                            .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx0).truncate().child(
                                 if self.diff_pending {
                                     "Changed files  …".to_string()
                                 } else {
@@ -1149,14 +1177,24 @@ impl HarnessWorkspace {
                     .child(
                         div()
                             .flex()
+                            // `min_w_0`, not `flex_none`: the group must take a
+                            // whole line once wrapped, but it must still be able
+                            // to shrink onto it. Pinned unshrinkable, the armed
+                            // push control would hang off the panel's right edge
+                            // — the same overflow this row exists to fix.
+                            // Shrinkage is absorbed by the push label alone; the
+                            // toggle (`flex_none` internally) and the counts hold
+                            // their size, because a squeezed toggle is
+                            // unclickable and a clipped count is a wrong number.
+                            .min_w_0()
                             .items_center()
                             .gap_2()
                             .text_xs()
                             .font_family(hx.font_mono)
                             .children(self.render_push_control(hx, r, cx))
                             .child(self.render_diff_view_toggle(hx, body_width, cx))
-                            .child(div().text_color(hx.green).child(format!("+{adds}")))
-                            .child(div().text_color(hx.red).child(format!("−{dels}"))),
+                            .child(div().flex_none().text_color(hx.green).child(format!("+{adds}")))
+                            .child(div().flex_none().text_color(hx.red).child(format!("−{dels}"))),
                     ),
             )
     }
