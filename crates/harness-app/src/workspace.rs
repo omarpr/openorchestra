@@ -29,7 +29,7 @@ use worktrees::{
     Change, CreateTaskMember, CreateTaskRequest, GitWorktrees, HookEnv, HookLayer, HookScriptPhase,
     HooksConfig, Manager, Registry, SystemRunner, TaskHooks, TaskStore, archive_task, clear_local_hooks,
     create_task, delete_task, ensure_hook_script, local_hooks_base, migrate_worktrees_to_tasks,
-    visible_setup_shell_line, write_task_agent_context, write_visible_setup_runner,
+    visible_setup_shell_line, write_task_agent_context, write_task_brief, write_visible_setup_runner,
 };
 
 use crate::data::{UnifiedDiff, WorkspaceData, compute_diff};
@@ -536,8 +536,8 @@ pub(crate) enum Selection {
     Main(String),
     /// Legacy single worktree id (still used when resolving members).
     Worktree(String),
-    /// Task-centric selection. `member_id` is the focused member worktree id
-    /// for the editor; agent/shell always use the task home. `None` = home.
+    /// Task-centric selection. `member_id` is the focused member worktree id —
+    /// agent, shell, and editor all use that member's worktree (home when `None`).
     Task {
         task_id: String,
         member_id: Option<String>,
@@ -566,16 +566,39 @@ struct ActiveEdit {
     editor: Entity<Editor>,
 }
 
-/// Centered "New task" dialog: description + optional branch + project members.
+/// Centered "New task" dialog: name, brief, optional branch, project members.
 struct NewTaskDialog {
-    description: Entity<Editor>,
+    name: Entity<Editor>,
+    /// Multi-line initial prompt injected into agent context on launch.
+    brief: Entity<Editor>,
     branch: Entity<Editor>,
     /// Last auto-branch string pushed into the branch field's placeholder, so
-    /// we only call `set_placeholder_text` when the description's slug changes.
+    /// we only call `set_placeholder_text` when the name's slug changes.
     auto_branch_shown: String,
-    /// Keeps the dialog view refreshing while the description is typed so the
+    /// Keeps the dialog view refreshing while the name is typed so the
     /// branch placeholder can track `feat/{slug}`.
-    _desc_sub: gpui::Subscription,
+    _name_sub: gpui::Subscription,
+}
+
+/// Steps in the post-create "start agents" guide for multi-member tasks.
+enum StartSpecialistsStep {
+    /// Single yes/no: open an agent in every member project?
+    AskOpenAll,
+    /// Which enabled agent to launch everywhere.
+    PickAgent { selected: AgentKind },
+}
+
+/// After creating a multi-member task, guide opening agents across projects.
+struct StartSpecialistsDialog {
+    task_id: String,
+    step: StartSpecialistsStep,
+}
+
+/// Live A2A broker for one openOrchestra task (multi-member only).
+struct TaskBrokerInfo {
+    base_url: String,
+    api_key: String,
+    handle: a2a_broker::BrokerHandle,
 }
 
 /// The name an agent goes by in front of users — notification titles, rows.
@@ -617,6 +640,39 @@ fn agent_catalog(prefs: &Prefs) -> Vec<AgentKind> {
         }
     }
     out
+}
+
+/// Agents the user has not turned off in Settings.
+fn enabled_agents(prefs: &Prefs) -> Vec<AgentKind> {
+    agent_catalog(prefs)
+        .into_iter()
+        .filter(|k| {
+            !prefs
+                .agents
+                .get(k.as_str())
+                .is_some_and(|p| p.disabled)
+        })
+        .collect()
+}
+
+/// Default agent for a new task: last used (if still enabled), else OpenCode
+/// when enabled (D12), else the first enabled catalog entry.
+fn default_enabled_agent(prefs: &Prefs) -> Option<AgentKind> {
+    let enabled = enabled_agents(prefs);
+    if enabled.is_empty() {
+        return None;
+    }
+    if let Some(key) = prefs.last_task_agent.as_deref() {
+        let kind = AgentKind::from(key);
+        if enabled.iter().any(|k| k == &kind) {
+            return Some(kind);
+        }
+    }
+    enabled
+        .iter()
+        .find(|k| matches!(k, AgentKind::OpenCode))
+        .cloned()
+        .or_else(|| enabled.into_iter().next())
 }
 
 /// Whether `slug` is a usable key for a new custom agent: non-empty, only
@@ -771,9 +827,9 @@ const MAX_LIVE_PANES: usize = 6;
 
 pub(crate) struct Resolved {
     key: String,
-    /// Agent / shell cwd (task home or main / single worktree).
+    /// Agent / shell cwd — the focused task member (or main / single worktree).
     path: PathBuf,
-    /// Editor project root — may differ from `path` when a non-home member is focused.
+    /// Editor project root — same as `path` for task members (per-context tabs).
     editor_path: PathBuf,
     /// Which agent this entry runs, or `None` for the read-only `main`
     /// checkout, which gets a plain shell (D8).
@@ -873,6 +929,16 @@ pub struct HarnessWorkspace {
     edit: Option<ActiveEdit>,
     /// Centered new-task dialog (description, branch, members).
     new_task: Option<NewTaskDialog>,
+    /// Guide starting per-member agents after a multi-member task create.
+    start_specialists: Option<StartSpecialistsDialog>,
+    /// Localhost A2A brokers keyed by openOrchestra task id.
+    task_brokers: HashMap<String, TaskBrokerInfo>,
+    /// Coalesced wake-ups when any task broker's A2A task state changes.
+    a2a_change_tx: crossbeam_channel::Sender<()>,
+    /// Inbox deliveries for tmux inject into specialist agents.
+    a2a_inbox_tx: crossbeam_channel::Sender<a2a_broker::InboxDelivery>,
+    /// Queued inbox messages awaiting a live Agent session (keyed by pane key).
+    a2a_pending_inject: HashMap<String, Vec<a2a_broker::InboxMessage>>,
     new_target_repo: String,
     menu: Option<CardMenu>,
     /// Open "new tab" menu, anchored under the `+` in the tab strip.
@@ -968,6 +1034,7 @@ const RESOURCE_HISTORY: usize = 60;
 // constructor, shared types, the Render/Focusable roots, and free
 // helpers live here.
 mod actions;
+mod a2a;
 mod state;
 mod ui;
 
@@ -987,7 +1054,7 @@ impl HarnessWorkspace {
         let prefs = load_prefs(&prefs_path);
         let reg_path = data_dir.join("registry.json");
         let panes_path = data_dir.join("panes.json");
-        let panes_state = crate::panes_state::load(&panes_path);
+        let mut panes_state = crate::panes_state::load(&panes_path);
         let has_tmux = crate::tmux::has_tmux();
 
         let mut repo_roots = load_repos(&repos_path);
@@ -1012,6 +1079,20 @@ impl HarnessWorkspace {
             Ok(n) if n > 0 => log::info!("migrated {n} worktrees to single-member tasks"),
             Ok(_) => {}
             Err(e) => log::warn!("worktree→task migration failed: {e}"),
+        }
+        {
+            let homes: Vec<(String, String)> = task_store
+                .active()
+                .filter_map(|t| {
+                    t.home_member()
+                        .map(|m| (t.id.clone(), m.worktree_id.clone()))
+                })
+                .collect();
+            let n = crate::panes_state::migrate_task_pane_keys(&mut panes_state, &homes);
+            if n > 0 {
+                crate::panes_state::save(&panes_path, &panes_state);
+                log::info!("migrated {n} legacy task pane keys to per-member keys");
+            }
         }
         let manager = Manager::new(registry, git, data_dir.join("worktrees"));
         let data = WorkspaceData::build(manager.git(), &manager.registry, &task_store, &repo_roots);
@@ -1090,6 +1171,10 @@ impl HarnessWorkspace {
         };
         let new_task_home = new_target_repo.clone();
 
+        let (a2a_change_tx, a2a_change_rx) = crossbeam_channel::bounded::<()>(1);
+        let (a2a_inbox_tx, a2a_inbox_rx) =
+            crossbeam_channel::unbounded::<a2a_broker::InboxDelivery>();
+
         let mut this = Self {
             manager,
             task_store,
@@ -1133,6 +1218,11 @@ impl HarnessWorkspace {
             has_tmux,
             edit: None,
             new_task: None,
+            start_specialists: None,
+            task_brokers: HashMap::new(),
+            a2a_change_tx,
+            a2a_inbox_tx,
+            a2a_pending_inject: HashMap::new(),
             new_target_repo,
             menu: None,
             tab_menu: None,
@@ -1331,6 +1421,50 @@ impl HarnessWorkspace {
                             .await
                     }
                     Err(_) => break,
+                }
+            }
+        })
+        .detach();
+
+        // A2A broker task-state changes (delegation chip in the chrome).
+        cx.spawn(async move |view, cx| {
+            loop {
+                match a2a_change_rx.try_recv() {
+                    Ok(()) => {
+                        while a2a_change_rx.try_recv().is_ok() {}
+                        if view.update(cx, |_, cx| cx.notify()).is_err() {
+                            break;
+                        }
+                    }
+                    Err(crossbeam_channel::TryRecvError::Empty) => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(250))
+                            .await;
+                    }
+                    Err(crossbeam_channel::TryRecvError::Disconnected) => break,
+                }
+            }
+        })
+        .detach();
+
+        // A2A inbox → specialist agent tmux inject.
+        cx.spawn(async move |view, cx| {
+            loop {
+                match a2a_inbox_rx.try_recv() {
+                    Ok(delivery) => {
+                        if view
+                            .update(cx, |ws, _cx| ws.deliver_a2a_inbox(delivery))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(crossbeam_channel::TryRecvError::Empty) => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(200))
+                            .await;
+                    }
+                    Err(crossbeam_channel::TryRecvError::Disconnected) => break,
                 }
             }
         })
@@ -1757,6 +1891,10 @@ impl Render for HarnessWorkspace {
             root = root.child(self.render_new_task_dialog(&hx, cx));
         }
 
+        if self.start_specialists.is_some() {
+            root = root.child(self.render_start_specialists_dialog(&hx, cx));
+        }
+
         if self.close_prompt.is_some() {
             root = root.child(self.render_close_prompt(&hx, cx));
         }
@@ -2052,6 +2190,10 @@ struct Prefs {
     /// enabled, default command.
     #[serde(default)]
     agents: std::collections::BTreeMap<String, AgentPref>,
+    /// Last agent chosen when starting agents for a new multi-member task.
+    /// Used as the default in the start-agents picker when still enabled.
+    #[serde(default)]
+    last_task_agent: Option<String>,
     /// Editor + terminal font size in px. `None` = 13.
     #[serde(default)]
     font_size: Option<f32>,
@@ -2125,6 +2267,7 @@ impl Default for Prefs {
             font_ui: None,
             font_mono: None,
             agents: Default::default(),
+            last_task_agent: None,
             font_size: None,
             pet_enabled: true,
             shortcuts: Default::default(),
@@ -2948,7 +3091,10 @@ mod collapsed_prefs_tests {
 
 #[cfg(test)]
 mod agent_prefs_tests {
-    use super::{AgentKind, AgentPref, Prefs, agent_catalog, valid_agent_slug};
+    use super::{
+        AgentKind, AgentPref, Prefs, agent_catalog, default_enabled_agent, enabled_agents,
+        valid_agent_slug,
+    };
 
     fn with_custom(slug: &str, command: &str) -> Prefs {
         let mut prefs = Prefs::default();
@@ -3086,6 +3232,47 @@ mod agent_prefs_tests {
         assert!(
             !prefs.agents.contains_key("codex"),
             "built-in override is dropped"
+        );
+    }
+
+    #[test]
+    fn default_task_agent_skips_disabled_opencode() {
+        let mut prefs = Prefs::default();
+        prefs.agents.insert(
+            "opencode".to_string(),
+            AgentPref {
+                disabled: true,
+                command: None,
+                custom: false,
+                signal: None,
+            },
+        );
+        let kind = default_enabled_agent(&prefs).expect("other built-ins remain");
+        assert_ne!(kind, AgentKind::OpenCode);
+        assert!(!enabled_agents(&prefs).contains(&AgentKind::OpenCode));
+    }
+
+    #[test]
+    fn default_task_agent_prefers_last_used_when_enabled() {
+        let mut prefs = Prefs::default();
+        prefs.last_task_agent = Some("claude-code".into());
+        assert_eq!(
+            default_enabled_agent(&prefs),
+            Some(AgentKind::ClaudeCode)
+        );
+        prefs.agents.insert(
+            "claude-code".into(),
+            AgentPref {
+                disabled: true,
+                command: None,
+                custom: false,
+                signal: None,
+            },
+        );
+        assert_ne!(
+            default_enabled_agent(&prefs),
+            Some(AgentKind::ClaudeCode),
+            "disabled last-used falls through"
         );
     }
 }

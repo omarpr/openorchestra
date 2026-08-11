@@ -155,10 +155,11 @@ Brief home-member `AGENTS.md` (harness-managed, local-excluded), e.g.:
 ```markdown
 <!-- openOrchestra task: do not commit -->
 # Task: add-auth-across-services
-Home (cwd): thisismyjam `<path>`
-Also:
-- getcookin: `<path>`
-- openorchestra: `<path>`
+openOrchestra multi-context task: each member project has its own agent cwd.
+Home / orchestrator: thisismyjam `<path>` (worktree id `…`)
+Specialists (do not edit these trees from home — delegate via A2A):
+- getcookin: path `…` · worktree id `…`
+- openorchestra: path `…` · worktree id `…`
 ```
 
 ## Migration — existing worktrees → single-member tasks
@@ -208,6 +209,6 @@ Add this as an explicit implementation step before flipping the sidebar to task-
 ## Out of scope (follow-ups)
 
 - True multi-root Zed `Project` showing all members in one file tree (member switching is enough for v1)
-- Multi-agent-per-task or per-member agents (Projects foot agents are separate: explore/maintenance only)
+- ~~Multi-agent-per-task or per-member agents~~ → implemented; see `docs/superpowers/specs/2026-08-09-multi-context-a2a-orchestration-design.md`
 - Cross-repo PR aggregation in forge badges (per-member badges remain fine initially)
 - Plugin marketplace for hook scripts

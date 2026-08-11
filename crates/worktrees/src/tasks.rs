@@ -384,52 +384,172 @@ pub fn task_agent_context_path(tasks_root: &Path, slug: &str) -> PathBuf {
     tasks_root.join(slug).join("agent-context.md")
 }
 
+/// Absolute path of the user brief for a task slug.
+///
+/// Written at create time; folded into [`agent-context.md`](task_agent_context_path)
+/// so agents receive the goal alongside coordination / A2A details.
+pub fn task_brief_path(tasks_root: &Path, slug: &str) -> PathBuf {
+    tasks_root.join(slug).join("brief.md")
+}
+
+/// Persist the user's initial prompt for a task. Empty / whitespace-only clears
+/// any existing brief file.
+pub fn write_task_brief(
+    tasks_root: &Path,
+    slug: &str,
+    brief: &str,
+) -> Result<Option<PathBuf>, TaskError> {
+    let path = task_brief_path(tasks_root, slug);
+    let trimmed = brief.trim();
+    if trimmed.is_empty() {
+        let _ = fs::remove_file(&path);
+        return Ok(None);
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, trimmed)?;
+    Ok(Some(path))
+}
+
+/// Load a previously written user brief, if any.
+pub fn read_task_brief(tasks_root: &Path, slug: &str) -> Option<String> {
+    fs::read_to_string(task_brief_path(tasks_root, slug))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Optional live A2A broker endpoints injected into agent-context.md.
+#[derive(Debug, Clone)]
+pub struct A2aContextInfo {
+    pub base_url: String,
+    pub api_key: String,
+}
+
+/// Whether this task needs a harness-owned agent-context file.
+///
+/// Multi-member tasks always do (coordination + A2A). Single-member tasks only
+/// when the user supplied a brief to inject at agent launch.
+pub fn task_needs_agent_context(task: &Task, tasks_root: &Path) -> bool {
+    task.members.len() >= 2 || read_task_brief(tasks_root, &task.slug).is_some()
+}
+
 /// Brief multi-member task context for agent launch injection.
 ///
-/// Only useful when the task has sibling members; single-member tasks need no
-/// coordination file.
+/// Also written for single-member tasks that have a user brief.
 pub fn task_agent_context(task: &Task) -> String {
+    task_agent_context_with_a2a(task, None, None)
+}
+
+pub fn task_agent_context_with_a2a(
+    task: &Task,
+    a2a: Option<&A2aContextInfo>,
+    brief: Option<&str>,
+) -> String {
     let mut out = format!("# Task: {}\n", task.name);
-    if let Some(home) = task.home_member() {
-        out.push_str(&format!(
-            "Home (cwd): {} `{}`\n",
-            home.repo,
-            home.path.display()
-        ));
+    if let Some(brief) = brief.map(str::trim).filter(|b| !b.is_empty()) {
+        out.push_str("\n## User brief\n");
+        out.push_str(brief);
+        out.push('\n');
     }
-    let siblings: Vec<_> = task
-        .members
-        .iter()
-        .filter(|m| m.repo != task.home_repo)
-        .collect();
-    if !siblings.is_empty() {
-        out.push_str("Also:\n");
-        for m in siblings {
-            out.push_str(&format!("- {}: `{}`\n", m.repo, m.path.display()));
+    if task.members.len() >= 2 {
+        out.push_str(
+            "\nopenOrchestra multi-context task: each member project has its own agent cwd.\n",
+        );
+        if let Some(home) = task.home_member() {
+            out.push_str(&format!(
+                "Home / orchestrator: {} `{}` (worktree id `{}`)\n",
+                home.repo,
+                home.path.display(),
+                home.worktree_id
+            ));
+        }
+        let siblings: Vec<_> = task
+            .members
+            .iter()
+            .filter(|m| m.repo != task.home_repo)
+            .collect();
+        if !siblings.is_empty() {
+            out.push_str("Specialists (do not edit these trees from home — delegate via A2A):\n");
+            for m in &siblings {
+                out.push_str(&format!(
+                    "- {}: path `{}` · worktree id `{}`\n",
+                    m.repo,
+                    m.path.display(),
+                    m.worktree_id
+                ));
+            }
+        }
+        if let Some(a2a) = a2a {
+            out.push_str("\n## A2A broker (localhost)\n");
+            out.push_str(&format!("Base URL: {}\n", a2a.base_url));
+            out.push_str(&format!(
+                "API key: `{}` (Authorization: Bearer …)\n",
+                a2a.api_key
+            ));
+            out.push_str(&format!(
+                "Orchestrator card: {}/.well-known/agent-card.json\n",
+                a2a.base_url
+            ));
+            for m in &siblings {
+                let enc = m.worktree_id.replace('/', "%2F");
+                out.push_str(&format!(
+                    "- {} card: {}/t/{}/.well-known/agent-card.json\n",
+                    m.repo, a2a.base_url, enc
+                ));
+            }
+            out.push_str(&format!(
+                "\nHelpers under `~/.openorchestra/tasks/{}/a2a/`:\n",
+                task.slug
+            ));
+            out.push_str(
+                "- `./delegate.sh <worktree_id> \"message\"` — SendMessage to specialist\n",
+            );
+            out.push_str("- `./status.sh <a2a_task_id>` — GetTask\n");
+            out.push_str(
+                "- `./complete.sh <a2a_task_id> [summary]` — complete inbound work (specialists)\n",
+            );
+            out.push_str("- `mcp-tools.json` — tool descriptors for MCP-capable agents\n");
+            out.push_str(
+                "\nInbox for this member: `a2a/inbox/<worktree_id_with_slashes_as__>.jsonl`\n",
+            );
         }
     }
     out
 }
 
-/// Write harness-owned agent context for a multi-member task.
+/// Write harness-owned agent context for a task that needs it.
 ///
-/// Returns `Ok(None)` for single-member tasks (no file written). Never writes
-/// into a project worktree.
+/// Returns `Ok(None)` when there is nothing to inject (solo task, no brief).
+/// Never writes into a project worktree.
 pub fn write_task_agent_context(task: &Task, tasks_root: &Path) -> Result<Option<PathBuf>, TaskError> {
-    if task.members.len() < 2 {
+    write_task_agent_context_with_a2a(task, tasks_root, None)
+}
+
+pub fn write_task_agent_context_with_a2a(
+    task: &Task,
+    tasks_root: &Path,
+    a2a: Option<A2aContextInfo>,
+) -> Result<Option<PathBuf>, TaskError> {
+    let brief = read_task_brief(tasks_root, &task.slug);
+    if task.members.len() < 2 && brief.is_none() {
         return Ok(None);
     }
     let path = task_agent_context_path(tasks_root, &task.slug);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(&path, task_agent_context(task))?;
+    fs::write(
+        &path,
+        task_agent_context_with_a2a(task, a2a.as_ref(), brief.as_deref()),
+    )?;
     Ok(Some(path))
 }
 
-/// Ensure multi-member task context exists; return its path when applicable.
+/// Ensure task context exists; return its path when applicable.
 pub fn ensure_task_agent_context(task: &Task, tasks_root: &Path) -> Result<Option<PathBuf>, TaskError> {
-    if task.members.len() < 2 {
+    if !task_needs_agent_context(task, tasks_root) {
         return Ok(None);
     }
     let path = task_agent_context_path(tasks_root, &task.slug);
@@ -511,13 +631,46 @@ mod tests {
             archived: false,
         };
         let md = task_agent_context(&task);
-        assert!(md.contains("Home (cwd): jam"));
+        assert!(md.contains("Home / orchestrator: jam"));
+        assert!(md.contains("Specialists"));
+        assert!(md.contains("api"));
         assert!(md.contains("- api:"));
         assert!(!md.contains("do not commit"));
     }
 
     #[test]
-    fn write_task_agent_context_skips_single_member() {
+    fn task_agent_context_includes_brief() {
+        let task = Task {
+            id: "auth".into(),
+            name: "add auth".into(),
+            slug: "auth".into(),
+            home_repo: "jam".into(),
+            members: vec![
+                TaskMember {
+                    repo: "jam".into(),
+                    worktree_id: "jam/auth".into(),
+                    path: PathBuf::from("/wt/jam/auth"),
+                    branch: "feat/auth".into(),
+                },
+                TaskMember {
+                    repo: "api".into(),
+                    worktree_id: "api/auth".into(),
+                    path: PathBuf::from("/wt/api/auth"),
+                    branch: "feat/auth".into(),
+                },
+            ],
+            agent_kind: AgentKind::default(),
+            created_at: "t".into(),
+            archived: false,
+        };
+        let md = task_agent_context_with_a2a(&task, None, Some("Wire JWT across jam + api"));
+        assert!(md.contains("## User brief"));
+        assert!(md.contains("Wire JWT across jam + api"));
+        assert!(md.contains("Home / orchestrator: jam"));
+    }
+
+    #[test]
+    fn write_task_agent_context_skips_single_member_without_brief() {
         let dir = tempfile::tempdir().unwrap();
         let task = Task {
             id: "solo".into(),
@@ -538,6 +691,33 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(!task_agent_context_path(dir.path(), "solo").exists());
+    }
+
+    #[test]
+    fn write_task_agent_context_writes_solo_when_brief_present() {
+        let dir = tempfile::tempdir().unwrap();
+        write_task_brief(dir.path(), "solo", "fix the login form").unwrap();
+        let task = Task {
+            id: "solo".into(),
+            name: "solo".into(),
+            slug: "solo".into(),
+            home_repo: "jam".into(),
+            members: vec![TaskMember {
+                repo: "jam".into(),
+                worktree_id: "jam/solo".into(),
+                path: PathBuf::from("/wt/jam/solo"),
+                branch: "feat/solo".into(),
+            }],
+            agent_kind: AgentKind::default(),
+            created_at: "t".into(),
+            archived: false,
+        };
+        let path = write_task_agent_context(&task, dir.path())
+            .unwrap()
+            .expect("brief alone is enough to write");
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(body.contains("fix the login form"));
+        assert!(!body.contains("Specialists"));
     }
 
     #[test]

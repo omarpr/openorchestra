@@ -118,15 +118,19 @@ impl HarnessWorkspace {
             }
             if let Some(w) = repo.worktrees.iter().find(|w| w.path == path) {
                 if let Some(tid) = &w.task_id {
-                    return Some(crate::tmux::session_prefix(&format!("task:{tid}")));
+                    return Some(crate::tmux::session_prefix(
+                        &a2a_broker::task_member_pane_key(tid, &w.id),
+                    ));
                 }
                 return Some(crate::tmux::session_prefix(&w.id));
             }
         }
         for task in self.task_store.active() {
-            if let Some(home) = task.home_path() {
-                if home == path {
-                    return Some(crate::tmux::session_prefix(&format!("task:{}", task.id)));
+            for m in &task.members {
+                if m.path == path {
+                    return Some(crate::tmux::session_prefix(
+                        &a2a_broker::task_member_pane_key(&task.id, &m.worktree_id),
+                    ));
                 }
             }
         }
@@ -154,7 +158,11 @@ impl HarnessWorkspace {
                 let prefix = w
                     .task_id
                     .as_ref()
-                    .map(|tid| crate::tmux::session_prefix(&format!("task:{tid}")))
+                    .map(|tid| {
+                        crate::tmux::session_prefix(&a2a_broker::task_member_pane_key(
+                            tid, &w.id,
+                        ))
+                    })
                     .unwrap_or_else(|| crate::tmux::session_prefix(&w.id));
                 attributables.push(Attributable {
                     label: w.name.clone(),
@@ -422,13 +430,15 @@ impl HarnessWorkspace {
             .find(|r| r.name == focused.repo)
             .map(|r| r.compare_ref.clone())
             .unwrap_or_else(|| "HEAD".into());
+        // Per-member context: agent/shell cwd and pane key follow the focused
+        // member (home when none selected). Unified DIFF stays task-scoped.
         Some(Resolved {
-            key: format!("task:{task_id}"),
-            path: home.path.clone(),
+            key: a2a_broker::task_member_pane_key(task_id, &focused.worktree_id),
+            path: focused.path.clone(),
             editor_path: focused.path.clone(),
             agent_kind: Some(task.agent_kind.clone()),
             compare_ref,
-            branch: home.branch.clone(),
+            branch: focused.branch.clone(),
             task_id: Some(task_id.to_string()),
         })
     }
@@ -446,27 +456,41 @@ impl HarnessWorkspace {
         let Some(task) = self.task_store.get(task_id) else {
             return Vec::new();
         };
-        let Some(home) = task.home_member() else {
-            return Vec::new();
+        let member = match task
+            .members
+            .iter()
+            .find(|m| m.path == r.path)
+            .or_else(|| task.home_member())
+        {
+            Some(m) => m,
+            None => return Vec::new(),
         };
-        let Some(entry) = self.manager.registry.get(&home.worktree_id) else {
+        let Some(entry) = self.manager.registry.get(&member.worktree_id) else {
             return Vec::new();
         };
         let env = worktrees::HookEnv {
             repo_root: entry.repo_root.clone(),
-            worktree: home.path.clone(),
-            branch: home.branch.clone(),
+            worktree: member.path.clone(),
+            branch: member.branch.clone(),
             task_slug: task.slug.clone(),
             task_id: Some(task_id.clone()),
             home_worktree: task.home_path().map(|p| p.to_path_buf()),
         };
         let mut pairs: Vec<(String, String)> = env.to_map().into_iter().collect();
-        // Multi-member sibling paths for agents (harness state, not project files).
         let tasks_root = self.data_dir.join("tasks");
         if let Ok(Some(path)) = worktrees::ensure_task_agent_context(task, &tasks_root) {
             pairs.push((
                 agent_runtime::HARNESS_TASK_CONTEXT.to_string(),
                 path.to_string_lossy().into_owned(),
+            ));
+        }
+        // A2A broker endpoint for multi-member orchestration (when running).
+        if let Some(info) = self.task_brokers.get(task_id) {
+            pairs.push(("HARNESS_A2A_URL".into(), info.base_url.clone()));
+            pairs.push(("HARNESS_A2A_KEY".into(), info.api_key.clone()));
+            pairs.push((
+                "HARNESS_A2A_TENANT".into(),
+                member.worktree_id.clone(),
             ));
         }
         pairs
@@ -704,8 +728,23 @@ impl HarnessWorkspace {
         pane.last_used = self.pane_clock;
         pane.tabs.push(Tab { id: tab_id, title, content, agent: agent_of_kind });
         pane.active = tab_id;
+        let opened_agent_key = matches!(kind, TabKind::Agent(_)).then(|| r.key.clone());
         self.focus_active_pane(window, cx);
         self.save_panes();
+        if let Some(key) = opened_agent_key {
+            self.flush_a2a_inbox_for_pane(&key);
+            // New tmux sessions are not always listed instantly; retry shortly.
+            let retry_key = key.clone();
+            cx.spawn(async move |view, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(750))
+                    .await;
+                let _ = view.update(cx, |ws, _cx| {
+                    ws.flush_a2a_inbox_for_pane(&retry_key);
+                });
+            })
+            .detach();
+        }
         cx.notify();
     }
 

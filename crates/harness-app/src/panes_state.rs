@@ -49,6 +49,26 @@ pub fn load(path: &Path) -> PanesState {
     }
 }
 
+/// Rewrite legacy `task:{id}` pane keys to `task:{id}:member:{home_worktree_id}`.
+///
+/// Returns the number of keys migrated. Idempotent.
+pub fn migrate_task_pane_keys(
+    state: &mut PanesState,
+    home_by_task: &[(String, String)],
+) -> usize {
+    let mut moved = 0;
+    for (task_id, home_wt) in home_by_task {
+        let legacy = format!("task:{task_id}");
+        if let Some(wp) = state.worktrees.remove(&legacy) {
+            let neu = a2a_broker::task_member_pane_key(task_id, home_wt);
+            // Prefer existing new-key data if both somehow exist.
+            state.worktrees.entry(neu).or_insert(wp);
+            moved += 1;
+        }
+    }
+    moved
+}
+
 pub fn save(path: &Path, state: &PanesState) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -106,6 +126,34 @@ mod tests {
         );
         save(&path, &state);
         assert_eq!(load(&path), state);
+    }
+
+    #[test]
+    fn migrate_task_pane_keys_rewrites_legacy() {
+        let mut state = PanesState {
+            next_tab_id: 2,
+            worktrees: BTreeMap::new(),
+        };
+        state.worktrees.insert(
+            "task:auth".into(),
+            WorktreePanes {
+                active: Some(1),
+                tabs: vec![TabRecord {
+                    id: 1,
+                    kind: TabRecordKind::Shell,
+                    title: "shell".into(),
+                }],
+            },
+        );
+        let n = migrate_task_pane_keys(
+            &mut state,
+            &[("auth".into(), "jam/auth".into())],
+        );
+        assert_eq!(n, 1);
+        assert!(!state.worktrees.contains_key("task:auth"));
+        assert!(state
+            .worktrees
+            .contains_key("task:auth:member:jam/auth"));
     }
 
     #[test]

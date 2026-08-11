@@ -1,13 +1,13 @@
-//! Centered "New task" dialog — description, optional branch, project members.
+//! Centered "New task" dialog — name, brief, optional branch, project members.
 
 use super::super::*;
 
 impl HarnessWorkspace {
-    /// Push `feat/{slug}` into the branch field placeholder when the description changes.
+    /// Push `feat/{slug}` into the branch field placeholder when the name changes.
     pub(crate) fn sync_new_task_branch_placeholder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let auto = self.new_task.as_ref().map(|dialog| {
-            let desc = dialog.description.read(cx).text(cx);
-            format!("feat/{}", slugify(desc.trim()))
+            let name = dialog.name.read(cx).text(cx);
+            format!("feat/{}", slugify(name.trim()))
         });
         let Some(auto) = auto else { return };
         let Some(dialog) = self.new_task.as_mut() else { return };
@@ -30,7 +30,8 @@ impl HarnessWorkspace {
             return div().into_any_element();
         };
 
-        let desc_editor = dialog.description.clone();
+        let name_editor = dialog.name.clone();
+        let brief_editor = dialog.brief.clone();
         let branch_editor = dialog.branch.clone();
 
         let field_label = |label: &str| {
@@ -43,8 +44,8 @@ impl HarnessWorkspace {
 
         let card = div()
             .id("new-task-card")
-            .w(px(440.0))
-            .max_h(px(560.0))
+            .w(px(480.0))
+            .max_h(px(640.0))
             .flex()
             .flex_col()
             .gap_3()
@@ -101,8 +102,22 @@ impl HarnessWorkspace {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(field_label("Description"))
-                    .child(self.render_input(hx, desc_editor, cx)),
+                    .child(field_label("Name"))
+                    .child(self.render_input(hx, name_editor, cx)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(field_label("Brief"))
+                    .child(self.render_multiline_input(hx, brief_editor, cx))
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(hx.tx2)
+                            .child("Shared with every agent as the starting prompt."),
+                    ),
             )
             .child(
                 div()
@@ -131,7 +146,7 @@ impl HarnessWorkspace {
                             .flex()
                             .flex_col()
                             .min_h_0()
-                            .max_h(px(220.0))
+                            .max_h(px(180.0))
                             .overflow_y_scroll()
                             .child(self.render_new_task_members(hx, cx)),
                     ),
@@ -200,7 +215,7 @@ impl HarnessWorkspace {
             .into_any_element()
     }
 
-    /// Info control — description vs home vs multi-project context.
+    /// Info control — name vs brief vs home vs multi-project context.
     fn render_new_task_info(&self, hx: &HarnessTheme) -> impl IntoElement {
         div()
             .id("new-task-info")
@@ -214,7 +229,7 @@ impl HarnessWorkspace {
             .cursor_default()
             .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
             .tooltip(tip(
-                "The description names what the task is about. Home is the project the agent runs from. Multi-project tasks pass sibling worktree paths to the agent via harness state (not by writing AGENTS.md).",
+                "Name labels the effort. Brief is the starting prompt injected into agents. Home is where the orchestrator runs. Multi-project tasks coordinate via A2A — project AGENTS.md is never overwritten.",
             ))
             .child("ⓘ")
     }
@@ -317,5 +332,31 @@ impl HarnessWorkspace {
             col = col.child(row);
         }
         col
+    }
+
+    /// Taller editor chrome for the brief field (Enter inserts a newline).
+    fn render_multiline_input(
+        &self,
+        hx: &HarnessTheme,
+        editor: Entity<Editor>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .key_context("HarnessInput")
+            .on_action(cx.listener(Self::cancel_edit))
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_h(px(72.0))
+            .max_h(px(160.0))
+            .px_1p5()
+            .py_1()
+            .rounded_md()
+            .bg(hx.bg0)
+            .border_1()
+            .border_color(hx.accent)
+            .text_sm()
+            .text_color(hx.tx0)
+            .child(editor)
     }
 }
