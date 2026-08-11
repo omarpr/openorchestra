@@ -6,6 +6,18 @@
 //! only uses them on graceful (`.upgrade().ok()`) paths — never on construction
 //! or render — so we pass invalid handles and never create a real Workspace.
 //!
+//! The consequence, which anything added here has to reckon with: every zed code
+//! path gated on a live `Project` or `Workspace` is **dead** in this pane. It
+//! does not misbehave, it never runs. File drop was the first feature to hit
+//! that — zed's `Item::handle_drop` opens with `project.upgrade()` and returns
+//! `false` — so this pane wires its own `drag_over`/`on_drop` (see
+//! [`TerminalPane::drop_paths`]) rather than inheriting zed's. Expect to
+//! re-implement, not to configure.
+//!
+//! Dropping files from Finder onto the pane inserts their shell-quoted paths
+//! into whatever is running — the point being screenshots, whose macOS filenames
+//! are miserable to type by hand.
+//!
 //! On creation the pane runs **whichever agent the worktree records**
 //! (§4.5) — pi, opencode, claude, codex, kimi — or a plain shell on the
 //! read-only `main` entry (D8), with cwd = the configured root. When the
@@ -23,8 +35,8 @@ use std::path::PathBuf;
 use agent_runtime::AgentCommand;
 
 use gpui::{
-    App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, Render, Styled,
-    WeakEntity, Window, div, prelude::*, px,
+    App, AppContext, Context, Entity, ExternalPaths, FocusHandle, Focusable, IntoElement, Render,
+    Styled, WeakEntity, Window, div, prelude::*, px,
 };
 use project::Project;
 use terminal::{
@@ -211,6 +223,27 @@ impl TerminalPane {
         })
         .detach();
     }
+
+    /// Insert paths dropped from Finder into the running agent's prompt.
+    fn drop_paths(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self.view.clone() else { return };
+        let Some(text) = paths_to_prompt_text(paths.paths()) else {
+            return;
+        };
+
+        // `terminal()` returns a reference borrowed from `cx`, so it is cloned
+        // out before `terminal.update(cx, …)` needs `cx` mutably.
+        let handle = view.focus_handle(cx);
+        let terminal = view.read(cx).terminal().clone();
+
+        // Focus follows the paste — the point of the drop is to keep typing.
+        window.focus(&handle, cx);
+
+        // `paste`, not `input`: this wraps the text in bracketed-paste markers
+        // when the running TUI has enabled that mode (Claude Code does), which
+        // is what keeps a multi-file drop from being read as a submit.
+        terminal.update(cx, |terminal, _| terminal.paste(&text));
+    }
 }
 
 impl Focusable for TerminalPane {
@@ -232,7 +265,32 @@ impl Render for TerminalPane {
         }
         let hx = theme(cx).clone();
         match &self.view {
-            Some(view) => div().size_full().bg(hx.bg0).child(view.clone()),
+            Some(view) => {
+                let accent = hx.accent;
+                div()
+                    .size_full()
+                    .bg(hx.bg0)
+                    // Always laid out, painted the background colour, so
+                    // `drag_over` below changes only the *colour*. Adding the
+                    // border on hover instead would shrink the content box
+                    // mid-drag, resize the pty, and make the agent redraw its
+                    // whole prompt under the user's cursor.
+                    //
+                    // The border is the *entire* affordance, hence 2px: a
+                    // background tint cannot work here. `TerminalView` wraps its
+                    // content in an opaque `bg(editor_background)` fill, and
+                    // `harness_zed_theme::hex` emits `#rrggbb` with no alpha, so
+                    // anything painted behind the terminal is covered.
+                    .border_2()
+                    .border_color(hx.bg0)
+                    .drag_over::<ExternalPaths>(move |style, _, _, _| {
+                        style.border_color(accent)
+                    })
+                    .on_drop(cx.listener(|pane, paths: &ExternalPaths, window, cx| {
+                        pane.drop_paths(paths, window, cx);
+                    }))
+                    .child(view.clone())
+            }
             None => div()
                 .size_full()
                 .bg(hx.bg0)
@@ -244,5 +302,154 @@ impl Render for TerminalPane {
                         .child(self.error.clone().unwrap_or_else(|| format!("spawning {} …", self.spawned))),
                 ),
         }
+    }
+}
+
+/// Format dropped file paths for insertion into the running agent's prompt.
+///
+/// Shell-quoted only where a path needs it, joined by single spaces, with one
+/// leading and one trailing space: the leading space keeps the first path from
+/// fusing onto whatever is already at the cursor, and the trailing one lets you
+/// keep typing straight after the drop. Byte-identical to what zed's
+/// `TerminalView::add_paths_to_terminal` produces for any path both accept.
+///
+/// `None` — never `Some(" ")` — when nothing usable survived, so the caller
+/// pastes nothing rather than injecting a stray space.
+fn paths_to_prompt_text(paths: &[PathBuf]) -> Option<String> {
+    let mut text = String::new();
+    for path in paths {
+        // A path we cannot represent is skipped and *named*. Zed's own version
+        // filter_maps the same failure away silently, so a five-file drop
+        // quietly becomes four with nothing said about it.
+        //
+        // In practice only `to_str` fires: `try_quote` refuses solely on an
+        // interior nul, which an OS-supplied path cannot contain. It is matched
+        // rather than unwrapped because that is shlex's contract, not ours.
+        let Some(quoted) = path.to_str().and_then(|p| shlex::try_quote(p).ok()) else {
+            log::warn!(
+                "dropped path skipped (not shell-quotable): {}",
+                path.display()
+            );
+            continue;
+        };
+        text.push(' ');
+        text.push_str(&quoted);
+    }
+    if text.is_empty() {
+        return None;
+    }
+    text.push(' ');
+    Some(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_clean_path_is_unquoted_and_padded() {
+        assert_eq!(
+            paths_to_prompt_text(&[PathBuf::from("/Users/sorce/notes.md")]),
+            Some(" /Users/sorce/notes.md ".to_string())
+        );
+    }
+
+    #[test]
+    fn screenshot_name_with_spaces_is_quoted_intact() {
+        // The case this feature exists for: macOS names every screenshot with
+        // spaces, which is exactly what makes typing the path by hand awful.
+        let p = PathBuf::from("/Users/sorce/Desktop/Screenshot 2026-08-09 at 1.23.45 PM.png");
+        assert_eq!(
+            paths_to_prompt_text(&[p]),
+            Some(" '/Users/sorce/Desktop/Screenshot 2026-08-09 at 1.23.45 PM.png' ".to_string())
+        );
+    }
+
+    #[test]
+    fn multiple_paths_are_space_separated_and_quoted_only_where_needed() {
+        let paths = [
+            PathBuf::from("/a/one.png"),
+            PathBuf::from("/b/two three.png"),
+            PathBuf::from("/c/four.png"),
+        ];
+        assert_eq!(
+            paths_to_prompt_text(&paths),
+            Some(" /a/one.png '/b/two three.png' /c/four.png ".to_string())
+        );
+    }
+
+    #[test]
+    fn shell_metacharacters_are_quoted_inert() {
+        // Not cosmetic: this pane also runs a plain `Shell::System` (the
+        // read-only `main` entry, and after an agent exits), so a path that
+        // escaped quoting would land at a real shell prompt and eventually run.
+        // Single-quoted shell strings do no escape processing at all, which is
+        // what makes $(), backticks, ; and && inert here.
+        let paths = [
+            PathBuf::from("/tmp/$(whoami).png"),
+            PathBuf::from("/tmp/a;rm -rf b.png"),
+        ];
+        assert_eq!(
+            paths_to_prompt_text(&paths),
+            Some(" '/tmp/$(whoami).png' '/tmp/a;rm -rf b.png' ".to_string())
+        );
+    }
+
+    #[test]
+    fn an_embedded_single_quote_switches_to_double_quotes() {
+        // A single quote cannot appear inside a single-quoted shell string, so
+        // shlex switches strategy rather than escaping. Pinned because it is the
+        // least obvious branch of the quoting and the likeliest to regress
+        // unnoticed if the implementation is ever swapped.
+        assert_eq!(
+            paths_to_prompt_text(&[PathBuf::from("/tmp/it's.png")]),
+            Some(" \"/tmp/it's.png\" ".to_string())
+        );
+    }
+
+    #[test]
+    fn a_quote_does_not_open_a_double_quoted_window_for_metacharacters() {
+        // The dangerous-looking combination, pinned deliberately: a double-quoted
+        // shell string *does* expand $() and backticks, so if the quote above
+        // forced the whole path into one pair of double quotes, a path could
+        // execute. It does not — shlex quotes per *chunk*, double-quoting only
+        // the run containing the apostrophe and single-quoting the run holding
+        // the metacharacters, where nothing expands.
+        assert_eq!(
+            paths_to_prompt_text(&[PathBuf::from("/tmp/it's$(whoami)`id`.png")]),
+            Some(" \"/tmp/it's\"'$(whoami)`id`.png' ".to_string())
+        );
+    }
+
+    #[test]
+    fn empty_input_yields_nothing() {
+        assert_eq!(paths_to_prompt_text(&[]), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unrepresentable_paths_are_skipped_not_fatal() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        // Invalid UTF-8 — `to_str()` returns None for this.
+        let bad = PathBuf::from(OsStr::from_bytes(&[0x2f, 0xff, 0xfe]));
+
+        // A bad path must not take its good neighbours down with it.
+        assert_eq!(
+            paths_to_prompt_text(&[bad, PathBuf::from("/tmp/ok.png")]),
+            Some(" /tmp/ok.png ".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn all_paths_unrepresentable_yields_none_not_a_bare_space() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let bad = PathBuf::from(OsStr::from_bytes(&[0x2f, 0xff, 0xfe]));
+        // Some(" ") here would inject a stray space into the user's prompt.
+        assert_eq!(paths_to_prompt_text(&[bad]), None);
     }
 }
