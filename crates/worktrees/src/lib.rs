@@ -38,7 +38,9 @@ pub use registry::{
 pub use runner::{CommandOutput, CommandRunner, SystemRunner};
 pub use tasks::{
     archive_task, create_task, delete_task, ensure_task_agent_context, migrate_worktrees_to_tasks,
-    task_agent_context, task_agent_context_path, write_task_agent_context, CreateTaskMember,
+    read_task_brief, task_agent_context, task_agent_context_path, task_agent_context_with_a2a,
+    task_brief_path, task_needs_agent_context, write_task_agent_context,
+    write_task_agent_context_with_a2a, write_task_brief, A2aContextInfo, CreateTaskMember,
     CreateTaskRequest, Task, TaskError, TaskMember, TaskStore,
 };
 

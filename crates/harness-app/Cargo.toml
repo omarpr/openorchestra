@@ -81,6 +81,8 @@ status-watch = { path = "../status-watch" }
 # The agent-agnostic layer (§4.5-4.6): picks the CLI per worktree, drops in the
 # per-agent config, and normalizes every adapter's signal onto one bus.
 agent-runtime = { path = "../agent-runtime" }
+# Localhost A2A broker for multi-member task orchestration.
+a2a-broker = { path = "../a2a-broker" }
 # M8: the Phase 2 chat tab drives a `pi --mode rpc` sidecar through this.
 pi-client = { path = "../pi-client" }
 

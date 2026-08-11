@@ -69,9 +69,57 @@ impl HarnessWorkspace {
                     .gap_2()
                     .child(div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx0).child("openOrchestra"))
                     .child(div().text_xs().text_color(hx.tx2).child("·"))
-                    .child(div().text_xs().font_family(hx.font_mono).text_color(hx.tx1).child(branch)),
+                    .child(div().text_xs().font_family(hx.font_mono).text_color(hx.tx1).child(branch))
+                    .children(self.render_a2a_delegation_chip(hx).into_iter()),
             )
             .children(diff_toggle)
+    }
+
+    /// Compact A2A delegation status for the active multi-member task.
+    fn render_a2a_delegation_chip(&self, hx: &HarnessTheme) -> Option<AnyElement> {
+        let rows = self.a2a_delegation_summary();
+        if rows.is_empty() {
+            let r = self.resolve()?;
+            let tid = r.task_id.as_ref()?;
+            if !self.task_brokers.contains_key(tid) {
+                return None;
+            }
+            return Some(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded_md()
+                    .bg(hx.surface)
+                    .text_xs()
+                    .text_color(hx.tx2)
+                    .child("A2A")
+                    .into_any_element(),
+            );
+        }
+        let working = rows
+            .iter()
+            .filter(|(_, _, s)| *s == "working" || *s == "submitted")
+            .count();
+        let done = rows.iter().filter(|(_, _, s)| *s == "completed").count();
+        let label = format!("A2A {working} active · {done} done");
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_1p5()
+                .py_0p5()
+                .rounded_md()
+                .bg(hx.surface)
+                .text_xs()
+                .font_family(hx.font_mono)
+                .text_color(if working > 0 { hx.amber } else { hx.tx2 })
+                .child(label)
+                .into_any_element(),
+        )
     }
 
     /// The conductor pet: a small maestro who appears with each notification

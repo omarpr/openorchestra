@@ -13,6 +13,10 @@ impl HarnessWorkspace {
         self.pending_repo_trash = None;
         self.menu = None;
         self.edit = None;
+        if let Selection::Task { task_id, .. } = &self.selection {
+            let tid = task_id.clone();
+            self.ensure_task_broker(&tid);
+        }
         self.ensure_pane(window, cx);
         self.recompute_diff(cx);
         self.focus_active_pane(window, cx);
@@ -400,17 +404,26 @@ impl HarnessWorkspace {
             self.new_task_home = r.name.clone();
             self.new_target_repo = r.name.clone();
         }
-        let description = cx.new(|cx| {
+        let name = cx.new(|cx| {
             let mut e = Editor::single_line(window, cx);
-            e.set_placeholder_text("short task description…", window, cx);
+            e.set_placeholder_text("effort name…", window, cx);
             e
         });
-        // Re-render when the description changes so the branch placeholder
+        // Re-render when the name changes so the branch placeholder
         // (feat/{slug}) stays in sync.
-        let _desc_sub = cx.subscribe(&description, |_ws, _editor, event, cx| {
+        let _name_sub = cx.subscribe(&name, |_ws, _editor, event, cx| {
             if matches!(event, editor::EditorEvent::BufferEdited) {
                 cx.notify();
             }
+        });
+        let brief = cx.new(|cx| {
+            let mut e = Editor::auto_height(3, 8, window, cx);
+            e.set_placeholder_text(
+                "What should the agents work on?",
+                window,
+                cx,
+            );
+            e
         });
         let auto = "feat/task".to_string();
         let branch = cx.new(|cx| {
@@ -418,12 +431,13 @@ impl HarnessWorkspace {
             e.set_placeholder_text(auto.as_str(), window, cx);
             e
         });
-        window.focus(&description.focus_handle(cx), cx);
+        window.focus(&name.focus_handle(cx), cx);
         self.new_task = Some(NewTaskDialog {
-            description,
+            name,
+            brief,
             branch,
             auto_branch_shown: auto,
-            _desc_sub,
+            _name_sub,
         });
         self.edit = None;
         self.menu = None;
@@ -437,27 +451,30 @@ impl HarnessWorkspace {
 
     pub(crate) fn submit_new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(dialog) = self.new_task.as_ref() else { return };
-        let name = dialog.description.read(cx).text(cx);
+        let name = dialog.name.read(cx).text(cx);
         let name = name.trim().to_string();
         if name.is_empty() {
-            self.note = "enter a short task description".to_string();
+            self.note = "enter an effort name".to_string();
             cx.notify();
             return;
         }
+        let brief = dialog.brief.read(cx).text(cx);
+        let brief = brief.trim().to_string();
         let branch_raw = dialog.branch.read(cx).text(cx);
         let branch = {
             let t = branch_raw.trim();
             if t.is_empty() { None } else { Some(t.to_string()) }
         };
         self.new_task = None;
-        self.create_named(&name, branch.as_deref(), window, cx);
+        self.create_named(&name, &brief, branch.as_deref(), window, cx);
     }
 
-    /// Create a task from an explicit description and optional branch override.
-    /// Empty branch → `feat/{slug}` from the description.
+    /// Create a task from a name, optional brief, and optional branch override.
+    /// Empty branch → `feat/{slug}` from the name.
     pub(crate) fn create_named(
         &mut self,
         name: &str,
+        brief: &str,
         branch: Option<&str>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -504,38 +521,52 @@ impl HarnessWorkspace {
             })
             .collect();
 
+        // Prefer an enabled local agent; never invent OpenCode when it's off.
+        let agent_kind = default_enabled_agent(&self.prefs)
+            .unwrap_or(AgentKind::OpenCode);
+
         let req = CreateTaskRequest {
             name: name.to_string(),
             slug: slug.clone(),
             home_repo: home.clone(),
             members,
             created_at,
-            agent_kind: AgentKind::OpenCode,
+            agent_kind,
         };
 
         match create_task(&mut self.manager, &mut self.task_store, req) {
             Ok(task_id) => {
-                // Multi-member coordination context lives under harness state
-                // (not project AGENTS.md). Setup runs visibly in the shell
-                // after select so the user can see script output.
+                let tasks_root = self.data_dir.join("tasks");
+                if let Err(e) = write_task_brief(&tasks_root, &slug, brief) {
+                    log::warn!("could not write task brief: {e}");
+                }
+                // Multi-member coordination (+ optional brief) lives under
+                // harness state (not project AGENTS.md). Setup runs visibly
+                // in the shell after select so the user can see script output.
                 let task = self.task_store.get(&task_id).cloned();
                 if let Some(task) = &task {
-                    let tasks_root = self.data_dir.join("tasks");
                     if let Err(e) = write_task_agent_context(task, &tasks_root) {
                         log::warn!("could not write task agent context: {e}");
                     }
+                }
+                let multi = task.as_ref().map(|t| t.members.len() >= 2).unwrap_or(false);
+                if multi {
+                    self.ensure_task_broker(&task_id);
                 }
                 self.note = format!("created task {task_id}");
                 self.refresh(window, cx);
                 self.select(
                     Selection::Task {
-                        task_id,
+                        task_id: task_id.clone(),
                         member_id: None,
                     },
                     window,
                     cx,
                 );
                 self.run_visible_setup_hooks(window, cx);
+                if multi {
+                    self.open_start_specialists(task_id, cx);
+                }
             }
             Err(e) => {
                 self.note = format!("create failed: {e}");
@@ -1014,13 +1045,18 @@ impl HarnessWorkspace {
         if let Some(tid) = task_id {
             if let Some(task) = self.task_store.get(&tid).cloned() {
                 self.run_teardown_hooks(&task);
-                let pane_key = format!("task:{tid}");
+                self.shutdown_task_broker(&tid);
                 for m in &task.members {
+                    let pane_key = a2a_broker::task_member_pane_key(&tid, &m.worktree_id);
+                    self.teardown_sessions(&pane_key);
+                    self.panes.remove(&pane_key);
+                    // Legacy keys from pre multi-context builds.
                     self.teardown_sessions(&m.worktree_id);
                     self.panes.remove(&m.worktree_id);
                 }
-                self.teardown_sessions(&pane_key);
-                self.panes.remove(&pane_key);
+                let legacy = format!("task:{tid}");
+                self.teardown_sessions(&legacy);
+                self.panes.remove(&legacy);
                 match archive_task(&mut self.manager, &mut self.task_store, &tid) {
                     Ok(()) => self.note = format!("archived task {tid}"),
                     Err(e) => self.note = format!("archive failed: {e}"),
@@ -1053,13 +1089,17 @@ impl HarnessWorkspace {
         if let Some(tid) = task_id {
             if let Some(task) = self.task_store.get(&tid).cloned() {
                 self.run_teardown_hooks(&task);
-                let pane_key = format!("task:{tid}");
+                self.shutdown_task_broker(&tid);
                 for m in &task.members {
+                    let pane_key = a2a_broker::task_member_pane_key(&tid, &m.worktree_id);
+                    self.teardown_sessions(&pane_key);
+                    self.panes.remove(&pane_key);
                     self.teardown_sessions(&m.worktree_id);
                     self.panes.remove(&m.worktree_id);
                 }
-                self.teardown_sessions(&pane_key);
-                self.panes.remove(&pane_key);
+                let legacy = format!("task:{tid}");
+                self.teardown_sessions(&legacy);
+                self.panes.remove(&legacy);
                 match delete_task(&mut self.manager, &mut self.task_store, &tid) {
                     Ok(()) => self.note = format!("deleted task {tid}"),
                     Err(e) => self.note = format!("delete failed: {e}"),
