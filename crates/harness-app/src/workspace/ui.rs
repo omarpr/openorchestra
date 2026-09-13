@@ -8,8 +8,10 @@ mod diff;
 mod diff_edit;
 mod new_task;
 mod preflight;
+mod project_search;
 mod settings;
 mod start_specialists;
+mod tool_panel;
 /// `pub(crate)` for `SidebarSection` alone — its variant labels are the keys
 /// `Prefs::collapsed_sections` persists, so the prefs tests pin them.
 pub(crate) mod sidebar;

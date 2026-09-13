@@ -680,23 +680,6 @@ impl HarnessWorkspace {
                     label,
                 )
             }
-            TabKind::Editor => match crate::workspace_host::workspace_for(&r.editor_path, window, cx) {
-                Ok(hosted) => {
-                    crate::workspace_host::probe(&hosted, window, cx);
-                    // Our render tree hosts the modal overlay, so our render
-                    // must re-run when the workspace's modal state changes —
-                    // a child view's notify does not re-render the parent.
-                    cx.observe(&hosted, |_, _, cx| cx.notify()).detach();
-                    (TabContent::Editor(hosted), "{ } editor".to_string())
-                }
-                Err(e) => {
-                    // Never fatal: the other tabs still work.
-                    log::warn!("could not open project for {}: {e}", r.editor_path.display());
-                    self.note = format!("could not open project: {e}");
-                    cx.notify();
-                    return;
-                }
-            },
             // Nothing to construct: the surface reads state the view already
             // holds, so the tab is a marker saying where to draw it.
             TabKind::Diff => (TabContent::Diff, "⑂ diff".to_string()),
@@ -750,12 +733,7 @@ impl HarnessWorkspace {
 
     /// The user tried to edit a diff line. A diff is a picture of a change, not
     /// the file, so the only useful response is to take them somewhere they can
-    /// actually type.
-    ///
-    /// With no editor open there is no choice to make — open one. With editors
-    /// already open, ask: dropping the file into one of several tabs the user
-    /// did not name is a guess, and a wrong guess scrolls a file they were
-    /// reading out from under them.
+    /// actually type — open (or focus) that file as a harness tab.
     pub(crate) fn request_edit(
         &mut self,
         file: String,
@@ -775,79 +753,469 @@ impl HarnessWorkspace {
             cx.notify();
             return;
         }
-        if self.editor_tab_ids().is_empty() {
-            self.open_in_editor(file, line, true, window, cx);
-        } else {
-            self.edit_prompt = Some(EditPrompt { file, line });
-            cx.notify();
-        }
+        self.open_in_editor(file, line, window, cx);
     }
 
-    /// Ids of this worktree's editor tabs, in strip order.
-    pub(crate) fn editor_tab_ids(&self) -> Vec<u64> {
-        let Some(r) = self.resolve() else { return Vec::new() };
-        let Some(pane) = self.panes.get(&r.key) else { return Vec::new() };
-        pane.tabs
-            .iter()
-            .filter(|t| matches!(t.content, TabContent::Editor(_)))
-            .map(|t| t.id)
-            .collect()
-    }
-
-    /// Open `file` at `line` in an editor tab: a fresh one when `new_tab`, else
-    /// the last existing one. Either way the center switches to it — opening a
-    /// file in a tab the user cannot see is indistinguishable from having done
-    /// nothing at all.
+    /// Open `file` at `line` via the service Workspace; the item-sync path
+    /// promotes it to a harness file tab.
     pub(crate) fn open_in_editor(
         &mut self,
         file: String,
         line: Option<u32>,
-        new_tab: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.exit_hooks_edit(window, cx);
         self.edit_prompt = None;
-        if new_tab {
-            self.open_tab(TabKind::Editor, window, cx);
-        } else if let Some(id) = self.editor_tab_ids().last().copied() {
-            let Some(r) = self.resolve() else { return };
-            if let Some(pane) = self.panes.get_mut(&r.key) {
-                pane.active = id;
-            }
-        }
         let Some(r) = self.resolve() else { return };
-        let hosted = self.panes.get(&r.key).and_then(|p| {
-            p.tabs
-                .iter()
-                .find(|t| t.id == p.active)
-                .and_then(|t| match &t.content {
-                    TabContent::Editor(ws) => Some(ws.clone()),
-                    _ => None,
-                })
-        });
-        let Some(hosted) = hosted else {
-            // open_tab logs the real cause (a project that would not open);
-            // this is the user-facing half.
+        let Some(hosted) = self.ensure_service_workspace(window, cx) else {
             self.note = "could not open an editor".to_string();
             cx.notify();
             return;
         };
-        crate::workspace_host::open_file_at(&hosted, &r.path, &file, line, window, cx);
-        self.save_panes();
+        crate::workspace_host::open_file_at(&hosted, &r.path, &file, line, false, window, cx);
         cx.notify();
     }
 
-    /// Show or hide the diff dock.
+    /// Show or hide the right-hand tools panel (Files / Git / Review).
     ///
-    /// `Dock` mode only, which is why this takes no view of `diff_location`: the
-    /// top-bar button that calls it renders only in that mode. In `Tab` mode the
-    /// diff is an ordinary tab — opened from ＋, closed with its ✕ — and there
-    /// is no dock whose visibility could be toggled.
+    /// Always available so Files/Git stay reachable even when Review lives in a
+    /// center tab.
     pub(crate) fn toggle_diff(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.prefs.diff_open = !self.prefs.diff_open;
         self.save_prefs(cx);
         cx.notify();
+    }
+
+    /// Select a tools-panel tab, open the panel if needed, and focus the surface.
+    pub(crate) fn set_tool_tab(
+        &mut self,
+        tab: ToolTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.prefs.tool_tab = tab;
+        self.prefs.diff_open = true;
+        match tab {
+            ToolTab::Files => {
+                let _ = self.ensure_service_workspace(window, cx);
+                match self.files_sub_tab {
+                    FilesSubTab::Explorer => {
+                        self.activate_hosted_tool_panel(ToolTab::Files, window, cx);
+                    }
+                    FilesSubTab::Search => {
+                        self.ensure_project_search_ui(window, cx);
+                        if let Some(ui) = self.project_search.as_ref() {
+                            window.focus(&ui.query.focus_handle(cx), cx);
+                        }
+                    }
+                }
+            }
+            ToolTab::Git => {
+                // Keep the current center tab (Terminal/Chat/…); tools host the
+                // service Workspace without promoting an Editor chrome tab.
+                let _ = self.ensure_service_workspace(window, cx);
+                self.activate_hosted_tool_panel(tab, window, cx);
+            }
+            ToolTab::Review if self.prefs.diff_location == DiffLocation::Tab => {
+                self.open_tab(TabKind::Diff, window, cx);
+            }
+            ToolTab::Review => {
+                window.focus(&self.diff_surface_focus, cx);
+            }
+        }
+        self.save_prefs(cx);
+        cx.notify();
+    }
+
+    /// ⌘⇧E / ⌘E — open tools on Files → Explorer and focus the tree.
+    pub(crate) fn focus_files_tool(
+        &mut self,
+        _: &crate::FocusFilesTool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.files_sub_tab = FilesSubTab::Explorer;
+        self.set_tool_tab(ToolTab::Files, window, cx);
+    }
+
+    /// ⌘⇧F — open tools on Files → Search and focus the query field.
+    pub(crate) fn focus_project_search(
+        &mut self,
+        _: &crate::FocusProjectSearch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.resolve().is_none() {
+            self.note = "select a project first".into();
+            cx.notify();
+            return;
+        }
+        self.files_sub_tab = FilesSubTab::Search;
+        self.prefs.tool_tab = ToolTab::Files;
+        self.prefs.diff_open = true;
+        let _ = self.ensure_service_workspace(window, cx);
+        self.ensure_project_search_ui(window, cx);
+        if let Some(ui) = self.project_search.as_ref() {
+            window.focus(&ui.query.focus_handle(cx), cx);
+        }
+        self.save_prefs(cx);
+        cx.notify();
+    }
+
+    /// ⌘⇧G — open tools on Git and focus the panel.
+    pub(crate) fn focus_git_tool(
+        &mut self,
+        _: &crate::FocusGitTool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_tool_tab(ToolTab::Git, window, cx);
+    }
+
+    /// Open tools on Review (and focus the diff surface).
+    pub(crate) fn focus_review_tool(
+        &mut self,
+        _: &crate::FocusReviewTool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_tool_tab(ToolTab::Review, window, cx);
+    }
+
+    /// Mark the hosted Files/Git panel active and focus it; keep docks closed.
+    pub(crate) fn activate_hosted_tool_panel(
+        &mut self,
+        tab: ToolTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use gpui::Focusable as _;
+        use workspace::Panel as _;
+
+        let Some(hosted) = self.editor_workspace() else {
+            return;
+        };
+        hosted.update(cx, |ws, cx| {
+            for dock in ws.all_docks() {
+                if dock.read(cx).is_open() {
+                    dock.update(cx, |dock, cx| dock.set_open(false, window, cx));
+                }
+            }
+        });
+        match tab {
+            ToolTab::Files => {
+                if let Some(panel) = hosted.read(cx).panel::<project_panel::ProjectPanel>(cx) {
+                    panel.update(cx, |p, cx| {
+                        p.set_active(true, window, cx);
+                        window.focus(&p.focus_handle(cx), cx);
+                    });
+                }
+            }
+            ToolTab::Git => {
+                if let Some(panel) = hosted.read(cx).panel::<git_ui::git_panel::GitPanel>(cx) {
+                    panel.update(cx, |p, cx| {
+                        p.set_active(true, window, cx);
+                        window.focus(&p.focus_handle(cx), cx);
+                    });
+                }
+            }
+            ToolTab::Review => {}
+        }
+    }
+
+    /// Service Workspace for the active selection, if already created.
+    pub(crate) fn editor_workspace(&self) -> Option<Entity<::workspace::Workspace>> {
+        let key = self.resolve()?.key;
+        self.service_workspaces.get(&key).cloned()
+    }
+
+    /// Create or return the per-worktree service Workspace (Files/Git + file tabs).
+    pub(crate) fn ensure_service_workspace(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<::workspace::Workspace>> {
+        let r = self.resolve()?;
+        let key = r.key.clone();
+        if let Some(ws) = self.service_workspaces.get(&key) {
+            return Some(ws.clone());
+        }
+        match crate::workspace_host::workspace_for(&r.editor_path, window, cx) {
+            Ok(hosted) => {
+                crate::workspace_host::probe(&hosted, window, cx);
+                // Hide Zed's nested tab bar — harness owns the strip.
+                self.wire_service_workspace(&hosted, window, cx);
+                self.service_workspaces.insert(key, hosted.clone());
+                // Ensure a pane set exists so file tabs have somewhere to land.
+                self.pane_clock = self.pane_clock.wrapping_add(1);
+                self.panes.entry(r.key.clone()).or_insert_with(|| PaneSet {
+                    tabs: Vec::new(),
+                    active: 0,
+                    last_used: 0,
+                }).last_used = self.pane_clock;
+                cx.notify();
+                Some(hosted)
+            }
+            Err(e) => {
+                log::warn!("could not open project for {}: {e}", r.editor_path.display());
+                self.note = format!("could not open project: {e}");
+                cx.notify();
+                None
+            }
+        }
+    }
+
+    /// Alias used by the tools empty-state button.
+    pub(crate) fn ensure_editor_workspace_quiet(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<::workspace::Workspace>> {
+        self.ensure_service_workspace(window, cx)
+    }
+
+    /// Subscribe to a hosted Zed Workspace so harness file tabs track preview
+    /// ↔ permanent the same way Zed's own tab bar does (edit / double-click).
+    pub(crate) fn wire_service_workspace(
+        &mut self,
+        hosted: &Entity<::workspace::Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        hosted.update(cx, |ws, cx| {
+            for pane in ws.panes() {
+                pane.update(cx, |pane, _| {
+                    pane.set_should_display_tab_bar(|_, _| false);
+                });
+            }
+        });
+        let panes: Vec<_> = hosted.read(cx).panes().iter().cloned().collect();
+        for pane in &panes {
+            self.observe_service_pane_preview(pane, cx);
+        }
+        cx.observe(hosted, |this, _, cx| {
+            this.sync_file_preview_flags(cx);
+            cx.notify();
+        })
+        .detach();
+        cx.subscribe_in(hosted, window, {
+            move |this, hosted, event: &workspace::Event, window, cx| {
+                match event {
+                    workspace::Event::ItemAdded { item } => {
+                        this.on_service_item_added(hosted, item.as_ref(), window, cx);
+                    }
+                    workspace::Event::ItemRemoved { item_id } => {
+                        this.on_service_item_removed(*item_id, window, cx);
+                    }
+                    workspace::Event::ActiveItemChanged => {
+                        this.on_service_active_item_changed(hosted, window, cx);
+                    }
+                    workspace::Event::PaneAdded(pane) => {
+                        pane.update(cx, |pane, _| {
+                            pane.set_should_display_tab_bar(|_, _| false);
+                        });
+                        this.observe_service_pane_preview(pane, cx);
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn observe_service_pane_preview(
+        &mut self,
+        pane: &Entity<::workspace::Pane>,
+        cx: &mut Context<Self>,
+    ) {
+        // Edits clear `preview_item_id` on the pane; observe so italics drop
+        // without waiting for ActiveItemChanged.
+        cx.observe(pane, |this, _, cx| {
+            this.sync_file_preview_flags(cx);
+            cx.notify();
+        })
+        .detach();
+    }
+
+    /// Mirror Zed's `preview_item_id` onto harness `TabContent::File.preview`.
+    pub(crate) fn sync_file_preview_flags(&mut self, cx: &mut Context<Self>) {
+        let Some(r) = self.resolve() else {
+            return;
+        };
+        let Some(hosted) = self.service_workspaces.get(&r.key).cloned() else {
+            return;
+        };
+        let Some(pane_set) = self.panes.get_mut(&r.key) else {
+            return;
+        };
+        let mut changed = false;
+        for tab in &mut pane_set.tabs {
+            let TabContent::File { item_id, preview } = &mut tab.content else {
+                continue;
+            };
+            let is_preview = hosted.read(cx).panes().iter().any(|pane| {
+                pane.read(cx).is_active_preview_item(*item_id)
+            });
+            if *preview != is_preview {
+                *preview = is_preview;
+                changed = true;
+            }
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    /// Double-click a harness file tab → pin it (Zed `unpreview_item_if_preview`).
+    pub(crate) fn pin_file_tab(
+        &mut self,
+        tab_id: u64,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(r) = self.resolve() else {
+            return;
+        };
+        let item_id = {
+            let Some(pane) = self.panes.get(&r.key) else {
+                return;
+            };
+            let Some(tab) = pane.tabs.iter().find(|t| t.id == tab_id) else {
+                return;
+            };
+            match &tab.content {
+                TabContent::File {
+                    item_id,
+                    preview: true,
+                } => *item_id,
+                _ => return,
+            }
+        };
+        if let Some(hosted) = self.service_workspaces.get(&r.key).cloned() {
+            hosted.update(cx, |ws, cx| {
+                for pane in ws.panes() {
+                    pane.update(cx, |pane, _| {
+                        pane.unpreview_item_if_preview(item_id);
+                    });
+                }
+            });
+        }
+        self.sync_file_preview_flags(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn on_service_item_added(
+        &mut self,
+        hosted: &Entity<::workspace::Workspace>,
+        item: &dyn workspace::ItemHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(r) = self.resolve() else { return };
+        let key = r.key.clone();
+        let item_id = item.item_id();
+        let title = item.tab_content_text(0, cx).to_string();
+        let preview = hosted
+            .read(cx)
+            .active_pane()
+            .read(cx)
+            .is_active_preview_item(item_id);
+
+        // Allocate id before borrowing panes mutably.
+        let existing_id = self.panes.get(&key).and_then(|pane| {
+            pane.tabs.iter().find_map(|t| match &t.content {
+                TabContent::File { item_id: id, .. } if *id == item_id => Some(t.id),
+                _ => None,
+            })
+        });
+        let new_id = existing_id.unwrap_or_else(|| self.next_tab_id());
+
+        let pane = self.panes.entry(key).or_insert_with(|| PaneSet {
+            tabs: Vec::new(),
+            active: 0,
+            last_used: 0,
+        });
+        if preview {
+            pane.tabs.retain(|t| {
+                !matches!(
+                    &t.content,
+                    TabContent::File {
+                        preview: true,
+                        ..
+                    }
+                ) || matches!(
+                    &t.content,
+                    TabContent::File { item_id: id, .. } if *id == item_id
+                )
+            });
+        }
+        if let Some(existing) = pane.tabs.iter_mut().find(|t| {
+            matches!(&t.content, TabContent::File { item_id: id, .. } if *id == item_id)
+        }) {
+            existing.title = title;
+            existing.content = TabContent::File { item_id, preview };
+            pane.active = existing.id;
+        } else {
+            pane.tabs.push(Tab {
+                id: new_id,
+                title,
+                content: TabContent::File { item_id, preview },
+                agent: None,
+            });
+            pane.active = new_id;
+        }
+        self.focus_active_pane(window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn on_service_item_removed(
+        &mut self,
+        item_id: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(r) = self.resolve() else { return };
+        let key = r.key.clone();
+        let Some(pane) = self.panes.get_mut(&key) else { return };
+        let was_active = pane.tabs.iter().any(|t| {
+            t.id == pane.active
+                && matches!(&t.content, TabContent::File { item_id: id, .. } if *id == item_id)
+        });
+        pane.tabs.retain(|t| {
+            !matches!(&t.content, TabContent::File { item_id: id, .. } if *id == item_id)
+        });
+        if was_active {
+            pane.active = pane.tabs.last().map(|t| t.id).unwrap_or(0);
+        }
+        if pane.tabs.is_empty() {
+            self.open_tab(TabKind::Shell, window, cx);
+        } else {
+            self.focus_active_pane(window, cx);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn on_service_active_item_changed(
+        &mut self,
+        hosted: &Entity<::workspace::Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sync_file_preview_flags(cx);
+        let Some(item) = hosted.read(cx).active_item(cx) else { return };
+        let item_id = item.item_id();
+        let Some(r) = self.resolve() else { return };
+        let Some(pane) = self.panes.get_mut(&r.key) else { return };
+        if let Some(tab) = pane.tabs.iter().find(|t| {
+            matches!(&t.content, TabContent::File { item_id: id, .. } if *id == item_id)
+        }) {
+            if pane.active != tab.id {
+                pane.active = tab.id;
+                self.focus_active_pane(window, cx);
+                cx.notify();
+            }
+        }
     }
 
     /// Switch bodies between unified and side-by-side.
@@ -933,20 +1301,50 @@ impl HarnessWorkspace {
     }
 
     /// Close a tab, dropping whatever it held — a terminal's pty and its
-    /// process, or a chat's `pi --mode rpc` sidecar.
+    /// process, a chat's `pi --mode rpc` sidecar, or a service-Workspace item.
     pub(crate) fn close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(r) = self.resolve() else { return };
+        let key = r.key.clone();
+        let file_item = self.panes.get(&key).and_then(|p| {
+            p.tabs.iter().find(|t| t.id == id).and_then(|t| match &t.content {
+                TabContent::File { item_id, .. } => Some(*item_id),
+                _ => None,
+            })
+        });
+        if let Some(item_id) = file_item {
+            if let Some(hosted) = self.service_workspaces.get(&key).cloned() {
+                // ItemRemoved sync removes the harness tab; avoid double-remove.
+                hosted.update(cx, |ws, cx| {
+                    for pane in ws.panes() {
+                        let has = pane.read(cx).items().any(|i| i.item_id() == item_id);
+                        if has {
+                            pane.update(cx, |pane, cx| {
+                                pane.close_item_by_id(
+                                    item_id,
+                                    workspace::SaveIntent::Close,
+                                    window,
+                                    cx,
+                                )
+                                .detach_and_log_err(cx);
+                            });
+                            break;
+                        }
+                    }
+                });
+                return;
+            }
+        }
         // Is the tab being closed an agent tab? If so, killing its session ends
         // that agent, and a dead agent never writes the resolving "idle" — so its
         // pill would stay stuck on WAITING/RUNNING forever. Clear it here.
         let was_agent = self
             .panes
-            .get(&r.key)
+            .get(&key)
             .and_then(|p| p.tabs.iter().find(|t| t.id == id))
             .is_some_and(|t| t.agent.is_some());
         if self.has_tmux {
             // Explicit close tears the session down (only app-exit detaches).
-            crate::tmux::kill_session(&crate::tmux::session_name(&r.key, id));
+            crate::tmux::kill_session(&crate::tmux::session_name(&key, id));
         }
         if was_agent {
             // Unknown (renders as IDLE) rather than Idle: we killed the process,
@@ -954,7 +1352,7 @@ impl HarnessWorkspace {
             // because the dead agent will never touch status.json again.
             self.agent_status.insert(r.path.clone(), AgentState::Unknown);
         }
-        let Some(pane) = self.panes.get_mut(&r.key) else { return };
+        let Some(pane) = self.panes.get_mut(&key) else { return };
         let Some(ix) = pane.tabs.iter().position(|t| t.id == id) else { return };
         pane.tabs.remove(ix);
         if pane.active == id {
@@ -1002,13 +1400,22 @@ impl HarnessWorkspace {
             let Some(tab) = p.active_tab() else { return };
             let handle = match &tab.content {
                 TabContent::Terminal(t) => t.read(cx).focus_handle(cx),
-                // With a file open, focus the workspace so the cursor lands in
-                // the buffer. With none, focus our host wrapper so ⌘P / ⌘⇧F
-                // still resolve — the empty pane would leave focus with nothing
-                // carrying the "Workspace" context.
-                TabContent::Editor(ws) => {
-                    if ws.read(cx).active_item(cx).is_some() {
-                        ws.read(cx).focus_handle(cx)
+                TabContent::File { item_id, .. } => {
+                    if let Some(hosted) = self.service_workspaces.get(&r.key) {
+                        let item_id = *item_id;
+                        let item = hosted.read(cx).panes().iter().find_map(|pane| {
+                            pane.read(cx).items().find(|i| i.item_id() == item_id).cloned()
+                        });
+                        if let Some(item) = item {
+                            hosted.update(cx, |ws, cx| {
+                                ws.activate_item(item.as_ref(), true, true, window, cx);
+                            });
+                        }
+                        if hosted.read(cx).active_item(cx).is_some() {
+                            hosted.read(cx).focus_handle(cx)
+                        } else {
+                            self.editor_host_focus.clone()
+                        }
                     } else {
                         self.editor_host_focus.clone()
                     }
@@ -1083,6 +1490,12 @@ impl HarnessWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Land on Review so the comment popover isn't drawn over Files/Git.
+        if self.prefs.diff_location == DiffLocation::Dock {
+            self.prefs.tool_tab = ToolTab::Review;
+            self.prefs.diff_open = true;
+            self.save_prefs(cx);
+        }
         let existing = self
             .resolve()
             .and_then(|r| self.review.get(&r.key, &file, line))
@@ -1660,12 +2073,23 @@ impl HarnessWorkspace {
             .panes
             .iter()
             .map(|(key, pane)| {
-                let tabs = pane
+                let tabs: Vec<TabRecord> = pane
                     .tabs
                     .iter()
-                    .map(|t| TabRecord { id: t.id, kind: t.kind_tag(), title: t.title.clone() })
+                    .filter(|t| !matches!(t.content, TabContent::File { .. }))
+                    .map(|t| TabRecord {
+                        id: t.id,
+                        kind: t.kind_tag(),
+                        title: t.title.clone(),
+                    })
                     .collect();
-                (key.clone(), WorktreePanes { active: Some(pane.active), tabs })
+                let active = pane
+                    .tabs
+                    .iter()
+                    .find(|t| t.id == pane.active && !matches!(t.content, TabContent::File { .. }))
+                    .map(|t| t.id)
+                    .or_else(|| tabs.first().map(|t| t.id));
+                (key.clone(), WorktreePanes { active, tabs })
             })
             .collect();
         for (key, wp) in updates {
@@ -1695,7 +2119,8 @@ impl HarnessWorkspace {
 
         for (id, kind, title) in records {
             match kind {
-                K::Editor => self.open_tab(TabKind::Editor, window, cx),
+                // Legacy Editor tabs are no longer a chrome type — skip.
+                K::Editor => {}
                 K::Chat => self.open_tab(TabKind::Chat, window, cx),
                 K::Diff => self.open_tab(TabKind::Diff, window, cx),
                 K::Shell => self.restore_terminal_tab(key, id, None, &title, &live, window, cx),

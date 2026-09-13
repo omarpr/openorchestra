@@ -45,8 +45,6 @@ actions!(
         Quit,
         /// New plain-shell tab in the active worktree (§3.4).
         NewTerminal,
-        /// New editor tab (a hosted zed Workspace).
-        NewEditor,
         /// New agent-chat tab.
         NewChat,
         /// Copy the selected diff lines.
@@ -58,6 +56,14 @@ actions!(
         /// Close the active tab in the current worktree pane (⌘W outside an
         /// editor; inside one, the Workspace-scoped binding closes the file).
         CloseTab,
+        /// Open the tools panel on the Files tab (file tree).
+        FocusFilesTool,
+        /// Open the tools panel on Files → Search (project find-in-files).
+        FocusProjectSearch,
+        /// Open the tools panel on the Git tab.
+        FocusGitTool,
+        /// Open the tools panel on the Review tab.
+        FocusReviewTool,
     ]
 );
 
@@ -504,14 +510,10 @@ pub fn apply_zed_settings(
     font_size: f32,
     theme: &str,
 ) {
-    // `git_panel.dock` — the editor's diff viewer sits LEFT, beside the file
-    // tree, rather than at zed's default right edge: the harness window
-    // already spends its right side on our own chrome, so a right-docked panel
-    // puts the diff as far as it can get from the gutter it annotates.
-    // `GitPanel::position` reads exactly this key and `workspace_host::
-    // dock_panel` resolves the dock from `position()`, so this one key moves
-    // it. Dragging the panel elsewhere still works for the session, but this
-    // string is re-applied at every launch, so left is what each launch gets.
+    // Panel docks stay closed — Files/Git live in the harness tools column —
+    // so hide the status-bar dock buttons (they only toggled those docks).
+    // Git primary click opens a single-file SoloDiff instead of ProjectDiff
+    // (all changes), which is faster when reviewing one path at a time.
     //
     // Keep the literal free of `//` comments: it is parsed as JSON, and a
     // parse failure silently reverts EVERY setting in it (parse_status below).
@@ -520,8 +522,13 @@ pub fn apply_zed_settings(
              "buffer_font_family": "{mono_font}", "buffer_font_size": {font_size},
              "ui_font_family": "{ui_font}",
              "terminal": {{ "font_family": "{mono_font}", "font_size": {font_size} }},
-             "project_panel": {{ "dock": "left" }},
-             "git_panel": {{ "dock": "left" }},
+             "project_panel": {{ "dock": "left", "button": false }},
+             "git_panel": {{
+               "dock": "left",
+               "button": false,
+               "entry_primary_click_action": "file_diff"
+             }},
+             "tab_bar": {{ "show": false }},
              "languages": {{
                "Rust": {{ "language_servers": ["rust-analyzer"] }}
              }},

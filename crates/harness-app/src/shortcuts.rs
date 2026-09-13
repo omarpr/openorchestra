@@ -79,7 +79,7 @@ impl Scope {
     pub fn label(self) -> &'static str {
         match self {
             Scope::Global => "Global",
-            Scope::Workspace => "Editor tab",
+            Scope::Workspace => "Files & search",
             Scope::Editor => "Text editing",
             Scope::EditorFull => "Text editing (buffers)",
             Scope::Input => "Inline input",
@@ -168,7 +168,12 @@ pub fn entries() -> Vec<Entry> {
     vec![
         // ---- Global ------------------------------------------------------
         Entry::new(s("cmd-t"), Scope::Global, "New terminal tab", crate::NewTerminal),
-        Entry::new(s("cmd-e"), Scope::Global, "New editor tab", crate::NewEditor),
+        Entry::new(
+            s("cmd-e"),
+            Scope::Global,
+            "Focus the file tree (tools panel)",
+            crate::FocusFilesTool,
+        ),
         Entry::new(s("cmd-shift-c"), Scope::Global, "New agent chat tab", crate::NewChat),
         Entry::new(
             s("cmd-c"),
@@ -187,24 +192,27 @@ pub fn entries() -> Vec<Entry> {
         // deeper (a full buffer's Newline, a picker's Confirm) outranks it.
         Entry::new(s("enter"), Scope::Global, "Confirm / submit search", menu::Confirm),
 
-        // ---- Editor tab (hosted zed workspace) ---------------------------
+        // ---- Hosted workspace (file tabs / ⌘P / search) ------------------
         Entry::new(
             s("cmd-p"),
             Scope::Workspace,
             "Find file by name",
             ::workspace::ToggleFileFinder::default(),
         ),
+        // Global so ⌘⇧F works from Review/Terminal/etc., not only when a
+        // File tab holds Workspace focus. Opens Files → Search in the tools
+        // panel (harness project search), not Zed's pane DeploySearch.
         Entry::new(
             s("cmd-shift-f"),
-            Scope::Workspace,
+            Scope::Global,
             "Find in files (project search)",
-            ::workspace::pane::DeploySearch::default(),
+            crate::FocusProjectSearch,
         ),
         Entry::new(
             s("cmd-shift-e"),
-            Scope::Workspace,
-            "Focus the file tree",
-            zed_actions::project_panel::ToggleFocus,
+            Scope::Global,
+            "Focus the file tree (tools panel)",
+            crate::FocusFilesTool,
         ),
         Entry::new(
             s("cmd-s"),
@@ -226,13 +234,19 @@ pub fn entries() -> Vec<Entry> {
             "Show project diff (git)",
             git_ui::project_diff::Diff,
         ),
-        // The git panel is docked but starts CLOSED (workspace_host.rs), so
-        // this chord is its only way in. Same chord zed uses.
+        // Tools panel Git tab (harness chrome), not Zed's dock ToggleFocus —
+        // docks stay closed so the editor stays full-bleed.
         Entry::new(
             s("cmd-shift-g"),
-            Scope::Workspace,
-            "Toggle the git panel",
-            zed_actions::git_panel::ToggleFocus,
+            Scope::Global,
+            "Toggle the git tools panel",
+            crate::FocusGitTool,
+        ),
+        Entry::new(
+            s("cmd-shift-r"),
+            Scope::Global,
+            "Focus the review tools panel",
+            crate::FocusReviewTool,
         ),
         // Native Markdown preview (markdown_preview): live, code-highlighted,
         // as an editor pane. Distinct from the diff panel's ◧ toggle.

@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement,
+    AnyElement, App, AppContext, Context, Entity, EntityId, FocusHandle, Focusable, IntoElement,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
     PathPromptOptions, Pixels, Render, Rgba, Styled, Window, div, prelude::*, px, rgb, rgba,
 };
@@ -441,12 +441,18 @@ pub(crate) enum FileRows {
 }
 
 /// What a tab can hold. Tab sets are per worktree and fully dynamic (§3.4):
-/// a worktree can carry any number of terminals, editors, and chats.
+/// a worktree can carry any number of terminals, file editors, and chats.
+///
+/// File buffers live in a per-worktree **service** Zed `Workspace` (not itself a
+/// tab). Opening a file or git diff promotes that pane item into a harness tab.
 enum TabContent {
     Terminal(Entity<TerminalPane>),
-    /// A real zed `Workspace` — this is what carries the file explorer, ⌘P,
-    /// ⌘⇧F, and LSP (§3.6).
-    Editor(Entity<::workspace::Workspace>),
+    /// A buffer / solo-diff / search item from the service Workspace.
+    File {
+        item_id: EntityId,
+        /// Italic preview tab — replaced by the next single-click open.
+        preview: bool,
+    },
     /// Native agent chat over pi's RPC mode (M8, §4.2–4.3).
     Chat(Entity<crate::chat_pane::ChatPane>),
     /// The diff review surface, when `DiffLocation::Tab` puts it in the center.
@@ -466,7 +472,6 @@ pub(crate) enum TabKind {
     /// A specific agent CLI (§4.5) — any of the five, not only the
     /// worktree's recorded default.
     Agent(AgentKind),
-    Editor,
     Chat,
     /// The diff review surface as a center tab (`DiffLocation::Tab`).
     Diff,
@@ -519,7 +524,10 @@ impl Tab {
     fn kind_tag(&self) -> crate::panes_state::TabRecordKind {
         use crate::panes_state::TabRecordKind as K;
         match &self.content {
-            TabContent::Editor(_) => K::Editor,
+            // File tabs are session-ephemeral (reopened from the tree); do not
+            // persist them. kind_tag is only used from save_panes which skips
+            // File — this arm is unreachable there.
+            TabContent::File { .. } => K::Shell,
             TabContent::Chat(_) => K::Chat,
             TabContent::Diff => K::Diff,
             TabContent::Terminal(_) => match &self.agent {
@@ -856,6 +864,13 @@ pub struct HarnessWorkspace {
     repos_path: PathBuf,
     selection: Selection,
     panes: HashMap<String, PaneSet>,
+    /// Per-worktree hosted Zed Workspace used by Files/Git tools and as the
+    /// engine behind file harness tabs. Not itself a user-facing tab.
+    service_workspaces: HashMap<String, Entity<::workspace::Workspace>>,
+    /// Explorer vs Search inside the Files tools tab (session; not persisted).
+    files_sub_tab: FilesSubTab,
+    /// Query editor + results for Files → Search. Created lazily.
+    project_search: Option<ProjectSearchUi>,
     diff: worktrees::Diff,
     /// Multi-member task changeset (when selection is a Task).
     unified_diff: UnifiedDiff,
@@ -1184,6 +1199,9 @@ impl HarnessWorkspace {
             repos_path,
             selection,
             panes: HashMap::new(),
+            service_workspaces: HashMap::new(),
+            files_sub_tab: FilesSubTab::Explorer,
+            project_search: None,
             diff: worktrees::Diff::default(),
             unified_diff: UnifiedDiff::default(),
             new_task_repos,
@@ -1347,20 +1365,16 @@ impl HarnessWorkspace {
                 theme(cx).accent,
             );
         }
-        // Test hook: open an editor tab without going through the ＋ menu, so
-        // "the menu is broken" and "the editor is broken" can be told apart.
-        // A value naming a worktree id selects that worktree first, so the
-        // editor can be probed against a real linked worktree — the thing a
-        // user actually clicks — and not only against a repo root.
+        // Test hook: ensure the service Workspace exists (Files/Git + file tabs).
         if let Some(v) = std::env::var_os("HARNESS_OPEN_EDITOR") {
             let id = v.to_string_lossy();
             if this.manager.registry.get(&id).is_some() {
                 this.selection = Selection::Worktree(id.into_owned());
             }
-            this.open_tab(TabKind::Editor, window, cx);
+            let _ = this.ensure_service_workspace(window, cx);
             log::info!(
-                "HARNESS_OPEN_EDITOR: tabs now = {:?}",
-                this.panes.values().next().map(|p| p.tabs.len())
+                "HARNESS_OPEN_EDITOR: service_workspace = {:?}",
+                this.service_workspaces.keys().collect::<Vec<_>>()
             );
         }
         this.recompute_diff(cx);
@@ -1691,13 +1705,10 @@ impl Render for HarnessWorkspace {
                         ))
                     })
                     .child(self.render_center(&hx, window, cx))
-                    .when(
-                        self.prefs.diff_open && self.prefs.diff_location == DiffLocation::Dock,
-                        |d| {
-                            d.child(self.splitter(&hx, Drag::DiffPanel, cx))
-                                .child(self.render_diff_panel(&hx, cx))
-                        },
-                    ),
+                    .when(self.prefs.diff_open, |d| {
+                        d.child(self.splitter(&hx, Drag::DiffPanel, cx))
+                            .child(self.render_tool_panel(&hx, window, cx))
+                    }),
             )
             .children(self.render_zed_modal(cx))
             .children(self.render_pet(&hx, cx))
@@ -1728,11 +1739,12 @@ impl Render for HarnessWorkspace {
             .on_action(
                 cx.listener(|ws, _: &crate::CopyDiffSelection, _, cx| ws.copy_diff_selection(cx)),
             )
+            .on_action(cx.listener(Self::focus_files_tool))
+            .on_action(cx.listener(Self::focus_project_search))
+            .on_action(cx.listener(Self::focus_git_tool))
+            .on_action(cx.listener(Self::focus_review_tool))
             .on_action(cx.listener(|ws, _: &crate::NewTerminal, window, cx| {
                 ws.open_tab(TabKind::Shell, window, cx)
-            }))
-            .on_action(cx.listener(|ws, _: &crate::NewEditor, window, cx| {
-                ws.open_tab(TabKind::Editor, window, cx)
             }))
             .on_action(cx.listener(|ws, _: &crate::CloseTab, window, cx| {
                 log::debug!("CloseTab (root ⌘W)");
@@ -2130,9 +2142,9 @@ fn tool_chip(hx: &HarnessTheme, label: &str, present: bool, required: bool) -> i
 /// Deliberately separate from `registry.json`: that file is *project state* the
 /// training loop reads (§6.4), and mixing window chrome into it would make a
 /// theme toggle look like a change to harvestable data.
-/// Where the diff surface is drawn. `Dock` is the right-hand panel this app
-/// shipped with; `Tab` moves it into the center tab strip, where it gets the
-/// whole window and the dock is not rendered at all.
+/// Where the review surface is drawn. `Dock` is the right-hand tools panel
+/// (Files / Git / Review tabs); `Tab` moves Review into the center tab strip,
+/// where it gets the whole window and the tools dock is not rendered at all.
 ///
 /// One location, not two: a docked panel and a tab showing the same review
 /// would each need their own scroll and selection, and the two would disagree
@@ -2143,6 +2155,56 @@ pub(crate) enum DiffLocation {
     #[default]
     Dock,
     Tab,
+}
+
+/// Which surface the right-hand tools panel is showing.
+///
+/// Files and Git host Zed's `ProjectPanel` / `GitPanel` outside the editor
+/// docks; Review is the harness diff surface. Persisted so relaunch restores
+/// the last tool rather than always bouncing back to Review.
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ToolTab {
+    Files,
+    Git,
+    #[default]
+    Review,
+}
+
+/// Sub-tab inside the Files tools surface: tree vs. project search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum FilesSubTab {
+    #[default]
+    Explorer,
+    Search,
+}
+
+/// One matching line in the Files → Search panel.
+#[derive(Debug, Clone)]
+pub(crate) struct ProjectSearchHit {
+    /// 1-based line number (same convention as the diff gutter / `open_file_at`).
+    pub line: u32,
+    /// The full line text (trimmed of trailing newline).
+    pub text: String,
+}
+
+/// Matches for one file, keyed by worktree-relative path.
+#[derive(Debug, Clone)]
+pub(crate) struct ProjectSearchFile {
+    pub path: String,
+    pub hits: Vec<ProjectSearchHit>,
+}
+
+/// Live state for the harness project-search panel (not Zed's DeploySearch tab).
+struct ProjectSearchUi {
+    query: Entity<Editor>,
+    _query_sub: gpui::Subscription,
+    /// Bumped on every new query so a slow prior search is discarded.
+    generation: u64,
+    results: Vec<ProjectSearchFile>,
+    searching: bool,
+    /// Soft status: "Searching…", "No matches", limit note, etc.
+    status: String,
 }
 
 /// How a file's changes are laid out: one column with +/− markers, or old and
@@ -2225,10 +2287,15 @@ struct Prefs {
     #[serde(default)]
     diff_base: DiffBase,
     sidebar_width: f32,
+    /// Width of the right-hand tools panel (Files / Git / Review).
+    /// Kept as `diff_width` in prefs.json so existing installs don't reset.
     diff_width: f32,
-    /// Where the diff surface lives (dock vs. center tab).
+    /// Where the review surface lives (tools dock vs. center tab).
     #[serde(default)]
     diff_location: DiffLocation,
+    /// Active tab inside the tools panel. Absent in older prefs → Review.
+    #[serde(default)]
+    tool_tab: ToolTab,
     /// Unified or side-by-side bodies. Absent in older prefs files, which land
     /// on `Unified` — what they were already showing.
     #[serde(default)]
@@ -2237,6 +2304,7 @@ struct Prefs {
     #[serde(default = "default_diff_list_width")]
     diff_list_width: f32,
     sidebar_open: bool,
+    /// Whether the right-hand tools panel is visible (`diff_open` in prefs.json).
     diff_open: bool,
     /// Remembered answer to the "keep or close terminals on quit?" prompt.
     /// `None` = ask every time; `Some(true)` = always kill the tmux sessions;
@@ -2275,8 +2343,9 @@ impl Default for Prefs {
             collapsed_sections: Default::default(),
             diff_base: DiffBase::default(),
             sidebar_width: 280.0,
-            diff_width: 340.0,
+            diff_width: 380.0,
             diff_location: DiffLocation::Dock,
+            tool_tab: ToolTab::default(),
             diff_view: DiffView::default(),
             diff_list_width: 280.0,
             sidebar_open: true,
@@ -2456,7 +2525,7 @@ mod diff_render_tests {
     use super::{
         load_prefs, max_diff_width, readable_diff_lines, reordered, save_prefs_to, split_rows,
         target_line_for_row, use_split, use_two_pane, DiffLineKind, DiffLocation, DiffView,
-        Prefs, SplitRow, DIFF_TWO_PANE_MIN, MAX_PANEL_W, MIN_CENTER_W, SPLIT_MIN_W,
+        Prefs, SplitRow, ToolTab, DIFF_TWO_PANE_MIN, MAX_PANEL_W, MIN_CENTER_W, SPLIT_MIN_W,
     };
 
     /// Verbatim shape of the noise a new file produces — the case that
@@ -2887,6 +2956,31 @@ diff --git a/y.rs b/y.rs\n@@ -1,1 +1,2 @@\n other\n+new\n",
         let prefs = load_prefs(&path);
         assert_eq!(prefs.diff_location, DiffLocation::Dock);
         assert_eq!(prefs.diff_list_width, 280.0);
+        assert_eq!(prefs.tool_tab, ToolTab::Review);
+    }
+
+    #[test]
+    fn the_tool_tab_survives_a_save_load_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        let prefs = Prefs {
+            tool_tab: ToolTab::Files,
+            ..Prefs::default()
+        };
+        save_prefs_to(&path, &prefs);
+        assert_eq!(load_prefs(&path).tool_tab, ToolTab::Files);
+    }
+
+    #[test]
+    fn a_prefs_file_without_a_tool_tab_loads_as_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        std::fs::write(
+            &path,
+            r#"{"dark":true,"sidebar_width":280.0,"diff_width":340.0,"sidebar_open":true,"diff_open":true}"#,
+        )
+        .unwrap();
+        assert_eq!(load_prefs(&path).tool_tab, ToolTab::Review);
     }
 
     #[test]

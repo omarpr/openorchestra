@@ -27,26 +27,21 @@ impl HarnessWorkspace {
                 cx.notify();
             }));
 
-        // Dock mode only. The button is a visibility toggle for a dock, and in
-        // Tab mode there is no dock to toggle: the diff is a tab like any other,
-        // opened from ＋ and closed with its ✕. A second control up here would
-        // be a permanent "open the diff tab" button that no other tab kind has,
-        // which reads as chrome for a mode that is not switched on.
-        let diff_toggle = (self.prefs.diff_location == DiffLocation::Dock).then(|| {
-            div()
-                .id("toggle-diff")
-                .flex_none()
-                .px_2()
-                .py_0p5()
-                .rounded_md()
-                .text_xs()
-                .text_color(if self.prefs.diff_open { hx.tx1 } else { hx.tx2 })
-                .cursor_pointer()
-                .tooltip(tip("Toggle diff panel"))
-                .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
-                .child("diff ▤")
-                .on_click(cx.listener(|ws, _, window, cx| ws.toggle_diff(window, cx)))
-        });
+        // Tools panel visibility. Always available so Files/Git stay reachable
+        // even when Review lives in a center tab.
+        let tools_toggle = div()
+            .id("toggle-diff")
+            .flex_none()
+            .px_2()
+            .py_0p5()
+            .rounded_md()
+            .text_xs()
+            .text_color(if self.prefs.diff_open { hx.tx1 } else { hx.tx2 })
+            .cursor_pointer()
+            .tooltip(tip("Toggle tools panel (Files / Git / Review)"))
+            .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
+            .child("tools ▤")
+            .on_click(cx.listener(|ws, _, window, cx| ws.toggle_diff(window, cx)));
 
         div()
             .flex()
@@ -57,8 +52,7 @@ impl HarnessWorkspace {
             .bg(hx.bg0)
             .border_b_1()
             .border_color(hx.border)
-            // Left: the sidebar toggle. Center: title (flex_1). Right: diff, in
-            // Dock mode only.
+            // Left: sidebar toggle. Center: title. Right: tools panel toggle.
             .child(sidebar_toggle)
             .child(
                 div()
@@ -72,7 +66,7 @@ impl HarnessWorkspace {
                     .child(div().text_xs().font_family(hx.font_mono).text_color(hx.tx1).child(branch))
                     .children(self.render_a2a_delegation_chip(hx).into_iter()),
             )
-            .children(diff_toggle)
+            .child(tools_toggle)
     }
 
     /// Compact A2A delegation status for the active multi-member task.
