@@ -253,6 +253,44 @@ fn resolve_scripts(base: &Path, scripts: &[String]) -> Vec<PathBuf> {
         .collect()
 }
 
+/// [`resolve_scripts`] for the repo-committed layer, which arrives with the
+/// repository and so is not something the user wrote.
+///
+/// Every entry must stay inside `<repo>/.openorchestra/`: no absolute paths,
+/// no `..`, and no symlink that resolves outside. Otherwise `hooks.toml` could
+/// run a file that is not in the repository at all (`/tmp/x.sh`,
+/// `../../../somewhere`), so reviewing the repo's own scripts would not tell
+/// you what runs. An escaping entry is an error rather than silently skipped,
+/// so a broken config is visible instead of half-applied.
+fn resolve_contained_scripts(base: &Path, scripts: &[String]) -> Result<Vec<PathBuf>, HooksError> {
+    use std::path::Component;
+    let canonical_base = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+    scripts
+        .iter()
+        .map(|s| {
+            let p = Path::new(s);
+            let lexically_inside = p
+                .components()
+                .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
+            let joined = base.join(p);
+            // Resolve the deepest part that exists: a symlinked *directory*
+            // escapes even when the script under it does not exist yet.
+            let resolved_inside = joined
+                .ancestors()
+                .find_map(|a| a.canonicalize().ok())
+                .is_none_or(|real| real.starts_with(&canonical_base));
+            if lexically_inside && resolved_inside {
+                Ok(joined)
+            } else {
+                Err(HooksError::Parse(format!(
+                    "hook script {s:?} is outside {} — committed hooks may only run scripts inside it",
+                    base.display()
+                )))
+            }
+        })
+        .collect()
+}
+
 /// Prefer local phases entirely when a local file exists (replace, not append).
 pub fn merge_hooks_replace(committed: &HooksFile, local: Option<&HooksFile>) -> HooksFile {
     match local {
@@ -368,9 +406,16 @@ impl HooksConfig {
         } else {
             repo_hooks_base(repo_root)
         };
+        let resolve = |scripts: &[String]| {
+            if using_local {
+                Ok(resolve_scripts(&base, scripts))
+            } else {
+                resolve_contained_scripts(&base, scripts)
+            }
+        };
         Ok(HooksConfig {
-            setup: resolve_scripts(&base, &merged.setup.scripts),
-            teardown: resolve_scripts(&base, &merged.teardown.scripts),
+            setup: resolve(&merged.setup.scripts)?,
+            teardown: resolve(&merged.teardown.scripts)?,
         })
     }
 
@@ -644,13 +689,25 @@ impl TaskHooks {
     }
 }
 
+/// `HARNESS_MEMBER_<REPO>` for a project name. The name is a directory name,
+/// so it can hold any character — including `;`, `=` and spaces, which would
+/// turn `export <key>=…` into extra shell commands. Only `[A-Z0-9_]` is kept;
+/// everything else becomes `_`, so `my-app` stays `MY_APP` as before.
+fn member_env_key(repo: &str) -> String {
+    let name: String = repo
+        .chars()
+        .map(|c| {
+            let c = c.to_ascii_uppercase();
+            if c.is_ascii_uppercase() || c.is_ascii_digit() { c } else { '_' }
+        })
+        .collect();
+    format!("HARNESS_MEMBER_{name}")
+}
+
 fn task_hook_command(script: &Path, member_paths: &[(String, PathBuf)]) -> String {
     let mut exports = String::new();
     for (repo, path) in member_paths {
-        let key = format!(
-            "HARNESS_MEMBER_{}",
-            repo.to_uppercase().replace('-', "_")
-        );
+        let key = member_env_key(repo);
         exports.push_str(&format!(
             "export {key}={}; ",
             shell_quote(&path.to_string_lossy())
@@ -675,6 +732,35 @@ fn run_task_script<R: CommandRunner>(
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+
+    #[test]
+    fn a_project_name_cannot_inject_shell_into_the_member_export() {
+        assert_eq!(member_env_key("my-app"), "HARNESS_MEMBER_MY_APP");
+        let key = member_env_key("a=1;touch ~/.pwn;b");
+        assert!(key.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'), "{key}");
+        let cmd = task_hook_command(Path::new("/s.sh"), &[("a=1;touch x;b".into(), PathBuf::from("/wt"))]);
+        assert_eq!(cmd.matches(';').count(), 1, "only the separator after the export: {cmd}");
+    }
+
+    #[test]
+    fn committed_hooks_cannot_point_outside_their_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join(".openorchestra");
+        fs::create_dir_all(base.join("scripts")).unwrap();
+        assert!(resolve_contained_scripts(&base, &["scripts/setup.sh".into()]).is_ok());
+        assert!(resolve_contained_scripts(&base, &["/tmp/x.sh".into()]).is_err());
+        assert!(resolve_contained_scripts(&base, &["../../x.sh".into()]).is_err());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/tmp", base.join("scripts/out")).unwrap();
+            assert!(resolve_contained_scripts(&base, &["scripts/out/x.sh".into()]).is_err());
+        }
+    }
 }
 
 #[cfg(test)]

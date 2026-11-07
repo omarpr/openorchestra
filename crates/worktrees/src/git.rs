@@ -13,6 +13,25 @@ use std::path::{Path, PathBuf};
 
 use crate::runner::{CommandOutput, CommandRunner};
 
+/// Global options for background, read-only git queries (see `git_ro`).
+const READ_ONLY_HARDENING: &[&str] = &[
+    "--no-optional-locks",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.pager=cat",
+];
+
+/// Whether `r` may be handed to git as a revision. A ref that starts with `-`
+/// would be parsed as an option instead (`--output=<path>` makes `git diff`
+/// write a file), and git's own ref names can never start with one, so any
+/// such value is a poisoned symref or config, never a real ref.
+pub fn is_safe_ref(r: &str) -> bool {
+    !r.is_empty() && !r.starts_with('-')
+}
+
 /// Aggregate git status for a worktree card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct GitStatus {
@@ -195,6 +214,28 @@ impl<R: CommandRunner> GitWorktrees<R> {
         }
     }
 
+    /// [`git_ok`](Self::git_ok) for the read-only queries the app runs on its
+    /// own, constantly and without the user asking: status, diff, rev-parse
+    /// and friends.
+    ///
+    /// Several git config keys run arbitrary commands, and a repository's
+    /// `.git/config` is not something a user audits — it can arrive inside an
+    /// archive, a submodule, or be written by an agent into the shared git dir.
+    /// So the background queries switch off every config-driven executable
+    /// they could reach: the fsmonitor hook (`status`/`diff` call it), hooks,
+    /// the pager, external diff drivers and textconv filters (added per call,
+    /// on `diff` only). `--no-optional-locks` also keeps a background `status`
+    /// from taking `index.lock` while the user is committing.
+    ///
+    /// Commands the user triggers (`worktree add`, `push`) deliberately keep
+    /// the user's own hooks and filters: git-lfs, pre-push checks and the like
+    /// are configuration the user chose and expects to run.
+    fn git_ro(&self, cwd: &Path, args: &[&str]) -> Result<CommandOutput, GitError> {
+        let mut full: Vec<&str> = READ_ONLY_HARDENING.to_vec();
+        full.extend_from_slice(args);
+        self.git_ok(cwd, &full)
+    }
+
     // ---- lifecycle (§6.1) ------------------------------------------------
 
     /// `git worktree add -b <branch> -- <path> [<base_ref>]` from `repo_root`.
@@ -236,7 +277,7 @@ impl<R: CommandRunner> GitWorktrees<R> {
 
     /// Parse `git worktree list --porcelain`.
     pub fn list_worktrees(&self, repo_root: &Path) -> Result<Vec<WorktreeListEntry>, GitError> {
-        let out = self.git_ok(repo_root, &["worktree", "list", "--porcelain"])?;
+        let out = self.git_ro(repo_root, &["worktree", "list", "--porcelain"])?;
         Ok(parse_worktree_list(&out.stdout))
     }
 
@@ -244,7 +285,7 @@ impl<R: CommandRunner> GitWorktrees<R> {
 
     /// The main checkout root for a directory (`git rev-parse --show-toplevel`).
     pub fn repo_root(&self, dir: &Path) -> Result<std::path::PathBuf, GitError> {
-        let out = self.git_ok(dir, &["rev-parse", "--show-toplevel"])?;
+        let out = self.git_ro(dir, &["rev-parse", "--show-toplevel"])?;
         Ok(std::path::PathBuf::from(out.stdout.trim()))
     }
 
@@ -267,7 +308,7 @@ impl<R: CommandRunner> GitWorktrees<R> {
         if patterns.is_empty() {
             return Ok(());
         }
-        let common = self.git_ok(dir, &["rev-parse", "--git-common-dir"])?;
+        let common = self.git_ro(dir, &["rev-parse", "--git-common-dir"])?;
         let common = common.stdout.trim();
         // `--git-common-dir` may be relative to `dir` (it is plain `.git` for a
         // primary checkout), so resolve it against the directory we asked in.
@@ -323,15 +364,17 @@ impl<R: CommandRunner> GitWorktrees<R> {
     /// Whether a ref resolves in this repo (e.g. to prefer `origin/main` over a
     /// local `main` for the diff base).
     pub fn ref_exists(&self, dir: &Path, git_ref: &str) -> bool {
-        self.git_ok(dir, &["rev-parse", "--verify", "--quiet", git_ref])
-            .is_ok()
+        is_safe_ref(git_ref)
+            && self
+                .git_ro(dir, &["rev-parse", "--verify", "--quiet", git_ref])
+                .is_ok()
     }
 
     /// Default branch name, from `origin/HEAD` when present, else a local
     /// `main`/`master` probe.
     pub fn default_branch(&self, repo_root: &Path) -> Result<String, GitError> {
         if let Ok(out) =
-            self.git_ok(repo_root, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+            self.git_ro(repo_root, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
         {
             let name = out.stdout.trim();
             if let Some(stripped) = name.strip_prefix("origin/") {
@@ -350,7 +393,7 @@ impl<R: CommandRunner> GitWorktrees<R> {
             }
         }
         // Last resort: the current branch of the repo root.
-        let out = self.git_ok(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+        let out = self.git_ro(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])?;
         Ok(out.stdout.trim().to_string())
     }
 
@@ -359,7 +402,7 @@ impl<R: CommandRunner> GitWorktrees<R> {
     /// `git rev-parse --abbrev-ref HEAD` yields — so callers can render it
     /// verbatim without a separate detached-state probe.
     pub fn current_branch(&self, dir: &Path) -> Result<String, GitError> {
-        let out = self.git_ok(dir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+        let out = self.git_ro(dir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
         Ok(out.stdout.trim().to_string())
     }
 
@@ -367,14 +410,14 @@ impl<R: CommandRunner> GitWorktrees<R> {
     /// against (e.g. `origin/main` or `@{upstream}`); when it cannot be
     /// resolved, ahead/behind are reported as 0 rather than erroring.
     pub fn status(&self, worktree: &Path, upstream: Option<&str>) -> Result<GitStatus, GitError> {
-        let porcelain = self.git_ok(worktree, &["status", "--porcelain"])?;
+        let porcelain = self.git_ro(worktree, &["status", "--porcelain"])?;
         let dirty_files = porcelain.stdout.lines().filter(|l| !l.is_empty()).count();
 
         let (mut ahead, mut behind) = (0, 0);
-        if let Some(upstream) = upstream {
+        if let Some(upstream) = upstream.filter(|u| is_safe_ref(u)) {
             let range = format!("{upstream}...HEAD");
             if let Ok(out) =
-                self.git_ok(worktree, &["rev-list", "--left-right", "--count", &range])
+                self.git_ro(worktree, &["rev-list", "--left-right", "--count", &range])
             {
                 // "<behind>\t<ahead>" — left = upstream-only, right = HEAD-only.
                 let mut nums = out.stdout.split_whitespace();
@@ -428,7 +471,7 @@ impl<R: CommandRunner> GitWorktrees<R> {
             let Ok(branch) = self.current_branch(worktree) else {
                 return false;
             };
-            self.git_ok(worktree, &["config", "--get", &format!("branch.{branch}.merge")])
+            self.git_ro(worktree, &["config", "--get", &format!("branch.{branch}.merge")])
                 .is_ok_and(|o| upstream_is_own_branch(o.stdout.trim(), &branch))
         });
 
@@ -447,8 +490,13 @@ impl<R: CommandRunner> GitWorktrees<R> {
     /// it exists, else the first remote configured. `None` means the repo has no
     /// remote at all, and the caller must not offer to publish.
     pub fn default_remote(&self, worktree: &Path) -> Option<String> {
-        let out = self.git_ok(worktree, &["remote"]).ok()?;
-        let names: Vec<&str> = out.stdout.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        let out = self.git_ro(worktree, &["remote"]).ok()?;
+        let names: Vec<&str> = out
+            .stdout
+            .lines()
+            .map(str::trim)
+            .filter(|l| is_safe_ref(l))
+            .collect();
         names
             .iter()
             .find(|n| **n == "origin")
@@ -476,7 +524,17 @@ impl<R: CommandRunner> GitWorktrees<R> {
             // only ever mean this branch, there.
             Some((remote, branch)) => {
                 let refspec = format!("HEAD:refs/heads/{branch}");
-                self.git_ok(worktree, &["push", "-u", remote, &refspec])?
+                // `--` and the dash check together: a remote named like an
+                // option (`--receive-pack=<cmd>`) can be hand-written into
+                // `.git/config`, and would otherwise reach git as a flag.
+                if !is_safe_ref(remote) {
+                    return Err(GitError::Failed {
+                        command: "push".into(),
+                        code: None,
+                        stderr: format!("refusing to push to a remote named {remote:?}"),
+                    });
+                }
+                self.git_ok(worktree, &["push", "-u", "--", remote, &refspec])?
             }
             None => self.git_ok(worktree, &["push"])?,
         };
@@ -494,7 +552,10 @@ impl<R: CommandRunner> GitWorktrees<R> {
     /// If the merge base cannot be resolved, returns an empty diff (not an
     /// error).
     pub fn diff(&self, worktree: &Path, base_ref: &str) -> Result<Diff, GitError> {
-        let base = match self.git_ok(worktree, &["merge-base", base_ref, "HEAD"]) {
+        if !is_safe_ref(base_ref) {
+            return Ok(Diff::default());
+        }
+        let base = match self.git_ro(worktree, &["merge-base", base_ref, "HEAD"]) {
             Ok(out) => out.stdout.trim().to_string(),
             Err(_) => return Ok(Diff::default()),
         };
@@ -502,8 +563,8 @@ impl<R: CommandRunner> GitWorktrees<R> {
             return Ok(Diff::default());
         }
 
-        let numstat = self.git_ok(worktree, &["diff", "--numstat", &base])?;
-        let name_status = self.git_ok(worktree, &["diff", "--name-status", &base])?;
+        let numstat = self.git_ro(worktree, &["diff", "--no-ext-diff", "--no-textconv", "--numstat", &base])?;
+        let name_status = self.git_ro(worktree, &["diff", "--no-ext-diff", "--no-textconv", "--name-status", &base])?;
 
         let files = merge_diff(&numstat.stdout, &name_status.stdout);
         Ok(Diff {
@@ -540,7 +601,20 @@ impl<R: CommandRunner> GitWorktrees<R> {
                 .run(
                     Some(worktree),
                     &self.git,
-                    &["diff", "--no-index", "--", "/dev/null", path],
+                    &[
+                        "--no-optional-locks",
+                        "-c",
+                        "core.fsmonitor=false",
+                        "-c",
+                        "core.pager=cat",
+                        "diff",
+                        "--no-ext-diff",
+                        "--no-textconv",
+                        "--no-index",
+                        "--",
+                        "/dev/null",
+                        path,
+                    ],
                 )
                 .map(|o| o.stdout)
                 .unwrap_or_default();
@@ -550,7 +624,10 @@ impl<R: CommandRunner> GitWorktrees<R> {
         }
         // Both ends named, so rename detection has a pair to work with; git
         // needs `--find-renames` explicitly once the pathspec is narrowed.
-        let mut args = vec!["diff", base];
+        if !is_safe_ref(base) {
+            return String::new();
+        }
+        let mut args = vec!["diff", "--no-ext-diff", "--no-textconv", base];
         if renamed_from.is_some() {
             args.push("--find-renames");
         }
@@ -559,7 +636,7 @@ impl<R: CommandRunner> GitWorktrees<R> {
             args.push(old);
         }
         args.push(path);
-        self.git_ok(worktree, &args)
+        self.git_ro(worktree, &args)
             .map(|o| o.stdout)
             .unwrap_or_default()
     }
@@ -567,7 +644,7 @@ impl<R: CommandRunner> GitWorktrees<R> {
     /// Paths git can see but is not tracking, with `.gitignore` respected.
     /// Sorted, so the diff's file list does not reshuffle between refreshes.
     pub fn untracked_files(&self, worktree: &Path) -> Vec<PathBuf> {
-        let Ok(out) = self.git_ok(worktree, &["ls-files", "--others", "--exclude-standard"]) else {
+        let Ok(out) = self.git_ro(worktree, &["ls-files", "--others", "--exclude-standard"]) else {
             return Vec::new();
         };
         let mut paths: Vec<PathBuf> = out

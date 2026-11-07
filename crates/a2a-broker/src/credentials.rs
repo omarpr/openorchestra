@@ -32,6 +32,7 @@ impl BrokerCredentials {
             let text = fs::read_to_string(&path)?;
             if let Ok(creds) = serde_json::from_str::<BrokerCredentials>(&text) {
                 if !creds.api_key.is_empty() {
+                    Self::tighten_existing(a2a_dir);
                     return Ok(creds);
                 }
             }
@@ -44,12 +45,63 @@ impl BrokerCredentials {
         Ok(creds)
     }
 
+    /// Write the key readable by this user only (`0600`, in a `0700` folder),
+    /// via a temp file and rename so a reader never sees a half-written key.
+    ///
+    /// The key is the broker's only authentication, and whoever holds it can
+    /// type messages into this task's agents. Written with default permissions
+    /// it was readable by every account on the Mac, since home folders are
+    /// world-traversable by default.
     pub fn save(&self, a2a_dir: &Path) -> io::Result<()> {
         fs::create_dir_all(a2a_dir)?;
+        restrict_dir(a2a_dir)?;
         let path = Self::path(a2a_dir);
         let body = serde_json::to_vec_pretty(self)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        fs::write(path, body)
+        let tmp = a2a_dir.join(format!(".{FILE_NAME}.tmp"));
+        let _ = fs::remove_file(&tmp);
+        {
+            use std::io::Write;
+            let mut f = private_file(&tmp)?;
+            f.write_all(&body)?;
+            f.sync_all()?;
+        }
+        fs::rename(&tmp, &path)
+    }
+}
+
+#[cfg(unix)]
+fn private_file(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)
+}
+
+#[cfg(not(unix))]
+fn private_file(path: &Path) -> io::Result<fs::File> {
+    fs::OpenOptions::new().write(true).create_new(true).open(path)
+}
+
+#[cfg(unix)]
+fn restrict_dir(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn restrict_dir(_dir: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+impl BrokerCredentials {
+    /// Re-tighten a key file written by an older build with default
+    /// permissions. Called on load so existing installs are fixed in place.
+    fn tighten_existing(a2a_dir: &Path) {
+        let _ = restrict_dir(a2a_dir);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(Self::path(a2a_dir), fs::Permissions::from_mode(0o600));
+        }
     }
 }
 
@@ -64,6 +116,18 @@ mod tests {
         let b = BrokerCredentials::load_or_create(dir.path()).unwrap();
         assert_eq!(a.api_key, b.api_key);
         assert!(!a.api_key.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_key_is_readable_by_this_user_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let a2a = dir.path().join("a2a");
+        BrokerCredentials::load_or_create(&a2a).unwrap();
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&BrokerCredentials::path(&a2a)), 0o600);
+        assert_eq!(mode(&a2a), 0o700);
     }
 
     #[test]

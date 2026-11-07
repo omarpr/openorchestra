@@ -33,6 +33,24 @@ pub struct SseStream {
     reader: BufReader<ChunkedReader<Body>>,
 }
 
+/// Longest status, header, or chunk-size line accepted.
+const MAX_HEADER_LINE: usize = 8 * 1024;
+/// Most header lines accepted before the body.
+const MAX_HEADERS: usize = 100;
+/// Largest single event (all its lines together) accepted.
+const MAX_EVENT_BYTES: usize = 8 * 1024 * 1024;
+
+/// One line of at most `max` bytes, including its `\n`. `Ok(Some(""))` at end
+/// of stream, `Ok(None)` when the line is longer than `max`.
+fn read_line_capped<R: BufRead>(reader: &mut R, max: usize) -> io::Result<Option<String>> {
+    let mut buf = Vec::new();
+    reader.by_ref().take(max as u64 + 1).read_until(b'\n', &mut buf)?;
+    if buf.len() > max {
+        return Ok(None);
+    }
+    Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
+}
+
 impl SseStream {
     /// Open `GET <path>` on `host:port` and start streaming events.
     pub fn connect(host: &str, port: u16, path: &str) -> io::Result<SseStream> {
@@ -49,17 +67,23 @@ impl SseStream {
 
         let mut reader = BufReader::new(stream);
         let mut chunked = false;
-        let mut status_line = String::new();
-        reader.read_line(&mut status_line)?;
+        let status_line = read_line_capped(&mut reader, MAX_HEADER_LINE)?
+            .ok_or_else(|| io::Error::other("SSE status line too long"))?;
         if !status_line.contains(" 200") {
             return Err(io::Error::other(format!(
                 "SSE endpoint returned {:?}",
                 status_line.trim()
             )));
         }
+        let mut header_lines = 0usize;
         loop {
-            let mut line = String::new();
-            if reader.read_line(&mut line)? == 0 {
+            header_lines += 1;
+            if header_lines > MAX_HEADERS {
+                return Err(io::Error::other("too many SSE headers"));
+            }
+            let line = read_line_capped(&mut reader, MAX_HEADER_LINE)?
+                .ok_or_else(|| io::Error::other("SSE header too long"))?;
+            if line.is_empty() {
                 return Err(io::Error::other("connection closed during headers"));
             }
             let trimmed = line.trim();
@@ -91,12 +115,19 @@ impl Iterator for SseStream {
     fn next(&mut self) -> Option<SseEvent> {
         let mut event = SseEvent::default();
         let mut data_lines: Vec<String> = Vec::new();
+        let mut data_bytes = 0usize;
         loop {
-            let mut line = String::new();
-            match self.reader.read_line(&mut line) {
-                Ok(0) => return None, // server closed
-                Ok(_) => {}
-                Err(_) => return None,
+            // Bounded per line and per event: the stream comes from a local
+            // server, but an unbounded read is an app-wide crash waiting for
+            // one misbehaving peer. An over-limit stream is ended, the same as
+            // a closed one.
+            let line = match read_line_capped(&mut self.reader, MAX_EVENT_BYTES) {
+                Ok(Some(l)) if !l.is_empty() => l,
+                _ => return None,
+            };
+            data_bytes += line.len();
+            if data_bytes > MAX_EVENT_BYTES {
+                return None;
             }
             let line = line.trim_end_matches(['\r', '\n']);
 
@@ -140,10 +171,10 @@ impl<R: Read> ChunkedReader<R> {
 
     /// Read the `<hex>\r\n` size line that starts each chunk.
     fn start_chunk(&mut self) -> io::Result<()> {
-        let mut line = String::new();
         loop {
-            line.clear();
-            if self.inner.read_line(&mut line)? == 0 {
+            let line = read_line_capped(&mut self.inner, MAX_HEADER_LINE)?
+                .ok_or_else(|| io::Error::other("chunk size line too long"))?;
+            if line.is_empty() {
                 self.done = true;
                 return Ok(());
             }

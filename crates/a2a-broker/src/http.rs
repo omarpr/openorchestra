@@ -81,20 +81,34 @@ impl BrokerServer {
         let join = thread::Builder::new()
             .name("a2a-broker".into())
             .spawn(move || {
+                // One thread per connection, so the number of them is capped:
+                // otherwise any local process could open connections until the
+                // app runs out of threads.
+                let live = Arc::new(std::sync::atomic::AtomicUsize::new(0));
                 for stream in listener.incoming() {
                     if shutdown_accept.load(Ordering::SeqCst) {
                         break;
                     }
                     match stream {
                         Ok(stream) => {
+                            if live.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
+                                drop(stream);
+                                continue;
+                            }
+                            live.fetch_add(1, Ordering::SeqCst);
                             let st = Arc::clone(&state_accept);
-                            let _ = thread::Builder::new()
+                            let live_conn = Arc::clone(&live);
+                            let spawned = thread::Builder::new()
                                 .name("a2a-conn".into())
                                 .spawn(move || {
                                     if let Err(e) = handle_connection(stream, st) {
                                         log_warn(&format!("a2a conn: {e}"));
                                     }
+                                    live_conn.fetch_sub(1, Ordering::SeqCst);
                                 });
+                            if spawned.is_err() {
+                                live.fetch_sub(1, Ordering::SeqCst);
+                            }
                         }
                         Err(_) => break,
                     }
@@ -197,35 +211,65 @@ fn drain_bridge(state: &BrokerState) {
     }
 }
 
+/// Longest request or header line accepted, in bytes.
+const MAX_LINE: u64 = 8 * 1024;
+/// Most header lines accepted on one request.
+const MAX_HEADERS: usize = 64;
+/// Largest request body accepted. JSON-RPC messages between agents are text;
+/// a megabyte is generous.
+const MAX_BODY: usize = 1024 * 1024;
+/// How long a client may take to send its request before it is dropped.
+const READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// Most connections served at once (SSE subscribers hold theirs open).
+const MAX_CONNECTIONS: usize = 64;
+
+/// One line, at most [`MAX_LINE`] bytes. `None` when the line is too long:
+/// an unbounded `read_line` grows its buffer for as long as a client keeps
+/// sending bytes without a newline.
+fn read_line_capped<R: BufRead>(reader: &mut R) -> std::io::Result<Option<String>> {
+    let mut buf = Vec::new();
+    let n = reader.by_ref().take(MAX_LINE + 1).read_until(b'\n', &mut buf)?;
+    if n as u64 > MAX_LINE {
+        return Ok(None);
+    }
+    Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
+}
+
 fn handle_connection(mut stream: TcpStream, state: Arc<BrokerState>) -> std::io::Result<()> {
+    // Everything up to the key check is reachable by any local process, so
+    // every read before it is bounded: line length, header count, body size,
+    // and time. The body is read only after the key has been checked — the
+    // declared Content-Length used to be allocated up front, so one request
+    // claiming a huge body aborted the whole app.
+    stream.set_read_timeout(Some(READ_TIMEOUT))?;
     let mut reader = BufReader::new(stream.try_clone()?);
-    let mut request_line = String::new();
-    reader.read_line(&mut request_line)?;
-    let mut headers = Vec::new();
+    let Some(request_line) = read_line_capped(&mut reader)? else {
+        write_response(&mut stream, 414, "text/plain", b"request line too long")?;
+        return Ok(());
+    };
     let mut content_length = 0usize;
     let mut auth = String::new();
+    let mut header_count = 0usize;
     loop {
-        let mut line = String::new();
-        reader.read_line(&mut line)?;
+        let Some(line) = read_line_capped(&mut reader)? else {
+            write_response(&mut stream, 431, "text/plain", b"header too long")?;
+            return Ok(());
+        };
         if line == "\r\n" || line == "\n" || line.is_empty() {
             break;
         }
-        let lower = line.to_ascii_lowercase();
-        if let Some(v) = lower.strip_prefix("content-length:") {
-            content_length = v.trim().parse().unwrap_or(0);
+        header_count += 1;
+        if header_count > MAX_HEADERS {
+            write_response(&mut stream, 431, "text/plain", b"too many headers")?;
+            return Ok(());
         }
-        if let Some(v) = line.split_once(':') {
-            if v.0.eq_ignore_ascii_case("authorization") {
-                auth = v.1.trim().to_string();
+        if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.trim().parse().unwrap_or(0);
+            } else if name.eq_ignore_ascii_case("authorization") {
+                auth = value.trim().to_string();
             }
         }
-        headers.push(line);
-    }
-    let _ = headers;
-
-    let mut body = vec![0u8; content_length];
-    if content_length > 0 {
-        reader.read_exact(&mut body)?;
     }
 
     let parts: Vec<&str> = request_line.split_whitespace().collect();
@@ -241,6 +285,18 @@ fn handle_connection(mut stream: TcpStream, state: Arc<BrokerState>) -> std::io:
         write_response(&mut stream, 401, "text/plain", b"unauthorized")?;
         return Ok(());
     }
+
+    if content_length > MAX_BODY {
+        write_response(&mut stream, 413, "text/plain", b"body too large")?;
+        return Ok(());
+    }
+    let mut body = vec![0u8; content_length];
+    if content_length > 0 {
+        reader.read_exact(&mut body)?;
+    }
+    // A subscription then streams for as long as the client listens; only the
+    // request itself was on the clock.
+    stream.set_read_timeout(None)?;
 
     if method == "GET" && path == "/health" {
         write_response(&mut stream, 200, "text/plain", b"ok")?;
@@ -368,14 +424,25 @@ fn handle_connection(mut stream: TcpStream, state: Arc<BrokerState>) -> std::io:
 }
 
 fn authorized(auth_header: &str, api_key: &str) -> bool {
+    // No key configured means nobody is authorized, not everybody: the port
+    // is reachable by every process (and every user) on the machine.
     if api_key.is_empty() {
-        return true;
+        return false;
     }
     let token = auth_header
         .strip_prefix("Bearer ")
         .or_else(|| auth_header.strip_prefix("bearer "))
         .unwrap_or(auth_header.trim());
-    token == api_key
+    constant_time_eq(token.as_bytes(), api_key.as_bytes())
+}
+
+/// Compare without stopping at the first differing byte, so response timing
+/// does not reveal how much of a guessed key was right.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// Extract tenant from `/t/<tenant>/.well-known/agent-card.json` (or `agent.json`).
@@ -938,6 +1005,42 @@ mod tests {
         handle.shutdown();
     }
 
+    /// Send a raw request head and return the status line.
+    fn status_of(addr: SocketAddr, head: &str) -> String {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream.write_all(head.as_bytes()).unwrap();
+        let mut status = String::new();
+        BufReader::new(stream).read_line(&mut status).unwrap();
+        status
+    }
+
+    #[test]
+    fn a_huge_declared_body_is_refused_not_allocated() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = BrokerServer::start(test_state(dir.path())).unwrap();
+        let addr = handle.addr;
+        // Without the key: refused before the body is considered at all.
+        let st = status_of(
+            addr,
+            "POST /rpc HTTP/1.1\r\nContent-Length: 999999999999\r\n\r\n",
+        );
+        assert!(st.contains(" 401 "), "{st}");
+        // With the key: refused for size, not allocated.
+        let st = status_of(
+            addr,
+            "POST /rpc HTTP/1.1\r\nAuthorization: Bearer test-key\r\nContent-Length: 999999999999\r\n\r\n",
+        );
+        assert!(st.contains(" 413 "), "{st}");
+        // A header line with no end is cut off rather than buffered forever.
+        let long = format!("GET /health HTTP/1.1\r\nX: {}\r\n\r\n", "a".repeat(20_000));
+        let st = status_of(addr, &long);
+        assert!(st.contains(" 431 "), "{st}");
+        // And the server is still up.
+        let st = status_of(addr, "GET /health HTTP/1.1\r\n\r\n");
+        assert!(st.contains(" 200 "), "{st}");
+        handle.shutdown();
+    }
+
     #[test]
     fn drop_stops_threads_and_frees_port() {
         let dir = tempfile::tempdir().unwrap();
@@ -947,5 +1050,25 @@ mod tests {
         // Port should be reusable once accept/drain have joined.
         let listener = TcpListener::bind(addr).expect("port freed after Drop");
         drop(listener);
+    }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::{authorized, constant_time_eq};
+
+    #[test]
+    fn an_empty_key_authorizes_nobody() {
+        assert!(!authorized("", ""));
+        assert!(!authorized("Bearer anything", ""));
+    }
+
+    #[test]
+    fn the_key_must_match_exactly() {
+        assert!(authorized("Bearer oo-abc", "oo-abc"));
+        assert!(!authorized("Bearer oo-abd", "oo-abc"));
+        assert!(!authorized("Bearer oo-ab", "oo-abc"));
+        assert!(constant_time_eq(b"x", b"x"));
+        assert!(!constant_time_eq(b"x", b"xy"));
     }
 }

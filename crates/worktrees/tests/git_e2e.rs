@@ -502,3 +502,58 @@ fn a_renamed_files_body_is_fetched_as_a_rename_not_as_a_fresh_file() {
         "precondition: a single-path fetch cannot detect the rename"
     );
 }
+
+/// A repo's `.git/config` can name commands git runs on its own. The app's
+/// background queries must not run them.
+#[test]
+fn background_queries_do_not_run_config_commands() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    init_repo(&root);
+    let marker = tmp.path().join("ran");
+    let hook = tmp.path().join("fsmonitor.sh");
+    fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+    git(&root, &["config", "core.fsmonitor", &hook.to_string_lossy()]);
+    git(&root, &["config", "diff.external", &hook.to_string_lossy()]);
+    fs::write(root.join("README.md"), "changed\n").unwrap();
+
+    let g = GitWorktrees::new(SystemRunner);
+    let status = g.status(&root, None).unwrap();
+    assert_eq!(status.dirty_files, 1);
+    let _ = g.diff(&root, "main");
+    let _ = g.file_diff(&root, "main", "README.md", false, None);
+    assert!(!marker.exists(), "a config-named command ran during a background query");
+}
+
+/// A remote named like an option must never reach `git push` as a flag.
+#[test]
+fn a_remote_named_like_an_option_is_never_offered_or_pushed_to() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    init_repo(&root);
+    let marker = tmp.path().join("pwned");
+    let bare = tmp.path().join("bare.git");
+    git(tmp.path(), &["init", "--bare", &bare.to_string_lossy()]);
+    // `git remote add` refuses dash names; a hand-edited config does not.
+    let cfg = root.join(".git/config");
+    let mut text = fs::read_to_string(&cfg).unwrap();
+    text.push_str(&format!(
+        "[remote \"--receive-pack=touch {}\"]\n\turl = {}\n",
+        marker.display(),
+        bare.display()
+    ));
+    fs::write(&cfg, text).unwrap();
+
+    let g = GitWorktrees::new(SystemRunner);
+    assert_eq!(g.default_remote(&root), None, "a dash-named remote must not be offered");
+    let name = format!("--receive-pack=touch {}", marker.display());
+    assert!(g.push(&root, Some((&name, "main"))).is_err());
+    assert!(!marker.exists());
+}
+
+#[test]
+fn refs_that_look_like_options_are_rejected() {
+    assert!(worktrees::is_safe_ref("origin/main"));
+    assert!(!worktrees::is_safe_ref("--output=/tmp/x"));
+    assert!(!worktrees::is_safe_ref(""));
+}

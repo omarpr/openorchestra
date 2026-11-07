@@ -13,6 +13,7 @@ mod data;
 mod diff_review;
 mod diff_watch;
 mod git_watch;
+mod state_files;
 mod harness_zed_theme;
 mod login_env;
 mod markdown_preview;

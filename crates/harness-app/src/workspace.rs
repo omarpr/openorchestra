@@ -1120,6 +1120,9 @@ impl HarnessWorkspace {
             .map(PathBuf::from)
             .unwrap_or_else(|| launch_hint.clone())
             .join(".openorchestra");
+        if let Err(e) = crate::state_files::secure_dir(&data_dir) {
+            log::warn!("could not restrict {}: {e}", data_dir.display());
+        }
         let repos_path = data_dir.join("repos.json");
         let archived_path = data_dir.join("archived.json");
         let archived_repos = load_repos(&archived_path);
@@ -2521,7 +2524,10 @@ fn save_prefs_to(path: &Path, prefs: &Prefs) {
         let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(json) = serde_json::to_string_pretty(prefs) {
-        let _ = std::fs::write(path, json);
+        // Private and atomic: prefs carry the agent launch overrides.
+        if let Err(e) = crate::state_files::write_private(path, json.as_bytes()) {
+            log::warn!("could not save prefs to {}: {e}", path.display());
+        }
     }
 }
 
@@ -2537,7 +2543,9 @@ fn save_repos(path: &Path, repos: &[PathBuf]) {
         let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(json) = serde_json::to_string_pretty(repos) {
-        let _ = std::fs::write(path, json);
+        if let Err(e) = crate::state_files::write_private(path, json.as_bytes()) {
+            log::warn!("could not save {}: {e}", path.display());
+        }
     }
 }
 

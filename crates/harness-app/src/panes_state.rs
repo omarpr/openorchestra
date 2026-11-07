@@ -75,7 +75,7 @@ pub fn save(path: &Path, state: &PanesState) {
     }
     match serde_json::to_string_pretty(state) {
         Ok(json) => {
-            if let Err(e) = std::fs::write(path, json) {
+            if let Err(e) = crate::state_files::write_private(path, json.as_bytes()) {
                 log::warn!("could not write panes state to {}: {e}", path.display());
             }
         }
