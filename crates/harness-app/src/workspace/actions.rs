@@ -18,6 +18,19 @@ impl HarnessWorkspace {
             self.ensure_task_broker(&tid);
         }
         self.ensure_pane(window, cx);
+        // Ensure the Files/Git host exists for this project so the explorer
+        // shows the newly selected tree (not an empty "open editor" hint).
+        let _ = self.ensure_service_workspace(window, cx);
+        if self.prefs.diff_open
+            && matches!(self.prefs.tool_tab, ToolTab::Files | ToolTab::Git)
+            && self.files_sub_tab != FilesSubTab::Search
+        {
+            self.activate_hosted_tool_panel(self.prefs.tool_tab, window, cx);
+        }
+        // Retarget an in-progress search at the new project's root.
+        if self.files_sub_tab == FilesSubTab::Search {
+            self.schedule_project_search(window, cx);
+        }
         self.recompute_diff(cx);
         self.focus_active_pane(window, cx);
         cx.notify();
@@ -747,8 +760,7 @@ impl HarnessWorkspace {
         cx.notify();
     }
 
-    /// Replace (or create) the active pane's Editor tab with a workspace rooted
-    /// at `root`. Returns the hosted workspace.
+    /// Replace (or create) the service Workspace rooted at `root`.
     fn replace_editor_workspace(
         &mut self,
         root: &std::path::Path,
@@ -756,48 +768,27 @@ impl HarnessWorkspace {
         cx: &mut Context<Self>,
     ) -> Option<Entity<::workspace::Workspace>> {
         let key = self.resolve()?.key;
-        let hosted = match crate::workspace_host::workspace_for(root, window, cx) {
+        // Drop file tabs — they pointed at the previous Workspace's items.
+        if let Some(pane) = self.panes.get_mut(&key) {
+            pane.tabs
+                .retain(|t| !matches!(t.content, TabContent::File { .. }));
+            if pane.tabs.iter().all(|t| t.id != pane.active) {
+                pane.active = pane.tabs.last().map(|t| t.id).unwrap_or(0);
+            }
+        }
+        self.service_workspaces.remove(&key);
+        match crate::workspace_host::workspace_for(root, window, cx) {
             Ok(ws) => {
                 crate::workspace_host::probe(&ws, window, cx);
-                cx.observe(&ws, |_, _, cx| cx.notify()).detach();
-                ws
+                self.wire_service_workspace(&ws, window, cx);
+                self.service_workspaces.insert(key, ws.clone());
+                Some(ws)
             }
             Err(e) => {
                 self.note = format!("could not open project: {e}");
                 cx.notify();
-                return None;
+                None
             }
-        };
-        if let Some(pane) = self.panes.get_mut(&key) {
-            if let Some(tab) = pane
-                .tabs
-                .iter_mut()
-                .find(|t| matches!(t.content, TabContent::Editor(_)))
-            {
-                let id = tab.id;
-                tab.content = TabContent::Editor(hosted.clone());
-                pane.active = id;
-                self.focus_active_pane(window, cx);
-                self.save_panes();
-                return Some(hosted);
-            }
-        }
-        // No editor tab yet — fall through to the normal open path.
-        self.open_tab(TabKind::Editor, window, cx);
-        let pane = self.panes.get_mut(&key)?;
-        if let Some(tab) = pane
-            .tabs
-            .iter_mut()
-            .find(|t| matches!(t.content, TabContent::Editor(_)))
-        {
-            let id = tab.id;
-            tab.content = TabContent::Editor(hosted.clone());
-            pane.active = id;
-            self.focus_active_pane(window, cx);
-            self.save_panes();
-            Some(hosted)
-        } else {
-            None
         }
     }
 
@@ -851,7 +842,7 @@ impl HarnessWorkspace {
         let Some(hosted) = self.replace_editor_workspace(&editor_root, window, cx) else {
             return;
         };
-        crate::workspace_host::open_file_at(&hosted, &editor_root, &rel, None, window, cx);
+        crate::workspace_host::open_file_at(&hosted, &editor_root, &rel, None, false, window, cx);
         let layer_label = match layer {
             HookLayer::Repo => "repo",
             HookLayer::Local => "local",
@@ -932,7 +923,7 @@ impl HarnessWorkspace {
             r.editor_path.join(display_path)
         };
 
-        let Some(hosted) = self.ensure_editor_tab(window, cx) else {
+        let Some(hosted) = self.ensure_service_workspace(window, cx) else {
             return;
         };
         hosted.update(cx, |ws, cx| {
@@ -991,41 +982,6 @@ impl HarnessWorkspace {
                     self.ensure_pane(window, cx);
                 }
             }
-        }
-    }
-
-    /// Activate an existing editor tab, or open a new one. Returns the hosted
-    /// zed Workspace so the caller can open a path into it.
-    fn ensure_editor_tab(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<Entity<::workspace::Workspace>> {
-        let key = self.resolve()?.key;
-        if let Some(pane) = self.panes.get(&key) {
-            if let Some(tab) = pane
-                .tabs
-                .iter()
-                .find(|t| matches!(t.content, TabContent::Editor(_)))
-            {
-                let id = tab.id;
-                let hosted = match &tab.content {
-                    TabContent::Editor(ws) => ws.clone(),
-                    _ => unreachable!(),
-                };
-                if let Some(pane) = self.panes.get_mut(&key) {
-                    pane.active = id;
-                }
-                self.focus_active_pane(window, cx);
-                self.save_panes();
-                return Some(hosted);
-            }
-        }
-        self.open_tab(TabKind::Editor, window, cx);
-        let pane = self.panes.get(&key)?;
-        match &pane.active_tab()?.content {
-            TabContent::Editor(ws) => Some(ws.clone()),
-            _ => None,
         }
     }
 

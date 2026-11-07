@@ -46,9 +46,20 @@ impl HarnessWorkspace {
         let content: AnyElement = match pane.and_then(|p| p.active_tab()) {
             Some(tab) => match &tab.content {
                 TabContent::Terminal(t) => t.clone().into_any_element(),
-                TabContent::Editor(ws) => {
+                TabContent::File { .. } => {
+                    let Some(ws) = self.editor_workspace() else {
+                        return div()
+                            .flex()
+                            .flex_1()
+                            .items_center()
+                            .justify_center()
+                            .text_xs()
+                            .text_color(hx.tx2)
+                            .child("Open a file from Files or Git")
+                            .into_any_element();
+                    };
                     if std::env::var_os("HARNESS_PROBE_PAINT").is_some() {
-                        log::info!("paint: center renders Editor tab");
+                        log::info!("paint: center renders File tab");
                     }
                     let editor = ws
                         .update(cx, |workspace, cx| workspace.actions(div(), window, cx))
@@ -56,21 +67,7 @@ impl HarnessWorkspace {
                         .track_focus(&self.editor_host_focus)
                         .flex()
                         .size_full()
-                        .child(ws.clone())
-                        .when(std::env::var_os("HARNESS_PROBE_PAINT").is_some(), |d| {
-                            d.child(
-                                gpui::canvas(
-                                    |bounds, _, _| {
-                                        log::info!("paint: editor slot bounds = {bounds:?}");
-                                    },
-                                    |_, _, _, _| {},
-                                )
-                                .absolute()
-                                .size_full(),
-                            )
-                        });
-                    // Hooks chrome sits above the hosted workspace when the
-                    // user is editing a project setup/teardown script.
+                        .child(ws.clone());
                     if self.hooks_edit.is_some() {
                         div()
                             .flex()
@@ -84,9 +81,7 @@ impl HarnessWorkspace {
                     }
                 }
                 TabContent::Chat(c) => c.clone().into_any_element(),
-                // `None`: a tab fills the center, so the surface never has to
-                // fall back to the narrow single-column layout.
-                TabContent::Diff => self.render_diff_surface(hx, None, cx),
+                TabContent::Diff => self.render_diff_surface(hx, None, true, cx),
             },
             None => div().into_any_element(),
         };
@@ -313,6 +308,16 @@ impl HarnessWorkspace {
             .text_xs()
             .font_family(hx.font_mono)
             .text_color(if active { hx.tx0 } else { hx.tx2 })
+            .when(
+                matches!(
+                    &tab.content,
+                    TabContent::File {
+                        preview: true,
+                        ..
+                    }
+                ),
+                |d| d.italic(),
+            )
             .when_some(tab.agent.clone(), |d, kind| {
                 let (glyph, color) = agent_mark(&kind);
                 d.child(
@@ -325,19 +330,23 @@ impl HarnessWorkspace {
             })
             .cursor_pointer()
             .hover(|d| d.text_color(hx.tx1))
-            .on_click(cx.listener(move |ws, _, window, cx| {
+            .on_click(cx.listener(move |ws, ev: &gpui::ClickEvent, window, cx| {
                 let Some(r) = ws.resolve() else { return };
                 let leaving_hooks = ws.hooks_edit.is_some()
                     && ws
                         .panes
                         .get(&r.key)
                         .and_then(|p| p.tabs.iter().find(|t| t.id == id))
-                        .is_some_and(|t| !matches!(t.content, TabContent::Editor(_)));
+                        .is_some_and(|t| !matches!(t.content, TabContent::File { .. }));
                 if let Some(pane) = ws.panes.get_mut(&r.key) {
                     pane.active = id;
                 }
                 if leaving_hooks {
                     ws.exit_hooks_edit(window, cx);
+                }
+                // Match Zed: double-click pins a preview tab.
+                if ev.click_count() > 1 {
+                    ws.pin_file_tab(id, window, cx);
                 }
                 ws.focus_active_pane(window, cx);
                 cx.notify();
@@ -568,8 +577,7 @@ impl HarnessWorkspace {
                 MouseButton::Left,
                 cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
             )
-            .child(self.tab_menu_item(hx, "❯_  Terminal", "⌘T", TabKind::Shell, cx))
-            .child(self.tab_menu_item(hx, "{ }  Editor", "⌘E", TabKind::Editor, cx));
+            .child(self.tab_menu_item(hx, "❯_  Terminal", "⌘T", TabKind::Shell, cx));
         // Only in Tab mode: in Dock mode the dock IS the surface, and a tab
         // showing the same review is the duplicate the setting exists to avoid.
         if self.prefs.diff_location == DiffLocation::Tab {

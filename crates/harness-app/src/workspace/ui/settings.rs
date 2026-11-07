@@ -13,11 +13,7 @@ impl HarnessWorkspace {
     /// title bar establishes. zed centers modals over the window; so do we.
     pub(crate) fn render_zed_modal(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let r = self.resolve()?;
-        let pane = self.panes.get(&r.key)?;
-        let ws = match &pane.active_tab()?.content {
-            TabContent::Editor(ws) => ws.clone(),
-            _ => return None,
-        };
+        let ws = self.service_workspaces.get(&r.key)?.clone();
         let view: gpui::AnyView = ws
             .read(cx)
             .active_modal::<file_finder::FileFinder>(cx)?
@@ -410,13 +406,13 @@ impl HarnessWorkspace {
         }
 
         if sec == S::Diff {
-        // ---- Diff panel ----------------------------------------------------
+        // ---- Review / tools panel ------------------------------------------
         {
             let location = self.prefs.diff_location;
             let mut row = div().flex().gap_1p5().pb_1();
             for (label, value) in [
-                ("Right dock", DiffLocation::Dock),
-                ("Tab", DiffLocation::Tab),
+                ("Tools panel", DiffLocation::Dock),
+                ("Center tab", DiffLocation::Tab),
             ] {
                 let selected = location == value;
                 row = row.child(
@@ -429,13 +425,15 @@ impl HarnessWorkspace {
                         })),
                 );
             }
-            body = body.child(section_title("Diff panel")).child(row).child(
+            body = body.child(section_title("Review location")).child(row).child(
                 div()
                     .text_xs()
                     .text_color(hx.tx2)
                     .pb_1()
                     .child(
-                        "A tab gives the diff the whole window; the dock keeps it beside your work.",
+                        "Tools panel keeps Review beside Files and Git on the right. \
+                         A center tab gives Review the whole window; Files and Git \
+                         still use the tools panel when it is open.",
                     ),
             );
 

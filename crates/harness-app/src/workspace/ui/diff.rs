@@ -16,13 +16,7 @@ impl HarnessWorkspace {
         // servers actually running on this worktree's Project, so "rust-analyzer"
         // appearing means it started — not that we hope it did.
         let lsp = r
-            .and_then(|r| self.panes.get(&r.key))
-            .and_then(|p| {
-                p.tabs.iter().find_map(|t| match &t.content {
-                    TabContent::Editor(ws) => Some(ws),
-                    _ => None,
-                })
-            })
+            .and_then(|r| self.service_workspaces.get(&r.key))
             .map(|ws| {
                 let project = ws.read(cx).project().read(cx);
                 let names: Vec<String> = project
@@ -35,7 +29,7 @@ impl HarnessWorkspace {
                     names.join(", ")
                 }
             })
-            .unwrap_or_else(|| "LSP: open an editor tab".to_string());
+            .unwrap_or_else(|| "LSP: open a file".to_string());
         div()
             .flex()
             .flex_none()
@@ -79,12 +73,16 @@ impl HarnessWorkspace {
         Some((r.path, self.diff.base.clone(), file))
     }
 
-    /// The review toolbar above the file list: how many comments there are,
-    /// and what can be done with them.
+    /// The review toolbar: how many comments there are, and what can be done
+    /// with them.
     ///
     /// Shown only when there is something to act on. Adding a comment is a
     /// click on a line's gutter number in the diff itself, so this bar is
     /// purely about what to do with the comments you already have.
+    ///
+    /// In the tools panel tab strip the trailing chips sit after a `flex_1`
+    /// spacer already owned by the strip; skip the internal spacers so the
+    /// chips pack tightly on the right.
     pub(crate) fn render_review_bar(
         &self,
         hx: &HarnessTheme,
@@ -106,36 +104,42 @@ impl HarnessWorkspace {
                 .child(label)
         };
 
-        div()
+        let in_tool_strip = self.prefs.diff_location == DiffLocation::Dock
+            && self.prefs.tool_tab == ToolTab::Review;
+
+        let mut row = div()
             .flex()
             .flex_none()
             .items_center()
             .gap_1()
-            .px_3()
-            .pb_1()
-            .font_family(hx.font_mono)
-            .child(div().flex_1())
-            .child(div().flex_1())
-            .child(
-                    div()
-                        .text_xs()
-                        .text_color(hx.amber)
-                        .child(format!("{count} comment{}", if count == 1 { "" } else { "s" })),
-                )
-            .child(chip("copy-review", "copy".to_string(), hx.tx2).on_click(
-                cx.listener(|ws, _, _, cx| ws.copy_review(cx)),
-            ))
-            .child(chip("save-review", "save .md".to_string(), hx.tx2).on_click(
-                cx.listener(|ws, _, _, cx| ws.save_review_markdown(cx)),
-            ))
-            .child(
-                chip(
-                        "clear-review",
-                        if self.clearing_review { "discard?".to_string() } else { "clear".to_string() },
-                        if self.clearing_review { hx.red } else { hx.tx2 },
-                    )
-                    .on_click(cx.listener(|ws, _, _, cx| ws.clear_review(cx))),
+            .font_family(hx.font_mono);
+        if !in_tool_strip {
+            row = row.px_3().pb_1().child(div().flex_1()).child(div().flex_1());
+        }
+        row.child(
+            div()
+                .text_xs()
+                .text_color(hx.amber)
+                .child(format!("{count} comment{}", if count == 1 { "" } else { "s" })),
+        )
+        .child(chip("copy-review", "copy".to_string(), hx.tx2).on_click(
+            cx.listener(|ws, _, _, cx| ws.copy_review(cx)),
+        ))
+        .child(chip("save-review", "save .md".to_string(), hx.tx2).on_click(
+            cx.listener(|ws, _, _, cx| ws.save_review_markdown(cx)),
+        ))
+        .child(
+            chip(
+                "clear-review",
+                if self.clearing_review {
+                    "discard?".to_string()
+                } else {
+                    "clear".to_string()
+                },
+                if self.clearing_review { hx.red } else { hx.tx2 },
             )
+            .on_click(cx.listener(|ws, _, _, cx| ws.clear_review(cx))),
+        )
     }
 
     /// Parsed rows for `file`, fetched on demand and cached for the life of the
@@ -745,31 +749,18 @@ impl HarnessWorkspace {
             .into_any_element()
     }
 
-    /// The dock: fixed width and its own left border, wrapping the shared
-    /// surface. Everything inside is identical to the tab — only the chrome
-    /// that makes it a *dock* lives here.
-    pub(crate) fn render_diff_panel(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .flex()
-            .flex_col()
-            .flex_none()
-            .w(px(self.prefs.diff_width))
-            .h_full()
-            .bg(hx.bg1)
-            .border_l_1()
-            .border_color(hx.border)
-            .child(self.render_diff_surface(hx, Some(self.prefs.diff_width), cx))
-            .into_any_element()
-    }
-
-    /// The diff review surface, drawn identically in the dock and in a tab.
+    /// The diff review surface, drawn identically in the tools panel and in a tab.
     ///
-    /// `dock_width` is `Some` for the dock and `None` for a tab — the only thing
-    /// the two differ by, since a tab always has room for two columns.
+    /// `dock_width` is `Some` for the tools panel and `None` for a tab — the only
+    /// thing the two differ by, since a tab always has room for two columns.
+    ///
+    /// `show_review_bar` is false when the tools panel already shows review
+    /// actions in its tab strip.
     pub(crate) fn render_diff_surface(
         &self,
         hx: &HarnessTheme,
         dock_width: Option<f32>,
+        show_review_bar: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some(r) = self.resolve() else {
@@ -810,7 +801,7 @@ impl HarnessWorkspace {
             // routes key events along the focus path only.
             .track_focus(&self.diff_surface_focus)
             .child(self.render_diff_header(hx, &r, adds, dels, body_w, cx));
-        if review_count > 0 {
+        if show_review_bar && review_count > 0 {
             panel = panel.child(self.render_review_bar(hx, review_count, cx));
         }
         panel = if two_pane {
@@ -1110,7 +1101,13 @@ impl HarnessWorkspace {
                     .px_3()
                     .border_b_1()
                     .border_color(hx.border)
-                    .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx2).child("DIFF"))
+                    .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx2).child(
+                        if self.prefs.diff_location == DiffLocation::Dock {
+                            "REVIEW"
+                        } else {
+                            "DIFF"
+                        },
+                    ))
                     // `truncate()` (= overflow_hidden + whitespace_nowrap +
                     // text_ellipsis), not bare `overflow_hidden()`: clipping
                     // stops a box painting outside itself but does nothing about

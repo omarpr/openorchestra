@@ -254,40 +254,43 @@ pub fn workspace_for(
                         let pane = pane.clone();
                         init_toolbar(ws, &pane, window, cx);
                     }
+                    // SoloDiff opens via add_item as a permanent tab. Mark it
+                    // preview so successive git-panel file clicks replace each
+                    // other (italic tab), matching project-panel single-click.
+                    if let workspace::Event::ItemAdded { item } = event
+                        && item
+                            .act_as::<git_ui::solo_diff_view::SoloDiffView>(cx)
+                            .is_some()
+                    {
+                        let item_id = item.item_id();
+                        for pane in ws.panes() {
+                            if pane.read(cx).index_for_item(item.as_ref()).is_some() {
+                                pane.update(cx, |pane, cx| {
+                                    pane.replace_preview_item_id(item_id, window, cx);
+                                });
+                                break;
+                            }
+                        }
+                    }
                 },
             )
             .detach();
         });
     }
 
-    // N1: dock the file explorer, and beside it the git panel. Both `load`
-    // calls are async because each reads its serialized width from the
-    // database, so the panels appear a frame or two after the workspace does —
-    // which is why the Files tab renders the workspace immediately rather than
-    // waiting on either.
-    //
-    // The git panel is the FIFTH window-root duty (see the toolbar block
-    // above): `git_ui::init` registers its actions on every hosted Workspace,
-    // but zed's app crate is what actually loads and docks the panel
-    // (`zed.rs` initialize_panels). Out of tree, nobody did — so the panel
-    // existed as a set of actions with nothing to act on.
-    // The file tree opens with the tab — it IS the editor's navigation, and
-    // that is the behavior N1 shipped.
+    // Panels are registered on the hosted Workspace so their entities exist,
+    // but docks stay CLOSED: the harness right-hand tools panel hosts the
+    // ProjectPanel / GitPanel views (Files / Git tabs) so the editor stays
+    // full-bleed. `dock_panel` still activates a slot when needed so a later
+    // focus path is never blank.
     dock_panel(
         &workspace,
         "project_panel",
         project_panel::ProjectPanel::load,
-        StartOpen::Yes,
+        StartOpen::No,
         window,
         cx,
     );
-    // The git panel is docked but CLOSED, and — per `git_panel.dock` in
-    // main.rs — it docks LEFT, sharing that dock with the file tree. Forcing it
-    // open would spend a third of the editor's width on every tab, in a window
-    // that already gives two columns to the harness chrome, and it would take
-    // the left dock's one visible slot from the file tree. ⌘⇧G brings it up:
-    // `focus_panel` activates it by index on its way in, so it does not need
-    // `dock_panel` to have claimed the slot for it.
     dock_panel(
         &workspace,
         "git_panel",
@@ -325,10 +328,11 @@ enum StartOpen {
 ///
 /// The dock is resolved from the panel's own `position()` rather than assumed,
 /// because that position is a *setting* each panel reads (`project_panel.dock`,
-/// `git_panel.dock` — both "left" here, see main.rs) and a user may drag a panel
-/// to another edge, which rewrites it. Activating "the last panel of the left
-/// dock" for a panel that had docked elsewhere would miss its target and steal
-/// the file tree's slot at the same time.
+/// `git_panel.dock`) and a user may drag a panel to another edge, which
+/// rewrites it. Activating "the last panel of the left dock" for a panel that
+/// had docked elsewhere would miss its target. Harness keeps docks closed and
+/// hosts the panels in the tools column, but registration still goes through
+/// this path so the entities exist.
 fn dock_panel<T, Fut>(
     workspace: &Entity<Workspace>,
     name: &'static str,
@@ -400,11 +404,10 @@ fn dock_panel<T, Fut>(
 ///
 /// A blank editor pane is undiagnosable from the outside: every layer reports
 /// success individually while the tab shows nothing. This asserts the whole
-/// chain instead — the file tree is registered, its dock is open *and* has an
-/// active panel (both are required, see `workspace_for`), and the worktree scan
-/// found files. `HARNESS_PROBE_OPEN=<path-in-worktree>` additionally opens that
-/// file and reports how many items the pane ends up holding, which is the one
-/// question the state above cannot answer: whether editing works at all.
+/// chain instead — the panels are registered (docks stay closed; the harness
+/// tools panel hosts them), and the worktree scan found files.
+/// `HARNESS_PROBE_OPEN=<path-in-worktree>` additionally opens that file and
+/// reports how many items the pane ends up holding.
 ///
 /// Deliberately state-based rather than screenshot-based, so it answers in CI
 /// and over ssh. What it cannot cover is layout — an element correct in every
@@ -445,7 +448,7 @@ pub fn probe(hosted: &Entity<Workspace>, window: &mut Window, cx: &mut App) {
             }
 
             hosted.update(cx, |ws, cx| {
-                let dock = ws.left_dock().read(cx);
+                let left = ws.left_dock().read(cx);
                 let entries: usize = ws
                     .project()
                     .read(cx)
@@ -453,12 +456,15 @@ pub fn probe(hosted: &Entity<Workspace>, window: &mut Window, cx: &mut App) {
                     .map(|wt| wt.read(cx).visible_entry_count())
                     .sum();
                 let tab_bar = workspace::TabBarSettings::get_global(cx).show;
+                let has_project_panel = ws.panel::<project_panel::ProjectPanel>(cx).is_some();
+                let has_git_panel = ws.panel::<git_ui::git_panel::GitPanel>(cx).is_some();
                 log::info!(
-                    "editor tab: dock panels={} open={} active={:?} \
+                    "editor tab: left_dock panels={} open={} active={:?} \
+                     project_panel={has_project_panel} git_panel={has_git_panel} \
                      tree_entries={entries} pane_items={} tab_bar={tab_bar}",
-                    dock.panels_len(),
-                    dock.is_open(),
-                    dock.active_panel_index(),
+                    left.panels_len(),
+                    left.is_open(),
+                    left.active_panel_index(),
                     ws.active_pane().read(cx).items_len(),
                 );
             });
@@ -650,6 +656,9 @@ pub fn probe_click(x: f32, y: f32, window: &mut Window, cx: &mut App) {
 /// Reaching this from the diff panel is the whole point — a diff row you want
 /// to change is useless if the editor drops you at the top of the file.
 ///
+/// `preview` matches Zed's project-panel single-click: the tab is italic and
+/// replaced by the next preview open until the user edits or pins it.
+///
 /// `root` is taken rather than read off the project because a workspace created
 /// moments ago HAS no worktree yet: `project_for` starts `find_or_create_worktree`
 /// and detaches it. Asking `visible_worktrees` for the id synchronously is what
@@ -663,6 +672,7 @@ pub fn open_file_at(
     root: &Path,
     rel: &str,
     line: Option<u32>,
+    preview: bool,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -687,7 +697,7 @@ pub fn open_file_at(
                     worktree_id: worktree.read(cx).id(),
                     path: parsed,
                 };
-                ws.open_path(path, None, true, window, cx)
+                ws.open_path_preview(path, None, true, preview, true, window, cx)
             })?;
             let item = task.await?;
             cx.update(|window, cx| {
@@ -935,36 +945,18 @@ async fn probe_keys(hosted: &Entity<Workspace>, cx: &mut gpui::AsyncWindowContex
          active_repository = {repo:?}"
     );
 
-    // ⌘⇧G — the git panel, which shares the LEFT dock with the file tree.
-    //
-    // Worth its own probe because the panel is deliberately never activated at
-    // dock time (`dock_panel`): it would take the visible slot away from the
-    // file tree. So the chord is the only thing that makes it appear, and
-    // "docked but unreachable" is indistinguishable from "docked and working"
-    // in every other reading of the dock. Reports the active index against the
-    // git panel's own index, since with two panels in one dock the index alone
-    // says nothing about WHICH panel is showing.
-    let git_panel_slot = |ws: &mut Workspace, cx: &mut gpui::Context<Workspace>| {
-        let dock = ws.left_dock().read(cx);
-        (
-            dock.active_panel_index(),
-            dock.panel_index_for_type::<git_ui::git_panel::GitPanel>(),
-        )
-    };
-    let (active_before, git_index) = hosted.update(cx, git_panel_slot);
-    focused_dispatch(
-        hosted,
-        Box::new(zed_actions::git_panel::ToggleFocus),
-        pause,
-        cx,
-    )
-    .await;
-    let (active_after, _) = hosted.update(cx, git_panel_slot);
+    // Git panel registration (docks stay closed; harness hosts the view).
+    // ToggleFocus would open a nested dock — do not dispatch it here. The
+    // ⌘⇧G chord now routes to harness FocusGitTool instead.
+    let git_registered = hosted.update(cx, |ws, cx| {
+        ws.panel::<git_ui::git_panel::GitPanel>(cx).is_some()
+    });
+    let project_registered = hosted.update(cx, |ws, cx| {
+        ws.panel::<project_panel::ProjectPanel>(cx).is_some()
+    });
     log::info!(
-        "HARNESS_PROBE_KEYS: cmd-shift-g git panel left-dock active {active_before:?} \
-         -> {active_after:?}, git panel is index {git_index:?} \
-         (showing = {})",
-        active_after.is_some() && active_after == git_index
+        "HARNESS_PROBE_KEYS: panels registered project={project_registered:?} \
+         git={git_registered:?} (docks stay closed; harness tools panel hosts them)"
     );
 
     // ⌘P — file finder modal.
