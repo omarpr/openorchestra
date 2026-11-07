@@ -160,9 +160,26 @@ say "signing identity ${IDENTITY:0:8}… (team $OO_TEAM_ID)"
 # argument, since process arguments are readable by any local process for the
 # lifetime of the call. `history` is the cheapest call that genuinely round
 # trips to Apple, so it proves the credentials work rather than merely exist.
+#
+# Apple's own error is surfaced, not swallowed: a missing profile and a valid
+# profile Apple is refusing (HTTP 403 "A required agreement is missing or has
+# expired" — an unsigned Program License Agreement update) used to print the
+# same "missing or cannot authenticate", which sends you off recreating
+# credentials that were fine all along.
 check_notary_profile() {
-  xcrun notarytool history --keychain-profile "$OO_NOTARY_PROFILE" >/dev/null 2>&1 \
-    || die "notarytool profile '$OO_NOTARY_PROFILE' is missing or cannot authenticate.
+  local out
+  if out="$(xcrun notarytool history --keychain-profile "$OO_NOTARY_PROFILE" 2>&1)"; then
+    return 0
+  fi
+  if printf '%s' "$out" | grep -qi 'agreement'; then
+    die "Apple rejected notarization: a developer agreement needs accepting.
+    The '$OO_NOTARY_PROFILE' credentials are fine. Sign in to
+    https://developer.apple.com/account as the team's Account Holder, accept
+    the pending agreement, then retry.
+    notarytool said: $(printf '%s' "$out" | tail -1)"
+  fi
+  die "notarytool profile '$OO_NOTARY_PROFILE' is missing or cannot authenticate.
+    notarytool said: $(printf '%s' "$out" | tail -1)
     Create it with:
       xcrun notarytool store-credentials $OO_NOTARY_PROFILE \\
         --key <AuthKey.p8> --key-id <KEYID> --issuer <ISSUERID>"
