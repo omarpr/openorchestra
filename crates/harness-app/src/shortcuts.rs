@@ -101,18 +101,39 @@ pub struct Entry {
 
 impl Entry {
     fn new(
-        keys: String,
+        keys: &'static str,
         scope: Scope,
         what: &'static str,
         action: impl gpui::Action,
     ) -> Self {
         Entry {
-            binding: Some(KeyBinding::new(&keys, action, scope.context())),
-            keys,
+            binding: Some(KeyBinding::new(keys, action, scope.context())),
+            keys: keys.to_string(),
             scope,
             what,
         }
     }
+}
+
+/// The OS keystrokes are parsed for. `KeyBinding::new` only takes static
+/// chords now; runtime strings (user rebindings) go through the OS-aware
+/// parser, which is also what resolves zed's `secondary-` alias.
+pub fn host_os() -> gpui::OperatingSystem {
+    if cfg!(target_os = "macos") {
+        gpui::OperatingSystem::Mac
+    } else if cfg!(target_os = "windows") {
+        gpui::OperatingSystem::Windows
+    } else {
+        gpui::OperatingSystem::Linux
+    }
+}
+
+/// Whether every keystroke in a (space-separated) chord parses.
+fn chord_parses(keys: &str) -> bool {
+    !keys.trim().is_empty()
+        && keys
+            .split_whitespace()
+            .all(|k| gpui::Keystroke::parse_with_os(k, host_os()).is_ok())
 }
 
 /// The stable identity a rebinding is stored under. Scope + description,
@@ -121,48 +142,59 @@ pub fn key_id(scope: Scope, what: &str) -> String {
     format!("{}/{}", scope.label(), what)
 }
 
-/// The catalog with the user's rebindings applied. An override replaces the
-/// chord, never the action or scope — the settings screen can move a command
-/// to a new key but cannot detach the key from what it does.
+/// The catalog with the user's rebindings applied to what it *shows*: an
+/// override replaces the chord, never the action or scope — the settings
+/// screen can move a command to a new key but cannot detach the key from what
+/// it does. A stored chord that does not parse is ignored, so the default
+/// stays both shown and bound. Bindings themselves come from
+/// [`bindings_with`], which needs the app (zed resolves chords against the
+/// live keyboard layout).
 pub fn entries_with(overrides: &std::collections::BTreeMap<String, String>) -> Vec<Entry> {
     let mut all = entries();
     for e in &mut all {
-        if let Some(keys) = overrides.get(&key_id(e.scope, e.what)) {
-            // Re-parse under the new chord. An invalid stored chord falls
-            // back to the default rather than panicking at startup.
-            if let Some(binding) = e.binding.take() {
-                let predicate = e.scope.context().map(|c| {
-                    std::rc::Rc::new(
-                        gpui::KeyBindingContextPredicate::parse(c).expect("catalog context parses"),
-                    )
-                });
-                match KeyBinding::load(
-                    keys,
-                    binding.action().boxed_clone(),
-                    predicate,
-                    false,
-                    None,
-                    &gpui::DummyKeyboardMapper,
-                ) {
-                    Ok(b) => {
-                        e.keys = keys.clone();
-                        e.binding = Some(b);
-                    }
-                    // An invalid stored chord keeps the default binding.
-                    Err(_) => e.binding = Some(binding),
-                }
-            }
+        if let Some(keys) = overrides.get(&key_id(e.scope, e.what))
+            && chord_parses(keys)
+        {
+            e.keys = keys.clone();
         }
     }
     all
+}
+
+/// The key bindings to install: each entry's default binding, re-made under
+/// the user's chord where one is set and valid.
+pub fn bindings_with(
+    overrides: &std::collections::BTreeMap<String, String>,
+    cx: &gpui::App,
+) -> Vec<KeyBinding> {
+    let mut out = Vec::new();
+    for e in entries() {
+        let Some(binding) = e.binding else { continue };
+        let rebound = overrides
+            .get(&key_id(e.scope, e.what))
+            .filter(|k| chord_parses(k))
+            .and_then(|keys| {
+                let predicate = e.scope.context().map(|c| {
+                    std::rc::Rc::new(
+                        gpui::KeyBindingContextPredicate::parse(c)
+                            .expect("catalog context parses"),
+                    )
+                });
+                KeyBinding::load(keys, binding.action().boxed_clone(), predicate, false, None, cx)
+                    .ok()
+            });
+        // An invalid stored chord keeps the default binding.
+        out.push(rebound.unwrap_or(binding));
+    }
+    out
 }
 
 /// The default catalog. Order within a scope is display order.
 pub fn entries() -> Vec<Entry> {
     use editor::actions as ed;
 
-    fn s(v: &str) -> String {
-        v.to_string()
+    fn s(v: &'static str) -> &'static str {
+        v
     }
 
     vec![
@@ -466,6 +498,11 @@ mod tests {
             .unwrap();
         assert_eq!(term.keys, "cmd-y", "override must rebind");
         assert!(term.binding.is_some());
+        // A stored chord that does not parse is shown as the default.
+        let mut bad = std::collections::BTreeMap::new();
+        bad.insert(key_id(Scope::Global, "New terminal tab"), "   ".to_string());
+        let term = entries_with(&bad).into_iter().find(|e| e.what == "New terminal tab").unwrap();
+        assert_eq!(term.keys, "cmd-t");
         let undo = all
             .iter()
             .find(|e| e.what == "Undo" && e.scope == Scope::Editor)

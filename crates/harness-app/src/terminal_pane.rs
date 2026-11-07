@@ -163,7 +163,7 @@ impl TerminalPane {
 
         let builder_task = TerminalBuilder::new(
             Some(self.worktree_root.clone()),
-            None,
+            terminal::TerminalMode::interactive(),
             shell,
             Default::default(),
             SettingsCursorShape::default(),
@@ -177,10 +177,9 @@ impl TerminalPane {
             AlternateScroll::Off,
             None,
             Vec::new(),
-            0,
+            std::time::Duration::ZERO,
             false,
             self.window_id,
-            None,
             cx,
             Vec::new(),
             PathStyle::local(),
