@@ -228,11 +228,41 @@ fn max_diff_width(viewport_w: f32, sidebar_w: f32, sidebar_open: bool) -> f32 {
 /// Decided from the location and the persisted dock width rather than measured
 /// bounds: a tab always fills the center, and the dock's width is a pref we
 /// already own, so neither case needs a layout pass to answer.
-fn use_two_pane(location: DiffLocation, dock_width: f32) -> bool {
+///
+/// With Split picked, the dock also has to leave the *body* wide enough to
+/// split once the file list has taken its column. When it cannot, the accordion
+/// wins: it gives the open file the whole dock, which is often exactly enough
+/// for two columns. Before this, a dock between the two thresholds kept the
+/// file list and so vetoed Split forever — picking Split in the tools panel
+/// visibly did nothing on any laptop-sized window.
+fn use_two_pane(location: DiffLocation, dock_width: f32, view: DiffView, list_width: f32) -> bool {
     match location {
         DiffLocation::Tab => true,
-        DiffLocation::Dock => dock_width >= DIFF_TWO_PANE_MIN,
+        DiffLocation::Dock => {
+            dock_width >= DIFF_TWO_PANE_MIN
+                && (view != DiffView::Split
+                    || dock_width - list_width - SPLITTER_W >= SPLIT_MIN_W
+                    || dock_width < SPLIT_MIN_W)
+        }
     }
+}
+
+/// Width of the drag handle between the diff file list and the body (see
+/// `splitter`).
+const SPLITTER_W: f32 = 6.0;
+
+/// The dock width to grow to when Split is picked in a dock too narrow for it,
+/// or `None` when the current width already splits (or nothing would help).
+///
+/// Picking Split is a request to see two columns; a toggle that greys out and
+/// does nothing reads as broken. So the click widens the dock to the narrowest
+/// width that splits — in the accordion layout the body is the whole dock —
+/// capped at what the window allows while keeping the center usable.
+fn split_dock_width(dock_width: f32, ceiling: f32) -> Option<f32> {
+    if dock_width >= SPLIT_MIN_W || ceiling < SPLIT_MIN_W {
+        return None;
+    }
+    Some(SPLIT_MIN_W)
 }
 
 /// The line in the *working file* that diff row `ix` refers to.
@@ -260,11 +290,14 @@ fn target_line_for_row(rows: &[DiffRow], ix: usize) -> Option<u32> {
 
 /// Body width at or below which split view falls back to unified.
 ///
-/// Two columns of roughly 360 px each. Below that neither side shows enough of
-/// a line to compare against the other, and one readable column beats two
-/// unreadable ones — the same judgement `DIFF_TWO_PANE_MIN` makes about the
-/// file list, and the same one zed makes with `minimum_split_diff_width`.
-const SPLIT_MIN_W: f32 = 720.0;
+/// Two columns of roughly 240 px each — about 30 monospace characters of code
+/// beside a line-number gutter. Below that neither side shows enough of a line
+/// to compare against the other, and one readable column beats two unreadable
+/// ones. It was 720 (zed's `minimum_split_diff_width`, which is sized for a
+/// full editor pane); the tools panel tops out near 800 px on a laptop window
+/// and also hosts the file list, so at 720 the dock could never split at all.
+/// A split line wider than its column is clipped, by design (`FitList`).
+const SPLIT_MIN_W: f32 = 480.0;
 
 /// Whether to draw the body as old-and-new columns.
 ///
@@ -538,6 +571,10 @@ impl Tab {
     }
 }
 
+/// Prefix on a notification's navigation id that names a project's main
+/// checkout rather than a registry worktree (see `alert_target`).
+pub(crate) const MAIN_NAV_PREFIX: &str = "main:";
+
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) enum Selection {
     /// Projects foot — main checkout.
@@ -586,6 +623,11 @@ struct NewTaskDialog {
     /// Keeps the dialog view refreshing while the name is typed so the
     /// branch placeholder can track `feat/{slug}`.
     _name_sub: gpui::Subscription,
+    /// `Some(repo)` when opened from a PROJECTS row's `+`: the dialog is a
+    /// "New worktree" form for that one project — no member picker, no Home,
+    /// worktree wording. Under the hood it is still a one-member task, so the
+    /// agent, branch and setup hooks behave exactly as for any task.
+    worktree_for: Option<String>,
 }
 
 /// Steps in the post-create "start agents" guide for multi-member tasks.
@@ -986,6 +1028,13 @@ pub struct HarnessWorkspace {
     /// twice the git processes to agree on the same numbers, and the watcher can
     /// fire far faster than git can answer.
     status_pending: bool,
+    /// A recompute was asked for while one was in flight. Dropping that request
+    /// is how badges went stale: the pass in flight had already read git
+    /// *before* the event that asked again, so its answer predates it, and
+    /// nothing re-asked until the 10 s backstop — or never, if the backstop
+    /// itself landed mid-flight. Set instead of dropped, and run once more when
+    /// the current pass lands.
+    status_rerun: bool,
     /// The selected root's standing against its own tracking branch, tagged with
     /// the path it was measured in. Tagged rather than bare because the answer
     /// arrives asynchronously and the user may have selected another worktree by
@@ -1257,6 +1306,7 @@ impl HarnessWorkspace {
             diff_watch,
             git_watch,
             status_pending: false,
+            status_rerun: false,
             push_state: None,
             push_armed: false,
             pushing: false,
@@ -1400,7 +1450,11 @@ impl HarnessWorkspace {
                 match nav_rx.try_recv() {
                     Ok(id) => {
                         let ok = view.update_in(cx, |ws, window, cx| {
-                            ws.select(Selection::Worktree(id.clone()), window, cx);
+                            let sel = match id.strip_prefix(MAIN_NAV_PREFIX) {
+                                Some(repo) => Selection::Main(repo.to_string()),
+                                None => Selection::Worktree(id.clone()),
+                            };
+                            ws.select(sel, window, cx);
                             cx.activate(true);
                         });
                         if ok.is_err() {
@@ -1549,10 +1603,23 @@ impl HarnessWorkspace {
                     log::debug!("git moved: {}", path.display());
                     if view
                         .update(cx, |ws, cx| {
+                            // Cheap when nothing changed (it compares first).
+                            // A repo's first `git worktree add` creates
+                            // `.git/worktrees`, which needs a watch of its own.
+                            let roots = ws.repo_roots.clone();
+                            ws.git_watch.watch_repos(&roots);
                             ws.refresh_status_live(cx);
                             // A commit or a push moves what the push control
                             // offers, and both land here.
                             ws.refresh_push_state(cx);
+                            // And what the diff shows. The diff watcher skips
+                            // `.git` by design, so a commit in the selected
+                            // worktree — which moves HEAD and empties the
+                            // working-tree diff without touching one tracked
+                            // file — reached nothing: the panel kept listing
+                            // files that were already committed. A checkout or
+                            // a rebase is the same story with more files.
+                            ws.refresh_diff_live(cx);
                         })
                         .is_err()
                     {
@@ -2263,6 +2330,12 @@ struct Prefs {
     /// the corner whenever a notification posts.
     #[serde(default = "default_true")]
     pet_enabled: bool,
+    /// Show gitignored files in the Files tree and in the ⌘P file finder.
+    /// On by default: agents routinely write build output, generated code and
+    /// local env files that are ignored, and a tree that hides them makes the
+    /// files an agent just mentioned look missing.
+    #[serde(default = "default_true")]
+    show_ignored_files: bool,
     /// Shortcut rebindings, keyed by `shortcuts::key_id`. Value is the gpui
     /// chord string; missing = the catalog default.
     #[serde(default)]
@@ -2338,6 +2411,7 @@ impl Default for Prefs {
             last_task_agent: None,
             font_size: None,
             pet_enabled: true,
+            show_ignored_files: true,
             shortcuts: Default::default(),
             collapsed: Default::default(),
             collapsed_sections: Default::default(),
@@ -2524,7 +2598,7 @@ mod slugify_tests {
 mod diff_render_tests {
     use super::{
         load_prefs, max_diff_width, readable_diff_lines, reordered, save_prefs_to, split_rows,
-        target_line_for_row, use_split, use_two_pane, DiffLineKind, DiffLocation, DiffView,
+        split_dock_width, target_line_for_row, use_split, use_two_pane, DiffLineKind, DiffLocation, DiffView,
         Prefs, SplitRow, ToolTab, DIFF_TWO_PANE_MIN, MAX_PANEL_W, MIN_CENTER_W, SPLIT_MIN_W,
     };
 
@@ -2877,11 +2951,33 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
     fn the_tab_is_always_two_pane_and_the_dock_only_when_wide_enough() {
         // A tab fills the center, so it always has room; the dock can be dragged
         // down to 220px, where two columns would leave neither readable.
-        assert!(use_two_pane(DiffLocation::Tab, 0.0));
-        assert!(!use_two_pane(DiffLocation::Dock, 340.0));
-        assert!(!use_two_pane(DiffLocation::Dock, DIFF_TWO_PANE_MIN - 1.0));
-        assert!(use_two_pane(DiffLocation::Dock, DIFF_TWO_PANE_MIN));
-        assert!(use_two_pane(DiffLocation::Dock, 800.0));
+        let u = DiffView::Unified;
+        assert!(use_two_pane(DiffLocation::Tab, 0.0, u, 200.0));
+        assert!(!use_two_pane(DiffLocation::Dock, 340.0, u, 200.0));
+        assert!(!use_two_pane(DiffLocation::Dock, DIFF_TWO_PANE_MIN - 1.0, u, 200.0));
+        assert!(use_two_pane(DiffLocation::Dock, DIFF_TWO_PANE_MIN, u, 200.0));
+        assert!(use_two_pane(DiffLocation::Dock, 800.0, u, 200.0));
+    }
+
+    #[test]
+    fn split_gives_up_the_file_list_rather_than_its_own_columns() {
+        let s = DiffView::Split;
+        // 600 px dock with a 200 px list leaves a 394 px body: too narrow to
+        // split, but the dock alone is wide enough — so drop the list.
+        assert!(!use_two_pane(DiffLocation::Dock, 600.0, s, 200.0));
+        assert!(use_split(s, 600.0), "the accordion body is the whole dock");
+        // Wide enough for both: keep the list.
+        assert!(use_two_pane(DiffLocation::Dock, 900.0, s, 200.0));
+        assert!(use_split(s, 900.0 - 200.0 - 6.0));
+        // A tab is never affected.
+        assert!(use_two_pane(DiffLocation::Tab, 0.0, s, 200.0));
+    }
+
+    #[test]
+    fn picking_split_in_a_narrow_dock_widens_it_just_enough() {
+        assert_eq!(split_dock_width(380.0, 816.0), Some(SPLIT_MIN_W));
+        assert_eq!(split_dock_width(SPLIT_MIN_W, 816.0), None, "already splits");
+        assert_eq!(split_dock_width(380.0, 400.0), None, "window too small to help");
     }
 
     #[test]

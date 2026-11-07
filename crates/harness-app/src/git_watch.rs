@@ -51,6 +51,10 @@ pub struct GitWatcher {
     /// so it can drop events from a repo we have since removed, and compared on
     /// retarget to skip rebuilding an identical watch set.
     current: Arc<Mutex<Vec<PathBuf>>>,
+    /// The directories actually under watch. Compared on retarget alongside the
+    /// roots: `.git/worktrees` only exists once a repo's first worktree does, so
+    /// an identical root set can still need a wider watch than the last one.
+    armed: Vec<PathBuf>,
     tx: Sender<PathBuf>,
 }
 
@@ -62,6 +66,7 @@ impl GitWatcher {
             Self {
                 watcher: None,
                 current: Arc::new(Mutex::new(Vec::new())),
+                armed: Vec::new(),
                 tx,
             },
             rx,
@@ -80,9 +85,16 @@ impl GitWatcher {
             .iter()
             .map(|r| std::fs::canonicalize(r).unwrap_or_else(|_| r.clone()))
             .collect();
-        if *self.current.lock().unwrap() == canonical {
+        let targets = watch_targets(&canonical);
+        let armed: Vec<PathBuf> = targets.iter().map(|(p, _)| p.clone()).collect();
+        if *self.current.lock().unwrap() == canonical && self.armed == armed {
             return; // already watching exactly this set
         }
+        // Before this compared roots only, so a repo whose first worktree was
+        // created after launch never gained its `.git/worktrees` watch: that
+        // worktree's commits — its HEAD and index live there — moved no badge
+        // and refreshed no diff for the rest of the session.
+        self.armed = armed;
         // Drop the old watcher first (stops its watches) and publish the new set
         // before the fresh watcher can deliver anything against it.
         self.watcher = None;
@@ -113,30 +125,39 @@ impl GitWatcher {
         };
 
         let mut watched_any = false;
-        for root in &canonical {
-            let git_dir = root.join(".git");
-            if !git_dir.is_dir() {
-                log::warn!("no .git directory at {}; badges stay static", root.display());
-                continue;
+        for (path, mode) in targets {
+            match watcher.watch(&path, mode) {
+                Ok(()) => watched_any = true,
+                Err(e) => log::warn!("cannot watch {}: {e}", path.display()),
             }
-            let mut add = |path: PathBuf, mode: RecursiveMode| {
-                if !path.exists() {
-                    return; // refs/ always exists; worktrees/ only once one is created
-                }
-                match watcher.watch(&path, mode) {
-                    Ok(()) => watched_any = true,
-                    Err(e) => log::warn!("cannot watch {}: {e}", path.display()),
-                }
-            };
-            add(git_dir.clone(), RecursiveMode::NonRecursive);
-            add(git_dir.join("refs"), RecursiveMode::Recursive);
-            add(git_dir.join("worktrees"), RecursiveMode::Recursive);
         }
         if watched_any {
             log::debug!("git watch armed for {} repo(s)", canonical.len());
             self.watcher = Some(watcher);
         }
     }
+}
+
+/// What to watch for each canonical repo root: `.git` itself, and its `refs`
+/// and `worktrees` subtrees when they exist (see the module docs).
+fn watch_targets(roots: &[PathBuf]) -> Vec<(PathBuf, RecursiveMode)> {
+    let mut out = Vec::new();
+    for root in roots {
+        let git_dir = root.join(".git");
+        if !git_dir.is_dir() {
+            log::debug!("no .git directory at {}; badges stay static", root.display());
+            continue;
+        }
+        out.push((git_dir.clone(), RecursiveMode::NonRecursive));
+        for (sub, mode) in [("refs", RecursiveMode::Recursive), ("worktrees", RecursiveMode::Recursive)] {
+            let path = git_dir.join(sub);
+            // refs/ always exists; worktrees/ only once one is created.
+            if path.exists() {
+                out.push((path, mode));
+            }
+        }
+    }
+    out
 }
 
 /// Whether a changed path under `.git` should trigger a status recompute.

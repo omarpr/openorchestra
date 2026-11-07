@@ -216,6 +216,17 @@ block2 = "0.6"
 # blow that stack, so a debug build without these lines crashes (SIGILL,
 # stack-probe guard) the first time any buffer parses — i.e. the first
 # time a file opens with a real grammar attached.
+# `debug = 0` makes rustc strip debuginfo from every artifact, and on current
+# macOS toolchains (ld-27034 / ld-27106) stripping the sqlez_macros proc-macro
+# — it statically bundles SQLite — leaves a dylib dyld refuses to load
+# ("mis-aligned LINKEDIT string pool"). rustc then reports the misleading
+# `E0463: can't find crate for sqlez_macros` while compiling zed's `db`. A
+# cached copy hides this until anything forces the macro to relink.
+[profile.dev.package.sqlez_macros]
+strip = false
+[profile.release.package.sqlez_macros]
+strip = false
+
 [profile.dev.package.wasmtime]
 opt-level = 3
 [profile.dev.package.cranelift-codegen]

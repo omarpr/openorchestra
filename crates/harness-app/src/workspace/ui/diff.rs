@@ -627,7 +627,16 @@ impl HarnessWorkspace {
                 .is_some_and(|(f, from, to)| f == file && ix >= *from && ix <= *to)
         });
 
-        let mut row = div().id(("splitrow", anchor.unwrap_or(usize::MAX))).flex().h(px(DIFF_ROW_H));
+        // `w_full` is load-bearing: the halves are sized as shares of this row,
+        // and a row with no width of its own is content-sized — so each line's
+        // halves landed wherever that line's text put them and the divider
+        // zig-zagged down the body, with insert-only lines drawn from the left
+        // edge as if they were old text.
+        let mut row = div()
+            .id(("splitrow", anchor.unwrap_or(usize::MAX)))
+            .flex()
+            .w_full()
+            .h(px(DIFF_ROW_H));
         if let Some(ix) = anchor {
             let row_file = file.to_string();
             let move_file = file.to_string();
@@ -665,9 +674,10 @@ impl HarnessWorkspace {
     /// insertion or deletion — tinted, so an unbalanced hunk reads as "nothing
     /// was here" rather than as a blank the renderer forgot to fill.
     ///
-    /// Exactly half the body: `w_1_2` plus `overflow_hidden`, which is what
-    /// clips a line wider than its column. `FitList` on the list above makes
-    /// the halves true halves.
+    /// Exactly half the body: two `flex_1` columns with a zero basis share the
+    /// full-width row equally whatever their text, and `overflow_hidden` clips a
+    /// line wider than its column. `min_w_0` lets a long line shrink its column
+    /// back to its share instead of claiming its content width.
     #[allow(clippy::too_many_arguments)]
     fn render_split_half(
         &self,
@@ -680,7 +690,7 @@ impl HarnessWorkspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let transparent = Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
-        let half = div().flex().flex_none().w_1_2().h_full().overflow_hidden();
+        let half = div().flex().flex_1().flex_basis(px(0.0)).min_w_0().h_full().overflow_hidden();
 
         let Some(ix) = ix else {
             return half.bg(tint(hx.tx2, 0.06)).into_any_element();
@@ -769,6 +779,8 @@ impl HarnessWorkspace {
         let two_pane = use_two_pane(
             self.prefs.diff_location,
             dock_width.unwrap_or(f32::INFINITY),
+            self.prefs.diff_view,
+            self.prefs.diff_list_width,
         );
         let (adds, dels) = self.diff.totals();
         let review_count = self.review.count(&r.key);
@@ -778,8 +790,7 @@ impl HarnessWorkspace {
         // unbounded rather than requiring a layout pass to measure.
         let surface_w = dock_width.unwrap_or(f32::INFINITY);
         let body_w = if two_pane {
-            // The splitter is 6px (see `splitter`).
-            surface_w - self.prefs.diff_list_width - 6.0
+            surface_w - self.prefs.diff_list_width - SPLITTER_W
         } else {
             surface_w
         };
@@ -974,7 +985,7 @@ impl HarnessWorkspace {
             // so widening the dock restores the layout the user asked for.
             let vetoed = view == DiffView::Split && too_narrow;
             let tooltip = if vetoed {
-                "Too narrow to split — widen the diff panel"
+                "Too narrow to split — click to widen the panel"
             } else {
                 match view {
                     DiffView::Unified => "One column, with +/− markers",
@@ -998,9 +1009,21 @@ impl HarnessWorkspace {
                     .cursor_pointer()
                     .tooltip(tip(tooltip))
                     .child(view.label())
-                    .on_click(cx.listener(move |ws, _, _, cx| {
+                    .on_click(cx.listener(move |ws, _, window, cx| {
                         cx.stop_propagation();
                         ws.set_diff_view(view, cx);
+                        if view == DiffView::Split && ws.prefs.diff_location == DiffLocation::Dock {
+                            let ceiling = max_diff_width(
+                                f32::from(window.viewport_size().width),
+                                ws.prefs.sidebar_width,
+                                ws.prefs.sidebar_open,
+                            );
+                            if let Some(w) = split_dock_width(ws.prefs.diff_width, ceiling) {
+                                ws.prefs.diff_width = w;
+                                save_prefs_to(&ws.prefs_path, &ws.prefs);
+                                cx.notify();
+                            }
+                        }
                     })),
             );
         }

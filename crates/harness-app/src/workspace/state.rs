@@ -278,24 +278,14 @@ impl HarnessWorkspace {
         {
             return;
         }
-        let entry = self
-            .manager
-            .registry
-            .entries()
-            .iter()
-            .find(|e| e.path == signal.worktree_root);
-        let (name, repo) = match entry {
-            Some(e) => (e.name.clone(), e.repo.clone()),
-            None => (String::new(), String::new()),
-        };
-        let id = self.worktree_id_for_path(&signal.worktree_root).unwrap_or_default();
+        let (label, repo, id) = self.alert_target(&signal.worktree_root);
         self.show_pet(
             format!("{} needs your attention!", agent_display(&signal.kind)),
             cx,
         );
         crate::notifier::notify_agent(
             &agent_display(&signal.kind),
-            &crate::notifier::label_for(&name, &signal.worktree_root),
+            &label,
             &repo,
             &id,
             crate::notifier::AgentAlert::NeedsAttention,
@@ -312,29 +302,37 @@ impl HarnessWorkspace {
         {
             return;
         }
-        let entry = self
-            .manager
-            .registry
-            .entries()
-            .iter()
-            .find(|e| e.path == signal.worktree_root);
-        let (name, repo) = match entry {
-            Some(e) => (e.name.clone(), e.repo.clone()),
-            None => (String::new(), String::new()),
-        };
-        let id = self.worktree_id_for_path(&signal.worktree_root).unwrap_or_default();
+        let (label, repo, id) = self.alert_target(&signal.worktree_root);
         self.show_pet(
             format!("{} finished — your turn", agent_display(&signal.kind)),
             cx,
         );
         crate::notifier::notify_agent(
             &agent_display(&signal.kind),
-            &crate::notifier::label_for(&name, &signal.worktree_root),
+            &label,
             &repo,
             &id,
             crate::notifier::AgentAlert::Finished,
             &self.prefs.notify_sound,
         );
+    }
+
+    /// Who an alert is about: `(label, repo, navigation id)`.
+    ///
+    /// The registry only holds worktrees, so an agent running in a project's
+    /// *main checkout* used to resolve to nothing: the banner read
+    /// "msrosa-tutoring () is waiting on you" (directory name, empty repo) and
+    /// its View button carried an empty id that navigated nowhere. A main
+    /// checkout is now named "main" in its project and navigates via a
+    /// `main:<repo>` id, which the View handler maps to `Selection::Main`.
+    pub(crate) fn alert_target(&self, path: &Path) -> (String, String, String) {
+        if let Some(e) = self.manager.registry.entries().iter().find(|e| e.path == path) {
+            return (e.name.clone(), e.repo.clone(), e.id.clone());
+        }
+        if let Some(r) = self.data.repos.iter().find(|r| r.repo_root == path) {
+            return ("main".to_string(), r.name.clone(), format!("{MAIN_NAV_PREFIX}{}", r.name));
+        }
+        (crate::notifier::label_for("", path), String::new(), String::new())
     }
 
     /// Resolve a worktree path back to its registry id.
@@ -1666,8 +1664,10 @@ impl HarnessWorkspace {
     /// left exactly as they are.
     pub(crate) fn refresh_status_live(&mut self, cx: &mut Context<Self>) {
         if self.status_pending {
+            self.status_rerun = true;
             return;
         }
+        self.status_rerun = false;
         // Every card, main rows included — each with the compare ref its own
         // repo resolved, so a worktree is never measured against another repo's
         // upstream.
@@ -1689,9 +1689,25 @@ impl HarnessWorkspace {
                     let git = GitWorktrees::new(SystemRunner);
                     targets
                         .into_iter()
-                        .map(|(path, compare_ref)| {
-                            let s = git.status(&path, Some(&compare_ref)).unwrap_or_default();
-                            (path, s.ahead, s.behind, s.dirty_files)
+                        // A failed probe is skipped, not zeroed: `git status`
+                        // racing a commit's `index.lock` fails transiently, and
+                        // `unwrap_or_default` turned that into a clean `~0` card
+                        // until the next tick.
+                        .filter_map(|(path, compare_ref)| {
+                            let s = git.status(&path, Some(&compare_ref)).ok()?;
+                            // The branch is re-read too. It used to come only
+                            // from `refresh()`, i.e. structural changes, so a
+                            // `git switch` in a worktree — or an agent renaming
+                            // its branch — left the old name on the card for
+                            // the rest of the session.
+                            let branch = git.current_branch(&path).ok();
+                            Some(LiveStatus {
+                                path,
+                                branch,
+                                ahead: s.ahead,
+                                behind: s.behind,
+                                dirty: s.dirty_files,
+                            })
                         })
                         .collect::<Vec<_>>()
                 })
@@ -1701,8 +1717,11 @@ impl HarnessWorkspace {
                 // Only re-render when a number actually moved. The backstop tick
                 // runs forever on an idle app, and an unconditional notify would
                 // repaint the window every few seconds for nothing.
-                if ws.apply_status(computed) {
+                if apply_live_status(&mut ws.data, computed) {
                     cx.notify();
+                }
+                if ws.status_rerun {
+                    ws.refresh_status_live(cx);
                 }
             })
             .ok();
@@ -1879,39 +1898,6 @@ impl HarnessWorkspace {
             .ok();
         })
         .detach();
-    }
-
-    /// Merge recomputed counts into the cards, keyed by path. Returns whether
-    /// anything changed.
-    ///
-    /// A path that no longer matches a card is dropped: the worktree was deleted
-    /// while its status was in flight, and `refresh()` has already rebuilt the
-    /// list without it.
-    fn apply_status(&mut self, computed: Vec<(PathBuf, usize, usize, usize)>) -> bool {
-        let mut changed = false;
-        let mut set = |ahead: &mut usize, behind: &mut usize, dirty: &mut usize, n: (usize, usize, usize)| {
-            if (*ahead, *behind, *dirty) != n {
-                (*ahead, *behind, *dirty) = n;
-                changed = true;
-            }
-        };
-        for (path, ahead, behind, dirty) in computed {
-            log::trace!("status {}: ↑{ahead} ↓{behind} ~{dirty}", path.display());
-            for repo in &mut self.data.repos {
-                if repo.repo_root == path {
-                    set(&mut repo.ahead, &mut repo.behind, &mut repo.dirty, (ahead, behind, dirty));
-                }
-            }
-            for task in &mut self.data.tasks {
-                for m in &mut task.members {
-                    if m.path == path {
-                        set(&mut m.ahead, &mut m.behind, &mut m.dirty, (ahead, behind, dirty));
-                    }
-                }
-                task.dirty = task.members.iter().map(|m| m.dirty).sum();
-            }
-        }
-        changed
     }
 
     /// Spawn the off-thread git diff, discarding a result whose selection the
@@ -2218,4 +2204,140 @@ fn ps_snapshot() -> String {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default()
+}
+
+/// One card's freshly probed git state, off the UI thread.
+#[derive(Debug, Clone)]
+pub(crate) struct LiveStatus {
+    pub path: PathBuf,
+    /// `None` when the branch probe failed; the card keeps the name it had.
+    pub branch: Option<String>,
+    pub ahead: usize,
+    pub behind: usize,
+    pub dirty: usize,
+}
+
+/// Merge recomputed status into the cards, keyed by path. Returns whether
+/// anything changed.
+///
+/// A path that no longer matches a card is dropped: the worktree was deleted
+/// while its status was in flight, and `refresh()` has already rebuilt the
+/// list without it.
+pub(crate) fn apply_live_status(data: &mut crate::data::WorkspaceData, computed: Vec<LiveStatus>) -> bool {
+    fn set<T: PartialEq>(slot: &mut T, value: T, changed: &mut bool) {
+        if *slot != value {
+            *slot = value;
+            *changed = true;
+        }
+    }
+    let mut changed = false;
+    for st in computed {
+        log::trace!("status {}: {:?} ↑{} ↓{} ~{}", st.path.display(), st.branch, st.ahead, st.behind, st.dirty);
+        for repo in &mut data.repos {
+            if repo.repo_root == st.path {
+                set(&mut repo.ahead, st.ahead, &mut changed);
+                set(&mut repo.behind, st.behind, &mut changed);
+                set(&mut repo.dirty, st.dirty, &mut changed);
+                if let Some(b) = &st.branch {
+                    set(&mut repo.head_branch, b.clone(), &mut changed);
+                }
+            }
+            for wt in &mut repo.worktrees {
+                if wt.path == st.path
+                    && let Some(b) = &st.branch
+                {
+                    set(&mut wt.branch, b.clone(), &mut changed);
+                }
+            }
+        }
+        for task in &mut data.tasks {
+            for m in &mut task.members {
+                if m.path == st.path {
+                    set(&mut m.ahead, st.ahead, &mut changed);
+                    set(&mut m.behind, st.behind, &mut changed);
+                    set(&mut m.dirty, st.dirty, &mut changed);
+                    if let Some(b) = &st.branch {
+                        set(&mut m.branch, b.clone(), &mut changed);
+                    }
+                }
+            }
+            task.dirty = task.members.iter().map(|m| m.dirty).sum();
+        }
+    }
+    changed
+}
+
+#[cfg(test)]
+mod live_status_tests {
+    use super::{apply_live_status, LiveStatus};
+    use crate::data::{RepoView, TaskMemberView, TaskView, WorkspaceData, WorktreeView};
+    use std::path::PathBuf;
+
+    fn data() -> WorkspaceData {
+        WorkspaceData {
+            repos: vec![RepoView {
+                name: "app".into(),
+                repo_root: PathBuf::from("/r/app"),
+                default_branch: "main".into(),
+                head_branch: "main".into(),
+                compare_ref: "origin/main".into(),
+                ahead: 0,
+                behind: 0,
+                dirty: 0,
+                worktrees: vec![WorktreeView {
+                    id: "wt1".into(),
+                    name: "wt1".into(),
+                    branch: "feat/old".into(),
+                    path: PathBuf::from("/r/app-wt1"),
+                    task_id: Some("t1".into()),
+                }],
+            }],
+            tasks: vec![TaskView {
+                id: "t1".into(),
+                name: "t".into(),
+                initials: "T".into(),
+                color: 0,
+                members: vec![TaskMemberView {
+                    worktree_id: "wt1".into(),
+                    repo: "app".into(),
+                    branch: "feat/old".into(),
+                    path: PathBuf::from("/r/app-wt1"),
+                    ahead: 0,
+                    behind: 0,
+                    dirty: 0,
+                    is_home: true,
+                }],
+                dirty: 0,
+            }],
+        }
+    }
+
+    fn st(path: &str, branch: Option<&str>, dirty: usize) -> LiveStatus {
+        LiveStatus { path: PathBuf::from(path), branch: branch.map(Into::into), ahead: 1, behind: 0, dirty }
+    }
+
+    #[test]
+    fn a_branch_switch_reaches_every_card_that_shows_it() {
+        let mut d = data();
+        assert!(apply_live_status(&mut d, vec![st("/r/app-wt1", Some("feat/new"), 2), st("/r/app", Some("dev"), 0)]));
+        assert_eq!(d.repos[0].head_branch, "dev");
+        assert_eq!(d.repos[0].worktrees[0].branch, "feat/new");
+        assert_eq!(d.tasks[0].members[0].branch, "feat/new");
+        assert_eq!(d.tasks[0].members[0].dirty, 2);
+        assert_eq!(d.tasks[0].dirty, 2);
+    }
+
+    #[test]
+    fn a_failed_branch_probe_keeps_the_known_name() {
+        let mut d = data();
+        apply_live_status(&mut d, vec![st("/r/app-wt1", None, 0)]);
+        assert_eq!(d.tasks[0].members[0].branch, "feat/old");
+    }
+
+    #[test]
+    fn an_unchanged_answer_reports_no_change() {
+        let mut d = data();
+        apply_live_status(&mut d, vec![st("/r/app-wt1", Some("feat/new"), 2)]);
+        assert!(!apply_live_status(&mut d, vec![st("/r/app-wt1", Some("feat/new"), 2)]));
+    }
 }

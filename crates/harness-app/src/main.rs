@@ -180,7 +180,7 @@ fn main() {
         };
         let theme_name = harness_zed_theme::theme_name(&hx);
         harness_zed_theme::install(&hx, cx);
-        apply_zed_settings(cx, "Zed Plex Sans", "Menlo", 13.0, theme_name);
+        apply_zed_settings(cx, "Zed Plex Sans", "Menlo", 13.0, theme_name, true);
 
         // Editor crate wiring (Spike 3). Safe out-of-tree: registers defensive
         // globals + workspace item hooks; Editor::for_buffer works without it,
@@ -509,7 +509,13 @@ pub fn apply_zed_settings(
     mono_font: &str,
     font_size: f32,
     theme: &str,
+    show_ignored: bool,
 ) {
+    // Gitignored files: `hide_gitignore` drops them from the project tree, and
+    // the file finder's "smart" mode only surfaces them when ⌘P is invoked from
+    // inside an ignored directory. "all" searches every ignored file too.
+    let hide_gitignore = !show_ignored;
+    let finder_ignored = if show_ignored { "all" } else { "smart" };
     // Panel docks stay closed — Files/Git live in the harness tools column —
     // so hide the status-bar dock buttons (they only toggled those docks).
     // Git primary click opens a single-file SoloDiff instead of ProjectDiff
@@ -522,7 +528,8 @@ pub fn apply_zed_settings(
              "buffer_font_family": "{mono_font}", "buffer_font_size": {font_size},
              "ui_font_family": "{ui_font}",
              "terminal": {{ "font_family": "{mono_font}", "font_size": {font_size} }},
-             "project_panel": {{ "dock": "left", "button": false }},
+             "project_panel": {{ "dock": "left", "button": false, "hide_gitignore": {hide_gitignore} }},
+             "file_finder": {{ "include_ignored": "{finder_ignored}" }},
              "git_panel": {{
                "dock": "left",
                "button": false,

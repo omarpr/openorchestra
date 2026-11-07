@@ -614,6 +614,11 @@ impl HarnessWorkspace {
                     .id(repo_element_id(ID_TOGGLE, &repo.name))
                     .flex()
                     .flex_1()
+                    // Shrinkable, with the name ellipsing below: four header
+                    // icons no longer fit beside a long project name, and
+                    // without this the row overflowed and pushed the trash
+                    // button past the sidebar's edge.
+                    .min_w_0()
                     .items_center()
                     .gap_2()
                     .cursor_pointer()
@@ -628,11 +633,26 @@ impl HarnessWorkspace {
                         cx.notify();
                     }))
                     .child(div().text_xs().text_color(hx.tx2).child(if collapsed { "▸" } else { "▾" }))
-                    .child(div().flex_1().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx0).child(repo.name.clone()))
-                    .child(div().text_xs().text_color(hx.tx2).child(format!("{count} {}", if count == 1 { "tree" } else { "trees" }))),
+                    .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx0).child(repo.name.clone()))
+                    .child(div().flex_none().whitespace_nowrap().text_xs().text_color(hx.tx2).child(format!("{count} {}", if count == 1 { "tree" } else { "trees" }))),
             )
-            // Archive / hooks / trash. Hooks opens the setup script in the
-            // editor (TOML is harness-managed).
+            // New worktree / archive / hooks / trash. Hooks opens the setup
+            // script in the editor (TOML is harness-managed).
+            //
+            // `+` is the classic per-project entry point that the task-centric
+            // rework (#3) dropped: it opens the same new-task dialog TASKS' `+`
+            // does, scoped to this one project, so the worktree it makes gets
+            // the agent, branch and setup hooks every task does — and is
+            // listed both here and under TASKS.
+            .child(
+                header_icon(ID_NEW_WT, "+", "New worktree in this project", false).on_click({
+                    let new_wt_repo = repo.name.clone();
+                    cx.listener(move |ws, _, window, cx| {
+                        cx.stop_propagation();
+                        ws.open_new_task_for_repo(&new_wt_repo, window, cx);
+                    })
+                }),
+            )
             .child(
                 header_icon(ID_ARCHIVE, "▦", "Archive project", false).on_click(
                     cx.listener(move |ws, _, window, cx| {
@@ -674,11 +694,105 @@ impl HarnessWorkspace {
                 .pl_1()
                 .border_l_1()
                 .border_color(hx.border);
-            // Projects foot: main checkout only (tasks own the worktree cards).
+            // Main checkout first, then the project's worktrees. Tasks still
+            // own the full cards; these rows are the per-project view of the
+            // same worktrees, so a single-repo workflow never has to leave
+            // PROJECTS.
             body = body.child(self.render_main_entry(hx, repo, cx));
+            for wt in &repo.worktrees {
+                body = body.child(self.render_project_worktree_row(hx, wt, cx));
+            }
             group = group.child(body);
         }
         group
+    }
+
+    /// One worktree under its project in PROJECTS: name, branch, badges and
+    /// agent pill. Clicking it selects the owning task focused on this member,
+    /// i.e. exactly what clicking the same row under TASKS does.
+    fn render_project_worktree_row(
+        &self,
+        hx: &HarnessTheme,
+        wt: &crate::data::WorktreeView,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let sel = match &wt.task_id {
+            Some(t) => Selection::Task { task_id: t.clone(), member_id: Some(wt.id.clone()) },
+            None => Selection::Worktree(wt.id.clone()),
+        };
+        let selected = self.selection == sel
+            || self.selection == Selection::Worktree(wt.id.clone());
+        // Counts live on the task member (the live status pass keeps them
+        // current); a worktree with no task has none to show.
+        let member = self
+            .data
+            .tasks
+            .iter()
+            .flat_map(|t| t.members.iter())
+            .find(|m| m.worktree_id == wt.id);
+        let agent = self.agent_status.get(&wt.path).copied().unwrap_or(AgentState::Unknown);
+        let mut badges = div().flex().flex_none().items_center().gap_1();
+        if let Some(m) = member {
+            for (n, glyph, color) in [(m.ahead, "↑", hx.green), (m.behind, "↓", hx.amber), (m.dirty, "~", hx.amber)] {
+                if n > 0 {
+                    badges = badges.child(
+                        div().text_size(px(10.0)).font_family(hx.font_mono).text_color(color).child(format!("{glyph}{n}")),
+                    );
+                }
+            }
+        }
+        div()
+            .id(gpui::SharedString::from(format!("project-wt-{}", wt.id)))
+            .flex()
+            .items_center()
+            .gap_2()
+            .mt_1()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .when(selected, |d| d.bg(hx.surface))
+            .cursor_pointer()
+            .hover(|d| d.bg(hx.surface_hover))
+            .on_click(cx.listener(move |ws, _, window, cx| ws.select(sel.clone(), window, cx)))
+            .child(
+                div()
+                    .size(px(24.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    .bg(hx.surface)
+                    .text_xs()
+                    .text_color(hx.tx1)
+                    .child("⑂"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(hx.tx0)
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(wt.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family(hx.font_mono)
+                            .text_color(hx.tx2)
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(wt.branch.clone()),
+                    ),
+            )
+            .child(badges)
+            .child(agent_pill(hx, agent))
     }
 
     /// The restorable "ARCHIVED" list at the foot of the sidebar. Each row
@@ -970,12 +1084,13 @@ const ID_ARCHIVE: &str = "repo-archive";
 const ID_HOOKS: &str = "repo-hooks";
 const ID_TRASH: &str = "repo-trash";
 const ID_MAIN: &str = "main-entry";
+const ID_NEW_WT: &str = "repo-new-worktree";
 
 /// Every prefix a project row keys an element id under, named rather than
 /// spelled inline at the call sites so the uniqueness test below covers the
 /// same set `render_repo_group` and `render_main_entry` actually render.
 #[cfg(test)]
-const REPO_ID_PREFIXES: [&str; 5] = [ID_TOGGLE, ID_ARCHIVE, ID_HOOKS, ID_TRASH, ID_MAIN];
+const REPO_ID_PREFIXES: [&str; 6] = [ID_TOGGLE, ID_ARCHIVE, ID_HOOKS, ID_TRASH, ID_MAIN, ID_NEW_WT];
 
 /// The element id for one control in a project's row, keyed on the project
 /// name — never on its length.

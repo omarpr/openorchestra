@@ -403,6 +403,23 @@ impl HarnessWorkspace {
         cx.notify();
     }
 
+    /// Open the new-task dialog with only `repo` included and as home — the
+    /// PROJECTS row's `+`. A one-member task is how a plain worktree is made:
+    /// same branch, agent and setup-hook path as any task.
+    pub(crate) fn open_new_task_for_repo(&mut self, repo: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.data.repos.iter().any(|r| r.name == repo) {
+            return;
+        }
+        self.open_new_task(window, cx);
+        if let Some(dialog) = self.new_task.as_mut() {
+            dialog.worktree_for = Some(repo.to_string());
+            dialog.name.update(cx, |e, cx| e.set_placeholder_text("worktree name…", window, cx));
+            dialog.brief.update(cx, |e, cx| {
+                e.set_placeholder_text("What should the agent work on?", window, cx)
+            });
+        }
+    }
+
     /// Open the centered new-task dialog (TASKS `+`).
     pub(crate) fn open_new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.data.repos.is_empty() {
@@ -451,6 +468,7 @@ impl HarnessWorkspace {
             branch,
             auto_branch_shown: auto,
             _name_sub,
+            worktree_for: None,
         });
         self.edit = None;
         self.menu = None;
@@ -466,8 +484,14 @@ impl HarnessWorkspace {
         let Some(dialog) = self.new_task.as_ref() else { return };
         let name = dialog.name.read(cx).text(cx);
         let name = name.trim().to_string();
+        let worktree_for = dialog.worktree_for.clone();
         if name.is_empty() {
-            self.note = "enter an effort name".to_string();
+            self.note = if worktree_for.is_some() {
+                "enter a worktree name"
+            } else {
+                "enter an effort name"
+            }
+            .to_string();
             cx.notify();
             return;
         }
@@ -479,7 +503,21 @@ impl HarnessWorkspace {
             if t.is_empty() { None } else { Some(t.to_string()) }
         };
         self.new_task = None;
-        self.create_named(&name, &brief, branch.as_deref(), window, cx);
+        match worktree_for {
+            // A project's worktree is exactly that one project. Swapped in for
+            // the create only, so the TASKS dialog's own project selection is
+            // still there the next time it opens.
+            Some(repo) => {
+                let saved = (
+                    std::mem::replace(&mut self.new_task_repos, vec![repo.clone()]),
+                    std::mem::replace(&mut self.new_task_home, repo.clone()),
+                    std::mem::replace(&mut self.new_target_repo, repo),
+                );
+                self.create_named(&name, &brief, branch.as_deref(), window, cx);
+                (self.new_task_repos, self.new_task_home, self.new_target_repo) = saved;
+            }
+            None => self.create_named(&name, &brief, branch.as_deref(), window, cx),
+        }
     }
 
     /// Create a task from a name, optional brief, and optional branch override.
@@ -1412,6 +1450,7 @@ impl HarnessWorkspace {
             font_mono,
             self.prefs.font_size.unwrap_or(13.0),
             &theme_name,
+            self.prefs.show_ignored_files,
         );
     }
 }

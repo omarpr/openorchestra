@@ -1,4 +1,5 @@
-//! Centered "New task" dialog — name, brief, optional branch, project members.
+//! Centered "New task" dialog — name, brief, optional branch, project members —
+//! and its single-project "New worktree" mode, opened from a PROJECTS row.
 
 use super::super::*;
 
@@ -30,6 +31,9 @@ impl HarnessWorkspace {
             return div().into_any_element();
         };
 
+        // Worktree mode: opened from a PROJECTS row, for that project only.
+        let worktree_for = dialog.worktree_for.clone();
+        let is_worktree = worktree_for.is_some();
         let name_editor = dialog.name.clone();
         let brief_editor = dialog.brief.clone();
         let branch_editor = dialog.branch.clone();
@@ -73,14 +77,14 @@ impl HarnessWorkspace {
                             .text_lg()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(hx.tx0)
-                            .child("New task"),
+                            .child(if is_worktree { "New worktree" } else { "New task" }),
                     )
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap_1()
-                            .child(self.render_new_task_info(hx))
+                            .child(self.render_new_task_info(hx, is_worktree))
                             .child(
                                 div()
                                     .id("new-task-close")
@@ -110,13 +114,17 @@ impl HarnessWorkspace {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(field_label("Brief"))
+                    .child(field_label(if is_worktree { "Brief (optional)" } else { "Brief" }))
                     .child(self.render_multiline_input(hx, brief_editor, cx))
                     .child(
                         div()
                             .text_size(px(10.0))
                             .text_color(hx.tx2)
-                            .child("Shared with every agent as the starting prompt."),
+                            .child(if is_worktree {
+                                "Given to the agent as its starting prompt."
+                            } else {
+                                "Shared with every agent as the starting prompt."
+                            }),
                     ),
             )
             .child(
@@ -133,8 +141,21 @@ impl HarnessWorkspace {
                             .child("Leave empty to use the placeholder name."),
                     ),
             )
-            .child(
-                div()
+            .child(match &worktree_for {
+                // One project, fixed by where `+` was clicked: shown, not picked.
+                Some(repo) => div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(field_label("Project"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family(hx.font_mono)
+                            .text_color(hx.tx1)
+                            .child(repo.clone()),
+                    ),
+                None => div()
                     .flex()
                     .flex_col()
                     .gap_1()
@@ -150,7 +171,7 @@ impl HarnessWorkspace {
                             .overflow_y_scroll()
                             .child(self.render_new_task_members(hx, cx)),
                     ),
-            )
+            })
             .child(
                 div()
                     .flex()
@@ -191,7 +212,7 @@ impl HarnessWorkspace {
                             .text_color(hx.accent)
                             .cursor_pointer()
                             .hover(|d| d.border_color(hx.accent).text_color(hx.accent))
-                            .child("Create")
+                            .child(if is_worktree { "Create worktree" } else { "Create" })
                             .on_click(cx.listener(|ws, _, window, cx| {
                                 ws.submit_new_task(window, cx);
                             })),
@@ -216,7 +237,7 @@ impl HarnessWorkspace {
     }
 
     /// Info control — name vs brief vs home vs multi-project context.
-    fn render_new_task_info(&self, hx: &HarnessTheme) -> impl IntoElement {
+    fn render_new_task_info(&self, hx: &HarnessTheme, is_worktree: bool) -> impl IntoElement {
         div()
             .id("new-task-info")
             .size(px(20.0))
@@ -228,9 +249,11 @@ impl HarnessWorkspace {
             .text_color(hx.tx1)
             .cursor_default()
             .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
-            .tooltip(tip(
-                "Name labels the effort. Brief is the starting prompt injected into agents. Home is where the orchestrator runs. Multi-project tasks coordinate via A2A — project AGENTS.md is never overwritten.",
-            ))
+            .tooltip(tip(if is_worktree {
+                "Creates a git worktree of this project on its own branch, with an agent and the project's setup scripts. It is listed under the project and under TASKS."
+            } else {
+                "Name labels the effort. Brief is the starting prompt injected into agents. Home is where the orchestrator runs. Multi-project tasks coordinate via A2A — project AGENTS.md is never overwritten."
+            }))
             .child("ⓘ")
     }
 

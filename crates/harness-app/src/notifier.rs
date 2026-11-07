@@ -50,16 +50,7 @@ pub fn notify_agent(
     alert: AgentAlert,
     sound: &str,
 ) {
-    let (title, body) = match alert {
-        AgentAlert::NeedsAttention => (
-            format!("{agent} needs your attention!"),
-            format!("{worktree_name} ({repo}) is waiting on you"),
-        ),
-        AgentAlert::Finished => (
-            format!("{agent} finished — your turn"),
-            format!("{worktree_name} ({repo}) is ready for review"),
-        ),
-    };
+    let (title, body) = alert_text(agent, worktree_name, repo, alert);
     log::info!("NOTIFY posting: {title}: {body}");
     #[cfg(target_os = "macos")]
     {
@@ -343,6 +334,26 @@ fn escape(s: &str) -> String {
 }
 
 /// Human-readable label for a worktree, preferring its editable name.
+/// Title and body for an agent alert. The repo is parenthesised only when
+/// known: an empty one rendered as a stray "()" in every banner.
+pub fn alert_text(agent: &str, worktree_name: &str, repo: &str, alert: AgentAlert) -> (String, String) {
+    let who = if repo.is_empty() {
+        worktree_name.to_string()
+    } else {
+        format!("{worktree_name} ({repo})")
+    };
+    match alert {
+        AgentAlert::NeedsAttention => (
+            format!("{agent} needs your attention!"),
+            format!("{who} is waiting on you"),
+        ),
+        AgentAlert::Finished => (
+            format!("{agent} finished — your turn"),
+            format!("{who} is ready for review"),
+        ),
+    }
+}
+
 pub fn label_for(name: &str, path: &Path) -> String {
     if name.is_empty() {
         path.file_name()
@@ -355,6 +366,15 @@ pub fn label_for(name: &str, path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_alert_never_shows_empty_parentheses() {
+        use super::{alert_text, AgentAlert};
+        let (_, body) = alert_text("Claude Code", "main", "msrosa-tutoring", AgentAlert::NeedsAttention);
+        assert_eq!(body, "main (msrosa-tutoring) is waiting on you");
+        let (_, body) = alert_text("Claude Code", "scratch", "", AgentAlert::Finished);
+        assert_eq!(body, "scratch is ready for review");
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn applescript_literals_are_escaped() {

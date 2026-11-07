@@ -406,6 +406,41 @@ impl HarnessWorkspace {
         }
 
         if sec == S::Diff {
+        // ---- Files: gitignored entries ---------------------------------------
+        {
+            let enabled = self.prefs.show_ignored_files;
+            body = body.child(section_title("Files")).child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .pb_1()
+                    .child(
+                        div()
+                            .id("show-ignored-toggle")
+                            .child(chip(
+                                if enabled { "on".into() } else { "off".into() },
+                                enabled,
+                                hx,
+                            ))
+                            .on_click(cx.listener(|ws, _, _, cx| {
+                                cx.stop_propagation();
+                                ws.prefs.show_ignored_files = !ws.prefs.show_ignored_files;
+                                save_prefs_to(&ws.prefs_path, &ws.prefs);
+                                // Rebuilds the zed settings JSON, which is where
+                                // the tree and the file finder read it from.
+                                ws.apply_appearance(cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(hx.tx1)
+                            .child("Show gitignored files in the file tree and ⌘P"),
+                    ),
+            );
+        }
         // ---- Review / tools panel ------------------------------------------
         {
             let location = self.prefs.diff_location;
