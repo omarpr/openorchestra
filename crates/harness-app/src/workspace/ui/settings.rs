@@ -937,7 +937,7 @@ impl HarnessWorkspace {
             // A modal owns the wheel. Scroll events bubble past the card's
             // own scroll region, and anything the backdrop lets through
             // reaches the editor underneath — both were scrolling at once.
-            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .on_scroll(|_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(|ws, _, _, cx| {
                 ws.settings_open = false;
                 cx.notify();

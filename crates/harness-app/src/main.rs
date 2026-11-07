@@ -558,7 +558,8 @@ pub fn install_keymap(
     overrides: &std::collections::BTreeMap<String, String>,
     cx: &mut gpui::App,
 ) {
-    cx.bind_keys(shortcuts::entries_with(overrides).into_iter().filter_map(|e| e.binding));
+    let bindings = shortcuts::bindings_with(overrides, cx);
+    cx.bind_keys(bindings);
     cx.bind_keys([KeyBinding::new("ctrl-q", Quit, None)]);
 }
 

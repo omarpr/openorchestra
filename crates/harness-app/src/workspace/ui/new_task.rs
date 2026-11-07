@@ -231,7 +231,7 @@ impl HarnessWorkspace {
             .justify_center()
             .bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .on_scroll(|_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(|ws, _, _, cx| {
                 ws.close_new_task(cx);
             }))

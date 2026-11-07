@@ -56,7 +56,7 @@ pub fn app_state(cx: &mut App) -> Arc<AppState> {
     }
 
     let fs: Arc<dyn fs::Fs> =
-        Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
+        fs::RealFs::new(None, cx.background_executor().clone());
     let mut registry = language::LanguageRegistry::new(cx.background_executor().clone());
     // Language servers need somewhere to live even when they are NOT
     // downloaded: the adapter consults this directory before falling back to a
@@ -975,7 +975,8 @@ async fn probe_keys(hosted: &Entity<Workspace>, cx: &mut gpui::AsyncWindowContex
 
 /// Press one chord through the real keymap.
 async fn press(keys: &str, pause_ms: u64, cx: &mut gpui::AsyncWindowContext) {
-    let ks = gpui::Keystroke::parse(keys).expect("probe chord parses");
+    let ks = gpui::Keystroke::parse_with_os(keys, crate::shortcuts::host_os())
+        .expect("probe chord parses");
     let handled = cx.update(|window, cx| window.dispatch_keystroke(ks, cx));
     log::debug!("press {keys}: handled={handled:?}");
     cx.background_executor()

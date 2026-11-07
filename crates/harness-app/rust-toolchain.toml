@@ -1,0 +1,9 @@
+# Pinned to the toolchain zed declares at the pinned rev (v1.27.0's
+# rust-toolchain.toml): its crates use language and std features newer
+# than older stable releases. Scoped to this crate, so the headless
+# workspace crates keep building on whatever stable is installed.
+[toolchain]
+channel = "1.98.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
