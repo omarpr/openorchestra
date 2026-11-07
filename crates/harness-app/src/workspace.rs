@@ -2011,7 +2011,15 @@ impl Render for HarnessWorkspace {
                             }),
                         ),
                 )
-                .child(self.render_tab_menu(&hx, x, cx));
+                // Kept inside the window: the menu opens at the button, and
+                // with many tabs (or a narrow window) that is close enough to
+                // the right edge for the menu to be cut off.
+                .child({
+                    const MENU_W: f32 = 190.0;
+                    let max_left = f32::from(window.viewport_size().width) - MENU_W - 8.0;
+                    let x = px(f32::from(x).min(max_left).max(8.0));
+                    self.render_tab_menu(&hx, x, cx)
+                });
         }
 
         if let Some(at) = self.diff_base_menu {

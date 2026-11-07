@@ -103,14 +103,14 @@ impl HarnessWorkspace {
         };
 
         // The tabs scroll; the `+` does not. The scrolling row used to have no
-        // width of its own, so it grew to fit every tab and spilled under the
-        // tools panel instead of scrolling — the last tabs, and `+`, became
-        // unreachable. Bounded by `flex_1` + `min_w_0` it scrolls, and `+`
-        // sits outside it so a new tab is always one click away.
+        // width limit, so it grew to fit every tab and spilled under the tools
+        // panel — the last tabs, and `+`, became unreachable. It now shrinks
+        // (`min_w_0`) but never grows: `+` sits directly after the last tab,
+        // and once the tabs overflow they scroll while `+` stays in view.
         let mut tabs = div()
             .id("tab-strip")
             .flex()
-            .flex_1()
+            .flex_shrink(1.0)
             .min_w_0()
             .items_center()
             .gap_1()
