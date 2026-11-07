@@ -46,6 +46,8 @@ actions!(
         Quit,
         /// New plain-shell tab in the active worktree (§3.4).
         NewTerminal,
+        /// Open (or switch to) the full editor tab: a complete zed workspace.
+        NewEditor,
         /// New agent-chat tab.
         NewChat,
         /// Copy the selected diff lines.

@@ -491,6 +491,10 @@ enum TabContent {
     },
     /// Native agent chat over pi's RPC mode (M8, §4.2–4.3).
     Chat(Entity<crate::chat_pane::ChatPane>),
+    /// The full editor ("IDE") tab: a complete zed workspace with its own file
+    /// tree and Git docks, tab bar and status bar, over the same project as the
+    /// tools panel. The other way to edit, alongside per-file tabs.
+    Editor(Entity<::workspace::Workspace>),
     /// The diff review surface, when `DiffLocation::Tab` puts it in the center.
     ///
     /// A UNIT variant, unlike the other three: the diff, the review notes, and
@@ -511,6 +515,8 @@ pub(crate) enum TabKind {
     Chat,
     /// The diff review surface as a center tab (`DiffLocation::Tab`).
     Diff,
+    /// The full editor (IDE) tab — one per worktree.
+    Editor,
 }
 
 /// The tab being dragged, and the pane set it came from.
@@ -566,6 +572,7 @@ impl Tab {
             TabContent::File { .. } => K::Shell,
             TabContent::Chat(_) => K::Chat,
             TabContent::Diff => K::Diff,
+            TabContent::Editor(_) => K::Editor,
             TabContent::Terminal(_) => match &self.agent {
                 Some(a) => K::Agent(a.clone()),
                 None => K::Shell,
@@ -912,6 +919,20 @@ pub struct HarnessWorkspace {
     /// Per-worktree hosted Zed Workspace used by Files/Git tools and as the
     /// engine behind file harness tabs. Not itself a user-facing tab.
     service_workspaces: HashMap<String, Entity<::workspace::Workspace>>,
+    /// Per-worktree full-editor workspaces (the Editor tab), keyed like
+    /// `service_workspaces` and sharing that workspace's project.
+    ide_workspaces: HashMap<String, Entity<::workspace::Workspace>>,
+    /// Where the last preview file tab sat when zed closed it, as
+    /// `(worktree key, index)`. Zed replaces a preview by removing the old
+    /// item *before* adding the new one, so by the time the new preview
+    /// arrives its predecessor is already gone; this keeps the slot so the
+    /// new tab lands where the old one was instead of at the end.
+    preview_slot: Option<(String, usize, std::time::Instant)>,
+    /// Horizontal scroll of the center tab strip, and the tab it last brought
+    /// into view — scrolled only when the active tab *changes*, so a user
+    /// scrolling the strip by hand is not snapped back every frame.
+    tab_scroll: gpui::ScrollHandle,
+    tab_scrolled_to: std::cell::Cell<u64>,
     /// Explorer vs Search inside the Files tools tab (session; not persisted).
     files_sub_tab: FilesSubTab,
     /// Query editor + results for Files → Search. Created lazily.
@@ -1261,6 +1282,10 @@ impl HarnessWorkspace {
             selection,
             panes: HashMap::new(),
             service_workspaces: HashMap::new(),
+            ide_workspaces: HashMap::new(),
+            preview_slot: None,
+            tab_scroll: gpui::ScrollHandle::new(),
+            tab_scrolled_to: std::cell::Cell::new(0),
             files_sub_tab: FilesSubTab::Explorer,
             project_search: None,
             diff: worktrees::Diff::default(),
@@ -1760,7 +1785,18 @@ impl Render for HarnessWorkspace {
         }
 
         let hx = theme(cx).clone();
-        let mut root = div()
+        // The hosted zed Workspace's own actions (⌘P's ToggleFileFinder among
+        // them) are attached here, at the root, not only around the File tab.
+        // Since zed v1.2x `Workspace::render` no longer attaches them itself —
+        // its MultiWorkspace wrapper does, and we host the Workspace without
+        // one — so from a terminal, Review, or any non-file tab those actions
+        // had no handler at all and ⌘P silently did nothing. The File tab's
+        // inner wrapper still handles them first when it is focused.
+        let base = match self.editor_workspace() {
+            Some(ws) => ws.update(cx, |w, cx| w.actions(div(), window, cx)),
+            None => div(),
+        };
+        let mut root = base
             .relative()
             .key_context("Harness")
             .flex()
@@ -1838,6 +1874,9 @@ impl Render for HarnessWorkspace {
             .on_action(cx.listener(Self::focus_review_tool))
             .on_action(cx.listener(|ws, _: &crate::NewTerminal, window, cx| {
                 ws.open_tab(TabKind::Shell, window, cx)
+            }))
+            .on_action(cx.listener(|ws, _: &crate::NewEditor, window, cx| {
+                ws.open_tab(TabKind::Editor, window, cx)
             }))
             .on_action(cx.listener(|ws, _: &crate::CloseTab, window, cx| {
                 log::debug!("CloseTab (root ⌘W)");

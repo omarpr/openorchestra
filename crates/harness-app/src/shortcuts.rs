@@ -20,6 +20,8 @@ pub enum Scope {
     Global,
     /// Inside an editor tab's hosted zed workspace (file tree, panes, …).
     Workspace,
+    /// Inside the full editor (IDE) tab only.
+    Ide,
     /// When focus is in a text editor buffer.
     Editor,
     /// One of the chrome's inline single-line inputs (rename, new worktree,
@@ -54,6 +56,7 @@ impl Scope {
             // deeper claims the chord".
             Scope::Global => Some("Harness"),
             Scope::Workspace => Some("Workspace"),
+            Scope::Ide => Some("IdeWorkspace"),
             Scope::Editor => Some("Editor"),
             Scope::EditorFull => Some("Editor && mode == full"),
             // Matches at the editor node itself (deepest), same shape as
@@ -80,6 +83,7 @@ impl Scope {
         match self {
             Scope::Global => "Global",
             Scope::Workspace => "Files & search",
+            Scope::Ide => "Editor tab (IDE)",
             Scope::Editor => "Text editing",
             Scope::EditorFull => "Text editing (buffers)",
             Scope::Input => "Inline input",
@@ -200,12 +204,7 @@ pub fn entries() -> Vec<Entry> {
     vec![
         // ---- Global ------------------------------------------------------
         Entry::new(s("cmd-t"), Scope::Global, "New terminal tab", crate::NewTerminal),
-        Entry::new(
-            s("cmd-e"),
-            Scope::Global,
-            "Focus the file tree (tools panel)",
-            crate::FocusFilesTool,
-        ),
+        Entry::new(s("cmd-e"), Scope::Global, "Open the editor tab (IDE)", crate::NewEditor),
         Entry::new(s("cmd-shift-c"), Scope::Global, "New agent chat tab", crate::NewChat),
         Entry::new(
             s("cmd-c"),
@@ -225,9 +224,13 @@ pub fn entries() -> Vec<Entry> {
         Entry::new(s("enter"), Scope::Global, "Confirm / submit search", menu::Confirm),
 
         // ---- Hosted workspace (file tabs / ⌘P / search) ------------------
+        // Global, not Workspace: ⌘P has to work from a terminal or Review
+        // too, where no zed "Workspace" key context is in the focus path. The
+        // root attaches the hosted workspace's actions, so this still reaches
+        // zed's own file finder.
         Entry::new(
             s("cmd-p"),
-            Scope::Workspace,
+            Scope::Global,
             "Find file by name",
             ::workspace::ToggleFileFinder::default(),
         ),
@@ -274,6 +277,24 @@ pub fn entries() -> Vec<Entry> {
             "Toggle the git tools panel",
             crate::FocusGitTool,
         ),
+        // ---- Editor tab (IDE): zed's own docks ---------------------------
+        // Scoped to the IdeWorkspace context, which is deeper than the
+        // harness root, so inside the Editor tab these chords drive *its*
+        // docks while everywhere else they keep their tools-panel meaning.
+        Entry::new(s("cmd-b"), Scope::Ide, "Toggle the file tree dock", ::workspace::ToggleLeftDock),
+        Entry::new(
+            s("cmd-shift-e"),
+            Scope::Ide,
+            "Focus the file tree",
+            zed_actions::project_panel::ToggleFocus,
+        ),
+        Entry::new(
+            s("cmd-shift-g"),
+            Scope::Ide,
+            "Toggle the git panel",
+            zed_actions::git_panel::ToggleFocus,
+        ),
+        Entry::new(s("cmd-j"), Scope::Ide, "Toggle the bottom dock", ::workspace::ToggleBottomDock),
         Entry::new(
             s("cmd-shift-r"),
             Scope::Global,

@@ -13,7 +13,14 @@ impl HarnessWorkspace {
     /// title bar establishes. zed centers modals over the window; so do we.
     pub(crate) fn render_zed_modal(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let r = self.resolve()?;
-        let ws = self.service_workspaces.get(&r.key)?.clone();
+        // The Editor tab's own workspace when that tab is showing, else the
+        // service workspace behind the tools panel. Since zed v1.2x a
+        // Workspace no longer draws its own modal layer, so ⌘P's finder only
+        // appears if we draw it.
+        let ws = match self.active_ide_workspace() {
+            Some(ide) => ide,
+            None => self.service_workspaces.get(&r.key)?.clone(),
+        };
         let view: gpui::AnyView = ws
             .read(cx)
             .active_modal::<file_finder::FileFinder>(cx)?
@@ -762,6 +769,7 @@ impl HarnessWorkspace {
         let scopes = [
             crate::shortcuts::Scope::Global,
             crate::shortcuts::Scope::Workspace,
+            crate::shortcuts::Scope::Ide,
             crate::shortcuts::Scope::Editor,
             crate::shortcuts::Scope::Picker,
         ];

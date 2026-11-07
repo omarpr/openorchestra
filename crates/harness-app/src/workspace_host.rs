@@ -166,13 +166,50 @@ pub fn project_for(worktree_root: &Path, cx: &mut App) -> Entity<Project> {
 }
 
 /// A `Workspace` hosting `worktree_root`, ready to be rendered as a child view.
+///
+/// This is the *service* workspace behind the tools panel and per-file tabs:
+/// its docks stay closed and its tab bar hidden, because the harness chrome
+/// draws the file tree, Git panel and tabs itself.
 pub fn workspace_for(
     worktree_root: &Path,
     window: &mut Window,
     cx: &mut App,
 ) -> Result<Entity<Workspace>> {
-    let state = app_state(cx);
     let project = project_for(worktree_root, cx);
+    build_workspace(project, HostedMode::Service, window, cx)
+}
+
+/// A full zed workspace — file tree and Git docks, tab bar, status bar — for
+/// the Editor ("IDE") tab, over an EXISTING project.
+///
+/// Sharing the service workspace's project is the point: one project means
+/// one worktree scan, one set of open buffers, and one rust-analyzer, rather
+/// than a second copy of all three for the same folder. Two workspaces over a
+/// single project is a configuration zed itself supports.
+pub fn ide_workspace_for(
+    project: Entity<Project>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Result<Entity<Workspace>> {
+    build_workspace(project, HostedMode::Ide, window, cx)
+}
+
+/// Which of the two ways a hosted workspace is presented.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum HostedMode {
+    /// Behind the harness tools panel and file tabs: docks closed.
+    Service,
+    /// The full editor tab: zed's own docks, file tree open.
+    Ide,
+}
+
+fn build_workspace(
+    project: Entity<Project>,
+    mode: HostedMode,
+    window: &mut Window,
+    cx: &mut App,
+) -> Result<Entity<Workspace>> {
+    let state = app_state(cx);
     let workspace = cx.new(|cx| {
         // `workspace_id: None` keeps this out of zed's session database —
         // openOrchestra owns worktree persistence in its own registry (§6.1),
@@ -283,11 +320,12 @@ pub fn workspace_for(
     // ProjectPanel / GitPanel views (Files / Git tabs) so the editor stays
     // full-bleed. `dock_panel` still activates a slot when needed so a later
     // focus path is never blank.
+    // The Editor tab is a full IDE: its file tree starts open, as zed's does.
     dock_panel(
         &workspace,
         "project_panel",
         project_panel::ProjectPanel::load,
-        StartOpen::No,
+        if mode == HostedMode::Ide { StartOpen::Yes } else { StartOpen::No },
         window,
         cx,
     );

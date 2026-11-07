@@ -730,6 +730,24 @@ impl HarnessWorkspace {
             // Nothing to construct: the surface reads state the view already
             // holds, so the tab is a marker saying where to draw it.
             TabKind::Diff => (TabContent::Diff, "⑂ diff".to_string()),
+            TabKind::Editor => {
+                // One per worktree: a second ⌘E switches to the existing tab.
+                if let Some(pane) = self.panes.get_mut(&r.key)
+                    && let Some(existing) =
+                        pane.tabs.iter().find(|t| matches!(t.content, TabContent::Editor(_)))
+                {
+                    pane.active = existing.id;
+                    self.focus_active_pane(window, cx);
+                    cx.notify();
+                    return;
+                }
+                let Some(ws) = self.ensure_ide_workspace(window, cx) else {
+                    self.note = "could not open the editor for this worktree".to_string();
+                    cx.notify();
+                    return;
+                };
+                (TabContent::Editor(ws), "{ } editor".to_string())
+            }
             TabKind::Chat => {
                 let path = r.path.clone();
                 (
@@ -972,6 +990,42 @@ impl HarnessWorkspace {
     }
 
     /// Service Workspace for the active selection, if already created.
+    /// The full-editor workspace for the selected worktree, created on first
+    /// use over the *service* workspace's project (see
+    /// `workspace_host::ide_workspace_for` for why they share it).
+    pub(crate) fn ensure_ide_workspace(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<::workspace::Workspace>> {
+        let key = self.resolve()?.key;
+        if let Some(ws) = self.ide_workspaces.get(&key) {
+            return Some(ws.clone());
+        }
+        let service = self.ensure_service_workspace(window, cx)?;
+        let project = service.read(cx).project().clone();
+        match crate::workspace_host::ide_workspace_for(project, window, cx) {
+            Ok(ws) => {
+                self.ide_workspaces.insert(key, ws.clone());
+                Some(ws)
+            }
+            Err(e) => {
+                log::warn!("could not open the editor workspace: {e}");
+                None
+            }
+        }
+    }
+
+    /// The selected worktree's active Editor tab workspace, if that tab is
+    /// the one showing.
+    pub(crate) fn active_ide_workspace(&self) -> Option<Entity<::workspace::Workspace>> {
+        let r = self.resolve()?;
+        match &self.panes.get(&r.key)?.active_tab()?.content {
+            TabContent::Editor(ws) => Some(ws.clone()),
+            _ => None,
+        }
+    }
+
     pub(crate) fn editor_workspace(&self) -> Option<Entity<::workspace::Workspace>> {
         let key = self.resolve()?.key;
         self.service_workspaces.get(&key).cloned()
@@ -1177,25 +1231,23 @@ impl HarnessWorkspace {
             })
         });
         let new_id = existing_id.unwrap_or_else(|| self.next_tab_id());
+        let key_for_slot = key.clone();
 
         let pane = self.panes.entry(key).or_insert_with(|| PaneSet {
             tabs: Vec::new(),
             active: 0,
             last_used: 0,
         });
+        // A new preview replaces the old one *in place*. It used to drop the
+        // old preview tab and append the new one, so browsing files from the
+        // tree made the italic tab jump to the end of the strip each time.
+        let mut replace_at = None;
         if preview {
-            pane.tabs.retain(|t| {
-                !matches!(
-                    &t.content,
-                    TabContent::File {
-                        preview: true,
-                        ..
-                    }
-                ) || matches!(
-                    &t.content,
-                    TabContent::File { item_id: id, .. } if *id == item_id
-                )
-            });
+            let is_other_preview = |t: &Tab| {
+                matches!(&t.content, TabContent::File { preview: true, item_id: id } if *id != item_id)
+            };
+            replace_at = pane.tabs.iter().position(|t| is_other_preview(t));
+            pane.tabs.retain(|t| !is_other_preview(t));
         }
         if let Some(existing) = pane.tabs.iter_mut().find(|t| {
             matches!(&t.content, TabContent::File { item_id: id, .. } if *id == item_id)
@@ -1204,12 +1256,26 @@ impl HarnessWorkspace {
             existing.content = TabContent::File { item_id, preview };
             pane.active = existing.id;
         } else {
-            pane.tabs.push(Tab {
+            let tab = Tab {
                 id: new_id,
                 title,
                 content: TabContent::File { item_id, preview },
                 agent: None,
-            });
+            };
+            // The slot of a preview zed already closed (see `preview_slot`).
+            let freed = self
+                .preview_slot
+                .take()
+                .filter(|(k, _, at)| {
+                    preview
+                        && *k == key_for_slot
+                        && at.elapsed() < std::time::Duration::from_millis(500)
+                })
+                .map(|(_, ix, _)| ix);
+            match replace_at.or(freed) {
+                Some(ix) if ix <= pane.tabs.len() => pane.tabs.insert(ix, tab),
+                _ => pane.tabs.push(tab),
+            }
             pane.active = new_id;
         }
         self.focus_active_pane(window, cx);
@@ -1229,6 +1295,18 @@ impl HarnessWorkspace {
             t.id == pane.active
                 && matches!(&t.content, TabContent::File { item_id: id, .. } if *id == item_id)
         });
+        // Any closed file tab's slot, not just a flagged preview's: zed's
+        // `close_current_preview_item` clears the preview id *before* removing
+        // the item, so our flag sync has already marked the tab non-preview by
+        // the time this runs. The timestamp below limits reuse to a preview
+        // that arrives in the same replacement.
+        self.preview_slot = pane
+            .tabs
+            .iter()
+            .position(|t| {
+                matches!(&t.content, TabContent::File { item_id: id, .. } if *id == item_id)
+            })
+            .map(|ix| (key.clone(), ix, std::time::Instant::now()));
         pane.tabs.retain(|t| {
             !matches!(&t.content, TabContent::File { item_id: id, .. } if *id == item_id)
         });
@@ -1469,6 +1547,13 @@ impl HarnessWorkspace {
                 }
                 TabContent::Chat(c) => c.read(cx).focus_handle(cx),
                 TabContent::Diff => self.diff_surface_focus.clone(),
+                TabContent::Editor(ws) => {
+                    if ws.read(cx).active_item(cx).is_some() {
+                        ws.read(cx).focus_handle(cx)
+                    } else {
+                        self.editor_host_focus.clone()
+                    }
+                }
             };
             window.focus(&handle, cx);
         }
@@ -2154,8 +2239,7 @@ impl HarnessWorkspace {
 
         for (id, kind, title) in records {
             match kind {
-                // Legacy Editor tabs are no longer a chrome type — skip.
-                K::Editor => {}
+                K::Editor => self.open_tab(TabKind::Editor, window, cx),
                 K::Chat => self.open_tab(TabKind::Chat, window, cx),
                 K::Diff => self.open_tab(TabKind::Diff, window, cx),
                 K::Shell => self.restore_terminal_tab(key, id, None, &title, &live, window, cx),

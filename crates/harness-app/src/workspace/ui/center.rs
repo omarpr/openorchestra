@@ -46,6 +46,22 @@ impl HarnessWorkspace {
         let content: AnyElement = match pane.and_then(|p| p.active_tab()) {
             Some(tab) => match &tab.content {
                 TabContent::Terminal(t) => t.clone().into_any_element(),
+                // The full editor. Its own actions are attached here (zed v1.2x
+                // moved that out of `Workspace::render`), and it carries both
+                // zed's `Workspace` key context and our `IdeWorkspace` one, so
+                // the IDE-only dock shortcuts apply here and nowhere else.
+                TabContent::Editor(ws) => div()
+                    .key_context("IdeWorkspace")
+                    .flex()
+                    .size_full()
+                    .child(
+                        ws.update(cx, |workspace, cx| workspace.actions(div(), window, cx))
+                            .key_context("Workspace")
+                            .flex()
+                            .size_full()
+                            .child(ws.clone()),
+                    )
+                    .into_any_element(),
                 TabContent::File { .. } => {
                     let Some(ws) = self.editor_workspace() else {
                         return div()
@@ -86,12 +102,39 @@ impl HarnessWorkspace {
             None => div().into_any_element(),
         };
 
-        // The tab strip scrolls: a worktree can carry many tabs now, and
-        // without this the `+` buttons would be pushed out of reach.
-        let mut strip = div()
+        // The tabs scroll; the `+` does not. The scrolling row used to have no
+        // width of its own, so it grew to fit every tab and spilled under the
+        // tools panel instead of scrolling — the last tabs, and `+`, became
+        // unreachable. Bounded by `flex_1` + `min_w_0` it scrolls, and `+`
+        // sits outside it so a new tab is always one click away.
+        let mut tabs = div()
             .id("tab-strip")
             .flex()
+            .flex_1()
+            .min_w_0()
+            .items_center()
+            .gap_1()
+            .overflow_x_scroll()
+            .track_scroll(&self.tab_scroll);
+        if let Some(p) = pane {
+            for tab in &p.tabs {
+                tabs = tabs.child(
+                    div().flex_none().child(self.render_tab(hx, tab, tab.id == p.active, cx)),
+                );
+            }
+            // Bring a newly active tab into view (only on change).
+            if p.active != self.tab_scrolled_to.get()
+                && let Some(ix) = p.tabs.iter().position(|t| t.id == p.active)
+            {
+                self.tab_scroll.scroll_to_item(ix);
+                self.tab_scrolled_to.set(p.active);
+            }
+        }
+        let strip = div()
+            .flex()
             .flex_none()
+            .w_full()
+            .min_w_0()
             .items_center()
             .h(px(34.0))
             .px_2()
@@ -99,13 +142,8 @@ impl HarnessWorkspace {
             .bg(hx.bg1)
             .border_b_1()
             .border_color(hx.border)
-            .overflow_x_scroll();
-        if let Some(p) = pane {
-            for tab in &p.tabs {
-                strip = strip.child(self.render_tab(hx, tab, tab.id == p.active, cx));
-            }
-        }
-        strip = strip.child(self.render_new_tab_button(hx, cx));
+            .child(tabs)
+            .child(div().flex_none().child(self.render_new_tab_button(hx, cx)));
 
         div()
             .flex()
@@ -304,7 +342,13 @@ impl HarnessWorkspace {
             .pl_3()
             .pr_1p5()
             .rounded_md()
-            .when(active, |d| d.bg(hx.bg0).border_1().border_color(hx.border))
+            // Every tab carries the 1px border, transparent unless active. Only
+            // the active one had it, so switching tabs made the newly active
+            // tab 2px wider and nudged every tab after it sideways — the strip
+            // visibly jittered on each click.
+            .border_1()
+            .border_color(if active { hx.border } else { Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 } })
+            .when(active, |d| d.bg(hx.bg0))
             .text_xs()
             .font_family(hx.font_mono)
             .text_color(if active { hx.tx0 } else { hx.tx2 })
@@ -577,7 +621,8 @@ impl HarnessWorkspace {
                 MouseButton::Left,
                 cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
             )
-            .child(self.tab_menu_item(hx, "❯_  Terminal", "⌘T", TabKind::Shell, cx));
+            .child(self.tab_menu_item(hx, "❯_  Terminal", "⌘T", TabKind::Shell, cx))
+            .child(self.tab_menu_item(hx, "{ }  Editor", "⌘E", TabKind::Editor, cx));
         // Only in Tab mode: in Dock mode the dock IS the surface, and a tab
         // showing the same review is the duplicate the setting exists to avoid.
         if self.prefs.diff_location == DiffLocation::Tab {

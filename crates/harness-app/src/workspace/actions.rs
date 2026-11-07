@@ -33,6 +33,16 @@ impl HarnessWorkspace {
         }
         self.recompute_diff(cx);
         self.focus_active_pane(window, cx);
+        // The hosted zed workspaces set the window title themselves (folder —
+        // file), and only when *their* active item changes. Switching to
+        // another worktree changed neither, so the title kept naming the
+        // previous project. Reset it to the newly selected folder; the new
+        // worktree's workspace takes over again on its next file change.
+        if let Some(r) = self.resolve()
+            && let Some(name) = r.editor_path.file_name()
+        {
+            window.set_window_title(&name.to_string_lossy());
+        }
         cx.notify();
     }
 
@@ -808,13 +818,16 @@ impl HarnessWorkspace {
         let key = self.resolve()?.key;
         // Drop file tabs — they pointed at the previous Workspace's items.
         if let Some(pane) = self.panes.get_mut(&key) {
-            pane.tabs
-                .retain(|t| !matches!(t.content, TabContent::File { .. }));
+            // Editor tabs go too: they share the old workspace's project.
+            pane.tabs.retain(|t| {
+                !matches!(t.content, TabContent::File { .. } | TabContent::Editor(_))
+            });
             if pane.tabs.iter().all(|t| t.id != pane.active) {
                 pane.active = pane.tabs.last().map(|t| t.id).unwrap_or(0);
             }
         }
         self.service_workspaces.remove(&key);
+        self.ide_workspaces.remove(&key);
         match crate::workspace_host::workspace_for(root, window, cx) {
             Ok(ws) => {
                 crate::workspace_host::probe(&ws, window, cx);
