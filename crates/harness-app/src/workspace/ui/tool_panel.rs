@@ -14,11 +14,13 @@ impl HarnessWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        div()
-            .flex()
-            .flex_col()
-            .flex_none()
-            .w(px(self.prefs.diff_width))
+        let panel = div().flex().flex_col();
+        let panel = if self.tools_maximized {
+            panel.flex_1().min_w_0()
+        } else {
+            panel.flex_none().w(px(self.prefs.diff_width))
+        };
+        panel
             .h_full()
             .min_h_0()
             .bg(hx.bg1)
@@ -93,7 +95,31 @@ impl HarnessWorkspace {
             strip = strip.child(self.render_review_bar(hx, review_count, cx));
         }
 
-        strip
+        let maximized = self.tools_maximized;
+        strip.child(
+            div()
+                .id("tools-maximize")
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .size(px(22.0))
+                .rounded_md()
+                .text_sm()
+                .text_color(if maximized { hx.accent } else { hx.tx2 })
+                .cursor_pointer()
+                .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
+                .tooltip(tip(if maximized {
+                    "Restore the tools panel"
+                } else {
+                    "Maximize the tools panel"
+                }))
+                .child(if maximized { "⤡" } else { "⤢" })
+                .on_click(cx.listener(|ws, _, _, cx| {
+                    cx.stop_propagation();
+                    ws.toggle_tools_maximized(cx);
+                })),
+        )
     }
 
     /// Explorer | Search under the Files tool tab.
@@ -224,7 +250,8 @@ impl HarnessWorkspace {
             }
             ToolTab::Review => {
                 // Skip the inner review bar — actions are in the tab strip.
-                self.render_diff_surface(hx, Some(self.prefs.diff_width), false, cx)
+                let width = self.tools_panel_width(window);
+                self.render_diff_surface(hx, Some(width), false, cx)
             }
             ToolTab::Files if self.files_sub_tab == FilesSubTab::Search => {
                 self.render_project_search_panel(hx, cx)
@@ -242,6 +269,27 @@ impl HarnessWorkspace {
                 cx,
             ),
         }
+    }
+
+    /// The width the tools panel is drawn at. Maximized it is whatever the
+    /// sidebar leaves; derived from the viewport rather than measured, the same
+    /// way `use_two_pane` decides from widths it already owns.
+    pub(crate) fn tools_panel_width(&self, window: &Window) -> f32 {
+        if !self.tools_maximized {
+            return self.prefs.diff_width;
+        }
+        let viewport = f32::from(window.viewport_size().width);
+        let sidebar = if self.prefs.sidebar_open {
+            self.prefs.sidebar_width + SPLITTER_W
+        } else {
+            0.0
+        };
+        (viewport - sidebar).max(self.prefs.diff_width)
+    }
+
+    pub(crate) fn toggle_tools_maximized(&mut self, cx: &mut Context<Self>) {
+        self.tools_maximized = !self.tools_maximized;
+        cx.notify();
     }
 
     /// Render a Zed dock panel inside harness chrome, with docks kept closed.

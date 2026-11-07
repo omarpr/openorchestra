@@ -914,6 +914,9 @@ impl HarnessWorkspace {
         // on_click can fire on mouse-up) and closes on click outside the card.
         div()
             .id("settings-backdrop")
+            // Occlude, not just catch clicks: without it the elements under
+            // an overlay still hover, and their tooltips show through it.
+            .occlude()
             .when(std::env::var_os("HARNESS_PROBE_PAINT").is_some(), |d| {
                 d.child(
                     gpui::canvas(

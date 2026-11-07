@@ -754,6 +754,17 @@ impl HarnessWorkspace {
             .cursor_pointer()
             .hover(|d| d.bg(hx.surface_hover))
             .on_click(cx.listener(move |ws, _, window, cx| ws.select(sel.clone(), window, cx)))
+            // The same Rename / Archive / Delete menu the TASKS card has —
+            // keyed on the owning task, since that is what those act on.
+            .on_mouse_down(MouseButton::Right, {
+                let menu_id = wt.task_id.clone().unwrap_or_else(|| wt.id.clone());
+                cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    ws.menu = Some(CardMenu { id: menu_id.clone(), x: ev.position.x, y: ev.position.y });
+                    cx.notify();
+                })
+            })
+            .tooltip(tip("Right-click to rename, archive or delete"))
             .child(
                 div()
                     .size(px(24.0))
@@ -993,6 +1004,17 @@ impl HarnessWorkspace {
 
     pub(crate) fn render_context_menu(&self, hx: &HarnessTheme, menu: &CardMenu, cx: &mut Context<Self>) -> impl IntoElement {
         let confirming = self.pending_delete.as_deref() == Some(menu.id.as_str());
+        // A multi-project task opened from one of its PROJECTS rows still
+        // archives/deletes as a whole; say so rather than imply one worktree.
+        let whole_task = self
+            .task_store
+            .get(&menu.id)
+            .is_some_and(|t| t.members.len() > 1);
+        let (archive_label, delete_label) = if whole_task {
+            ("Archive task", if confirming { "Confirm delete task?" } else { "Delete task" })
+        } else {
+            ("Archive", if confirming { "Confirm delete?" } else { "Delete" })
+        };
         let rename_id = menu.id.clone();
         let archive_id = menu.id.clone();
         let del_id = menu.id.clone();
@@ -1040,11 +1062,11 @@ impl HarnessWorkspace {
                 }
                 ws.begin_edit(EditKind::Rename(rename_id.clone()), &name, "name…", window, cx);
             })))
-            .child(self.menu_item(hx, "Archive", false, cx.listener(move |ws, _, window, cx| {
+            .child(self.menu_item(hx, archive_label, false, cx.listener(move |ws, _, window, cx| {
                 cx.stop_propagation();
                 ws.archive(archive_id.clone(), window, cx);
             })))
-            .child(self.menu_item(hx, if confirming { "Confirm delete?" } else { "Delete" }, true, cx.listener(move |ws, _, window, cx| {
+            .child(self.menu_item(hx, delete_label, true, cx.listener(move |ws, _, window, cx| {
                 cx.stop_propagation();
                 if ws.pending_delete.as_deref() == Some(del_id.as_str()) {
                     ws.delete(del_id.clone(), window, cx);

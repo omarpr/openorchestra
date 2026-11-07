@@ -1177,6 +1177,13 @@ impl HarnessWorkspace {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
+                    // Double-clicking the tools panel's handle maximizes it —
+                    // the conventional "make this pane as big as it goes".
+                    if target == Drag::DiffPanel && ev.click_count >= 2 {
+                        ws.drag = None;
+                        ws.toggle_tools_maximized(cx);
+                        return;
+                    }
                     ws.drag = Some(DragState {
                         target,
                         start: if vertical { ev.position.x } else { ev.position.y },

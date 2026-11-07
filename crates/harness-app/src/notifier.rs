@@ -211,8 +211,17 @@ mod mac {
         center.setNotificationCategories(&NSSet::from_retained_slice(&[category]));
 
         let done = RcBlock::new(
-            |granted: objc2::runtime::Bool, _err: *mut objc2_foundation::NSError| {
-                log::info!("notification authorization granted = {}", granted.as_bool());
+            |granted: objc2::runtime::Bool, err: *mut objc2_foundation::NSError| {
+                // The reason matters: "denied in System Settings" and "this
+                // build isn't signed well enough to ask" look identical as a
+                // bare `false`.
+                let reason = unsafe { err.as_ref() }
+                    .map(|e| e.localizedDescription().to_string())
+                    .unwrap_or_default();
+                log::info!(
+                    "notification authorization granted = {} {reason}",
+                    granted.as_bool()
+                );
             },
         );
         center.requestAuthorizationWithOptions_completionHandler(

@@ -20,6 +20,9 @@ impl HarnessWorkspace {
 
         div()
             .id("edit-backdrop")
+            // Occlude, not just catch clicks: without it the elements under
+            // an overlay still hover, and their tooltips show through it.
+            .occlude()
             .absolute()
             .top(px(0.0))
             .left(px(0.0))

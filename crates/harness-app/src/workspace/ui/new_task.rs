@@ -221,6 +221,9 @@ impl HarnessWorkspace {
 
         div()
             .id("new-task-backdrop")
+            // Occlude, not just catch clicks: without it the elements under
+            // an overlay still hover, and their tooltips show through it.
+            .occlude()
             .absolute()
             .inset_0()
             .flex()

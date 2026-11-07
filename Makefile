@@ -1,7 +1,8 @@
 # openOrchestra developer entry points.
 #
 #   make setup   — install/verify build + runtime tools (idempotent)
-#   make run     — verify prerequisites, then build & run the GPUI app
+#   make run     — verify prerequisites, then build & run the GPUI app (as a
+#                  dev .app bundle, so native notifications work)
 #   make build   — verify prerequisites, then build the GPUI app
 #   make app     — build openOrchestra.app (macOS bundle → dist/)
 #   make dmg     — universal (arm64+x86_64) bundle + .dmg → dist/  (two compiles)
@@ -19,7 +20,7 @@ setup:
 	bash ./script/setup-macos.sh
 
 run: setup
-	cd $(APP_DIR) && cargo run
+	bash ./script/run-dev.sh
 
 build: setup
 	cd $(APP_DIR) && cargo build

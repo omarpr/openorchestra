@@ -287,7 +287,7 @@ impl HarnessWorkspace {
             &agent_display(&signal.kind),
             &label,
             &repo,
-            &id,
+            &alert_nav_id(&id, &signal.kind),
             crate::notifier::AgentAlert::NeedsAttention,
             &self.prefs.notify_sound,
         );
@@ -311,10 +311,59 @@ impl HarnessWorkspace {
             &agent_display(&signal.kind),
             &label,
             &repo,
-            &id,
+            &alert_nav_id(&id, &signal.kind),
             crate::notifier::AgentAlert::Finished,
             &self.prefs.notify_sound,
         );
+    }
+
+    /// Act on a notification click: select the worktree the alert was about
+    /// and bring its agent tab to the front.
+    ///
+    /// A task's worktree is selected as that task with the member focused —
+    /// the same thing clicking it in the sidebar does. The legacy
+    /// `Selection::Worktree` the handler used before resolved to the worktree
+    /// but not to its task, and the pane kept whatever tab was last active,
+    /// so "View" often landed on a shell instead of the agent asking for you.
+    pub(crate) fn navigate_to_alert(&mut self, nav: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let (target, agent) = match nav.split_once(ALERT_AGENT_SEP) {
+            Some((t, a)) => (t, Some(a)),
+            None => (nav, None),
+        };
+        let sel = if let Some(repo) = target.strip_prefix(MAIN_NAV_PREFIX) {
+            Selection::Main(repo.to_string())
+        } else {
+            let task_id = self
+                .data
+                .repos
+                .iter()
+                .flat_map(|r| r.worktrees.iter())
+                .find(|w| w.id == target)
+                .and_then(|w| w.task_id.clone());
+            match task_id {
+                Some(task_id) => Selection::Task { task_id, member_id: Some(target.to_string()) },
+                None => Selection::Worktree(target.to_string()),
+            }
+        };
+        self.select(sel, window, cx);
+        self.focus_agent_tab(agent, window, cx);
+    }
+
+    /// Make an agent tab active in the selected worktree's pane: the one
+    /// running `kind` when there is one, else the first agent tab. A worktree
+    /// with no agent tab is left on whatever it shows.
+    fn focus_agent_tab(&mut self, kind: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(key) = self.resolve().map(|r| r.key) else { return };
+        let Some(pane) = self.panes.get_mut(&key) else { return };
+        let pick = kind
+            .and_then(|k| pane.tabs.iter().find(|t| t.agent.as_ref().is_some_and(|a| a.as_str() == k)))
+            .or_else(|| pane.tabs.iter().find(|t| t.agent.is_some()))
+            .map(|t| t.id);
+        if let Some(id) = pick {
+            pane.active = id;
+            self.focus_active_pane(window, cx);
+            cx.notify();
+        }
     }
 
     /// Who an alert is about: `(label, repo, navigation id)`.
@@ -2339,5 +2388,41 @@ mod live_status_tests {
         let mut d = data();
         apply_live_status(&mut d, vec![st("/r/app-wt1", Some("feat/new"), 2)]);
         assert!(!apply_live_status(&mut d, vec![st("/r/app-wt1", Some("feat/new"), 2)]));
+    }
+}
+
+/// Separates a notification's navigation target from the agent that raised
+/// it. Not `#`: the notifier already uses that to make request ids unique.
+pub(crate) const ALERT_AGENT_SEP: char = '|';
+
+/// The navigation id a notification carries: where to go, and which agent's
+/// tab to front once there. An empty target (nothing resolvable) stays empty
+/// so the click is a no-op rather than a jump to the wrong place.
+pub(crate) fn alert_nav_id(target: &str, kind: &AgentKind) -> String {
+    if target.is_empty() {
+        return String::new();
+    }
+    format!("{target}{ALERT_AGENT_SEP}{}", kind.as_str())
+}
+
+#[cfg(test)]
+mod alert_nav_tests {
+    use super::{alert_nav_id, ALERT_AGENT_SEP};
+    use agent_runtime::AgentKind;
+
+    #[test]
+    fn a_nav_id_carries_the_target_and_the_agent_and_splits_back() {
+        let id = alert_nav_id("wt-42", &AgentKind::ClaudeCode);
+        let (target, agent) = id.split_once(ALERT_AGENT_SEP).unwrap();
+        assert_eq!(target, "wt-42");
+        assert_eq!(agent, AgentKind::ClaudeCode.as_str());
+        // The notifier makes request ids unique with `#<nanos>` and strips
+        // from the first `#`; the separator must survive that.
+        assert!(!id.contains('#'));
+    }
+
+    #[test]
+    fn nothing_to_navigate_to_stays_empty() {
+        assert_eq!(alert_nav_id("", &AgentKind::Pi), "");
     }
 }

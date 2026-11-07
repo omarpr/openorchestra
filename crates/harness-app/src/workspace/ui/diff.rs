@@ -1018,9 +1018,17 @@ impl HarnessWorkspace {
                                 ws.prefs.sidebar_width,
                                 ws.prefs.sidebar_open,
                             );
-                            if let Some(w) = split_dock_width(ws.prefs.diff_width, ceiling) {
+                            if ws.tools_maximized {
+                                // Already as wide as the window allows.
+                            } else if let Some(w) = split_dock_width(ws.prefs.diff_width, ceiling) {
                                 ws.prefs.diff_width = w;
                                 save_prefs_to(&ws.prefs_path, &ws.prefs);
+                                cx.notify();
+                            } else if ws.prefs.diff_width < SPLIT_MIN_W {
+                                // Even the widest drag can't fit two columns
+                                // beside the center: give the panel the center's
+                                // space instead, so Split is never a dead toggle.
+                                ws.tools_maximized = true;
                                 cx.notify();
                             }
                         }
@@ -1436,18 +1444,35 @@ impl HarnessWorkspace {
                         .text_color(badge_color)
                         .child(file.change.badge().to_string()),
                 )
-                .child(
-                    div()
+                .child({
+                    let label = div()
                         .flex_1()
                         .min_w_0()
                         .text_xs()
                         .font_family(hx.font_mono)
                         .text_color(if reviewed { hx.tx2 } else { hx.tx1 })
                         .whitespace_nowrap()
-                        .overflow_hidden()
-                        .text_ellipsis_middle()
-                        .child(display_path.to_string()),
-                )
+                        .overflow_hidden();
+                    // The two-pane list is narrow by design, and middle-ellipsing
+                    // a deep path there left every row reading "crate…rs". Lead
+                    // with the file name and let the dimmed directory be what
+                    // gets cut, as zed's own git panel does.
+                    match display_path.rsplit_once('/') {
+                        Some((dir, name)) if two_pane => label
+                            .flex()
+                            .gap_1()
+                            .child(div().flex_none().child(name.to_string()))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .text_color(hx.tx2)
+                                    .child(dir.to_string()),
+                            ),
+                        _ => label.text_ellipsis_middle().child(display_path.to_string()),
+                    }
+                })
                 .when(open && crate::markdown_preview::is_markdown(&md_check), |d| {
                     let previewing =
                         self.md_preview.as_ref().is_some_and(|(f, _)| f == &md_path);

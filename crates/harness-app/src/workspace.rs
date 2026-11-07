@@ -207,10 +207,13 @@ const DIFF_TWO_PANE_MIN: f32 = 560.0;
 /// Wide enough for a 6K monitor, so it never binds in practice.
 const MAX_PANEL_W: f32 = 6000.0;
 
-/// Space the sidebar and center pane keep between them when the diff dock is
-/// dragged wide. Below this the tab strip and terminal stop being usable, and
-/// the drag has to stop rather than let the dock swallow the window.
-const MIN_CENTER_W: f32 = 360.0;
+/// Space the center pane keeps when the tools panel is dragged wide. Below
+/// this the tab strip and terminal stop being usable, and the drag has to stop
+/// rather than let the dock swallow the window. 240 rather than the old 360:
+/// reviewing a split diff is exactly when you want the panel as wide as it
+/// goes, and anyone who wants the center gone entirely maximizes the panel
+/// (`tools_maximized`) instead.
+const MIN_CENTER_W: f32 = 240.0;
 
 /// The widest the diff dock may be dragged in a window this wide.
 ///
@@ -1035,6 +1038,12 @@ pub struct HarnessWorkspace {
     /// itself landed mid-flight. Set instead of dropped, and run once more when
     /// the current pass lands.
     status_rerun: bool,
+    /// The tools panel fills the center's space (⤢ in its tab strip, or a
+    /// double-click on its splitter). Session-only on purpose: launching into
+    /// a window with the terminals hidden would read as the app having lost
+    /// them. The center is not rendered meanwhile, so terminals keep their
+    /// size rather than being squeezed to zero columns.
+    tools_maximized: bool,
     /// The selected root's standing against its own tracking branch, tagged with
     /// the path it was measured in. Tagged rather than bare because the answer
     /// arrives asynchronously and the user may have selected another worktree by
@@ -1307,6 +1316,7 @@ impl HarnessWorkspace {
             git_watch,
             status_pending: false,
             status_rerun: false,
+            tools_maximized: false,
             push_state: None,
             push_armed: false,
             pushing: false,
@@ -1427,6 +1437,17 @@ impl HarnessWorkspace {
                 this.service_workspaces.keys().collect::<Vec<_>>()
             );
         }
+        // The restored selection is set directly above, not through `select`,
+        // so nothing created its Files/Git host: a window that reopened on the
+        // Files or Git tab showed "Open editor" until something else forced it.
+        // Do here what `select` does for every later selection.
+        let _ = this.ensure_service_workspace(window, cx);
+        if this.prefs.diff_open
+            && matches!(this.prefs.tool_tab, ToolTab::Files | ToolTab::Git)
+            && this.files_sub_tab != FilesSubTab::Search
+        {
+            this.activate_hosted_tool_panel(this.prefs.tool_tab, window, cx);
+        }
         this.recompute_diff(cx);
 
         // Route the window's close button (red X) through the same
@@ -1450,11 +1471,9 @@ impl HarnessWorkspace {
                 match nav_rx.try_recv() {
                     Ok(id) => {
                         let ok = view.update_in(cx, |ws, window, cx| {
-                            let sel = match id.strip_prefix(MAIN_NAV_PREFIX) {
-                                Some(repo) => Selection::Main(repo.to_string()),
-                                None => Selection::Worktree(id.clone()),
-                            };
-                            ws.select(sel, window, cx);
+                            if !id.is_empty() {
+                                ws.navigate_to_alert(&id, window, cx);
+                            }
                             cx.activate(true);
                         });
                         if ok.is_err() {
@@ -1771,10 +1790,14 @@ impl Render for HarnessWorkspace {
                             cx,
                         ))
                     })
-                    .child(self.render_center(&hx, window, cx))
+                    .when(!(self.prefs.diff_open && self.tools_maximized), |d| {
+                        d.child(self.render_center(&hx, window, cx))
+                    })
                     .when(self.prefs.diff_open, |d| {
-                        d.child(self.splitter(&hx, Drag::DiffPanel, cx))
-                            .child(self.render_tool_panel(&hx, window, cx))
+                        d.when(!self.tools_maximized, |d| {
+                            d.child(self.splitter(&hx, Drag::DiffPanel, cx))
+                        })
+                        .child(self.render_tool_panel(&hx, window, cx))
                     }),
             )
             .children(self.render_zed_modal(cx))
@@ -1884,6 +1907,9 @@ impl Render for HarnessWorkspace {
             root = root.child(
                 div()
                     .id("menu-backdrop")
+                    // Occlude, not just catch clicks: without it the elements under
+                    // an overlay still hover, and their tooltips show through it.
+                    .occlude()
                     .absolute()
                     .top(px(0.0))
                     .left(px(0.0))
@@ -1907,6 +1933,9 @@ impl Render for HarnessWorkspace {
                     // lost by clicking away — the common accident.
                     div()
                         .id("comment-backdrop")
+                        // Occlude, not just catch clicks: without it the elements under
+                        // an overlay still hover, and their tooltips show through it.
+                        .occlude()
                         .absolute()
                         .top(px(0.0))
                         .left(px(0.0))
@@ -1925,6 +1954,9 @@ impl Render for HarnessWorkspace {
                     // Click-anywhere-else dismisses, same as the card menu.
                     div()
                         .id("tab-menu-backdrop")
+                        // Occlude, not just catch clicks: without it the elements under
+                        // an overlay still hover, and their tooltips show through it.
+                        .occlude()
                         .absolute()
                         .top(px(0.0))
                         .left(px(0.0))
@@ -1946,6 +1978,9 @@ impl Render for HarnessWorkspace {
                     // Click-anywhere-else dismisses, same as the card menu.
                     div()
                         .id("diff-base-backdrop")
+                        // Occlude, not just catch clicks: without it the elements under
+                        // an overlay still hover, and their tooltips show through it.
+                        .occlude()
                         .absolute()
                         .top(px(0.0))
                         .left(px(0.0))
@@ -2100,6 +2135,9 @@ impl HarnessWorkspace {
 
         div()
             .id("close-backdrop")
+            // Occlude, not just catch clicks: without it the elements under
+            // an overlay still hover, and their tooltips show through it.
+            .occlude()
             .absolute()
             .top(px(0.0))
             .left(px(0.0))
