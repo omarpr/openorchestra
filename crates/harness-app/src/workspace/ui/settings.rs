@@ -409,6 +409,48 @@ impl HarnessWorkspace {
                             .child("Conductor pet on notifications"),
                     ),
             );
+            let always = self.prefs.conductor_always_on;
+            body = body.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .pb_1()
+                    .child(
+                        div()
+                            .id("conductor-toggle")
+                            .child(chip(
+                                if always { "on".into() } else { "off".into() },
+                                always,
+                                hx,
+                            ))
+                            .on_click(cx.listener(|ws, _, _, cx| {
+                                cx.stop_propagation();
+                                ws.prefs.conductor_always_on = !ws.prefs.conductor_always_on;
+                                if ws.prefs.conductor_always_on {
+                                    // He takes over announcements; clear a
+                                    // popup that's mid-performance.
+                                    ws.pet = None;
+                                } else {
+                                    ws.conductor_view = None;
+                                }
+                                save_prefs_to(&ws.prefs_path, &ws.prefs);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(div().text_sm().text_color(hx.tx1).child("Always-on conductor"))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(hx.tx2)
+                                    .child("Stays on screen, conducts while agents work, and says what they're doing. Drag him anywhere."),
+                            ),
+                    ),
+            );
         }
         }
 

@@ -9,6 +9,7 @@
 #![recursion_limit = "256"]
 
 mod chat_pane;
+mod conductor;
 mod data;
 mod diff_review;
 mod diff_watch;

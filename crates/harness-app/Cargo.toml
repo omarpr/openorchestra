@@ -178,6 +178,9 @@ sysinfo = "0.37"
 # `terminal_view` pins, so a dropped path is quoted here exactly as zed would
 # quote it — the format users already expect from every other terminal.
 shlex = "1.3.0"
+# The conductor's frames are handed to gpui as `image::Frame`s. Already in
+# the lockfile via gpui, so this adds no new copy.
+image = { version = "0.25", default-features = false }
 
 # Zed's workspace [patch.crates-io] entries do NOT propagate to out-of-tree
 # consumers, so we replicate the ones inside our dependency cone (from zed's

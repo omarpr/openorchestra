@@ -989,6 +989,15 @@ pub struct HarnessWorkspace {
     /// two-pose arm cycle it is on.
     pet: Option<(String, std::time::Instant)>,
     pet_pose: bool,
+    /// The always-on conductor (`Prefs::conductor_always_on`): his state,
+    /// what he showed last tick, his rendered frames and the accent they were
+    /// rendered in, whether his tick loop runs, and a press on him.
+    conductor: crate::conductor::Conductor,
+    conductor_view: Option<crate::conductor::View>,
+    conductor_frames: Option<Vec<Arc<gpui::RenderImage>>>,
+    conductor_frames_accent: Option<[f32; 3]>,
+    conductor_ticking: bool,
+    conductor_drag: Option<ui::conductor::ConductorDrag>,
     /// Shared clock for the sidebar's agent indicators (spinner angle, pulse
     /// phase), and whether the loop that repaints them is running.
     anim_clock: std::time::Instant,
@@ -1318,6 +1327,12 @@ impl HarnessWorkspace {
             preflight: Vec::new(),
             pet: None,
             pet_pose: false,
+            conductor: Default::default(),
+            conductor_view: None,
+            conductor_frames: None,
+            conductor_frames_accent: None,
+            conductor_ticking: false,
+            conductor_drag: None,
             anim_clock: std::time::Instant::now(),
             indicator_ticking: false,
             rebinding: None,
@@ -1794,6 +1809,7 @@ impl Render for HarnessWorkspace {
         }
 
         let hx = theme(cx).clone();
+        self.ensure_conductor(&hx, cx);
         self.ensure_indicator_ticker(cx);
         // The hosted zed Workspace's own actions (⌘P's ToggleFileFinder among
         // them) are attached here, at the root, not only around the File tab.
@@ -1851,6 +1867,7 @@ impl Render for HarnessWorkspace {
             )
             .children(self.render_zed_modal(cx))
             .children(self.render_pet(&hx, cx))
+            .children(self.render_conductor(&hx, window, cx))
             // The settings overlay is the LAST child on purpose: gpui paints
             // siblings in order, so an overlay added before the content row
             // renders underneath it — "settings don't open" while the state
@@ -1944,8 +1961,9 @@ impl Render for HarnessWorkspace {
             )
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|ws, _: &MouseUpEvent, _, cx| {
+                cx.listener(|ws, _: &MouseUpEvent, window, cx| {
                     ws.diff_selecting = false;
+                    ws.conductor_drag_end(window, cx);
                     ws.end_drag(cx);
                 }),
             );
@@ -2518,6 +2536,15 @@ struct Prefs {
     /// the corner whenever a notification posts.
     #[serde(default = "default_true")]
     pet_enabled: bool,
+    /// Keep the conductor on screen all the time, conducting while agents
+    /// work and narrating what they're doing. On by default — including for
+    /// prefs files written before it existed; Settings › Extras turns it off.
+    #[serde(default = "default_true")]
+    conductor_always_on: bool,
+    /// Where he stands: distance from the window's right and bottom edges.
+    /// `None` = the default corner.
+    #[serde(default)]
+    conductor_offset: Option<[f32; 2]>,
     /// Show gitignored files in the Files tree and in the ⌘P file finder.
     /// On by default: agents routinely write build output, generated code and
     /// local env files that are ignored, and a tree that hides them makes the
@@ -2599,6 +2626,8 @@ impl Default for Prefs {
             last_task_agent: None,
             font_size: None,
             pet_enabled: true,
+            conductor_always_on: true,
+            conductor_offset: None,
             show_ignored_files: true,
             shortcuts: Default::default(),
             collapsed: Default::default(),

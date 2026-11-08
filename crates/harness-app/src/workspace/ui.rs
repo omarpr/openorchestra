@@ -4,6 +4,7 @@
 
 mod center;
 mod chrome;
+pub(crate) mod conductor;
 mod diff;
 mod diff_edit;
 mod new_task;

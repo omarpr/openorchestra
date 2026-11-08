@@ -1221,6 +1221,9 @@ impl HarnessWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.conductor_drag_move(ev, window, cx) {
+            return;
+        }
         let Some(drag) = self.drag else { return };
         // The button can be released outside the window, in which case no
         // mouse-up ever reaches us; treat "moving with no button" as the end.

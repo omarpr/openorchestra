@@ -78,6 +78,7 @@ impl HarnessWorkspace {
             // Strongest signal: a stamped pid that no longer exists.
             if let Some(pid) = status_pid(&root) {
                 if !pid_alive(pid) {
+                    self.conductor.stopped(&root);
                     self.agent_status.insert(root, AgentState::Unknown);
                     changed = true;
                 }
@@ -99,6 +100,7 @@ impl HarnessWorkspace {
             // Either the worktree has no live session, or the session is now
             // just a shell — the agent that wrote this pill is gone.
             if !crate::resource_monitor::agent_running_in(&procs, &pane_pids) {
+                self.conductor.stopped(&root);
                 self.agent_status.insert(root, AgentState::Unknown);
                 changed = true;
             }
@@ -217,6 +219,31 @@ impl HarnessWorkspace {
             .get(&signal.worktree_root)
             .copied()
             .unwrap_or_else(|| self.fidelity_for_kind(&signal.kind));
+        // The conductor follows every agent, including the one on screen:
+        // unlike a native notification, a bow you are watching isn't noise.
+        let (label, repo, id) = self.alert_target(&signal.worktree_root);
+        let label = super::ui::conductor::conductor_label(&label, &repo);
+        let now = std::time::Instant::now();
+        self.conductor.observe(
+            &signal.worktree_root,
+            signal.kind.clone(),
+            signal.state,
+            signal.reason,
+            signal.session_file.clone(),
+            signal.tool.clone(),
+            label.clone(),
+            now,
+        );
+        let nav = alert_nav_id(&id, &signal.kind);
+        if previous != Some(signal.state) && signal.should_notify(fidelity) {
+            let text = format!("{} needs your attention!", agent_display(&signal.kind));
+            self.conductor.announce(&signal.worktree_root, label.clone(), text, nav.clone(), false, now);
+        }
+        if signal.should_notify_finished(previous, fidelity) {
+            let text = format!("{} finished — your turn", agent_display(&signal.kind));
+            self.conductor.announce(&signal.worktree_root, label, text, nav, true, now);
+        }
+
         if previous != Some(signal.state) && signal.should_notify(fidelity) {
             self.notify_needs_input(&signal, cx);
         }
@@ -235,7 +262,9 @@ impl HarnessWorkspace {
     /// arms moving until it expires or is closed. A fresh notification while
     /// visible just replaces the message and extends the performance.
     pub(crate) fn show_pet(&mut self, message: String, cx: &mut Context<Self>) {
-        if !self.prefs.pet_enabled {
+        // With the always-on conductor up, he announces it himself; a
+        // second, smaller maestro popping up beside him would be silly.
+        if !self.prefs.pet_enabled || self.prefs.conductor_always_on {
             return;
         }
         let until = std::time::Instant::now() + Duration::from_secs(8);
@@ -1475,6 +1504,7 @@ impl HarnessWorkspace {
             // Unknown (renders as IDLE) rather than Idle: we killed the process,
             // we didn't observe a clean finish. A file event can't unstick this
             // because the dead agent will never touch status.json again.
+            self.conductor.stopped(&r.path);
             self.agent_status.insert(r.path.clone(), AgentState::Unknown);
         }
         let Some(pane) = self.panes.get_mut(&key) else { return };
