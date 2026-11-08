@@ -1131,9 +1131,18 @@ pub struct HarnessWorkspace {
     /// they can be restored. Persisted to `archived.json`; never deletes files.
     archived_repos: Vec<PathBuf>,
     archived_path: PathBuf,
-    /// First click of the two-click "remove project" (trash) confirm, by repo
-    /// name — so a stray click can't drop a whole project's group.
-    pending_repo_trash: Option<String>,
+    /// A removal waiting on the confirm dialog — so a stray click can't drop
+    /// a whole project.
+    confirm_removal: Option<Removal>,
+}
+
+/// What the remove-confirmation dialog is asking about.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Removal {
+    /// An active project, by display name.
+    Project(String),
+    /// An entry in the archived list, by root.
+    Archived(PathBuf),
 }
 
 /// How many samples the sidebar sparkline retains (≈2 min at the 2 s cadence).
@@ -1387,7 +1396,7 @@ impl HarnessWorkspace {
             resource_history: crate::resource_monitor::History::new(RESOURCE_HISTORY),
             archived_repos,
             archived_path,
-            pending_repo_trash: None,
+            confirm_removal: None,
         };
         // Appearance before panes: restore_tabs may open an Editor, which
         // constructs a hosted Workspace that observes window appearance and
@@ -2090,6 +2099,9 @@ impl Render for HarnessWorkspace {
         if self.close_prompt.is_some() {
             root = root.child(self.render_close_prompt(&hx, cx));
         }
+        if let Some(removal) = self.confirm_removal.clone() {
+            root = root.child(self.render_removal_prompt(&hx, removal, cx));
+        }
         root
     }
 }
@@ -2097,6 +2109,104 @@ impl Render for HarnessWorkspace {
 impl HarnessWorkspace {
     /// The keep-or-close-terminals confirmation shown on quit. A centered modal
     /// over a dimming backdrop; clicking the backdrop cancels the quit.
+    /// "Remove ‘x’?" — the confirm step for removing a project or an archived
+    /// entry. Cancel is the highlighted, safe choice; clicking outside cancels.
+    fn render_removal_prompt(&self, hx: &HarnessTheme, removal: Removal, cx: &mut Context<Self>) -> AnyElement {
+        let (name, body) = match &removal {
+            Removal::Project(name) => (
+                name.clone(),
+                "It leaves the sidebar. Its files, branches and worktrees stay on disk — add the folder again to bring it back.",
+            ),
+            Removal::Archived(root) => (
+                root.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+                "It leaves the archived list. Its files stay on disk — add the folder again to bring it back.",
+            ),
+        };
+        let button = |id: &'static str, label: &'static str, primary: bool| {
+            div()
+                .id(id)
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .h(px(34.0))
+                .rounded_md()
+                .border_1()
+                .border_color(if primary { hx.accent } else { hx.border2 })
+                .bg(if primary { tint(hx.accent, 0.16) } else { hx.surface })
+                .text_sm()
+                .text_color(if primary { hx.accent } else { hx.tx0 })
+                .cursor_pointer()
+                .hover(|d| {
+                    d.border_color(if primary { hx.accent } else { hx.red })
+                        .text_color(if primary { hx.accent } else { hx.red })
+                })
+                .child(label)
+        };
+        let card = div()
+            .w(px(400.0))
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_4()
+            .rounded_lg()
+            .bg(hx.surface2)
+            .border_1()
+            .border_color(hx.border2)
+            .shadow_lg()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
+            )
+            .child(
+                div()
+                    .text_lg()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(hx.tx0)
+                    .child(format!("Remove ‘{name}’?")),
+            )
+            .child(div().text_sm().text_color(hx.tx1).child(body))
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .mt_1()
+                    .child(button("remove-cancel", "Cancel", true).on_click(cx.listener(|ws, _, _, cx| {
+                        ws.confirm_removal = None;
+                        cx.notify();
+                    })))
+                    .child(button("remove-confirm", "Remove", false).on_click(cx.listener(
+                        move |ws, _, window, cx| {
+                            ws.confirm_removal = None;
+                            match &removal {
+                                Removal::Project(name) => ws.remove_repo(name.clone(), window, cx),
+                                Removal::Archived(root) => ws.forget_archived(root, cx),
+                            }
+                        },
+                    ))),
+            );
+        div()
+            .id("remove-backdrop")
+            .occlude()
+            .absolute()
+            .top(px(0.0))
+            .left(px(0.0))
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x00000099))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|ws, _, _, cx| {
+                    ws.confirm_removal = None;
+                    cx.notify();
+                }),
+            )
+            .child(card)
+            .into_any_element()
+    }
+
     fn render_close_prompt(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
         let Some(prompt) = self.close_prompt.as_ref() else {
             return div().into_any_element();
@@ -3497,7 +3607,14 @@ mod collapsed_prefs_tests {
         // renaming a header silently orphans everyone's saved collapse state.
         // This pins the three keys the file format depends on.
         use crate::workspace::ui::sidebar::SidebarSection::*;
-        assert_eq!([Stats.label(), Tasks.label(), Projects.label()], ["STATS", "TASKS", "PROJECTS"]);
+        assert_eq!(
+            [Stats.label(), Tasks.label(), Projects.label(), Archived.label()],
+            ["STATS", "TASKS", "PROJECTS", "ARCHIVED"]
+        );
+        // Only ARCHIVED starts collapsed; for the rest a stored key still means
+        // "collapsed", so existing prefs files keep their meaning.
+        assert!(Archived.collapsed_by_default());
+        assert!(![Stats, Tasks, Projects].iter().any(|s| s.collapsed_by_default()));
     }
 }
 

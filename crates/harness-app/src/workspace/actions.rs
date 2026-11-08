@@ -10,7 +10,6 @@ impl HarnessWorkspace {
         self.exit_hooks_edit(window, cx);
         self.selection = sel;
         self.pending_delete = None;
-        self.pending_repo_trash = None;
         self.menu = None;
         self.edit = None;
         if let Selection::Task { task_id, .. } = &self.selection {
@@ -214,22 +213,20 @@ impl HarnessWorkspace {
             save_repos(&self.archived_path, &self.archived_repos);
             self.note = format!("archived ‘{name}’");
         }
-        self.pending_repo_trash = None;
         self.refresh(window, cx);
         self.reselect_after_removal(window, cx);
     }
 
-    /// Remove a project from openOrchestra entirely (two-click confirm). Files
-    /// on disk are untouched — this only forgets the project; re-add it to bring
-    /// it back. Distinct from Archive, which keeps it in a restorable list.
-    pub(crate) fn trash_repo(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pending_repo_trash.as_deref() != Some(name.as_str()) {
-            self.pending_repo_trash = Some(name.clone());
-            self.note = format!("remove ‘{name}’? click the trash again to confirm (files are kept)");
-            cx.notify();
-            return;
-        }
-        self.pending_repo_trash = None;
+    /// Ask before removing: opens the confirm dialog for `removal`.
+    pub(crate) fn request_removal(&mut self, removal: super::Removal, cx: &mut Context<Self>) {
+        self.confirm_removal = Some(removal);
+        cx.notify();
+    }
+
+    /// Remove a project from openOrchestra entirely, once the dialog confirms.
+    /// Files on disk are untouched — this only forgets the project; re-add it
+    /// to bring it back. Distinct from Archive, which keeps it restorable.
+    pub(crate) fn remove_repo(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(root) = self.repo_root_for_name(&name) {
             self.repo_roots.retain(|p| p != &root);
             save_repos(&self.repos_path, &self.repo_roots);
@@ -237,6 +234,20 @@ impl HarnessWorkspace {
         }
         self.refresh(window, cx);
         self.reselect_after_removal(window, cx);
+    }
+
+    /// Drop a project from the archived list. Like trash, it only forgets the
+    /// project — files and worktrees stay on disk, and adding it again brings
+    /// it back.
+    pub(crate) fn forget_archived(&mut self, root: &Path, cx: &mut Context<Self>) {
+        let before = self.archived_repos.len();
+        self.archived_repos.retain(|p| p != root);
+        if self.archived_repos.len() != before {
+            save_repos(&self.archived_path, &self.archived_repos);
+            let name = root.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            self.note = format!("removed ‘{name}’ from the archive (files kept on disk)");
+        }
+        cx.notify();
     }
 
     /// Restore an archived project back into the active list.

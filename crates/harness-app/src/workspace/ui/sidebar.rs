@@ -13,6 +13,7 @@ pub(crate) enum SidebarSection {
     Stats,
     Tasks,
     Projects,
+    Archived,
 }
 
 impl SidebarSection {
@@ -22,9 +23,25 @@ impl SidebarSection {
             Self::Stats => "STATS",
             Self::Tasks => "TASKS",
             Self::Projects => "PROJECTS",
+            Self::Archived => "ARCHIVED",
         }
     }
+
+    /// Whether the section starts collapsed. ARCHIVED does: it is a list you
+    /// reach into now and then, and open by default it grows with every
+    /// archive and eats the height PROJECTS scrolls in.
+    pub(crate) fn collapsed_by_default(self) -> bool {
+        matches!(self, Self::Archived)
+    }
 }
+
+/// The most of the sidebar's height TASKS takes before scrolling inside
+/// itself, leaving PROJECTS room however many tasks there are.
+const TASKS_MAX_SHARE: f32 = 0.3;
+
+/// Archived rows shown before the section scrolls inside itself.
+const ARCHIVED_VISIBLE_ROWS: f32 = 5.0;
+const ARCHIVED_ROW_H: f32 = 30.0;
 
 /// Every section header is this tall — the value TASKS was missing, which is
 /// why it read as cramped next to STATS and PROJECTS.
@@ -61,8 +78,12 @@ impl HarnessWorkspace {
             }))
     }
 
+    /// `collapsed_sections` records the sections the user has flipped away
+    /// from their default, so for every section but ARCHIVED (default
+    /// collapsed) membership still simply means "collapsed" — existing prefs
+    /// files read exactly as before.
     pub(crate) fn section_collapsed(&self, section: SidebarSection) -> bool {
-        self.prefs.collapsed_sections.contains(section.label())
+        self.prefs.collapsed_sections.contains(section.label()) != section.collapsed_by_default()
     }
 
     /// One sidebar section header: disclosure caret, label, optional trailing
@@ -99,8 +120,8 @@ impl HarnessWorkspace {
                 "Collapse section"
             }))
             .on_click(cx.listener(move |ws, _, _, cx| {
-                // Same set-not-map discipline as project collapse: expanding
-                // removes the entry rather than persisting `false`.
+                // Same set-not-map discipline as project collapse: going back
+                // to the default removes the entry rather than persisting it.
                 if !ws.prefs.collapsed_sections.remove(label) {
                     ws.prefs.collapsed_sections.insert(label.to_string());
                 }
@@ -266,51 +287,61 @@ impl HarnessWorkspace {
                 .when(!self.archived_repos.is_empty(), |d| d.child(self.render_archived(hx, cx)));
         }
 
+        // Every section header stays put; each body scrolls inside its own
+        // section. TASKS takes what it needs up to a share of the sidebar, so
+        // a long task list can't push PROJECTS out of view; PROJECTS takes
+        // the rest, and being `flex_1` even when short keeps ARCHIVED at the
+        // bottom.
         let tasks_action = self.tasks_add_button(hx, cx);
         let mut tasks_col = div()
             .flex()
             .flex_col()
             .flex_none()
+            .max_h(gpui::relative(TASKS_MAX_SHARE))
             .child(self.section_header(hx, SidebarSection::Tasks, Some(tasks_action), cx));
         if !self.section_collapsed(SidebarSection::Tasks) {
             // Body gets its own top padding now that the header owns the rule.
-            tasks_col = tasks_col.child(div().h(px(4.0)));
+            let mut body = div()
+                .id("tasks-scroll")
+                .flex()
+                .flex_col()
+                .flex_initial()
+                .min_h_0()
+                .overflow_y_scroll()
+                .pt(px(4.0));
+            // Rows keep their height (`flex_none`): as flex items they would
+            // otherwise squash to fit before the body ever scrolled.
             for task in &self.data.tasks {
-                tasks_col = tasks_col.child(self.render_task_row(hx, task, cx));
+                body = body.child(div().flex_none().child(self.render_task_row(hx, task, cx)));
             }
+            tasks_col = tasks_col.child(body);
         }
 
         let projects_action = self.projects_add_button(hx, cx);
         let mut projects = div()
             .flex()
             .flex_col()
-            .flex_none()
-            .child(self.section_header(hx, SidebarSection::Projects, Some(projects_action), cx));
-        if !self.section_collapsed(SidebarSection::Projects) {
-            projects = projects.child(div().h(px(4.0)));
-            for repo in &self.data.repos {
-                projects = projects.child(self.render_repo_group(hx, repo, cx));
-            }
-        }
-
-        // TASKS and PROJECTS share one scroll area that takes the height
-        // between STATS and ARCHIVED. It used to be `overflow_hidden` on
-        // PROJECTS alone: that clips, it doesn't scroll, so past a window's
-        // worth of projects the rest were unreachable — and TASKS, sized to
-        // its content outside it, pushed PROJECTS off the bottom too. Being
-        // `flex_1` even when both are short also keeps ARCHIVED at the bottom.
-        let scroller = div()
-            .id("sidebar-scroll")
-            .flex()
-            .flex_col()
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
-            .child(tasks_col)
-            .child(projects);
+            .child(self.section_header(hx, SidebarSection::Projects, Some(projects_action), cx));
+        if !self.section_collapsed(SidebarSection::Projects) {
+            let mut body = div()
+                .id("projects-scroll")
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .pt(px(4.0));
+            for repo in &self.data.repos {
+                body = body.child(div().flex_none().child(self.render_repo_group(hx, repo, cx)));
+            }
+            projects = projects.child(body);
+        }
 
         column
-            .child(scroller)
+            .child(tasks_col)
+            .child(projects)
             .when(!self.archived_repos.is_empty(), |d| d.child(self.render_archived(hx, cx)))
     }
 
@@ -589,29 +620,38 @@ impl HarnessWorkspace {
         let repo_name = repo.name.clone();
         let archive_repo = repo.name.clone();
         let trash_repo = repo.name.clone();
-        let trash_pending = self.pending_repo_trash.as_deref() == Some(repo.name.as_str());
         let count = repo.worktrees.len();
 
-        // A small icon button in the repo header (archive, trash), styled like
-        // the section `+` controls. `danger` tints it red — used to flag the
-        // trash's armed (click-again-to-confirm) state.
-        let header_icon =
-            |id_prefix: &'static str, glyph: &'static str, tip_text: &'static str, danger: bool| {
-                div()
-                    .id(repo_element_id(id_prefix, &repo.name))
-                    .size(px(20.0))
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .rounded_md()
-                    .text_xs()
-                    .text_color(if danger { hx.red } else { hx.tx2 })
-                    .cursor_pointer()
-                    .tooltip(tip(tip_text))
-                    .hover(|d| d.bg(hx.surface).text_color(if danger { hx.red } else { hx.tx0 }))
-                    .child(glyph)
-            };
+        // A small icon button in the repo header, styled like the section `+`
+        // controls.
+        let header_icon = |id_prefix: &'static str, glyph: AnyElement, tip_text: &'static str| {
+            div()
+                .id(repo_element_id(id_prefix, &repo.name))
+                .group(repo_element_id(id_prefix, &repo.name).to_string())
+                .size(px(20.0))
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .rounded_md()
+                .text_xs()
+                .text_color(hx.tx2)
+                .cursor_pointer()
+                .tooltip(tip(tip_text))
+                .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
+                .child(glyph)
+        };
+        let text = |glyph: &'static str| div().child(glyph).into_any_element();
+        // An archive box with a lid, rather than a square that read as
+        // "stop". SVGs color from their own style, so the hover brightening
+        // comes in through the button's group.
+        let archive_group = repo_element_id(ID_ARCHIVE, &repo.name).to_string();
+        let archive_icon = gpui::svg()
+            .path("icons/archive.svg")
+            .size(px(14.0))
+            .text_color(hx.tx2)
+            .group_hover(archive_group, |s| s.text_color(hx.tx0))
+            .into_any_element();
 
         let header = div()
             .flex()
@@ -655,7 +695,7 @@ impl HarnessWorkspace {
             // the agent, branch and setup hooks every task does — and is
             // listed both here and under TASKS.
             .child(
-                header_icon(ID_NEW_WT, "+", "New worktree in this project", false).on_click({
+                header_icon(ID_NEW_WT, text("+"), "New worktree in this project").on_click({
                     let new_wt_repo = repo.name.clone();
                     cx.listener(move |ws, _, window, cx| {
                         cx.stop_propagation();
@@ -664,7 +704,7 @@ impl HarnessWorkspace {
                 }),
             )
             .child(
-                header_icon(ID_ARCHIVE, "▦", "Archive project", false).on_click(
+                header_icon(ID_ARCHIVE, archive_icon, "Archive project").on_click(
                     cx.listener(move |ws, _, window, cx| {
                         cx.stop_propagation();
                         ws.archive_repo(archive_repo.clone(), window, cx);
@@ -672,7 +712,7 @@ impl HarnessWorkspace {
                 ),
             )
             .child(
-                header_icon(ID_HOOKS, "ƒ", "Edit setup scripts", false).on_click({
+                header_icon(ID_HOOKS, text("ƒ"), "Edit setup scripts").on_click({
                     let hooks_repo = repo.name.clone();
                     cx.listener(move |ws, _, window, cx| {
                         cx.stop_propagation();
@@ -687,10 +727,10 @@ impl HarnessWorkspace {
                 }),
             )
             .child(
-                header_icon(ID_TRASH, "✕", "Remove project (files kept)", trash_pending)
-                    .on_click(cx.listener(move |ws, _, window, cx| {
+                header_icon(ID_TRASH, text("✕"), "Remove project (files kept)")
+                    .on_click(cx.listener(move |ws, _, _, cx| {
                         cx.stop_propagation();
-                        ws.trash_repo(trash_repo.clone(), window, cx);
+                        ws.request_removal(super::super::Removal::Project(trash_repo.clone()), cx);
                     })),
             );
 
@@ -818,47 +858,97 @@ impl HarnessWorkspace {
 
     /// The restorable "ARCHIVED" list at the foot of the sidebar. Each row
     /// restores its project on click. Rendered only when something is archived.
+    /// The ARCHIVED section: collapsed by default to one header line with a
+    /// count; open, newest first, at most [`ARCHIVED_VISIBLE_ROWS`] tall before
+    /// it scrolls inside itself, so it never crowds out PROJECTS. Only the
+    /// "restore" link restores — a stray click on the row does nothing — and
+    /// "×" drops an entry from the list (files stay on disk).
     pub(crate) fn render_archived(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
+        let count = div()
+            .flex_none()
+            .text_xs()
+            .font_family(hx.font_mono)
+            .text_color(hx.tx2)
+            .child(self.archived_repos.len().to_string())
+            .into_any_element();
         let mut section = div()
             .flex()
             .flex_col()
             .flex_none()
-            .border_t_1()
-            .border_color(hx.border)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .h(px(28.0))
-                    .px_3()
-                    .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx2).child("ARCHIVED")),
-            );
+            .child(self.section_header(hx, SidebarSection::Archived, Some(count), cx));
+        if self.section_collapsed(SidebarSection::Archived) {
+            return section;
+        }
 
-        for (ix, root) in self.archived_repos.iter().enumerate() {
+        let mut rows = div()
+            .id("archived-scroll")
+            .flex()
+            .flex_col()
+            .max_h(px(ARCHIVED_VISIBLE_ROWS * ARCHIVED_ROW_H))
+            .overflow_y_scroll();
+        // Archiving appends, so the newest is last; show it first.
+        for (ix, root) in self.archived_repos.iter().enumerate().rev() {
             let name = root
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| root.to_string_lossy().into_owned());
             let restore_root = root.clone();
-            section = section.child(
+            let forget_root = root.clone();
+            rows = rows.child(
                 div()
-                    .id(("archived-row", ix))
                     .flex()
+                    .flex_none()
                     .items_center()
-                    .justify_between()
                     .gap_2()
+                    .h(px(ARCHIVED_ROW_H))
                     .px_3()
-                    .py_1()
-                    .cursor_pointer()
-                    .tooltip(tip("Restore project"))
                     .hover(|d| d.bg(hx.surface))
-                    .on_click(cx.listener(move |ws, _, window, cx| {
-                        ws.restore_repo(restore_root.clone(), window, cx);
-                    }))
-                    .child(div().flex_1().min_w_0().text_sm().text_color(hx.tx1).child(name))
-                    .child(div().flex_none().text_xs().text_color(hx.tx2).child("restore ⤴")),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_sm()
+                            .text_color(hx.tx1)
+                            .child(name),
+                    )
+                    .child(
+                        div()
+                            .id(("archived-restore", ix))
+                            .flex_none()
+                            .px_1()
+                            .rounded_md()
+                            .text_xs()
+                            .text_color(hx.tx2)
+                            .cursor_pointer()
+                            .tooltip(tip("Restore project"))
+                            .hover(|d| d.bg(hx.surface_hover).text_color(hx.tx0))
+                            .child("restore ⤴")
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                ws.restore_repo(restore_root.clone(), window, cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id(("archived-forget", ix))
+                            .flex_none()
+                            .px_1()
+                            .rounded_md()
+                            .text_xs()
+                            .text_color(hx.tx2)
+                            .cursor_pointer()
+                            .tooltip(tip("Remove from this list (files stay on disk)"))
+                            .hover(|d| d.bg(hx.surface_hover).text_color(hx.red))
+                            .child("×")
+                            .on_click(cx.listener(move |ws, _, _, cx| {
+                                ws.request_removal(super::super::Removal::Archived(forget_root.clone()), cx);
+                            })),
+                    ),
             );
         }
+        section = section.child(rows);
         section
     }
 
