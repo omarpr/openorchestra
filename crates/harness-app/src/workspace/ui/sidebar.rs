@@ -280,27 +280,37 @@ impl HarnessWorkspace {
             }
         }
 
-        // Expanded, PROJECTS takes the leftover height and scrolls; collapsed,
-        // it must shrink to its header so a spacer can hold ARCHIVED down.
-        let projects_collapsed = self.section_collapsed(SidebarSection::Projects);
         let projects_action = self.projects_add_button(hx, cx);
         let mut projects = div()
             .flex()
             .flex_col()
-            .when(projects_collapsed, |d| d.flex_none())
-            .when(!projects_collapsed, |d| d.flex_1().min_h_0().overflow_hidden())
+            .flex_none()
             .child(self.section_header(hx, SidebarSection::Projects, Some(projects_action), cx));
-        if !projects_collapsed {
+        if !self.section_collapsed(SidebarSection::Projects) {
             projects = projects.child(div().h(px(4.0)));
             for repo in &self.data.repos {
                 projects = projects.child(self.render_repo_group(hx, repo, cx));
             }
         }
 
-        column
+        // TASKS and PROJECTS share one scroll area that takes the height
+        // between STATS and ARCHIVED. It used to be `overflow_hidden` on
+        // PROJECTS alone: that clips, it doesn't scroll, so past a window's
+        // worth of projects the rest were unreachable — and TASKS, sized to
+        // its content outside it, pushed PROJECTS off the bottom too. Being
+        // `flex_1` even when both are short also keeps ARCHIVED at the bottom.
+        let scroller = div()
+            .id("sidebar-scroll")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
             .child(tasks_col)
-            .child(projects)
-            .when(projects_collapsed, |d| d.child(div().flex_1()))
+            .child(projects);
+
+        column
+            .child(scroller)
             .when(!self.archived_repos.is_empty(), |d| d.child(self.render_archived(hx, cx)))
     }
 
