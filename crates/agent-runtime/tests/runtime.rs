@@ -21,6 +21,7 @@ fn signal(root: &str, state: AgentState) -> AgentSignal {
         state,
         reason: WaitReason::None,
         session_file: None,
+        tool: None,
     }
 }
 

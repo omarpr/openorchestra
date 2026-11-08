@@ -371,6 +371,7 @@ fn codex_is_best_effort_and_may_not_claim_input_is_needed() {
         state: AgentState::Waiting,
         reason: WaitReason::PermissionPrompt,
         session_file: None,
+        tool: None,
     };
     assert!(!waiting.should_notify(rt.fidelity()));
 }
@@ -646,6 +647,7 @@ fn other_with_exact_fidelity_notifies_on_waiting() {
         state: AgentState::Waiting,
         reason: WaitReason::PermissionPrompt,
         session_file: None,
+        tool: None,
     };
     assert!(signal.should_notify(WaitFidelity::Exact));
     assert!(!signal.should_notify(WaitFidelity::BestEffort));
@@ -815,4 +817,46 @@ fn harness_status_shim_uses_payload_cwd_for_codex_hooks() {
         !launch_cwd.path().join(".harness/status.json").exists(),
         "must not write to the hook process cwd"
     );
+}
+
+/// PreToolUse carries the tool about to run into status.json — trimmed to a
+/// few short fields — so the conductor can say "Editing main.rs" while the
+/// call is in flight. Every other event clears it.
+#[test]
+fn claude_code_shim_records_the_tool_about_to_run() {
+    let wt = tempfile::tempdir().unwrap();
+    let shim = Path::new(env!("CARGO_MANIFEST_DIR")).join("shims/claude-code-status.mjs");
+    let run = |payload: serde_json::Value| {
+        use std::io::Write;
+        let mut child = std::process::Command::new("node")
+            .arg(&shim)
+            .env("CLAUDE_PROJECT_DIR", wt.path())
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .ok()?;
+        child.stdin.take()?.write_all(payload.to_string().as_bytes()).ok()?;
+        child.wait().ok()?;
+        let text = std::fs::read_to_string(wt.path().join(".harness/status.json")).ok()?;
+        serde_json::from_str::<serde_json::Value>(&text).ok()
+    };
+    let long = "x".repeat(5000);
+    let Some(status) = run(serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Edit",
+        "tool_use_id": "toolu_1",
+        "transcript_path": "/t.jsonl",
+        "tool_input": { "file_path": "/src/main.rs", "old_string": long, "new_string": "y" }
+    })) else {
+        eprintln!("node not installed — skipping shim tool test");
+        return;
+    };
+    assert_eq!(status["state"], "running");
+    assert_eq!(status["tool"]["name"], "Edit");
+    assert_eq!(status["tool"]["id"], "toolu_1");
+    assert_eq!(status["tool"]["input"]["file_path"], "/src/main.rs");
+    assert!(status["tool"]["input"].get("old_string").is_none(), "file contents never land on disk");
+
+    let status = run(serde_json::json!({ "hook_event_name": "Stop" })).unwrap();
+    assert_eq!(status["state"], "idle");
+    assert!(status["tool"].is_null());
 }

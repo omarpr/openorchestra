@@ -62,13 +62,42 @@ export function classify(payload) {
 	return "running";
 }
 
-export function writeStatus(cwd, state, sessionFile) {
+/**
+ * The tool a PreToolUse hook is about to run, trimmed to what a status line
+ * needs: the conductor shows "Editing main.rs" / "Running cargo test" from it
+ * and matches `id` against the transcript to see when it has finished. Only
+ * a few short input fields are kept, so the file never carries file contents
+ * or long commands. Any other event has no tool -> null.
+ *
+ * Exported for the test harness.
+ */
+export function toolFrom(payload) {
+	const event = String(pick(payload, "hook_event_name", "hookEventName", "event") ?? "").toLowerCase();
+	if (event !== "pretooluse") return null;
+	const name = pick(payload, "tool_name", "toolName", "tool.name");
+	if (typeof name !== "string") return null;
+	const raw = pick(payload, "tool_input", "toolInput", "tool.input") ?? {};
+	const input = {};
+	for (const [key, max] of [["file_path", 400], ["notebook_path", 400], ["command", 160], ["pattern", 80]]) {
+		if (typeof raw[key] === "string") input[key] = raw[key].slice(0, max);
+	}
+	const id = pick(payload, "tool_use_id", "toolUseId", "tool.id");
+	return { name, id: typeof id === "string" ? id : null, input };
+}
+
+export function writeStatus(cwd, state, sessionFile, tool) {
 	try {
 		const dir = path.join(cwd, ".harness");
 		fs.mkdirSync(dir, { recursive: true });
 		const payload =
 			JSON.stringify(
-				{ state, agent: "claude-code", timestamp: new Date().toISOString(), sessionFile: sessionFile ?? null },
+				{
+					state,
+					agent: "claude-code",
+					timestamp: new Date().toISOString(),
+					sessionFile: sessionFile ?? null,
+					tool: tool ?? null,
+				},
 				null,
 				"\t",
 			) + "\n";
@@ -92,6 +121,6 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 	// transcript_path is the harvesting hook (§6.4): the one peer agent that
 	// exposes a session transcript we could train from.
 	const sessionFile = pick(payload, "transcript_path", "transcriptPath", "session.transcript_path");
-	writeStatus(CWD, classify(payload), sessionFile);
+	writeStatus(CWD, classify(payload), sessionFile, toolFrom(payload));
 	process.exit(0);
 }

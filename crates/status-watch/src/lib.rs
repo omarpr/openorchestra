@@ -9,7 +9,8 @@
 //! {
 //!   "state": "running" | "waiting" | "idle",
 //!   "timestamp": "<ISO-8601>",
-//!   "sessionFile": "<absolute path>" | null
+//!   "sessionFile": "<absolute path>" | null,
+//!   "tool": { "name": "Edit", "id": "toolu_…", "input": { … } } | null
 //! }
 //! ```
 //!
@@ -67,6 +68,21 @@ pub struct AgentStatus {
     pub timestamp: Option<String>,
     #[serde(default)]
     pub session_file: Option<String>,
+    /// The tool the agent is about to run, when its hook reports one (Claude
+    /// Code's PreToolUse). Absent for every other writer.
+    #[serde(default)]
+    pub tool: Option<ToolCall>,
+}
+
+/// A tool call an agent announced before running it. `input` holds only a few
+/// short fields (path, command head, search pattern), never file contents.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ToolCall {
+    pub name: String,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub input: serde_json::Value,
 }
 
 impl AgentStatus {
@@ -77,6 +93,7 @@ impl AgentStatus {
             agent: None,
             timestamp: None,
             session_file: None,
+            tool: None,
         }
     }
 }

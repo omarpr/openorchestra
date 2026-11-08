@@ -148,6 +148,7 @@ fn pump(
                         // OpenCode keeps its own session store; nothing
                         // harvestable is exposed on this stream (§6.4).
                         session_file: None,
+                        tool: None,
                     };
                     if tx.send(signal).is_err() {
                         return; // nobody listening any more

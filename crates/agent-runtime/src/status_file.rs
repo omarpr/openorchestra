@@ -57,6 +57,7 @@ impl StatusFileSource {
                         state: event.status.state,
                         reason: reason_for(event.status.state),
                         session_file: event.status.session_file.map(PathBuf::from),
+                        tool: event.status.tool,
                     });
                 }
             })

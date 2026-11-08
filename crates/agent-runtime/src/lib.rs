@@ -48,7 +48,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-pub use status_watch::AgentState;
+pub use status_watch::{AgentState, ToolCall};
 pub use worktrees::AgentKind;
 
 /// Why an agent is waiting, when it tells us (§4.5).
@@ -102,6 +102,8 @@ pub struct AgentSignal {
     /// Path to the agent's session transcript, when the adapter exposes one —
     /// the harvesting hook for §6.4 / M7.
     pub session_file: Option<PathBuf>,
+    /// The tool the agent is about to run, when the adapter reports one.
+    pub tool: Option<ToolCall>,
 }
 
 impl AgentSignal {
