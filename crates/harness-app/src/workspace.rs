@@ -427,15 +427,17 @@ pub(crate) enum SettingsSection {
     Diff,
     Agents,
     Notifications,
+    Shortcuts,
 }
 
 impl SettingsSection {
-    pub(crate) const ALL: [SettingsSection; 5] = [
+    pub(crate) const ALL: [SettingsSection; 6] = [
         SettingsSection::Appearance,
         SettingsSection::Editor,
         SettingsSection::Diff,
         SettingsSection::Agents,
         SettingsSection::Notifications,
+        SettingsSection::Shortcuts,
     ];
 
     pub(crate) fn label(self) -> &'static str {
@@ -445,6 +447,7 @@ impl SettingsSection {
             SettingsSection::Diff => "Diff",
             SettingsSection::Agents => "Agents",
             SettingsSection::Notifications => "Notifications",
+            SettingsSection::Shortcuts => "Shortcuts",
         }
     }
 }

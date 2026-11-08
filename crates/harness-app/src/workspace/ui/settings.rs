@@ -751,20 +751,11 @@ impl HarnessWorkspace {
             reset = reset.text_color(hx.tx2);
         }
         body = body.child(reset);
+        }
 
-        // The shortcuts get their own heading now that the screen holds
-        // appearance, fonts, and agents above them.
-        body = body.child(
-            div()
-                .mt_2()
-                .pt_2()
-                .border_t_1()
-                .border_color(hx.border)
-                .text_sm()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(hx.tx0)
-                .child("Keyboard Shortcuts"),
-        );
+        // Keyboard shortcuts: their own tab. They used to trail the Agents
+        // section, where nobody looking for a key binding would think to go.
+        if sec == S::Shortcuts {
         let entries = crate::shortcuts::entries_with(&self.prefs.shortcuts);
         let scopes = [
             crate::shortcuts::Scope::Global,
