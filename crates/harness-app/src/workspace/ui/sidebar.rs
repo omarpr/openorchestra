@@ -562,7 +562,7 @@ impl HarnessWorkspace {
                         )
                     })
                     .child(badges)
-                    .child(agent_pill(hx, agent)),
+                    .child(agent_pill(hx, agent, self.anim_secs())),
             );
         }
         block = block.child(members);
@@ -803,7 +803,7 @@ impl HarnessWorkspace {
                     ),
             )
             .child(badges)
-            .child(agent_pill(hx, agent))
+            .child(agent_pill(hx, agent, self.anim_secs()))
     }
 
     /// The restorable "ARCHIVED" list at the foot of the sidebar. Each row
@@ -914,7 +914,7 @@ impl HarnessWorkspace {
                         repo.head_branch.clone()
                     })),
             )
-            .child(agent_pill(hx, agent));
+            .child(agent_pill(hx, agent, self.anim_secs()));
 
         // Badges mirror the worktree card's, minus the PR badge: a PR is a
         // feature-branch concept, and main is the target, not a PR head. CI is

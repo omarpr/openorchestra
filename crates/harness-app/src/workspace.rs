@@ -989,6 +989,10 @@ pub struct HarnessWorkspace {
     /// two-pose arm cycle it is on.
     pet: Option<(String, std::time::Instant)>,
     pet_pose: bool,
+    /// Shared clock for the sidebar's agent indicators (spinner angle, pulse
+    /// phase), and whether the loop that repaints them is running.
+    anim_clock: std::time::Instant,
+    indicator_ticking: bool,
     /// A shortcut row waiting for its new chord (`shortcuts::key_id`).
     rebinding: Option<String>,
     /// Focus target while capturing a chord.
@@ -1314,6 +1318,8 @@ impl HarnessWorkspace {
             preflight: Vec::new(),
             pet: None,
             pet_pose: false,
+            anim_clock: std::time::Instant::now(),
+            indicator_ticking: false,
             rebinding: None,
             rebind_focus: cx.focus_handle(),
             md_preview: None,
@@ -1788,6 +1794,7 @@ impl Render for HarnessWorkspace {
         }
 
         let hx = theme(cx).clone();
+        self.ensure_indicator_ticker(cx);
         // The hosted zed Workspace's own actions (⌘P's ToggleFileFinder among
         // them) are attached here, at the root, not only around the File tab.
         // Since zed v1.2x `Workspace::render` no longer attaches them itself —
@@ -2209,7 +2216,54 @@ impl HarnessWorkspace {
     }
 }
 
-fn agent_pill(hx: &HarnessTheme, state: AgentState) -> impl IntoElement {
+/// Repaint cadence for the sidebar indicators: ~15 fps is smooth for a 10px
+/// spinner and a fraction of what a per-frame gpui animation would cost — the
+/// whole chrome re-renders on every repaint, for as long as an agent works.
+const INDICATOR_FRAME: Duration = Duration::from_millis(66);
+/// One full spinner turn, and one breath of the waiting pulse.
+const SPIN_PERIOD: f32 = 1.0;
+const PULSE_PERIOD: f32 = 1.2;
+
+impl HarnessWorkspace {
+    /// Seconds on the indicators' shared clock, so every spinner turns in step.
+    fn anim_secs(&self) -> f32 {
+        self.anim_clock.elapsed().as_secs_f32()
+    }
+
+    /// Keep the sidebar indicators moving while any agent is running or
+    /// waiting; stop the loop as soon as none is, so an idle app stays idle.
+    fn ensure_indicator_ticker(&mut self, cx: &mut Context<Self>) {
+        let animating = |ws: &Self| {
+            ws.agent_status.values().any(|s| matches!(s, AgentState::Running | AgentState::Waiting))
+        };
+        if self.indicator_ticking || !animating(self) {
+            return;
+        }
+        self.indicator_ticking = true;
+        cx.spawn(async move |view, cx| {
+            loop {
+                cx.background_executor().timer(INDICATOR_FRAME).await;
+                let keep = view
+                    .update(cx, |ws, cx| {
+                        let keep = animating(ws);
+                        ws.indicator_ticking = keep;
+                        cx.notify();
+                        keep
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+}
+
+/// The agent state pill: a spinning accent arc while running, a breathing
+/// amber dot while waiting on you, a still grey ring at rest. `t` is the
+/// shared animation clock in seconds.
+fn agent_pill(hx: &HarnessTheme, state: AgentState, t: f32) -> impl IntoElement {
     let (color, label) = match state {
         AgentState::Running => (hx.accent, "RUNNING"),
         AgentState::Waiting => (hx.amber, "WAITING"),
@@ -2219,6 +2273,49 @@ fn agent_pill(hx: &HarnessTheme, state: AgentState) -> impl IntoElement {
         hx.surface2
     } else {
         tint(color, 0.16)
+    };
+    let size = px(10.0);
+    let indicator = match state {
+        AgentState::Running => {
+            let angle = (t / SPIN_PERIOD).fract() * std::f32::consts::TAU;
+            div()
+                .relative()
+                .size(size)
+                // A faint full ring as the track the arc runs on.
+                .child(
+                    div()
+                        .absolute()
+                        .size_full()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(tint(color, 0.3)),
+                )
+                .child(
+                    gpui::svg()
+                        .absolute()
+                        .size_full()
+                        .path("icons/load_circle.svg")
+                        .text_color(color)
+                        .with_transformation(gpui::Transformation::rotate(gpui::radians(angle))),
+                )
+        }
+        AgentState::Waiting => {
+            // Eased breathing between 35% and 100%.
+            let phase = (t / PULSE_PERIOD).fract() * std::f32::consts::TAU;
+            let level = 0.35 + 0.65 * (0.5 - 0.5 * phase.cos());
+            div()
+                .size(size)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(div().size(px(7.0)).rounded_full().bg(color).opacity(level))
+        }
+        AgentState::Idle | AgentState::Unknown => div()
+            .size(size)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(div().size(px(7.0)).rounded_full().border_1().border_color(color)),
     };
     div()
         .flex_none()
@@ -2231,7 +2328,7 @@ fn agent_pill(hx: &HarnessTheme, state: AgentState) -> impl IntoElement {
         .bg(bg)
         .text_xs()
         .text_color(color)
-        .child(div().size(px(6.0)).rounded_full().bg(color))
+        .child(indicator)
         .child(label)
 }
 
