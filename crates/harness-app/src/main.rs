@@ -526,6 +526,10 @@ pub fn apply_zed_settings(
     // workspace and left the Editor tab with an empty bottom bar. The service
     // workspace (whose docks stay closed) drops its buttons itself instead —
     // see `workspace_host::build_workspace`.
+    // No global `"tab_bar": {"show": false}` for the same reason: it took
+    // the Editor tab's file tabs with it. The service workspace hides its
+    // own panes' tab bars (`wire_service_workspace`), since harness draws
+    // those tabs itself.
     // Git primary click opens a single-file SoloDiff instead of ProjectDiff
     // (all changes), which is faster when reviewing one path at a time.
     //
@@ -542,7 +546,6 @@ pub fn apply_zed_settings(
                "dock": "left",
                "entry_primary_click_action": "file_diff"
              }},
-             "tab_bar": {{ "show": false }},
              "languages": {{
                "Rust": {{ "language_servers": ["rust-analyzer"] }}
              }},

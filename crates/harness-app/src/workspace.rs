@@ -924,6 +924,11 @@ pub struct HarnessWorkspace {
     /// Per-worktree full-editor workspaces (the Editor tab), keyed like
     /// `service_workspaces` and sharing that workspace's project.
     ide_workspaces: HashMap<String, Entity<::workspace::Workspace>>,
+    /// Watches the open ⌘P finder for its dismissal so focus can be handed
+    /// back (see `watch_finder_dismiss`). Replaced on every open: zed keeps
+    /// the finder entity alive to reopen it, so accumulating subscriptions
+    /// would fire once per past open.
+    finder_dismiss_sub: Option<gpui::Subscription>,
     /// Where the last preview file tab sat when zed closed it, as
     /// `(worktree key, index)`. Zed replaces a preview by removing the old
     /// item *before* adding the new one, so by the time the new preview
@@ -1307,6 +1312,7 @@ impl HarnessWorkspace {
             panes: HashMap::new(),
             service_workspaces: HashMap::new(),
             ide_workspaces: HashMap::new(),
+            finder_dismiss_sub: None,
             preview_slot: None,
             tab_scroll: gpui::ScrollHandle::new(),
             tab_scrolled_to: std::cell::Cell::new(0),
@@ -1826,7 +1832,14 @@ impl Render for HarnessWorkspace {
         // one — so from a terminal, Review, or any non-file tab those actions
         // had no handler at all and ⌘P silently did nothing. The File tab's
         // inner wrapper still handles them first when it is focused.
-        let base = match self.editor_workspace() {
+        //
+        // While the Editor tab is showing, the root must carry ITS actions,
+        // not the service workspace's: `render_zed_modal` only draws the
+        // Editor tab's finder then, so a root-level ⌘P (focus anywhere
+        // outside the editor) used to open the service workspace's finder
+        // invisibly — and that hidden finder then held focus, so ⌘P, ⌘C, ⌘V
+        // and typing all looked dead until a click back into the text.
+        let base = match self.active_ide_workspace().or_else(|| self.editor_workspace()) {
             Some(ws) => ws.update(cx, |w, cx| w.actions(div(), window, cx)),
             None => div(),
         };

@@ -1035,6 +1035,12 @@ impl HarnessWorkspace {
         let project = service.read(cx).project().clone();
         match crate::workspace_host::ide_workspace_for(project, window, cx) {
             Ok(ws) => {
+                cx.subscribe_in(&ws, window, |this, hosted, event: &workspace::Event, window, cx| {
+                    if matches!(event, workspace::Event::ModalOpened) {
+                        this.watch_finder_dismiss(hosted, window, cx);
+                    }
+                })
+                .detach();
                 self.ide_workspaces.insert(key, ws.clone());
                 Some(ws)
             }
@@ -1043,6 +1049,42 @@ impl HarnessWorkspace {
                 None
             }
         }
+    }
+
+    /// Hand focus back when the ⌘P finder closes without going anywhere.
+    ///
+    /// zed's `ModalLayer` restores the pre-modal focus only if its own
+    /// wrapper element (which tracks a private focus handle) holds focus.
+    /// Harness draws the finder itself (`render_zed_modal`) — zed v1.2x
+    /// leaves that to a `MultiWorkspace` we don't host — so that wrapper
+    /// never exists and the restore never fires: Escape left focus on a
+    /// finder that was no longer on screen, and the editor stopped getting
+    /// keys. If focus is still inside the finder once it is dismissed,
+    /// return it to the active tab. A confirm that opened a file has
+    /// already moved focus to that file, so this leaves it alone.
+    pub(crate) fn watch_finder_dismiss(
+        &mut self,
+        hosted: &Entity<::workspace::Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(finder) = hosted.read(cx).active_modal::<file_finder::FileFinder>(cx) else {
+            return;
+        };
+        self.finder_dismiss_sub = Some(cx.subscribe_in(
+            &finder,
+            window,
+            |_, finder, _: &gpui::DismissEvent, window, cx| {
+                let finder_focus = finder.focus_handle(cx);
+                // Deferred so zed's own dismissal (and any file open that
+                // moves focus) has run first.
+                cx.defer_in(window, move |this, window, cx| {
+                    if finder_focus.contains_focused(window, cx) {
+                        this.focus_active_pane(window, cx);
+                    }
+                });
+            },
+        ));
     }
 
     /// The selected worktree's active Editor tab workspace, if that tab is
@@ -1146,6 +1188,9 @@ impl HarnessWorkspace {
                             pane.set_should_display_tab_bar(|_, _| false);
                         });
                         this.observe_service_pane_preview(pane, cx);
+                    }
+                    workspace::Event::ModalOpened => {
+                        this.watch_finder_dismiss(hosted, window, cx);
                     }
                     _ => {}
                 }

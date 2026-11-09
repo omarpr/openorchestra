@@ -32,10 +32,15 @@ impl HarnessWorkspace {
                 .inset_0()
                 .on_mouse_down(
                     gpui::MouseButton::Left,
-                    cx.listener(move |_, _, window, cx| {
-                        ws_for_dismiss.update(cx, |ws, cx| {
-                            ws.hide_modal(window, cx);
-                        });
+                    // `hide_modal` emits no DismissEvent, so the finder's
+                    // dismissal watcher never sees a click-outside; hand
+                    // focus back here (zed's own restore can't fire — see
+                    // `watch_finder_dismiss`).
+                    cx.listener(move |this, _, window, cx| {
+                        let hidden = ws_for_dismiss.update(cx, |ws, cx| ws.hide_modal(window, cx));
+                        if hidden {
+                            this.focus_active_pane(window, cx);
+                        }
                     }),
                 )
                 .child(
