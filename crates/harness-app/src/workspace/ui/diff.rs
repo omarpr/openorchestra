@@ -47,7 +47,6 @@ impl HarnessWorkspace {
             .child(div().font_family(hx.font_mono).text_color(hx.tx2).child(lsp))
             .child(tool_chip(hx, "git", self.tools.git, true))
             .child(tool_chip(hx, "gh", self.tools.gh, false))
-            .child(tool_chip(hx, "pi", self.tools.pi, false))
     }
 
     /// Where one file's diff has to be fetched from: its worktree, the base the

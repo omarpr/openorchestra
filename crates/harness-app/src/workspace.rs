@@ -906,7 +906,6 @@ pub(crate) struct Resolved {
 struct ToolStatus {
     git: bool,
     gh: bool,
-    pi: bool,
 }
 
 pub struct HarnessWorkspace {
@@ -2479,7 +2478,6 @@ fn detect_tools() -> ToolStatus {
     ToolStatus {
         git: on_path("git"),
         gh: on_path("gh"),
-        pi: on_path(agent_runtime::default_invocation(&AgentKind::Pi).0),
     }
 }
 

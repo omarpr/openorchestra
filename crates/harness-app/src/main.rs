@@ -520,8 +520,12 @@ pub fn apply_zed_settings(
     // inside an ignored directory. "all" searches every ignored file too.
     let hide_gitignore = !show_ignored;
     let finder_ignored = if show_ignored { "all" } else { "smart" };
-    // Panel docks stay closed — Files/Git live in the harness tools column —
-    // so hide the status-bar dock buttons (they only toggled those docks).
+    // The panels' status-bar dock buttons stay ON here: these settings are
+    // global, and the Editor tab's status bar is where you switch between
+    // its file tree and Git panel. `"button": false` once hid them for every
+    // workspace and left the Editor tab with an empty bottom bar. The service
+    // workspace (whose docks stay closed) drops its buttons itself instead —
+    // see `workspace_host::build_workspace`.
     // Git primary click opens a single-file SoloDiff instead of ProjectDiff
     // (all changes), which is faster when reviewing one path at a time.
     //
@@ -532,11 +536,10 @@ pub fn apply_zed_settings(
              "buffer_font_family": "{mono_font}", "buffer_font_size": {font_size},
              "ui_font_family": "{ui_font}",
              "terminal": {{ "font_family": "{mono_font}", "font_size": {font_size} }},
-             "project_panel": {{ "dock": "left", "button": false, "hide_gitignore": {hide_gitignore} }},
+             "project_panel": {{ "dock": "left", "hide_gitignore": {hide_gitignore} }},
              "file_finder": {{ "include_ignored": "{finder_ignored}" }},
              "git_panel": {{
                "dock": "left",
-               "button": false,
                "entry_primary_click_action": "file_diff"
              }},
              "tab_bar": {{ "show": false }},

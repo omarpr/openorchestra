@@ -321,6 +321,22 @@ fn build_workspace(
     // full-bleed. `dock_panel` still activates a slot when needed so a later
     // focus path is never blank.
     // The Editor tab is a full IDE: its file tree starts open, as zed's does.
+    //
+    // Its status bar keeps zed's dock buttons — that bar is how you switch
+    // between the file tree and the Git panel. The service workspace's docks
+    // never open, so its buttons would only toggle hidden docks: remove them
+    // from THIS workspace's status bar. (The panels' `button` setting can't
+    // do this — it is global, and hiding it there emptied the Editor tab's
+    // bar too.)
+    if mode == HostedMode::Service {
+        workspace.update(cx, |ws, cx| {
+            ws.status_bar().update(cx, |bar, cx| {
+                while let Some(ix) = bar.position_of_item::<workspace::dock::PanelButtons>() {
+                    bar.remove_item_at(ix, cx);
+                }
+            });
+        });
+    }
     dock_panel(
         &workspace,
         "project_panel",
