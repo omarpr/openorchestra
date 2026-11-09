@@ -47,7 +47,21 @@ authentication.
 
 ## Open questions before choosing option 1
 
-- [ ] Audit dependency licenses (Cargo crates, bundled JS/assets). Any GPL/AGPL
+- [ ] **Blocker: harness-app links GPL zed crates.** Of the 126 zed crates in
+      `crates/harness-app`'s dependency graph, 93 are `GPL-3.0-or-later` —
+      including the ones the app is built on: `editor`, `workspace`,
+      `project_panel`, `git_ui`, `terminal`, `language`, `lsp`. Only gpui and
+      a few base crates are Apache-2.0. That is why
+      `crates/harness-app/Cargo.toml` declares `license = "GPL-3.0-or-later"`
+      (accepted in `docs/architecture.md` §3.2). We don't hold zed's
+      copyright, so relicensing our own code doesn't change this: a
+      closed-source binary would first need every GPL zed crate replaced,
+      i.e. the editor, file tree, Git panel and terminal rebuilt on gpui
+      alone. Short of that, option 1 is off the table and option 2 (or
+      shipping the source under GPL) is the path. Re-check with
+      `cargo metadata` from `crates/harness-app` — the repo-root workspace
+      excludes harness-app.
+- [ ] Audit the remaining dependency licenses (Cargo crates, bundled JS/assets). Any GPL/AGPL
       dependency linked into the binary conflicts with closed-source
       distribution. `cargo license` / `cargo deny check licenses` are good starts.
 - [ ] Pick the public hosting location for release artifacts.
