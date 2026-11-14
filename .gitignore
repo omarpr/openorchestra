@@ -5,7 +5,6 @@ node_modules/
 .spike3-sync.tar.gz
 dist/
 assets/openOrchestra.iconset/
-_to_delete/
 
 # `harvest`'s default output (crates/training). Run from the repo root it lands
 # here, and it contains full session transcripts, prompts, and diffs — the one
