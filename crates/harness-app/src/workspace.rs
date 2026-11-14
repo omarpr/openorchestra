@@ -563,7 +563,7 @@ pub struct HarnessWorkspace {
     /// tries to type into a diff.
     edit_prompt: Option<EditPrompt>,
     /// Tasks (or lone worktrees) whose archive/delete is running off-thread.
-    ending: std::collections::HashSet<String>,
+    ending: HashMap<String, lifecycle::EndKind>,
     /// An archive/delete waiting on its loss check or the user's answer.
     end_confirm: Option<lifecycle::EndConfirm>,
     /// Setup paused until the user approves these repos' committed hooks.

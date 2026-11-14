@@ -33,7 +33,14 @@ impl EndKind {
             EndKind::Delete => "Delete",
         }
     }
-    fn doing(self) -> &'static str {
+    /// For the row's pill while it runs.
+    pub(crate) fn doing_label(self) -> &'static str {
+        match self {
+            EndKind::Archive => "ARCHIVING",
+            EndKind::Delete => "DELETING",
+        }
+    }
+    pub(crate) fn doing(self) -> &'static str {
         match self {
             EndKind::Archive => "archiving",
             EndKind::Delete => "deleting",
@@ -179,6 +186,15 @@ fn run_end(plan: &EndPlan, data_dir: &Path) -> EndOutcome {
 }
 
 impl HarnessWorkspace {
+    /// The archive/delete running for this row, if any: keyed by task id, or
+    /// by worktree id for a worktree outside any task.
+    pub(crate) fn ending_for(&self, task_id: Option<&str>, worktree_id: &str) -> Option<EndKind> {
+        task_id
+            .and_then(|t| self.ending.get(t))
+            .or_else(|| self.ending.get(worktree_id))
+            .copied()
+    }
+
     /// Build the plan for ending `id` (a task id, or a worktree id).
     fn end_plan(&self, id: &str, kind: EndKind) -> Option<EndPlan> {
         let task_id = self
@@ -245,7 +261,7 @@ impl HarnessWorkspace {
     /// (or, for a clean archive, just go).
     pub(crate) fn request_end(&mut self, id: String, kind: EndKind, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
-        if self.ending.contains(&id) {
+        if self.ending.contains_key(&id) {
             return;
         }
         let Some(plan) = self.end_plan(&id, kind) else {
@@ -285,7 +301,7 @@ impl HarnessWorkspace {
     /// of the registry entries that actually went.
     pub(crate) fn start_end(&mut self, plan: EndPlan, window: &mut Window, cx: &mut Context<Self>) {
         self.end_confirm = None;
-        self.ending.insert(plan.id.clone());
+        self.ending.insert(plan.id.clone(), plan.kind);
 
         if let Some(tid) = &plan.task_id {
             self.shutdown_task_broker(tid);

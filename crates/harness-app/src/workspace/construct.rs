@@ -214,7 +214,7 @@ impl HarnessWorkspace {
             diff_base_menu: None,
             close_prompt: None,
             edit_prompt: None,
-            ending: std::collections::HashSet::new(),
+            ending: HashMap::new(),
             end_confirm: None,
             hook_trust: None,
             note: String::new(),

@@ -166,6 +166,29 @@ impl HarnessWorkspace {
             .flat_map(|t| t.members.iter())
             .find(|m| m.worktree_id == wt.id);
         let agent = self.agent_status.get(&wt.path).copied().unwrap_or(AgentState::Unknown);
+        let ending = self.ending_for(wt.task_id.as_deref(), &wt.id);
+        // Rename acts on the owning task (that is what the menu keys on), so
+        // the field opens here as well as on the TASKS card — before, a rename
+        // started from this row put its input in TASKS, collapsed or not, and
+        // looked like nothing happened.
+        let rename_key = wt.task_id.as_deref().unwrap_or(&wt.id);
+        let renaming = matches!(self.edit_kind(), Some(EditKind::Rename(rid)) if rid == rename_key);
+        let name_el: AnyElement = match renaming.then(|| self.edit_editor()).flatten() {
+            // Clicks in the field stay in the field: the row's own click would
+            // re-select it and pull focus back to the terminal.
+            Some(editor) => div()
+                .on_mouse_down(MouseButton::Left, cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()))
+                .child(self.render_input(hx, editor, cx))
+                .into_any_element(),
+            None => div()
+                .text_sm()
+                .text_color(hx.tx0)
+                .whitespace_nowrap()
+                .overflow_hidden()
+                .text_ellipsis()
+                .child(wt.name.clone())
+                .into_any_element(),
+        };
         let mut badges = div().flex().flex_none().items_center().gap_1();
         if let Some(m) = member {
             for (n, glyph, color) in [(m.ahead, "↑", hx.green), (m.behind, "↓", hx.amber), (m.dirty, "~", hx.amber)] {
@@ -188,9 +211,13 @@ impl HarnessWorkspace {
             // Same accent left-border the selected main entry gets; the bare
             // surface fill alone barely shows against the sidebar.
             .when(selected, |d| d.bg(hx.surface).border_l_1().border_color(hx.accent))
-            .cursor_pointer()
-            .hover(|d| d.bg(hx.surface_hover))
-            .on_click(cx.listener(move |ws, _, window, cx| ws.select(sel.clone(), window, cx)))
+            // Going away: dimmed and inert until it's gone.
+            .when(ending.is_some(), |d| d.opacity(0.55))
+            .when(ending.is_none(), |d| {
+                d.cursor_pointer()
+                    .hover(|d| d.bg(hx.surface_hover))
+                    .on_click(cx.listener(move |ws, _, window, cx| ws.select(sel.clone(), window, cx)))
+            })
             // The same Rename / Archive / Delete menu the TASKS card has —
             // keyed on the owning task, since that is what those act on.
             .on_mouse_down(MouseButton::Right, {
@@ -221,15 +248,7 @@ impl HarnessWorkspace {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(hx.tx0)
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(wt.name.clone()),
-                    )
+                    .child(name_el)
                     .child(
                         div()
                             .text_xs()
@@ -242,7 +261,10 @@ impl HarnessWorkspace {
                     ),
             )
             .child(badges)
-            .child(agent_pill(hx, agent, self.anim_secs()))
+            .child(match ending {
+                Some(kind) => busy_pill(hx, kind.doing_label(), self.anim_secs()).into_any_element(),
+                None => agent_pill(hx, agent, self.anim_secs()).into_any_element(),
+            })
     }
 
     /// The restorable "ARCHIVED" list at the foot of the sidebar. Each row

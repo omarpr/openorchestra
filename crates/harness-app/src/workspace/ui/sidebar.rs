@@ -359,6 +359,7 @@ impl HarnessWorkspace {
             Selection::Task { task_id: tid, .. } if tid == &task.id
         );
         let renaming = matches!(self.edit_kind(), Some(EditKind::Rename(rid)) if rid == &task.id);
+        let task_ending = self.ending.get(&task.id).copied();
         let color = SWATCHES[(task.color as usize) % SWATCHES.len()];
         let tid_click = task_id.clone();
         let menu_id = task_id.clone();
@@ -392,6 +393,7 @@ impl HarnessWorkspace {
             // square off the corners this block just rounded.
             .overflow_hidden()
             .when(selected, |d| d.bg(hx.surface))
+            .when(task_ending.is_some(), |d| d.opacity(0.55))
             // A task and its repos are one card, so hovering anywhere lifts the
             // whole block one step on the surface ramp. The row under the cursor
             // then takes a second step, which keeps it clear what a click hits —
@@ -605,7 +607,10 @@ impl HarnessWorkspace {
                         )
                     })
                     .child(badges)
-                    .child(agent_pill(hx, agent, self.anim_secs())),
+                    .child(match task_ending {
+                        Some(kind) => busy_pill(hx, kind.doing_label(), self.anim_secs()).into_any_element(),
+                        None => agent_pill(hx, agent, self.anim_secs()).into_any_element(),
+                    }),
             );
         }
         block = block.child(members);

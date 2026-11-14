@@ -382,6 +382,7 @@ impl HarnessWorkspace {
     pub(crate) fn ensure_indicator_ticker(&mut self, cx: &mut Context<Self>) {
         let animating = |ws: &Self| {
             ws.agent_status.values().any(|s| matches!(s, AgentState::Running | AgentState::Waiting))
+                || !ws.ending.is_empty()
         };
         if self.indicator_ticking || !animating(self) {
             return;
@@ -405,6 +406,38 @@ impl HarnessWorkspace {
         })
         .detach();
     }
+}
+
+/// In place of the agent pill while a row's worktree is being archived or
+/// deleted: the same spinning arc, in grey, saying which.
+pub(crate) fn busy_pill(hx: &HarnessTheme, label: &'static str, t: f32) -> impl IntoElement {
+    let angle = (t / SPIN_PERIOD).fract() * std::f32::consts::TAU;
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_1()
+        .px_1p5()
+        .py_0p5()
+        .rounded_full()
+        .bg(hx.surface2)
+        .text_xs()
+        .text_color(hx.tx1)
+        .child(
+            div()
+                .relative()
+                .size(px(10.0))
+                .child(div().absolute().size_full().rounded_full().border_1().border_color(tint(hx.tx2, 0.4)))
+                .child(
+                    gpui::svg()
+                        .absolute()
+                        .size_full()
+                        .path("icons/load_circle.svg")
+                        .text_color(hx.tx1)
+                        .with_transformation(gpui::Transformation::rotate(gpui::radians(angle))),
+                ),
+        )
+        .child(label)
 }
 
 /// The agent state pill: a spinning accent arc while running, a breathing
