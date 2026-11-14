@@ -1,7 +1,7 @@
 //! Bridge from A2A SendMessage into a member agent session.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -47,6 +47,7 @@ pub trait Bridge: Send + Sync {
 /// File-based bridge: `inbox/<tenant>.jsonl` + `outbox.jsonl`.
 pub struct FileBridge {
     root: PathBuf,
+    /// Byte offset of the first outbox line not yet consumed.
     outbox_cursor: Mutex<u64>,
 }
 
@@ -58,9 +59,14 @@ impl FileBridge {
         if !outbox.exists() {
             File::create(&outbox)?;
         }
+        // Start at the end. The task store is in memory, so a completion
+        // written before this broker started names a task it has never seen;
+        // replaying the whole file on every restart only re-ran those no-ops
+        // (and re-appended them to the audit log).
+        let start = fs::metadata(&outbox).map(|m| m.len()).unwrap_or(0);
         Ok(FileBridge {
             root,
-            outbox_cursor: Mutex::new(0),
+            outbox_cursor: Mutex::new(start),
         })
     }
 
@@ -111,21 +117,37 @@ impl Bridge for FileBridge {
     }
 
     fn try_recv_completion(&self) -> Option<BridgeEvent> {
-        let path = self.outbox_path();
-        let text = fs::read_to_string(&path).ok()?;
         let mut cursor = self.outbox_cursor.lock().ok()?;
-        let bytes = text.as_bytes();
-        if (*cursor as usize) >= bytes.len() {
-            return None;
+        loop {
+            // Read only from the cursor on: the drain loop polls this every
+            // 200ms, and re-reading the whole append-only file each time made
+            // every poll cost grow with the task's history.
+            let mut f = File::open(self.outbox_path()).ok()?;
+            let len = f.metadata().ok()?.len();
+            if len < *cursor {
+                // Truncated or replaced underneath us: start over.
+                *cursor = 0;
+            }
+            f.seek(SeekFrom::Start(*cursor)).ok()?;
+            let mut buf = Vec::new();
+            BufReader::new(f).read_until(b'\n', &mut buf).ok()?;
+            // Only a complete line counts; a half-written one waits for its
+            // newline.
+            if buf.last() != Some(&b'\n') {
+                return None;
+            }
+            *cursor += buf.len() as u64;
+            if let Some(ev) = parse_completion(&String::from_utf8_lossy(&buf)) {
+                return Some(ev);
+            }
+            // A blank or malformed line: skip it rather than stall the queue.
         }
-        let remaining = &text[*cursor as usize..];
-        let (line, rest) = match remaining.split_once('\n') {
-            Some((l, r)) => (l, r),
-            None => return None,
-        };
-        *cursor += (line.len() + 1) as u64;
-        let _ = rest;
-        let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    }
+}
+
+fn parse_completion(line: &str) -> Option<BridgeEvent> {
+    {
+        let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
         let kind = v.get("kind")?.as_str()?;
         let id = v.get("a2a_task_id")?.as_str()?.to_string();
         match kind {

@@ -57,7 +57,7 @@ impl BrokerCredentials {
         restrict_dir(a2a_dir)?;
         let path = Self::path(a2a_dir);
         let body = serde_json::to_vec_pretty(self)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
         let tmp = a2a_dir.join(format!(".{FILE_NAME}.tmp"));
         let _ = fs::remove_file(&tmp);
         {

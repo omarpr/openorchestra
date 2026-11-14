@@ -145,7 +145,30 @@ fn now_rfc3339() -> String {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    format!("{secs}")
+    rfc3339_utc(secs)
+}
+
+/// `secs` since the epoch as `YYYY-MM-DDTHH:MM:SSZ`. The name always promised
+/// RFC 3339, but it used to return bare epoch seconds.
+fn rfc3339_utc(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    // Howard Hinnant's days-from-civil, inverted.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rem / 3_600,
+        (rem / 60) % 60,
+        rem % 60
+    )
 }
 
 fn drain_bridge(state: &BrokerState) {
@@ -249,6 +272,7 @@ fn handle_connection(mut stream: TcpStream, state: Arc<BrokerState>) -> std::io:
     };
     let mut content_length = 0usize;
     let mut auth = String::new();
+    let mut content_type = String::new();
     let mut header_count = 0usize;
     loop {
         let Some(line) = read_line_capped(&mut reader)? else {
@@ -268,6 +292,8 @@ fn handle_connection(mut stream: TcpStream, state: Arc<BrokerState>) -> std::io:
                 content_length = value.trim().parse().unwrap_or(0);
             } else if name.eq_ignore_ascii_case("authorization") {
                 auth = value.trim().to_string();
+            } else if name.eq_ignore_ascii_case("content-type") {
+                content_type = value.trim().to_ascii_lowercase();
             }
         }
     }
@@ -280,7 +306,10 @@ fn handle_connection(mut stream: TcpStream, state: Arc<BrokerState>) -> std::io:
     let method = parts[0];
     let path = parts[1];
 
-    if !authorized(&auth, &state.config.api_key) && !path.ends_with("/health") {
+    // Only the bare health check is open. This used to match any path
+    // *ending* in "/health", which let an unauthenticated request reach
+    // routing for paths it had no business reaching.
+    if !authorized(&auth, &state.config.api_key) && path != "/health" {
         // Agent card discovery still requires auth in v1 (localhost key).
         write_response(&mut stream, 401, "text/plain", b"unauthorized")?;
         return Ok(());
@@ -381,6 +410,41 @@ fn handle_connection(mut stream: TcpStream, state: Arc<BrokerState>) -> std::io:
         return Ok(());
     }
 
+    let is_form = content_type.starts_with("application/x-www-form-urlencoded");
+
+    // Plain-form send, for the shell helpers: `curl --data-urlencode text=…`
+    // does the encoding, so they need neither python nor jq to build JSON.
+    if method == "POST" && is_form {
+        if let Some(tenant) = path.strip_prefix("/t/").and_then(|r| r.strip_suffix("/send")) {
+            let tenant = crate::decode_tenant(tenant);
+            let text = form_value(&body, "text").unwrap_or_default();
+            let params = serde_json::json!({
+                "message": {
+                    "message_id": "",
+                    "role": "user",
+                    "parts": [{ "text": text }]
+                }
+            });
+            let resp = match handle_send_message(&state, &params, Some(&tenant)) {
+                Ok(v) => JsonRpcResponse::ok(None, v),
+                Err(e) => JsonRpcResponse::err(None, -32000, e),
+            };
+            let b = serde_json::to_vec(&resp).unwrap_or_default();
+            write_response(&mut stream, 200, "application/json", &b)?;
+            return Ok(());
+        }
+        if path == "/v1/status" {
+            let id = form_value(&body, "id").unwrap_or_default();
+            let resp = match handle_get_task(&state, &serde_json::json!({ "id": id })) {
+                Ok(v) => JsonRpcResponse::ok(None, v),
+                Err(e) => JsonRpcResponse::err(None, -32000, e),
+            };
+            let b = serde_json::to_vec(&resp).unwrap_or_default();
+            write_response(&mut stream, 200, "application/json", &b)?;
+            return Ok(());
+        }
+    }
+
     // Helper: complete a task (specialist outbox shortcut via HTTP)
     if method == "POST" && path == "/v1/complete" {
         #[derive(serde::Deserialize)]
@@ -393,12 +457,21 @@ fn handle_connection(mut stream: TcpStream, state: Arc<BrokerState>) -> std::io:
             #[serde(default)]
             error: Option<String>,
         }
-        let parsed: CompleteBody = serde_json::from_slice(&body).unwrap_or(CompleteBody {
-            a2a_task_id: String::new(),
-            summary: String::new(),
-            failed: false,
-            error: None,
-        });
+        let parsed: CompleteBody = if is_form {
+            CompleteBody {
+                a2a_task_id: form_value(&body, "a2a_task_id").unwrap_or_default(),
+                summary: form_value(&body, "summary").unwrap_or_default(),
+                failed: form_value(&body, "failed").is_some_and(|v| v == "true" || v == "1"),
+                error: form_value(&body, "error"),
+            }
+        } else {
+            serde_json::from_slice(&body).unwrap_or(CompleteBody {
+                a2a_task_id: String::new(),
+                summary: String::new(),
+                failed: false,
+                error: None,
+            })
+        };
         if parsed.a2a_task_id.is_empty() {
             write_response(&mut stream, 400, "text/plain", b"a2a_task_id required")?;
             return Ok(());
@@ -421,6 +494,40 @@ fn handle_connection(mut stream: TcpStream, state: Arc<BrokerState>) -> std::io:
 
     write_response(&mut stream, 404, "text/plain", b"not found")?;
     Ok(())
+}
+
+/// One field of an `application/x-www-form-urlencoded` body.
+fn form_value(body: &[u8], key: &str) -> Option<String> {
+    let body = std::str::from_utf8(body).ok()?;
+    body.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        (percent_decode(k) == key).then(|| percent_decode(v))
+    })
+}
+
+/// Form decoding: `+` is a space, `%XX` a byte; bytes are then read as UTF-8.
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'+' => out.push(b' '),
+            b'%' if i + 2 < b.len() => {
+                let hex = std::str::from_utf8(&b[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok());
+                match hex {
+                    Some(byte) => {
+                        out.push(byte);
+                        i += 2;
+                    }
+                    None => out.push(b'%'),
+                }
+            }
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn authorized(auth_header: &str, api_key: &str) -> bool {
@@ -760,7 +867,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    fn test_state(dir: &std::path::Path) -> BrokerState {
+    pub(super) fn test_state(dir: &std::path::Path) -> BrokerState {
         test_state_with_notify(dir, None)
     }
 
@@ -1006,7 +1113,7 @@ mod tests {
     }
 
     /// Send a raw request head and return the status line.
-    fn status_of(addr: SocketAddr, head: &str) -> String {
+    pub(super) fn status_of(addr: SocketAddr, head: &str) -> String {
         let mut stream = TcpStream::connect(addr).unwrap();
         stream.write_all(head.as_bytes()).unwrap();
         let mut status = String::new();
@@ -1055,7 +1162,63 @@ mod tests {
 
 #[cfg(test)]
 mod hardening_tests {
-    use super::{authorized, constant_time_eq};
+    use super::*;
+    use super::tests::{status_of, test_state};
+
+    #[test]
+    fn timestamps_are_rfc3339() {
+        assert_eq!(rfc3339_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339_utc(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(rfc3339_utc(1_794_614_400 + 3_723), "2026-11-14T01:02:03Z");
+    }
+
+    #[test]
+    fn form_values_decode() {
+        let body = b"text=hello+world%21&id=a%2Fb&empty=&bad=%zz";
+        assert_eq!(form_value(body, "text").as_deref(), Some("hello world!"));
+        assert_eq!(form_value(body, "id").as_deref(), Some("a/b"));
+        assert_eq!(form_value(body, "empty").as_deref(), Some(""));
+        assert_eq!(form_value(body, "bad").as_deref(), Some("%zz"));
+        assert_eq!(form_value(body, "missing"), None);
+        assert_eq!(form_value("x=caf%C3%A9".as_bytes(), "x").as_deref(), Some("café"));
+    }
+
+    #[test]
+    fn only_the_bare_health_path_skips_auth() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = BrokerServer::start(test_state(dir.path())).unwrap();
+        assert!(status_of(handle.addr, "GET /health HTTP/1.1\r\n\r\n").contains("200"));
+        assert!(status_of(handle.addr, "GET /t/x/health HTTP/1.1\r\n\r\n").contains("401"));
+        handle.shutdown();
+    }
+
+    #[test]
+    fn the_form_helpers_send_check_and_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = BrokerServer::start(test_state(dir.path())).unwrap();
+        let form = |path: &str, body: &str| {
+            let mut s = TcpStream::connect(handle.addr).unwrap();
+            write!(
+                s,
+                "POST {path} HTTP/1.1\r\nAuthorization: Bearer test-key\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            let mut out = String::new();
+            s.read_to_string(&mut out).unwrap();
+            let json = out.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+            serde_json::from_str::<serde_json::Value>(&json).unwrap()
+        };
+        let sent = form("/t/api%2Fauth/send", "text=Add+a+%22login%22+endpoint");
+        let id = sent["result"]["id"].as_str().unwrap().to_string();
+        assert_eq!(sent["result"]["history"][0]["parts"][0]["text"], "Add a \"login\" endpoint");
+
+        form("/v1/complete", &format!("a2a_task_id={id}&summary=shipped"));
+        thread::sleep(Duration::from_millis(500));
+        let got = form("/v1/status", &format!("id={id}"));
+        assert_eq!(got["result"]["status"]["state"], "completed");
+        handle.shutdown();
+    }
 
     #[test]
     fn an_empty_key_authorizes_nobody() {
