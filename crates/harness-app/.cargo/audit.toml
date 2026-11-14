@@ -6,40 +6,39 @@
 # is ours (66 crates, currently clean) and should never need an exception.
 #
 # Every entry below is transitive through the zed pin; none is a direct
-# dependency of ours, and none has a fixed upgrade reachable from here (the
-# quick-xml fix is >=0.41.0, and the three live versions are semver-incompatible
-# 0.x releases chosen by zed's workspace and two upstream crates, so
-# `cargo update` cannot cross them; `rsa` has no fixed release at all).
+# dependency of ours, and none has a fixed upgrade reachable from here.
 #
-# VALID ONLY FOR zed rev 952d712dac48a4af2c54fb22c82d82a9d69b72d4 (tag v1.11.3).
-# A pin bump rewrites Cargo.lock, which re-triggers the workflow — re-verify the
-# reachability notes below at that point rather than carrying them forward
-# blindly. Advisories NOT listed here still fail the job.
+# VALID ONLY FOR zed rev e8bc16acee5ae1937600d571d441c4b5d7b0d288 (tag v1.28.1),
+# re-verified 2026-11-13. A pin bump rewrites Cargo.lock, which re-triggers the
+# workflow — re-verify the reachability notes below at that point rather than
+# carrying them forward blindly. Advisories NOT listed here still fail the job.
 
 [advisories]
 ignore = [
-  # RUSTSEC-2026-0194 — quick-xml: quadratic run time checking a start tag for
-  # duplicate attribute names. Three versions are in the graph:
-  #   0.30.0  via gpui -> zed-scap -> xcb. A [build-dependencies] entry
-  #           (xcb-1.7.0/Cargo.toml:280) driving build-time codegen over the
-  #           X11 protocol XML bundled in the crate. Not runtime-reachable.
-  #   0.39.4  via gpui_platform -> gpui_linux -> wayland-client ->
-  #           wayland-scanner. Build-time protocol-XML codegen, Linux-only.
-  #           Not runtime-reachable.
-  #   0.38.4  via markdown -> mermaid_render. This one IS live at runtime: it
-  #           post-processes the SVG that mermaid emits for our markdown
-  #           preview (src/markdown_preview.rs). Worst case is a crafted
-  #           mermaid diagram in an already-opened repo burning CPU in the
-  #           preview pane — local DoS, no RCE and no disclosure. Accepted
-  #           until zed bumps quick-xml.
+  # RUSTSEC-2026-0194 / RUSTSEC-2026-0195 — quick-xml: quadratic start-tag
+  # check, and unbounded namespace allocation in `NsReader`. At this pin the
+  # one runtime path (markdown -> mermaid_render, our markdown preview) is on
+  # quick-xml 0.41.0, which is fixed. What remains is not reachable on macOS:
+  #   0.37.5  via gpui_linux -> wayland-client -> wayland-scanner, a proc-macro
+  #           doing build-time protocol-XML codegen. Linux-only, build-time.
+  #   0.39.3  via atspi-common -> zbus-lockstep -> zbus_xml. Linux
+  #           accessibility (AT-SPI over D-Bus); never built for macOS.
+  #   0.30.0  still in the lockfile but with no dependent on any target
+  #           (`cargo tree -i quick-xml@0.30.0 --target all -e all` is empty).
   "RUSTSEC-2026-0194",
-
-  # RUSTSEC-2026-0195 — quick-xml: unbounded namespace-declaration allocation
-  # in `NsReader`. Same three paths, but advisory-specific: the two Linux/X11
-  # paths are build-time as above, and mermaid_render uses `quick_xml::Reader`
-  # exclusively (no `NsReader` reference anywhere in that crate), so the
-  # runtime path is not affected by this one at all.
   "RUSTSEC-2026-0195",
+
+  # RUSTSEC-2026-0459 — libsqlite3-sys 0.30.1 bundles SQLite < 3.54.0
+  # (CVE-2026-119375): opening a database together with a crafted `-wal`
+  # file of a different page size can return stale process memory. Fixed in
+  # libsqlite3-sys >= 0.39, but zed's workspace pins 0.30.1 (still at v1.28.1)
+  # and a [patch] cannot cross a semver-incompatible 0.x line. Reached via
+  # sqlez -> db, i.e. zed's own state database under the user's
+  # ~/Library/Application Support/<Zed>/db (paths::database_dir); exploiting
+  # it needs another party to have written that database and its WAL inside
+  # the user's own Library. We never open a database from a repository.
+  # Accepted until zed moves to rusqlite 0.41 / libsqlite3-sys 0.39.
+  "RUSTSEC-2026-0459",
 
   # RUSTSEC-2023-0071 — rsa: Marvin attack, potential key recovery via timing
   # sidechannels. No fixed upgrade exists. Reached via client -> rpc, i.e.
