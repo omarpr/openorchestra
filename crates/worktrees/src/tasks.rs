@@ -425,6 +425,9 @@ pub fn read_task_brief(tasks_root: &Path, slug: &str) -> Option<String> {
 pub struct A2aContextInfo {
     pub base_url: String,
     pub api_key: String,
+    /// Absolute `…/tasks/<slug>/a2a` dir holding the helper scripts. Agents
+    /// run with a worktree cwd, so helpers must be named by absolute path.
+    pub a2a_dir: PathBuf,
 }
 
 /// Whether this task needs a harness-owned agent-context file.
@@ -499,21 +502,30 @@ pub fn task_agent_context_with_a2a(
                     m.repo, a2a.base_url, enc
                 ));
             }
+            let dir = a2a.a2a_dir.display();
+            out.push_str("\n## Your role\n");
+            if let Some(home) = task.home_member() {
+                out.push_str(&format!(
+                    "Check your working directory to tell which role is yours.\n\n\
+                     **If your cwd is `{home}` you are the ORCHESTRATOR.** The user talks to \
+                     you about the whole task. Plan the work across all repos, do the \
+                     {repo} part yourself, and hand each other repo's part to its \
+                     specialist instead of editing that tree:\n\
+                     - `{dir}/delegate.sh <worktree_id> \"what to do\"` — returns an A2A task id\n\
+                     - `{dir}/status.sh <a2a_task_id>` — check progress (completed carries the summary)\n\
+                     Tell the user what you delegated and report back when specialists finish.\n\n\
+                     **Otherwise you are a SPECIALIST** for your cwd's repo. Work only in your \
+                     own tree. Requests from the orchestrator arrive as lines starting \
+                     `[openOrchestra A2A] task_id=…`; when one is done run \
+                     `{dir}/complete.sh <a2a_task_id> \"short summary\"` so the orchestrator \
+                     sees it.\n",
+                    home = home.path.display(),
+                    repo = home.repo,
+                ));
+            }
             out.push_str(&format!(
-                "\nHelpers under `~/.openorchestra/tasks/{}/a2a/`:\n",
-                task.slug
+                "\nAlso in `{dir}/`: `mcp-tools.json` (tool descriptors for MCP-capable agents).\n"
             ));
-            out.push_str(
-                "- `./delegate.sh <worktree_id> \"message\"` — SendMessage to specialist\n",
-            );
-            out.push_str("- `./status.sh <a2a_task_id>` — GetTask\n");
-            out.push_str(
-                "- `./complete.sh <a2a_task_id> [summary]` — complete inbound work (specialists)\n",
-            );
-            out.push_str("- `mcp-tools.json` — tool descriptors for MCP-capable agents\n");
-            out.push_str(
-                "\nInbox for this member: `a2a/inbox/<worktree_id_with_slashes_as__>.jsonl`\n",
-            );
         }
     }
     out
@@ -667,6 +679,20 @@ mod tests {
         assert!(md.contains("## User brief"));
         assert!(md.contains("Wire JWT across jam + api"));
         assert!(md.contains("Home / orchestrator: jam"));
+
+        // With a live broker, both roles are spelled out and the helpers are
+        // named by absolute path (agents run with a worktree cwd).
+        let a2a = A2aContextInfo {
+            base_url: "http://127.0.0.1:9".into(),
+            api_key: "k".into(),
+            a2a_dir: PathBuf::from("/oo/tasks/auth/a2a"),
+        };
+        let md = task_agent_context_with_a2a(&task, Some(&a2a), None);
+        assert!(md.contains("## Your role"));
+        assert!(md.contains("If your cwd is `/wt/jam/auth` you are the ORCHESTRATOR"));
+        assert!(md.contains("`/oo/tasks/auth/a2a/delegate.sh <worktree_id>"));
+        assert!(md.contains("`/oo/tasks/auth/a2a/complete.sh <a2a_task_id>"));
+        assert!(md.contains("SPECIALIST"));
     }
 
     #[test]

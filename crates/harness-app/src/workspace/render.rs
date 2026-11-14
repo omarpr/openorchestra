@@ -69,6 +69,7 @@ impl Render for HarnessWorkspace {
             .font_family(hx.font_ui)
             .text_color(hx.tx0)
             .child(self.render_top_bar(&hx, cx))
+            .children(self.render_task_strip(&hx, cx))
             .child(
                 div()
                     .flex()

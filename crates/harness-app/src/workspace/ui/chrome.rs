@@ -93,6 +93,107 @@ impl HarnessWorkspace {
             .child(tools_toggle)
     }
 
+    /// The task chat strip: one chip per repo agent of the selected
+    /// multi-project task. HOME (the orchestrator, where the user talks about
+    /// the whole task) comes first; each specialist shows its agent state and
+    /// how many A2A delegations it is working on. Clicking a chip looks in on
+    /// that agent. `None` for anything that isn't a multi-project task.
+    pub(crate) fn render_task_strip(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let Selection::Task { task_id, .. } = &self.selection else {
+            return None;
+        };
+        let task = self.data.tasks.iter().find(|t| &t.id == task_id)?;
+        if task.members.len() < 2 {
+            return None;
+        }
+        let focused = self.resolve().map(|r| r.path);
+        let delegations = self.a2a_delegation_summary();
+        let t = self.anim_secs();
+
+        let mut members: Vec<_> = task.members.iter().collect();
+        members.sort_by_key(|m| !m.is_home);
+
+        let mut strip = div()
+            .id("task-strip")
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_1()
+            .h(px(30.0))
+            .px_3()
+            .bg(hx.bg0)
+            .border_b_1()
+            .border_color(hx.border)
+            .overflow_x_scroll()
+            .child(
+                div()
+                    .flex_none()
+                    .mr_1()
+                    .text_size(px(10.0))
+                    .text_color(hx.tx2)
+                    .child("TASK AGENTS"),
+            );
+        for m in members {
+            let selected = focused.as_ref() == Some(&m.path);
+            let state = self.agent_status.get(&m.path).copied().unwrap_or(AgentState::Unknown);
+            let active = delegations
+                .iter()
+                .filter(|(_, tenant, s)| tenant == &m.worktree_id && (s == "working" || s == "submitted"))
+                .count();
+            let label = if m.is_home {
+                format!("★ {} · orchestrator", m.repo)
+            } else {
+                m.repo.clone()
+            };
+            let tooltip = if m.is_home {
+                "HOME: chat here about the whole task — it delegates to the other repos over A2A"
+            } else {
+                "Specialist: works only in this repo; look in on its agent"
+            };
+            let sel = Selection::Task {
+                task_id: task.id.clone(),
+                // HOME is the task itself, so it selects the task, not a member.
+                member_id: (!m.is_home).then(|| m.worktree_id.clone()),
+            };
+            strip = strip.child(
+                div()
+                    .id(gpui::SharedString::from(format!("task-strip-{}", m.worktree_id)))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap_1p5()
+                    .pl_2()
+                    .pr_1()
+                    .py_0p5()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(if selected { hx.accent } else { hx.border })
+                    .when(selected, |d| d.bg(hx.surface))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(hx.surface_hover))
+                    .tooltip(tip(tooltip))
+                    .on_click(cx.listener(move |ws, _, window, cx| ws.select(sel.clone(), window, cx)))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(if m.is_home { hx.accent } else if selected { hx.tx0 } else { hx.tx1 })
+                            .child(label),
+                    )
+                    .when(active > 0, |d| {
+                        d.child(
+                            div()
+                                .text_size(px(10.0))
+                                .font_family(hx.font_mono)
+                                .text_color(hx.amber)
+                                .child(format!("{active} A2A")),
+                        )
+                    })
+                    .child(agent_pill(hx, state, t)),
+            );
+        }
+        Some(strip.into_any_element())
+    }
+
     /// Compact A2A delegation status for the active multi-member task.
     fn render_a2a_delegation_chip(&self, hx: &HarnessTheme) -> Option<AnyElement> {
         let rows = self.a2a_delegation_summary();

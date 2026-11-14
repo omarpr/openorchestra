@@ -156,7 +156,12 @@ impl HarnessWorkspace {
         // task selected from TASKS, a restore, or the conductor can carry
         // `member_id: None` (the home member) or a bare `Worktree` id, and an
         // exact `==` against this row's own selection missed those.
-        let selected = self.resolve().is_some_and(|r| r.path == wt.path);
+        // A task's worktree shows its selection under TASKS; marking it here
+        // too put the indicator in the wrong section. Fall back to this row
+        // only while TASKS is collapsed, so the selection never disappears.
+        let shown_in_tasks =
+            wt.task_id.is_some() && !self.section_collapsed(super::SidebarSection::Tasks);
+        let selected = !shown_in_tasks && self.resolve().is_some_and(|r| r.path == wt.path);
         // Counts live on the task member (the live status pass keeps them
         // current); a worktree with no task has none to show.
         let member = self

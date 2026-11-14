@@ -184,7 +184,19 @@ impl HarnessWorkspace {
 
         let restored = self.restore_tabs(&r.key, window, cx);
         if !restored {
-            self.open_tab(TabKind::Shell, window, cx);
+            // A multi-project task's HOME is its task chat: open the
+            // orchestrator agent there rather than a bare shell, so clicking
+            // the task lands somewhere you can talk to.
+            let home_agent = r.task_id.as_ref().and_then(|tid| {
+                let task = self.task_store.get(tid)?;
+                (task.members.len() >= 2 && task.home_path() == Some(r.path.as_path()))
+                    .then(|| r.agent_kind.clone())
+                    .flatten()
+            });
+            match home_agent {
+                Some(kind) => self.open_tab(TabKind::Agent(kind), window, cx),
+                None => self.open_tab(TabKind::Shell, window, cx),
+            }
         }
         self.evict_stale_panes(&r.key);
     }

@@ -85,6 +85,7 @@ impl HarnessWorkspace {
                 Some(worktrees::A2aContextInfo {
                     base_url: base_url.clone(),
                     api_key: api_key.clone(),
+                    a2a_dir: a2a_dir.clone(),
                 }),
             );
         }

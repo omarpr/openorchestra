@@ -506,11 +506,13 @@ impl HarnessWorkspace {
         for m in task.members.iter() {
             let tid = task.id.clone();
             let mid = m.worktree_id.clone();
+            // Match where the selection lands, not its shape: clicking the task
+            // row selects `member_id: None`, which resolves to the home member,
+            // and that row must light up too.
             let mem_selected = matches!(
                 &self.selection,
-                Selection::Task { task_id: t, member_id: Some(id) }
-                    if t == &task.id && id == &m.worktree_id
-            );
+                Selection::Task { task_id: t, .. } if t == &task.id
+            ) && self.resolve().is_some_and(|r| r.path == m.path);
             let label = if m.is_home {
                 format!("★ {}", m.repo)
             } else {
@@ -563,7 +565,12 @@ impl HarnessWorkspace {
                     .px_2()
                     .py_0p5()
                     .rounded_md()
-                    .when(mem_selected, |d| d.bg(hx.surface))
+                    // The whole block is already `surface` while its task is
+                    // selected, so a `surface` fill here was invisible. Use the
+                    // accent left-border PROJECTS rows use for "selected".
+                    .when(mem_selected, |d| {
+                        d.bg(hx.surface_hover).border_l_1().border_color(hx.accent)
+                    })
                     .cursor_pointer()
                     // The second step of the hover: the block is already lifted
                     // to `surface`, so this marks which row a click would take.
