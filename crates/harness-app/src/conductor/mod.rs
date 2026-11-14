@@ -12,7 +12,7 @@
 pub mod activity;
 pub mod scene;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -76,6 +76,16 @@ pub struct Caption {
     pub nav: String,
     /// A "finished" / "needs you" event rather than a live status.
     pub announcement: bool,
+    /// Worth interrupting you for: an announcement, or an agent waiting on
+    /// you. Live "working…" lines are not.
+    pub urgent: bool,
+}
+
+impl View {
+    /// Whether the bubble has something for you, rather than only progress.
+    pub fn needs_you(&self) -> bool {
+        self.lines.iter().any(|l| l.urgent)
+    }
 }
 
 pub struct Conductor {
@@ -89,6 +99,12 @@ pub struct Conductor {
     seed: u64,
     activity: HashMap<PathBuf, String>,
     activity_read: Option<Instant>,
+    /// Waiting agents you've already gone to see: they leave the bubble
+    /// (and stop his cue) until they wait on you again.
+    seen: HashSet<PathBuf>,
+    /// The worktree you were looking at last tick, so arriving at an agent
+    /// counts as checking on it.
+    last_selected: Option<PathBuf>,
 }
 
 impl Default for Conductor {
@@ -104,6 +120,8 @@ impl Default for Conductor {
             seed: 0x9E37_79B9_7F4A_7C15,
             activity: HashMap::new(),
             activity_read: None,
+            seen: HashSet::new(),
+            last_selected: None,
         }
     }
 }
@@ -164,6 +182,11 @@ impl Conductor {
         if state != AgentState::Running {
             self.activity.remove(root);
         }
+        // Seeing a wait only dismisses that wait: a fresh one (or the agent
+        // moving on) brings it back. Repeated Waiting refreshes keep it seen.
+        if state != AgentState::Waiting || t.state != AgentState::Waiting {
+            self.seen.remove(root);
+        }
         // Back to work: a stale "finished" line for it would now be a lie.
         if state == AgentState::Running {
             self.announcements.retain(|a| a.root != root);
@@ -201,6 +224,20 @@ impl Conductor {
         }
     }
 
+    /// You checked on `root`'s agent (navigated to it, or clicked its line):
+    /// drop its "finished" line, and its "needs you" until it next waits.
+    pub fn dismiss(&mut self, root: &Path) {
+        self.announcements.retain(|a| a.root != root);
+        if self.agents.get(root).is_some_and(|t| t.state == AgentState::Waiting) {
+            self.seen.insert(root.to_path_buf());
+        }
+    }
+
+    /// Waiting on you, and not yet seen.
+    fn waiting(&self, path: &Path, t: &Tracked) -> bool {
+        t.state == AgentState::Waiting && !self.seen.contains(path)
+    }
+
     /// Active agents in display order: the one you're looking at, then those
     /// waiting on you, then the running ones; ties by path, so lines don't
     /// shuffle between ticks.
@@ -208,7 +245,7 @@ impl Conductor {
         let mut v: Vec<&PathBuf> = self
             .agents
             .iter()
-            .filter(|(_, t)| matches!(t.state, AgentState::Running | AgentState::Waiting))
+            .filter(|(p, t)| t.state == AgentState::Running || self.waiting(p, t))
             .map(|(p, _)| p)
             .collect();
         v.sort_by_key(|p| {
@@ -259,7 +296,7 @@ impl Conductor {
         if self.blink_until.is_none() && now >= self.next_blink {
             self.blink_until = Some(now + BLINK);
             let r = self.rand();
-            self.next_blink = if r % 5 == 0 {
+            self.next_blink = if r.is_multiple_of(5) {
                 now + Duration::from_millis(320)
             } else {
                 now + Duration::from_millis(2000 + r % 3500)
@@ -267,6 +304,14 @@ impl Conductor {
         }
         let eyes_open = self.blink_until.is_none();
         self.announcements.retain(|a| now < a.until);
+        // Arriving at an agent is checking on it. Only the arrival counts: a
+        // wait that starts while you're already there still shows.
+        if selected != self.last_selected.as_deref() {
+            self.last_selected = selected.map(Path::to_path_buf);
+            if let Some(p) = selected {
+                self.dismiss(p);
+            }
+        }
 
         // Announcements take their agent's place; everyone else follows.
         let active: Vec<PathBuf> = self
@@ -304,8 +349,9 @@ impl Conductor {
         // and raises his free hand to cue you if someone's waiting. The
         // baton only stops, held up, when the waiting is all that's left.
         let any = |s: AgentState| self.agents.values().any(|t| t.state == s);
+        let any_waiting = self.agents.iter().any(|(p, t)| self.waiting(p, t));
         let beat = (now.duration_since(self.clock).as_millis() / BEAT_FRAME.as_millis()) as usize % CONDUCT_FRAMES;
-        let pose = match (bowing, any(AgentState::Running), any(AgentState::Waiting)) {
+        let pose = match (bowing, any(AgentState::Running), any_waiting) {
             (Some(f), _, _) => Pose::Bow(f),
             (None, true, true) => Pose::ConductCue(beat),
             (None, true, false) => Pose::Conduct(beat),
@@ -322,6 +368,7 @@ impl Conductor {
                 text: a.text.clone(),
                 nav: a.nav.clone(),
                 announcement: true,
+                urgent: true,
             })
             .collect();
         for path in &shown {
@@ -331,6 +378,7 @@ impl Conductor {
                 text: self.status_text(path, now),
                 nav: nav_for(path, &t.kind),
                 announcement: false,
+                urgent: t.state == AgentState::Waiting,
             });
         }
 
@@ -481,6 +529,74 @@ mod tests {
         let v = c.tick(t0, None, |_, _| String::new());
         assert!(v.lines.iter().all(|l| !l.announcement));
         assert_eq!(v.lines.len(), 2);
+    }
+
+    fn wait_on(c: &mut Conductor, root: &str, state: AgentState, at: Instant) {
+        c.observe(Path::new(root), AgentKind::ClaudeCode, state, WaitReason::PermissionPrompt, None, None, "(w)".into(), at);
+    }
+
+    #[test]
+    fn going_to_a_waiting_agent_dismisses_it_until_it_waits_again() {
+        let t0 = Instant::now();
+        let mut c = Conductor::default();
+        wait_on(&mut c, "/w", AgentState::Waiting, t0);
+        let v = c.tick(t0, Some(Path::new("/other")), |_, _| String::new());
+        assert_eq!(v.lines[0].text, "Needs your OK");
+
+        // You go and look: the line goes, and so does his cue.
+        let v = c.tick(t0, Some(Path::new("/w")), |_, _| String::new());
+        assert!(v.lines.is_empty());
+        assert!(v.frame == scene::frame_index(Pose::Rest, true) || v.frame == scene::frame_index(Pose::Rest, false));
+
+        // The same wait refreshing stays dismissed, even after you leave.
+        wait_on(&mut c, "/w", AgentState::Waiting, t0);
+        let v = c.tick(t0, Some(Path::new("/other")), |_, _| String::new());
+        assert!(v.lines.is_empty());
+
+        // A new wait after it moves on comes back.
+        wait_on(&mut c, "/w", AgentState::Running, t0);
+        wait_on(&mut c, "/w", AgentState::Waiting, t0);
+        let v = c.tick(t0, Some(Path::new("/other")), |_, _| String::new());
+        assert_eq!(v.lines[0].text, "Needs your OK");
+    }
+
+    #[test]
+    fn a_wait_that_starts_while_you_are_there_still_shows() {
+        let t0 = Instant::now();
+        let mut c = Conductor::default();
+        wait_on(&mut c, "/w", AgentState::Running, t0);
+        c.tick(t0, Some(Path::new("/w")), |_, _| String::new());
+        wait_on(&mut c, "/w", AgentState::Waiting, t0);
+        let v = c.tick(t0, Some(Path::new("/w")), |_, _| String::new());
+        assert_eq!(v.lines[0].text, "Needs your OK");
+        // Clicking it (dismiss) clears it in place.
+        c.dismiss(Path::new("/w"));
+        let v = c.tick(t0, Some(Path::new("/w")), |_, _| String::new());
+        assert!(v.lines.is_empty());
+    }
+
+    #[test]
+    fn going_to_a_finished_agent_retires_its_announcement() {
+        let t0 = Instant::now();
+        let mut c = conductor_with("/w", AgentState::Idle, t0);
+        c.announce(Path::new("/w"), "(app)".into(), "Codex finished — your turn".into(), String::new(), true, t0);
+        let v = c.tick(t0, Some(Path::new("/other")), |_, _| String::new());
+        assert_eq!(v.lines.len(), 1);
+        let v = c.tick(t0, Some(Path::new("/w")), |_, _| String::new());
+        assert!(v.lines.is_empty());
+    }
+
+    #[test]
+    fn only_waits_and_announcements_need_you() {
+        let t0 = Instant::now();
+        let mut c = conductor_with("/run", AgentState::Running, t0);
+        assert!(!c.tick(t0, None, |_, _| String::new()).needs_you(), "progress alone is not urgent");
+        wait_on(&mut c, "/w", AgentState::Waiting, t0);
+        assert!(c.tick(t0, None, |_, _| String::new()).needs_you());
+        c.dismiss(Path::new("/w"));
+        assert!(!c.tick(t0, None, |_, _| String::new()).needs_you(), "a seen wait no longer is");
+        c.announce(Path::new("/run"), "(app)".into(), "finished".into(), String::new(), true, t0);
+        assert!(c.tick(t0, None, |_, _| String::new()).needs_you());
     }
 
     #[test]

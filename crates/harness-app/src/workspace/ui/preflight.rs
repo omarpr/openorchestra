@@ -215,7 +215,7 @@ impl HarnessWorkspace {
             // Same idiom as the settings overlay: prove it reaches pixels. An
             // overlay that lays out to nothing is indistinguishable from one
             // that never opened.
-            .when(std::env::var_os("HARNESS_PROBE_PAINT").is_some(), |d| {
+            .when(crate::probe_paint(), |d| {
                 d.child(
                     gpui::canvas(
                         |b, _, _| log::info!("paint: preflight overlay bounds = {b:?}"),

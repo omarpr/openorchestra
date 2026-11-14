@@ -53,20 +53,42 @@ pub struct WorkspaceData {
     pub tasks: Vec<TaskView>,
 }
 
+/// Last known ahead/behind/dirty for a path.
+type Counts = (usize, usize, usize);
+
 impl WorkspaceData {
+    /// Rebuild the cards from the registry and task store.
+    ///
+    /// No `git status` here: it runs on the render thread, and status on a
+    /// large tree is slow enough to drop frames on every add, archive or task
+    /// creation. The badges carry over from `previous` (or start at zero) and
+    /// the caller refreshes them off-thread (`refresh_status_live`).
     pub fn build(
         git: &GitWorktrees<SystemRunner>,
         registry: &Registry,
         tasks: &TaskStore,
         repo_roots: &[std::path::PathBuf],
+        previous: Option<&WorkspaceData>,
     ) -> Self {
+        let mut known: std::collections::HashMap<PathBuf, Counts> = std::collections::HashMap::new();
+        if let Some(prev) = previous {
+            for r in &prev.repos {
+                known.insert(r.repo_root.clone(), (r.ahead, r.behind, r.dirty));
+            }
+            for t in &prev.tasks {
+                for m in &t.members {
+                    known.insert(m.path.clone(), (m.ahead, m.behind, m.dirty));
+                }
+            }
+        }
+        let counts = |p: &Path| known.get(p).copied().unwrap_or_default();
         let mut repos: Vec<RepoView> = Vec::new();
         for root in repo_roots {
             let name = root
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| root.display().to_string());
-            let mut rv = new_repo_view(git, &name, root);
+            let mut rv = new_repo_view(git, &name, root, counts(root));
             for entry in registry.active().filter(|e| &e.repo_root == root) {
                 rv.worktrees.push(WorktreeView {
                     id: entry.id.clone(),
@@ -86,13 +108,8 @@ impl WorkspaceData {
             let mut initials = "TK".to_string();
             let mut color = 0u8;
             for m in &task.members {
-                let compare = repos
-                    .iter()
-                    .find(|r| r.name == m.repo)
-                    .map(|r| r.compare_ref.clone())
-                    .unwrap_or_else(|| "HEAD".into());
-                let status = git.status(&m.path, Some(&compare)).unwrap_or_default();
-                dirty += status.dirty_files;
+                let (ahead, behind, member_dirty) = counts(&m.path);
+                dirty += member_dirty;
                 if let Some(entry) = registry.get(&m.worktree_id) {
                     initials = entry.avatar.initials.clone();
                     color = entry.avatar.color;
@@ -102,9 +119,9 @@ impl WorkspaceData {
                     repo: m.repo.clone(),
                     branch: m.branch.clone(),
                     path: m.path.clone(),
-                    ahead: status.ahead,
-                    behind: status.behind,
-                    dirty: status.dirty_files,
+                    ahead,
+                    behind,
+                    dirty: member_dirty,
                     is_home: m.repo == task.home_repo,
                 });
             }
@@ -125,7 +142,7 @@ impl WorkspaceData {
     }
 }
 
-fn new_repo_view(git: &GitWorktrees<SystemRunner>, name: &str, root: &Path) -> RepoView {
+fn new_repo_view(git: &GitWorktrees<SystemRunner>, name: &str, root: &Path, (ahead, behind, dirty): Counts) -> RepoView {
     let default_branch = git
         .default_branch(root)
         .unwrap_or_else(|_| "main".to_string());
@@ -138,16 +155,15 @@ fn new_repo_view(git: &GitWorktrees<SystemRunner>, name: &str, root: &Path) -> R
     } else {
         default_branch.clone()
     };
-    let status = git.status(root, Some(&compare_ref)).unwrap_or_default();
     RepoView {
         name: name.to_string(),
         repo_root: root.to_path_buf(),
         default_branch,
         head_branch,
         compare_ref,
-        ahead: status.ahead,
-        behind: status.behind,
-        dirty: status.dirty_files,
+        ahead,
+        behind,
+        dirty,
         worktrees: Vec::new(),
     }
 }

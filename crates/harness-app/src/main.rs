@@ -68,30 +68,39 @@ actions!(
         FocusGitTool,
         /// Open the tools panel on the Review tab.
         FocusReviewTool,
+        /// Switch to the Nth center tab (⌘1…⌘8); ⌘9 is always the last tab.
+        ActivateTab1,
+        ActivateTab2,
+        ActivateTab3,
+        ActivateTab4,
+        ActivateTab5,
+        ActivateTab6,
+        ActivateTab7,
+        ActivateTab8,
+        ActivateLastTab,
+        /// Cycle center tabs.
+        NextTab,
+        PreviousTab,
+        /// Move the selection down / up the sidebar's worktree list.
+        NextWorktree,
+        PreviousWorktree,
+        /// Jump to the next agent that is waiting on you.
+        NextWaitingAgent,
+        /// Open the new-task dialog.
+        NewTask,
+        /// Show / hide the left sidebar.
+        ToggleSidebar,
+        /// Show / hide the right tools panel.
+        ToggleTools,
     ]
 );
 
-/// First `.rs` file under `root`, for the Spike 5 probe to open so a language
-/// server has a reason to start.
-fn first_rust_file(root: &std::path::Path) -> Option<PathBuf> {
-    fn walk(dir: &std::path::Path, depth: usize) -> Option<PathBuf> {
-        if depth > 4 {
-            return None;
-        }
-        let mut dirs = Vec::new();
-        for entry in std::fs::read_dir(dir).ok()?.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if !path.ends_with("target") && !path.ends_with(".git") {
-                    dirs.push(path);
-                }
-            } else if path.extension().is_some_and(|e| e == "rs") {
-                return Some(path);
-            }
-        }
-        dirs.into_iter().find_map(|d| walk(&d, depth + 1))
-    }
-    walk(root, 0)
+/// `HARNESS_PROBE_PAINT=1`: log the painted bounds of overlays and lists, to
+/// tell "laid out to zero size" from "never rendered" (see CONTRIBUTING.md).
+/// Read once; render paths call this every frame.
+pub fn probe_paint() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("HARNESS_PROBE_PAINT").is_some())
 }
 
 fn main() {
@@ -297,166 +306,6 @@ fn main() {
 
         install_menus(cx);
 
-        // Spike 5 self-check (R10). The Files tab builds its Workspace lazily on
-        // first click, so an ordinary headless run never exercises
-        // `Workspace::new` — the one thing the spike exists to prove. This flag
-        // forces the construction at startup, reports it, and quits, so the
-        // gate is verifiable without a human clicking a tab.
-        if std::env::var_os("HARNESS_SPIKE5").is_some() {
-            let probe_root = worktree_root.clone();
-            cx.open_window(WindowOptions::default(), move |window, cx| {
-                match workspace_host::workspace_for(&probe_root, window, cx) {
-                    Ok(hosted) => {
-                        // The worktree registers asynchronously (Project::local
-                        // kicks off a scan), so poll briefly rather than
-                        // reading a count that is guaranteed to be 0.
-                        let root = probe_root.clone();
-                        window.spawn(cx, async move |cx| {
-                            let mut worktrees = 0;
-                            for _ in 0..50 {
-                                cx.background_executor()
-                                    .timer(std::time::Duration::from_millis(100))
-                                    .await;
-                                worktrees = hosted.update(cx, |ws, cx| {
-                                    ws.project().read(cx).visible_worktrees(cx).count()
-                                });
-                                if worktrees > 0 {
-                                    break;
-                                }
-                            }
-                            if worktrees > 0 {
-                                println!(
-                                    "SPIKE5 OK: hosted zed Workspace built for {} ({worktrees} visible worktree(s) scanned)",
-                                    root.display()
-                                );
-                                // N1's panel load is async (it reads its
-                                // serialized width from the db), and N2's
-                                // server only starts once a buffer of that
-                                // language is open — so open a real file and
-                                // give both a moment before reporting.
-                                // Evidence, not assumptions: report whether the
-                                // file opened, what language the buffer got,
-                                // and whether the panel load errored.
-                                match first_rust_file(&root) {
-                                    Some(rs) => {
-                                        println!("SPIKE5 probe: opening {}", rs.display());
-                                        let task = hosted.update_in(cx, |ws, window, cx| {
-                                            ws.open_abs_path(
-                                                rs,
-                                                ::workspace::OpenOptions::default(),
-                                                window,
-                                                cx,
-                                            )
-                                        });
-                                        match task {
-                                            Ok(task) => match task.await {
-                                                Ok(_) => println!("SPIKE5 probe: file opened OK"),
-                                                Err(e) => println!("SPIKE5 probe: open FAILED: {e:#}"),
-                                            },
-                                            Err(e) => println!("SPIKE5 probe: update failed: {e:#}"),
-                                        }
-                                    }
-                                    None => println!("SPIKE5 probe: no .rs file found under root"),
-                                }
-                                for _ in 0..60 {
-                                    cx.background_executor()
-                                        .timer(std::time::Duration::from_millis(250))
-                                        .await;
-                                    let ready = hosted.update(cx, |ws, cx| {
-                                        ws.left_dock().read(cx).panels_len() > 0
-                                            && ws
-                                                .project()
-                                                .read(cx)
-                                                .language_server_statuses(cx)
-                                                .next()
-                                                .is_some()
-                                    });
-                                    if ready {
-                                        break;
-                                    }
-                                }
-                                // N1/N2: report what actually attached, so a
-                                // silently-absent panel or language server is
-                                // visible rather than assumed.
-                                let (panels, servers) = hosted
-                                    .update(cx, |ws, cx| {
-                                        (
-                                            ws.left_dock().read(cx).panels_len()
-                                                + ws.right_dock().read(cx).panels_len()
-                                                + ws.bottom_dock().read(cx).panels_len(),
-                                            ws.project()
-                                                .read(cx)
-                                                .language_server_statuses(cx)
-                                                .map(|(_, s)| s.name.to_string())
-                                                .collect::<Vec<_>>(),
-                                        )
-                                    });
-                                println!("SPIKE5 N1: {panels} docked panel(s)");
-                                let open = hosted.update(cx, |ws, cx| {
-                                    let dock = ws.left_dock().read(cx);
-                                    (dock.is_open(), dock.active_panel_index(), ws.panes().len())
-                                });
-                                // Dock::render bails unless the dock is BOTH
-                                // open and has an active panel. Assert both, so
-                                // a regression shows up here rather than as a
-                                // blank editor pane nobody can explain.
-                                match open {
-                                    (true, Some(_), _) => {
-                                        println!("SPIKE5 N1: file tree is renderable {open:?}")
-                                    }
-                                    _ => println!(
-                                        "SPIKE5 FAILED: file tree registered but NOT renderable {open:?}"
-                                    ),
-                                }
-                                println!("SPIKE5 N2: language servers = {servers:?}");
-                                let langs = hosted.update(cx, |ws, cx| {
-                                    ws.project()
-                                        .read(cx)
-                                        .opened_buffers(cx)
-                                        .iter()
-                                        .map(|b| {
-                                            b.read(cx)
-                                                .language()
-                                                .map(|l| l.name().to_string())
-                                                .unwrap_or_else(|| "<none>".into())
-                                        })
-                                        .collect::<Vec<_>>()
-                                });
-                                println!("SPIKE5 probe: open buffer languages = {langs:?}");
-                                // How much of the tree actually materialized.
-                                // A panel with no entries renders blank no
-                                // matter how correct the dock state is.
-                                for _ in 0..8 {
-                                    let counts = hosted.update(cx, |ws, cx| {
-                                        ws.project()
-                                            .read(cx)
-                                            .visible_worktrees(cx)
-                                            .map(|wt| {
-                                                let wt = wt.read(cx);
-                                                (wt.visible_entry_count(), wt.entry_count())
-                                            })
-                                            .collect::<Vec<_>>()
-                                    });
-                                    println!("SPIKE5 probe: worktree (visible, total) entries = {counts:?}");
-                                    cx.background_executor()
-                                        .timer(std::time::Duration::from_secs(2))
-                                        .await;
-                                }
-                            } else {
-                                println!("SPIKE5 FAILED: workspace built but no worktree ever registered");
-                            }
-                            let _ = cx.update(|_, cx| cx.quit());
-                        })
-                        .detach();
-                    }
-                    Err(e) => println!("SPIKE5 FAILED: {e:#}"),
-                }
-                cx.new(|cx| HarnessWorkspace::new(probe_root.clone(), window, cx))
-            })
-            .expect("probe window");
-            return;
-        }
-
         let bounds = Bounds::centered(None, size(px(1400.0), px(880.0)), cx);
         cx.open_window(
             WindowOptions {
@@ -474,27 +323,6 @@ fn main() {
         )
         .expect("failed to open window");
 
-        // `HARNESS_PROBE_CLICK=x,y` clicks that window point once the first
-        // frame has been laid out. Whether a click reaches its handler is the
-        // one question every other probe is blind to: they drive state
-        // directly, which is exactly the step a broken click skips.
-        if let Some(spec) = std::env::var_os("HARNESS_PROBE_CLICK")
-            && let Some((x, y)) = spec.to_string_lossy().split_once(',')
-            && let (Ok(x), Ok(y)) = (x.trim().parse::<f32>(), y.trim().parse::<f32>())
-        {
-            let handle = cx.windows().into_iter().next();
-            cx.spawn(async move |cx| {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(3))
-                    .await;
-                if let Some(handle) = handle {
-                    let _ = handle.update(cx, |_, window, cx| {
-                        workspace_host::probe_click(x, y, window, cx);
-                    });
-                }
-            })
-            .detach();
-        }
 
         cx.activate(true);
     });
@@ -593,6 +421,30 @@ pub fn install_menus(cx: &mut gpui::App) {
                 gpui::MenuItem::action("First-time Checks…", FirstTimeChecks),
                 gpui::MenuItem::separator(),
                 gpui::MenuItem::action("Quit openOrchestra", Quit),
+            ],
+        },
+        // Every navigation shortcut is also a menu item, so they can be found
+        // without reading Settings → Shortcuts first.
+        gpui::Menu {
+            name: "Go".into(),
+            disabled: false,
+            items: vec![
+                gpui::MenuItem::action("New Task…", NewTask),
+                gpui::MenuItem::separator(),
+                gpui::MenuItem::action("Next Worktree", NextWorktree),
+                gpui::MenuItem::action("Previous Worktree", PreviousWorktree),
+                gpui::MenuItem::action("Next Agent Waiting on You", NextWaitingAgent),
+                gpui::MenuItem::separator(),
+                gpui::MenuItem::action("Next Tab", NextTab),
+                gpui::MenuItem::action("Previous Tab", PreviousTab),
+            ],
+        },
+        gpui::Menu {
+            name: "View".into(),
+            disabled: false,
+            items: vec![
+                gpui::MenuItem::action("Toggle Sidebar", ToggleSidebar),
+                gpui::MenuItem::action("Toggle Tools Panel", ToggleTools),
             ],
         },
         gpui::Menu {

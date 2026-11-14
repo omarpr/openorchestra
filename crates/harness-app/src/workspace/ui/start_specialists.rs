@@ -67,7 +67,7 @@ impl HarnessWorkspace {
         let task_id = dialog.task_id.clone();
 
         if enabled_agents(&self.prefs).is_empty() {
-            self.note = "enable an agent in Settings first".to_string();
+            self.set_note("enable an agent in Settings first".to_string());
             cx.notify();
             return;
         }
@@ -91,12 +91,11 @@ impl HarnessWorkspace {
         };
         // Open specialists first; home last so the selection stays on the
         // orchestrator after the loop.
-        if let Some(hid) = home_id {
-            if let Some(pos) = member_ids.iter().position(|id| id == &hid) {
+        if let Some(hid) = home_id
+            && let Some(pos) = member_ids.iter().position(|id| id == &hid) {
                 let home = member_ids.remove(pos);
                 member_ids.push(home);
             }
-        }
 
         for mid in member_ids {
             self.select(

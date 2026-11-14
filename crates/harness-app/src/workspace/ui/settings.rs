@@ -358,9 +358,6 @@ impl HarnessWorkspace {
                                 .cursor_pointer()
                                 .hover(|d| d.bg(hx.surface).text_color(hx.accent))
                                 .child("▶")
-                                .when(std::env::var_os("HARNESS_PROBE_CLICK").is_some(), |d| {
-                                    d.child(gpui::canvas(move |b, _, _| log::info!("hitbox: play-{id} = {b:?}"), |_, _, _, _| {}).absolute().size_full())
-                                })
                                 .on_click(cx.listener(move |_, _, _, cx| {
                                     cx.stop_propagation();
                                     crate::sounds::preview(id);
@@ -382,38 +379,7 @@ impl HarnessWorkspace {
         if sec == S::Notifications {
         // ---- Extras --------------------------------------------------------
         {
-            let enabled = self.prefs.pet_enabled;
-            body = body.child(section_title("Extras")).child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .pb_1()
-                    .child(
-                        div()
-                            .id("pet-toggle")
-                            .child(chip(
-                                if enabled { "on".into() } else { "off".into() },
-                                enabled,
-                                hx,
-                            ))
-                            .on_click(cx.listener(|ws, _, _, cx| {
-                                cx.stop_propagation();
-                                ws.prefs.pet_enabled = !ws.prefs.pet_enabled;
-                                if !ws.prefs.pet_enabled {
-                                    ws.pet = None;
-                                }
-                                save_prefs_to(&ws.prefs_path, &ws.prefs);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(hx.tx1)
-                            .child("Conductor pet on notifications"),
-                    ),
-            );
+            body = body.child(section_title("Extras"));
             let always = self.prefs.conductor_always_on;
             body = body.child(
                 div()
@@ -432,11 +398,7 @@ impl HarnessWorkspace {
                             .on_click(cx.listener(|ws, _, _, cx| {
                                 cx.stop_propagation();
                                 ws.prefs.conductor_always_on = !ws.prefs.conductor_always_on;
-                                if ws.prefs.conductor_always_on {
-                                    // He takes over announcements; clear a
-                                    // popup that's mid-performance.
-                                    ws.pet = None;
-                                } else {
+                                if !ws.prefs.conductor_always_on {
                                     ws.conductor_view = None;
                                 }
                                 save_prefs_to(&ws.prefs_path, &ws.prefs);
@@ -948,7 +910,7 @@ impl HarnessWorkspace {
                 .flex_1()
                 .h_full()
                 .min_h_0()
-                .when(std::env::var_os("HARNESS_PROBE_PAINT").is_some(), |d| {
+                .when(crate::probe_paint(), |d| {
                     d.child(gpui::canvas(|b, _, _| log::info!("paint: settings content row = {b:?}"), |_, _, _, _| {}).absolute().size_full())
                 })
                 .child(rail)
@@ -963,7 +925,7 @@ impl HarnessWorkspace {
             // Occlude, not just catch clicks: without it the elements under
             // an overlay still hover, and their tooltips show through it.
             .occlude()
-            .when(std::env::var_os("HARNESS_PROBE_PAINT").is_some(), |d| {
+            .when(crate::probe_paint(), |d| {
                 d.child(
                     gpui::canvas(
                         |b, _, _| log::info!("paint: settings overlay bounds = {b:?}"),

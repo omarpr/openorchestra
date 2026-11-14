@@ -28,7 +28,7 @@ impl Render for DragGhost {
 impl HarnessWorkspace {
 
     pub(crate) fn render_center(&self, hx: &HarnessTheme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if std::env::var_os("HARNESS_PROBE_PAINT").is_some() {
+        if crate::probe_paint() {
             log::info!(
                 "paint: center selection={:?} pane={:?}",
                 self.selection,
@@ -74,7 +74,7 @@ impl HarnessWorkspace {
                             .child("Open a file from Files or Git")
                             .into_any_element();
                     };
-                    if std::env::var_os("HARNESS_PROBE_PAINT").is_some() {
+                    if crate::probe_paint() {
                         log::info!("paint: center renders File tab");
                     }
                     let editor = ws
@@ -154,7 +154,6 @@ impl HarnessWorkspace {
             .bg(hx.bg0)
             .child(strip)
             .child(div().flex_1().h_full().min_h_0().child(content))
-            .child(self.render_status_bar(hx, Some(&r), cx))
             .into_any_element()
     }
 
@@ -375,25 +374,11 @@ impl HarnessWorkspace {
             .cursor_pointer()
             .hover(|d| d.text_color(hx.tx1))
             .on_click(cx.listener(move |ws, ev: &gpui::ClickEvent, window, cx| {
-                let Some(r) = ws.resolve() else { return };
-                let leaving_hooks = ws.hooks_edit.is_some()
-                    && ws
-                        .panes
-                        .get(&r.key)
-                        .and_then(|p| p.tabs.iter().find(|t| t.id == id))
-                        .is_some_and(|t| !matches!(t.content, TabContent::File { .. }));
-                if let Some(pane) = ws.panes.get_mut(&r.key) {
-                    pane.active = id;
-                }
-                if leaving_hooks {
-                    ws.exit_hooks_edit(window, cx);
-                }
+                ws.activate_tab(id, window, cx);
                 // Match Zed: double-click pins a preview tab.
                 if ev.click_count() > 1 {
                     ws.pin_file_tab(id, window, cx);
                 }
-                ws.focus_active_pane(window, cx);
-                cx.notify();
             }))
             // The ghost that follows the cursor. gpui wants a real view here, so
             // it is a one-off entity rendering this tab's own label — a generic

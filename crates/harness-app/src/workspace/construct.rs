@@ -1,0 +1,579 @@
+//! `HarnessWorkspace::new`: load state from `~/.openorchestra`, start the
+//! watchers, pollers and background loops, and restore the last session.
+
+use super::*;
+
+impl HarnessWorkspace {
+    pub fn new(launch_hint: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let git = GitWorktrees::new(SystemRunner);
+
+        // App-level state dir, independent of any repo.
+        let data_dir = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| launch_hint.clone())
+            .join(".openorchestra");
+        if let Err(e) = crate::state_files::secure_dir(&data_dir) {
+            log::warn!("could not restrict {}: {e}", data_dir.display());
+        }
+        let repos_path = data_dir.join("repos.json");
+        let archived_path = data_dir.join("archived.json");
+        let archived_repos = load_repos(&archived_path);
+        let prefs_path = data_dir.join("prefs.json");
+        let prefs = load_prefs(&prefs_path);
+        let reg_path = data_dir.join("registry.json");
+        let panes_path = data_dir.join("panes.json");
+        let mut panes_state = crate::panes_state::load(&panes_path);
+        let has_tmux = crate::tmux::has_tmux();
+
+        let mut repo_roots = load_repos(&repos_path);
+        // Auto-add the launch dir if it's inside a git repo.
+        if let Ok(root) = git.repo_root(&launch_hint)
+            && !repo_roots.contains(&root)
+        {
+            repo_roots.push(root);
+            save_repos(&repos_path, &repo_roots);
+        }
+
+        let mut registry = Registry::load(&reg_path).unwrap_or_else(|e| {
+            log::warn!("registry load failed ({e}); starting empty");
+            Registry::new_at(&reg_path)
+        });
+        let tasks_path = data_dir.join("tasks.json");
+        let mut task_store = TaskStore::load(&tasks_path).unwrap_or_else(|e| {
+            log::warn!("tasks load failed ({e}); starting empty");
+            TaskStore::new_at(&tasks_path)
+        });
+        match migrate_worktrees_to_tasks(&mut registry, &mut task_store) {
+            Ok(n) if n > 0 => log::info!("migrated {n} worktrees to single-member tasks"),
+            Ok(_) => {}
+            Err(e) => log::warn!("worktree→task migration failed: {e}"),
+        }
+        {
+            let homes: Vec<(String, String)> = task_store
+                .active()
+                .filter_map(|t| {
+                    t.home_member()
+                        .map(|m| (t.id.clone(), m.worktree_id.clone()))
+                })
+                .collect();
+            let n = crate::panes_state::migrate_task_pane_keys(&mut panes_state, &homes);
+            if n > 0 {
+                crate::panes_state::save(&panes_path, &panes_state);
+                log::info!("migrated {n} legacy task pane keys to per-member keys");
+            }
+        }
+        let manager = Manager::new(registry, git, data_dir.join("worktrees"));
+        let data = WorkspaceData::build(manager.git(), &manager.registry, &task_store, &repo_roots, None);
+
+        let mut branches: Vec<BranchKey> = manager
+            .registry
+            .active()
+            .map(|e| BranchKey {
+                repo_dir: e.repo_root.clone(),
+                branch: e.branch.clone(),
+            })
+            .collect();
+        // Main-checkout CI: poll each repo's default branch too (main is
+        // first-class). PRs don't apply to a default branch, but its CI does.
+        for repo in &data.repos {
+            branches.push(BranchKey {
+                repo_dir: repo.repo_root.clone(),
+                branch: repo.default_branch.clone(),
+            });
+        }
+        let (poller, forge_rx) =
+            Poller::spawn(Arc::new(GhCli::new()), branches, PollerConfig::default());
+
+        // One bus for every adapter's signal (§4.6). The sidebar pill, the
+        // status bar, and the notifier each take their own subscription, so it
+        // must fan out rather than work-steal.
+        let bus = Bus::new();
+        let status_rx = Some(bus.subscribe());
+        let status_source = match StatusFileSource::new(bus.clone()) {
+            Ok(mut source) => {
+                for e in manager.registry.active() {
+                    if let Err(err) = source.watch(&e.path, e.agent_kind.clone()) {
+                        log::warn!("cannot watch {}: {err}", e.path.display());
+                    }
+                }
+                // Main checkouts are first-class (D8 revised): watch each repo
+                // root too, so an agent run on `main` drives the same status
+                // pill and notifications a worktree does. The kind is a fallback
+                // — status files self-identify their writer.
+                for root in &repo_roots {
+                    if let Err(err) = source.watch(root, AgentKind::default()) {
+                        log::warn!("cannot watch main {}: {err}", root.display());
+                    }
+                }
+                Some(source)
+            }
+            Err(e) => {
+                log::warn!("status watcher unavailable: {e}");
+                None
+            }
+        };
+
+        let (diff_watch, diff_dirty_rx) = crate::diff_watch::DiffWatcher::new();
+
+        // Watched from the start, and retargeted by `refresh()` whenever the
+        // repo list changes. Every repo is watched at once, unlike the diff
+        // watch: a card for a repo you are not looking at is still on screen,
+        // and a badge is only worth showing if it is current.
+        let (mut git_watch, git_moved_rx) = crate::git_watch::GitWatcher::new();
+        git_watch.watch_repos(&repo_roots);
+
+        let selection = data
+            .repos
+            .first()
+            .map(|r| Selection::Main(r.name.clone()))
+            .unwrap_or_else(|| Selection::Main(String::new()));
+        let new_target_repo = data
+            .repos
+            .first()
+            .map(|r| r.name.clone())
+            .unwrap_or_default();
+        let new_task_repos = if new_target_repo.is_empty() {
+            Vec::new()
+        } else {
+            vec![new_target_repo.clone()]
+        };
+        let new_task_home = new_target_repo.clone();
+
+        let (a2a_change_tx, a2a_change_rx) = crossbeam_channel::bounded::<()>(1);
+        let (a2a_inbox_tx, a2a_inbox_rx) =
+            crossbeam_channel::unbounded::<a2a_broker::InboxDelivery>();
+
+        let mut this = Self {
+            manager,
+            task_store,
+            data_dir: data_dir.clone(),
+            data,
+            repo_roots,
+            repos_path,
+            selection,
+            panes: HashMap::new(),
+            service_workspaces: HashMap::new(),
+            ide_workspaces: HashMap::new(),
+            finder_dismiss_sub: None,
+            liveness_pending: false,
+            preview_slot: None,
+            tab_scroll: gpui::ScrollHandle::new(),
+            tab_scrolled_to: std::cell::Cell::new(0),
+            files_sub_tab: FilesSubTab::Explorer,
+            project_search: None,
+            diff: worktrees::Diff::default(),
+            unified_diff: UnifiedDiff::default(),
+            new_task_repos,
+            new_task_home,
+            expanded: std::collections::HashSet::new(),
+            diff_focus: None,
+            hooks_edit: None,
+            diff_selection: None,
+            diff_selecting: false,
+            review: crate::diff_review::ReviewNotes::load(
+                &crate::diff_review::ReviewNotes::path_in(&data_dir),
+            ),
+            review_path: crate::diff_review::ReviewNotes::path_in(&data_dir),
+            comment_draft: None,
+            clearing_review: false,
+            settings_open: false,
+            settings_section: SettingsSection::Appearance,
+            // Probed once at startup; the screen opens below if this machine is
+            // missing something that blocks, or if it has never been shown.
+            preflight_open: false,
+            preflight: Vec::new(),
+            conductor: Default::default(),
+            conductor_view: None,
+            conductor_frames: None,
+            conductor_frames_accent: None,
+            conductor_ticking: false,
+            conductor_hovered: false,
+            conductor_drag: None,
+            anim_clock: std::time::Instant::now(),
+            indicator_ticking: false,
+            rebinding: None,
+            rebind_focus: cx.focus_handle(),
+            md_preview: None,
+            diff_gen: 0,
+            diff_pending: false,
+            pane_clock: 0,
+            panes_state,
+            panes_path,
+            has_tmux,
+            edit: None,
+            new_task: None,
+            start_specialists: None,
+            task_brokers: HashMap::new(),
+            a2a_change_tx,
+            a2a_inbox_tx,
+            a2a_pending_inject: HashMap::new(),
+            new_target_repo,
+            menu: None,
+            project_menu: None,
+            tab_menu: None,
+            diff_base_menu: None,
+            close_prompt: None,
+            edit_prompt: None,
+            ending: std::collections::HashSet::new(),
+            end_confirm: None,
+            hook_trust: None,
+            note: String::new(),
+            note_at: None,
+            forge_status: HashMap::new(),
+            agent_status: HashMap::new(),
+            agent_fidelity: HashMap::new(),
+            _poller: Some(poller),
+            status_source,
+            diff_watch,
+            git_watch,
+            status_pending: false,
+            status_rerun: false,
+            tools_maximized: false,
+            push_state: None,
+            push_armed: false,
+            pushing: false,
+            push_probe_pending: false,
+            row_cache: Default::default(),
+            state_dir: data_dir.clone(),
+            prefs,
+            prefs_path,
+            drag: None,
+            bus,
+            focus_handle: cx.focus_handle(),
+            editor_host_focus: cx.focus_handle(),
+            diff_surface_focus: cx.focus_handle(),
+            resource: None,
+            resource_history: crate::resource_monitor::History::new(RESOURCE_HISTORY),
+            archived_repos,
+            archived_path,
+            confirm_removal: None,
+        };
+        // Appearance before panes: restore_tabs may open an Editor, which
+        // constructs a hosted Workspace that observes window appearance and
+        // reloads GlobalTheme from ThemeSettings. Sync ThemeSettings first so
+        // that reload cannot swap the editor to One Light while chrome is dark.
+        this.apply_appearance(cx);
+        this.ensure_pane(window, cx);
+        // What this machine can actually do, before the user infers it from an
+        // empty screen. Opens when something Required is missing (and then it
+        // cannot be dismissed), or once on a first ever launch — but never for
+        // an optional gap alone, because a screen that appears every morning
+        // because rust-analyzer is absent is a screen nobody reads.
+        this.preflight = crate::preflight::probe(crate::preflight::version_on_path);
+        let short: Vec<&str> = this
+            .preflight
+            .iter()
+            .filter(|c| c.missing())
+            .map(|c| c.name)
+            .collect();
+        log::info!(
+            "preflight: missing {short:?}, blocked={}, seen_before={}",
+            crate::preflight::blocked(&this.preflight),
+            this.prefs.seen_preflight
+        );
+        if crate::preflight::blocked(&this.preflight) || !this.prefs.seen_preflight {
+            this.preflight_open = true;
+        }
+        // The restored selection is set directly above, not through `select`,
+        // so nothing created its Files/Git host: a window that reopened on the
+        // Files or Git tab showed "Open editor" until something else forced it.
+        // Do here what `select` does for every later selection.
+        let _ = this.ensure_service_workspace(window, cx);
+        // The cards were built without `git status` (see `WorkspaceData::build`);
+        // fill their badges in off-thread.
+        this.refresh_status_live(cx);
+        if this.prefs.diff_open
+            && matches!(this.prefs.tool_tab, ToolTab::Files | ToolTab::Git)
+            && this.files_sub_tab != FilesSubTab::Search
+        {
+            this.activate_hosted_tool_panel(this.prefs.tool_tab, window, cx);
+        }
+        this.recompute_diff(cx);
+
+        // Route the window's close button (red X) through the same
+        // keep-or-close-terminals prompt as ⌘Q. `request_quit` returns whether
+        // the app may close now: `false` holds the window open while the prompt
+        // is up; `true` when there's nothing to ask (no sessions, or a
+        // remembered choice) and the quit has already begun.
+        let weak = cx.weak_entity();
+        window.on_window_should_close(cx, move |_window, cx| {
+            weak.update(cx, |ws, cx| ws.request_quit(cx))
+                .unwrap_or(true)
+        });
+
+        // Notification "View" clicks: the platform delegate pushes worktree
+        // ids; select them and front the app. Foreground actions activate the
+        // app at the OS level already — cx.activate makes the dev-fallback
+        // path behave the same.
+        let nav_rx = crate::notifier::nav_rx();
+        cx.spawn_in(window, async move |view, cx| {
+            loop {
+                match nav_rx.try_recv() {
+                    Ok(id) => {
+                        let ok = view.update_in(cx, |ws, window, cx| {
+                            if !id.is_empty() {
+                                ws.navigate_to_alert(&id, window, cx);
+                            }
+                            cx.activate(true);
+                        });
+                        if ok.is_err() {
+                            break;
+                        }
+                    }
+                    Err(crossbeam_channel::TryRecvError::Empty) => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(250))
+                            .await;
+                    }
+                    Err(crossbeam_channel::TryRecvError::Disconnected) => break,
+                }
+            }
+        })
+        .detach();
+
+        cx.spawn(async move |view, cx| {
+            loop {
+                match forge_rx.try_recv() {
+                    Ok(update) => {
+                        if view
+                            .update(cx, |ws, cx| ws.apply_forge(update, cx))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(e) if e.is_empty() => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(400))
+                            .await
+                    }
+                    Err(_) => break,
+                }
+            }
+        })
+        .detach();
+
+        // A2A broker task-state changes (delegation chip in the chrome).
+        cx.spawn(async move |view, cx| {
+            loop {
+                match a2a_change_rx.try_recv() {
+                    Ok(()) => {
+                        while a2a_change_rx.try_recv().is_ok() {}
+                        if view.update(cx, |_, cx| cx.notify()).is_err() {
+                            break;
+                        }
+                    }
+                    Err(crossbeam_channel::TryRecvError::Empty) => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(250))
+                            .await;
+                    }
+                    Err(crossbeam_channel::TryRecvError::Disconnected) => break,
+                }
+            }
+        })
+        .detach();
+
+        // A2A inbox → specialist agent tmux inject.
+        cx.spawn(async move |view, cx| {
+            loop {
+                match a2a_inbox_rx.try_recv() {
+                    Ok(delivery) => {
+                        if view
+                            .update(cx, |ws, _cx| ws.deliver_a2a_inbox(delivery))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(crossbeam_channel::TryRecvError::Empty) => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(200))
+                            .await;
+                    }
+                    Err(crossbeam_channel::TryRecvError::Disconnected) => break,
+                }
+            }
+        })
+        .detach();
+
+        if let Some(status_rx) = status_rx {
+            cx.spawn(async move |view, cx| {
+                loop {
+                    match status_rx.try_recv() {
+                        Ok(ev) => {
+                            if view.update(cx, |ws, cx| ws.apply_agent(ev, cx)).is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) if e.is_empty() => {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(400))
+                                .await
+                        }
+                        Err(_) => break,
+                    }
+                }
+            })
+            .detach();
+        }
+
+        // Live diff refresh: a file changed under the selected root. The 250 ms
+        // poll cadence is the debounce — a burst of edits in one agent turn
+        // collapses to one recompute per tick, and the `diff_gen` guard drops
+        // any overlap. State-preserving so an in-progress review is not reset.
+        cx.spawn(async move |view, cx| loop {
+            match diff_dirty_rx.try_recv() {
+                Ok(_) => {
+                    // Coalesce everything already queued this instant.
+                    while diff_dirty_rx.try_recv().is_ok() {}
+                    // The same edit that moved the diff moved the selected
+                    // card's `~N`. Nothing else sees a plain unstaged write —
+                    // it touches no git file — so this signal is the only way
+                    // that badge tracks typing.
+                    if view
+                        .update(cx, |ws, cx| {
+                            ws.refresh_diff_live(cx);
+                            ws.refresh_status_live(cx);
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(e) if e.is_empty() => {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(250))
+                        .await
+                }
+                Err(_) => break,
+            }
+        })
+        .detach();
+
+        // Live sidebar badges: git moved under some repo's `.git`. Same drain
+        // shape as the diff watch, and the 250 ms cadence is again the debounce
+        // — a commit writes the index, a ref and often packed-refs, which is one
+        // recompute here rather than three.
+        cx.spawn(async move |view, cx| loop {
+            match git_moved_rx.try_recv() {
+                Ok(path) => {
+                    while git_moved_rx.try_recv().is_ok() {}
+                    log::debug!("git moved: {}", path.display());
+                    if view
+                        .update(cx, |ws, cx| {
+                            // Cheap when nothing changed (it compares first).
+                            // A repo's first `git worktree add` creates
+                            // `.git/worktrees`, which needs a watch of its own.
+                            let roots = ws.repo_roots.clone();
+                            ws.git_watch.watch_repos(&roots);
+                            ws.refresh_status_live(cx);
+                            // A commit or a push moves what the push control
+                            // offers, and both land here.
+                            ws.refresh_push_state(cx);
+                            // And what the diff shows. The diff watcher skips
+                            // `.git` by design, so a commit in the selected
+                            // worktree — which moves HEAD and empties the
+                            // working-tree diff without touching one tracked
+                            // file — reached nothing: the panel kept listing
+                            // files that were already committed. A checkout or
+                            // a rebase is the same story with more files.
+                            ws.refresh_diff_live(cx);
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(e) if e.is_empty() => {
+                    cx.background_executor().timer(Duration::from_millis(250)).await
+                }
+                Err(_) => break,
+            }
+        })
+        .detach();
+
+        // Toast expiry: a cheap once-a-second check that repaints only when a
+        // message actually times out.
+        cx.spawn(async move |view, cx| loop {
+            cx.background_executor().timer(Duration::from_secs(1)).await;
+            if view
+                .update(cx, |ws, cx| {
+                    if ws.expire_note() {
+                        cx.notify();
+                    }
+                })
+                .is_err()
+            {
+                break;
+            }
+        })
+        .detach();
+
+        // Backstop. The watches above cover every git event and the selected
+        // worktree's edits; what neither sees is an agent writing files in a
+        // worktree you are not viewing, which changes that card's `~N` without
+        // touching git. Ten seconds is slow enough to be free on an idle app —
+        // the recompute runs off-thread and repaints only when a number moved.
+        cx.spawn(async move |view, cx| loop {
+            cx.background_executor().timer(Duration::from_secs(10)).await;
+            if view
+                .update(cx, |ws, cx| {
+                    ws.refresh_status_live(cx);
+                    ws.refresh_push_state(cx);
+                })
+                .is_err()
+            {
+                break;
+            }
+        })
+        .detach();
+
+        // Unstick agent pills. A status file left on waiting/running by a
+        // process that died without writing "idle" (killed mid-dialog, crashed)
+        // would show forever; every few seconds, drop any such pill whose pid is
+        // gone. The probe is a couple of tiny file reads only when a non-terminal
+        // pill exists, so an idle app does no work.
+        cx.spawn(async move |view, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(3)).await;
+                if view
+                    .update(cx, |ws, cx| ws.reconcile_agent_liveness(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        // Sample openOrchestra's own CPU/memory footprint for the sidebar band.
+        // The sysinfo refresh + tmux pane read run on a background thread; only
+        // the (cheap, pure) attribution runs on the UI thread. The `System` is
+        // reused across ticks so CPU figures are real deltas, not zeros.
+        let sampler_has_tmux = has_tmux;
+        cx.spawn(async move |view, cx| {
+            let mut sys = sysinfo::System::new();
+            loop {
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+                let (returned, raw) = cx
+                    .background_spawn(async move {
+                        let mut sys = sys;
+                        let raw = crate::resource_monitor::sample_once(&mut sys, sampler_has_tmux);
+                        (sys, raw)
+                    })
+                    .await;
+                sys = returned;
+                if view
+                    .update(cx, |ws, cx| ws.apply_resource(raw, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        this
+    }
+}

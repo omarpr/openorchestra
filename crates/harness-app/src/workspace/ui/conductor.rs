@@ -149,6 +149,11 @@ impl HarnessWorkspace {
             save_prefs_to(&self.prefs_path, &self.prefs);
         } else if let Some(nav) = drag.nav.filter(|n| !n.is_empty()) {
             self.navigate_to_alert(&nav, window, cx);
+            // Clicking his line is checking on that agent, even when you were
+            // already there (so the next tick sees no arrival to dismiss on).
+            if let Some(r) = self.resolve() {
+                self.conductor.dismiss(&r.path);
+            }
         }
         cx.notify();
     }
@@ -212,16 +217,48 @@ impl HarnessWorkspace {
             .h(px(FIGURE))
             .cursor(if dragging { gpui::CursorStyle::ClosedHand } else { gpui::CursorStyle::OpenHand })
             .child(img(frame).size_full())
+            .on_hover(cx.listener(|ws, hovered: &bool, _, cx| {
+                ws.conductor_hovered = *hovered;
+                cx.notify();
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|ws, ev: &MouseDownEvent, _, cx| ws.start_conductor_drag(ev, None, cx)),
             );
         let figure = self.track_conductor_pointer(figure, cx);
 
-        let bubble = (!view.lines.is_empty()).then(|| {
+        // Progress alone ("Running swift build… 21s") collapses to a small
+        // badge so it stops covering whatever is under it; a wait or a
+        // "finished" opens the full bubble, and so does hovering him.
+        let collapsed = !view.needs_you() && !self.conductor_hovered && !dragging;
+        let on_left = right + FIGURE / 2.0 < vw / 2.0;
+        let badge = (collapsed && !view.lines.is_empty()).then(|| {
+            let n = view.lines.len() + view.more;
+            let b = div()
+                .id("conductor-badge")
+                .occlude()
+                .absolute()
+                .bottom(px(bottom + FIGURE * 0.42))
+                .px_2()
+                .py_0p5()
+                .rounded_full()
+                .bg(hx.surface2)
+                .border_1()
+                .border_color(hx.border2)
+                .text_xs()
+                .text_color(hx.tx1)
+                .whitespace_nowrap()
+                .child(if n == 1 { "1 agent working".to_string() } else { format!("{n} agents working") })
+                .on_hover(cx.listener(|ws, hovered: &bool, _, cx| {
+                    ws.conductor_hovered = *hovered;
+                    cx.notify();
+                }));
+            let b = if on_left { b.right(px(right + FIGURE + 2.0)) } else { b.left(px(vw - right + 2.0)) };
+            self.track_conductor_pointer(b, cx)
+        });
+        let bubble = (!collapsed && !view.lines.is_empty()).then(|| {
             // On the left of him when he's in the right half of the window,
             // on his right otherwise, so it never runs off-screen.
-            let on_left = right + FIGURE / 2.0 < vw / 2.0;
             let gap = 2.0;
             let mut b = div()
                 .id("conductor-caption")
@@ -240,6 +277,10 @@ impl HarnessWorkspace {
                 .flex()
                 .flex_col()
                 .gap_0p5()
+                .on_hover(cx.listener(|ws, hovered: &bool, _, cx| {
+                    ws.conductor_hovered = *hovered;
+                    cx.notify();
+                }))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|ws, ev: &MouseDownEvent, _, cx| ws.start_conductor_drag(ev, None, cx)),
@@ -319,6 +360,7 @@ impl HarnessWorkspace {
                 .left_0()
                 .children(shield)
                 .children(bubble)
+                .children(badge)
                 .child(figure)
                 .into_any_element(),
         )

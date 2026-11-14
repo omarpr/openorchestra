@@ -218,11 +218,10 @@ pub fn agent_running_in(procs: &[ProcInfo], roots: &[u32]) -> bool {
         if !visited.insert(pid) {
             continue;
         }
-        if let Some(p) = by_pid.get(&pid) {
-            if !is_shell(&p.comm) {
+        if let Some(p) = by_pid.get(&pid)
+            && !is_shell(&p.comm) {
                 return true;
             }
-        }
         if let Some(kids) = children.get(&pid) {
             stack.extend(kids.iter().copied());
         }

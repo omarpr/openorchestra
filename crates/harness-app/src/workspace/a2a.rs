@@ -194,14 +194,13 @@ impl HarnessWorkspace {
         let is_live = |name: &str| live.iter().any(|s| s == name);
 
         if let Some(pane) = self.panes.get(pane_key) {
-            if let Some(tab) = pane.active_tab() {
-                if tab.agent.is_some() {
+            if let Some(tab) = pane.active_tab()
+                && tab.agent.is_some() {
                     let name = crate::tmux::session_name(pane_key, tab.id);
                     if is_live(&name) {
                         return Some(name);
                     }
                 }
-            }
             for tab in pane.tabs.iter().rev() {
                 if tab.agent.is_some() {
                     let name = crate::tmux::session_name(pane_key, tab.id);
@@ -226,6 +225,9 @@ impl HarnessWorkspace {
     }
 }
 
+// Every argument is a distinct input to the broker config; bundling them into
+// a one-off struct would only move the list.
+#[allow(clippy::too_many_arguments)]
 fn start_broker_with_port_fallback(
     task: &worktrees::Task,
     home: &worktrees::TaskMember,
@@ -298,6 +300,9 @@ fn format_a2a_inject(msg: &InboxMessage, a2a_dir: Option<&std::path::Path>) -> S
 
 fn write_a2a_helpers(a2a_dir: &std::path::Path, base_url: &str, api_key: &str) {
     let _ = std::fs::create_dir_all(a2a_dir);
+    // Plain sh + curl. `--data-urlencode` does all the escaping, so a message
+    // with quotes or newlines arrives intact without python or jq to build
+    // JSON (the broker's form endpoints exist for exactly this).
     let delegate = format!(
         r#"#!/bin/sh
 # Usage: ./delegate.sh <worktree_id> <message>
@@ -305,39 +310,15 @@ set -e
 TENANT="${{1:?tenant}}"
 MSG="${{2:?message}}"
 ENC=$(printf '%s' "$TENANT" | sed 's|/|%2F|g')
-BODY=$(MSG="$MSG" python3 - <<'PY'
-import json, os, uuid
-print(json.dumps({{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "message/send",
-  "params": {{
-    "message": {{
-      "message_id": str(uuid.uuid4()),
-      "role": "user",
-      "parts": [{{"text": os.environ["MSG"]}}]
-    }}
-  }}
-}}))
-PY
-)
-curl -sS -X POST "{base}/t/${{ENC}}/jsonrpc" \
+curl -sS -X POST "{base}/t/${{ENC}}/send" \
   -H "Authorization: Bearer {key}" \
-  -H "Content-Type: application/json" \
-  -d "$BODY"
+  --data-urlencode "text=$MSG"
 echo
 "#,
         base = base_url,
         key = api_key,
     );
-    let path = a2a_dir.join("delegate.sh");
-    if std::fs::write(&path, &delegate).is_ok() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
-        }
-    }
+    write_script(&a2a_dir.join("delegate.sh"), &delegate);
 
     let complete = format!(
         r#"#!/bin/sh
@@ -347,44 +328,29 @@ ID="${{1:?a2a_task_id}}"
 SUMMARY="${{2:-done}}"
 curl -sS -X POST "{base}/v1/complete" \
   -H "Authorization: Bearer {key}" \
-  -H "Content-Type: application/json" \
-  -d "$(python3 -c 'import json,sys; print(json.dumps({{"a2a_task_id":sys.argv[1],"summary":sys.argv[2]}}))' "$ID" "$SUMMARY")"
+  --data-urlencode "a2a_task_id=$ID" \
+  --data-urlencode "summary=$SUMMARY"
 echo
 "#,
         base = base_url,
         key = api_key,
     );
-    let path = a2a_dir.join("complete.sh");
-    if std::fs::write(&path, complete).is_ok() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
-        }
-    }
+    write_script(&a2a_dir.join("complete.sh"), &complete);
 
     let status = format!(
         r#"#!/bin/sh
 # Usage: ./status.sh <a2a_task_id>
 set -e
 ID="${{1:?a2a_task_id}}"
-curl -sS -X POST "{base}/jsonrpc" \
+curl -sS -X POST "{base}/v1/status" \
   -H "Authorization: Bearer {key}" \
-  -H "Content-Type: application/json" \
-  -d "$(python3 -c 'import json,sys; print(json.dumps({{"jsonrpc":"2.0","id":1,"method":"tasks/get","params":{{"id":sys.argv[1]}}}}))' "$ID")"
+  --data-urlencode "id=$ID"
 echo
 "#,
         base = base_url,
         key = api_key,
     );
-    let path = a2a_dir.join("status.sh");
-    if std::fs::write(&path, status).is_ok() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
-        }
-    }
+    write_script(&a2a_dir.join("status.sh"), &status);
 
     let tools = serde_json::json!({
         "tools": [
@@ -431,4 +397,16 @@ echo
         a2a_dir.join("mcp-tools.json"),
         serde_json::to_string_pretty(&tools).unwrap_or_default(),
     );
+}
+
+/// Write a helper script that carries the broker key: owner-only, since the
+/// key is all it takes to type into this task's agents (0700, not 0755).
+fn write_script(path: &std::path::Path, body: &str) {
+    if std::fs::write(path, body).is_ok() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+        }
+    }
 }

@@ -124,9 +124,9 @@ cargo test --bin harness-app   # it is a binary crate, so --bin, not --lib
   not mocks, because the questions worth asking are about what git actually does.
 - Follow TDD where practical: write the failing test first.
 - **Verify before claiming.** "It builds" is not "it works". For UI changes,
-  state how you checked — the app has probe hooks for exactly this
-  (`HARNESS_PROBE_PAINT` logs painted bounds, `HARNESS_PROBE_OPEN` opens a file
-  and reports pane state, and `RUST_LOG=harness_app=debug` traces the watchers).
+  state how you checked — the app has a probe hook for exactly this
+  (`HARNESS_PROBE_PAINT=1` logs painted bounds of overlays and lists, and
+  `RUST_LOG=harness_app=debug` traces the watchers).
   A view that lays out to zero height reports perfect state and draws nothing;
   every state probe passes while the screen shows nothing.
 - For performance work, include the before and after numbers and how you got

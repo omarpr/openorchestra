@@ -219,6 +219,26 @@ pub fn entries() -> Vec<Entry> {
         // ⌘W means in an editor.
         Entry::new(s("cmd-w"), Scope::Global, "Close tab", crate::CloseTab),
         Entry::new(s("cmd-q"), Scope::Global, "Quit", crate::Quit),
+        Entry::new(s("cmd-n"), Scope::Global, "New task", crate::NewTask),
+        Entry::new(s("cmd-alt-down"), Scope::Global, "Next worktree", crate::NextWorktree),
+        Entry::new(s("cmd-alt-up"), Scope::Global, "Previous worktree", crate::PreviousWorktree),
+        Entry::new(s("cmd-shift-a"), Scope::Global, "Jump to the next agent waiting on you", crate::NextWaitingAgent),
+        Entry::new(s("cmd-shift-]"), Scope::Global, "Next tab", crate::NextTab),
+        Entry::new(s("cmd-shift-["), Scope::Global, "Previous tab", crate::PreviousTab),
+        Entry::new(s("cmd-1"), Scope::Global, "Tab 1", crate::ActivateTab1),
+        Entry::new(s("cmd-2"), Scope::Global, "Tab 2", crate::ActivateTab2),
+        Entry::new(s("cmd-3"), Scope::Global, "Tab 3", crate::ActivateTab3),
+        Entry::new(s("cmd-4"), Scope::Global, "Tab 4", crate::ActivateTab4),
+        Entry::new(s("cmd-5"), Scope::Global, "Tab 5", crate::ActivateTab5),
+        Entry::new(s("cmd-6"), Scope::Global, "Tab 6", crate::ActivateTab6),
+        Entry::new(s("cmd-7"), Scope::Global, "Tab 7", crate::ActivateTab7),
+        Entry::new(s("cmd-8"), Scope::Global, "Tab 8", crate::ActivateTab8),
+        Entry::new(s("cmd-9"), Scope::Global, "Last tab", crate::ActivateLastTab),
+        // ⌘B is the left panel everywhere: the sidebar here, and zed's own
+        // file-tree dock inside the Editor tab (its Ide-scoped binding below
+        // is deeper, so it wins there).
+        Entry::new(s("cmd-b"), Scope::Global, "Toggle the sidebar", crate::ToggleSidebar),
+        Entry::new(s("cmd-shift-b"), Scope::Global, "Toggle the tools panel", crate::ToggleTools),
         // The root-level enter: submits search, confirms menus — anything
         // deeper (a full buffer's Newline, a picker's Confirm) outranks it.
         Entry::new(s("enter"), Scope::Global, "Confirm / submit search", menu::Confirm),

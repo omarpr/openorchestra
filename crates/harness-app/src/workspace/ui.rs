@@ -7,6 +7,7 @@ mod chrome;
 pub(crate) mod conductor;
 mod diff;
 mod diff_edit;
+mod dialogs;
 mod new_task;
 mod preflight;
 mod project_search;
