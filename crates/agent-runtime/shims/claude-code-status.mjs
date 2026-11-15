@@ -41,8 +41,9 @@ function pick(obj, ...names) {
 /**
  * Map a hook payload to one of running | waiting | idle.
  *
- * `Stop` ends the turn -> idle. A Notification whose matcher/type mentions a
- * permission or idle prompt means the agent is blocked on the user -> waiting.
+ * `Stop` ends the turn -> idle, and so does the 60s `idle_prompt` reminder. A
+ * Notification about a permission or approval prompt means the agent is
+ * blocked on the user -> waiting.
  * Anything else we can still attribute to a live session -> running.
  *
  * Exported for the test harness.
@@ -57,7 +58,10 @@ export function classify(payload) {
 
 	if (event.includes("stop") || event.includes("subagentstop")) return "idle";
 	if (detail.includes("permission") || detail.includes("approval")) return "waiting";
-	if (detail.includes("idle") || detail.includes("waiting for your input")) return "waiting";
+	// Claude Code's `idle_prompt` reminder ("waiting for your input") fires 60s
+	// after a turn ends. The turn is already done (Stop said so); it is not a
+	// block, and as `waiting` it pinned the pill until the user typed again.
+	if (detail.includes("idle") || detail.includes("waiting for your input")) return "idle";
 	if (event.includes("notification")) return "waiting";
 	return "running";
 }

@@ -860,3 +860,45 @@ fn claude_code_shim_records_the_tool_about_to_run() {
     assert_eq!(status["state"], "idle");
     assert!(status["tool"].is_null());
 }
+
+/// Run both Claude-shaped shims' `classify` on one hook payload via node.
+/// `None` when node is not installed.
+fn shim_classify(shim: &str, payload: &str) -> Option<String> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("shims").join(shim);
+    let script = format!(
+        "import {{ classify }} from {:?}; process.stdout.write(classify(JSON.parse(process.argv[1])));",
+        format!("file://{}", path.display())
+    );
+    let out = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", &script, payload])
+        .output()
+        .ok()?;
+    assert!(out.status.success(), "node stderr: {}", String::from_utf8_lossy(&out.stderr));
+    Some(String::from_utf8(out.stdout).unwrap())
+}
+
+// Claude Code sends an `idle_prompt` Notification ("Claude is waiting for your
+// input") 60s after a turn ends. That is a reminder, not a block: mapping it
+// to `waiting` left the pill stuck on WAITING after the user had already seen
+// the finished turn, until they typed again. Only permission/approval prompts
+// are waiting.
+#[test]
+fn claude_idle_reminder_is_idle_but_permission_prompt_waits() {
+    let cases = [
+        (r#"{"hook_event_name":"Notification","notification_type":"idle_prompt","message":"Claude is waiting for your input"}"#, "idle"),
+        (r#"{"hook_event_name":"Notification","message":"Claude is waiting for your input"}"#, "idle"),
+        (r#"{"hook_event_name":"Notification","notification_type":"permission_prompt","message":"Claude needs your permission to use Bash"}"#, "waiting"),
+        (r#"{"hook_event_name":"Notification","message":"Claude needs your approval"}"#, "waiting"),
+        (r#"{"hook_event_name":"Stop"}"#, "idle"),
+        (r#"{"hook_event_name":"UserPromptSubmit"}"#, "running"),
+    ];
+    for shim in ["claude-code-status.mjs", "harness-status.mjs"] {
+        for (payload, want) in cases {
+            let Some(got) = shim_classify(shim, payload) else {
+                eprintln!("node not installed — skipping shim classify test");
+                return;
+            };
+            assert_eq!(got, want, "{shim}: {payload}");
+        }
+    }
+}
