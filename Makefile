@@ -10,11 +10,12 @@
 #   make release — notarized universal .dmg, published to GitHub Releases
 #   make doctor  — report which build/runtime tools are present
 #   make icon    — regenerate the app icon from script/gen-icon.py
+#   make dmg-background — regenerate the installer DMG's background art
 #   make test    — headless workspace tests (harness-app excluded by design)
 
 APP_DIR := crates/harness-app
 
-.PHONY: setup run build check test app dmg dmg-notarized release icon doctor
+.PHONY: setup run build check test app dmg dmg-notarized release icon dmg-background doctor
 
 setup:
 	bash ./script/setup-macos.sh
@@ -47,6 +48,10 @@ release: setup
 
 icon:
 	python3 script/gen-icon.py
+
+# The installer DMG's background (arrow + hint). Rerun after changing the layout.
+dmg-background:
+	python3 script/gen-dmg-background.py
 
 doctor:
 	bash ./script/doctor.sh

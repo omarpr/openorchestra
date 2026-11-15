@@ -215,22 +215,93 @@ lipo -info "$APP/Contents/MacOS/$APP_NAME" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # DMG. Stage the bundle next to an /Applications symlink so the mounted volume
-# is the conventional drag-to-install window.
+# is the conventional drag-to-install window, then dress that window: large
+# icons on either side of an arrow (assets/dmg-background*.png, drawn by
+# script/gen-dmg-background.py, which shares this layout).
 # ---------------------------------------------------------------------------
 DMG="$ROOT/dist/$APP_NAME-$FULL-$ARCH_TAG.dmg"
+
+# Window layout in points. Must match W/H/ICON/*_X/ICON_Y in
+# script/gen-dmg-background.py, or the arrow won't sit between the icons.
+DMG_W=720 DMG_H=420 DMG_ICON=160
+DMG_APP_X=200 DMG_APPS_X=520 DMG_ICON_Y=190
+
+# Lay out the mounted read-write volume's Finder window. Finder saves the result
+# to the volume's .DS_Store, which is what every later mount reads.
+style_dmg_window() {
+  local disk="$1"
+  osascript <<OSA
+tell application "Finder"
+  tell disk "$disk"
+    open
+    delay 1
+    set w to container window
+    set current view of w to icon view
+    set toolbar visible of w to false
+    set statusbar visible of w to false
+    set the bounds of w to {200, 120, $((200 + DMG_W)), $((120 + DMG_H))}
+    set opts to the icon view options of w
+    set arrangement of opts to not arranged
+    set icon size of opts to $DMG_ICON
+    set text size of opts to 13
+    set background picture of opts to file ".background:background.tiff"
+    set position of item "$APP_NAME.app" of w to {$DMG_APP_X, $DMG_ICON_Y}
+    set position of item "Applications" of w to {$DMG_APPS_X, $DMG_ICON_Y}
+    update without registering applications
+    delay 1
+    close
+  end tell
+end tell
+OSA
+}
 
 if ((make_dmg)); then
   say "creating $(basename "$DMG")"
   STAGE="$ROOT/dist/.dmg-stage"
-  rm -rf "$STAGE"
-  mkdir -p "$STAGE"
+  RW_DMG="$ROOT/dist/.dmg-rw.dmg"
+  rm -rf "$STAGE" "$RW_DMG"
+  mkdir -p "$STAGE/.background"
   # ditto, not cp -R: the app carries a stapled notarization ticket and a code
   # signature, and ditto is the copy that preserves bundle metadata verbatim.
   ditto "$APP" "$STAGE/$APP_NAME.app"
   ln -s /Applications "$STAGE/Applications"
-  rm -f "$DMG"
-  hdiutil create -volname "$APP_NAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+  # One TIFF holding both resolutions, so Finder picks the sharp one on Retina.
+  tiffutil -cathidpicheck "$ROOT/assets/dmg-background.png" "$ROOT/assets/dmg-background@2x.png" \
+    -out "$STAGE/.background/background.tiff" >/dev/null 2>&1 \
+    || die "could not build the DMG background (run: make dmg-background)"
+
+  # Built writable first: Finder can only save the window layout to a volume it
+  # can write. Compressed to the read-only image afterwards.
+  hdiutil create -volname "$APP_NAME" -srcfolder "$STAGE" -fs HFS+ -format UDRW -ov "$RW_DMG" >/dev/null
   rm -rf "$STAGE"
+  # Not -nobrowse: Finder has to see the volume to lay it out. The mount point,
+  # not the volume name, names it to Finder, since a second copy already
+  # mounted would make this one "openOrchestra 1".
+  MOUNT="$(hdiutil attach -readwrite -noverify -noautoopen "$RW_DMG" | awk -F'\t' '/\/Volumes\//{print $NF; exit}')"
+  [ -d "$MOUNT" ] || die "could not mount $RW_DMG"
+  say "laying out the installer window"
+  # Driving Finder needs Automation permission for the terminal running this.
+  # Without it the image still installs, just as a plain window, so that's a
+  # warning for a local build and a failure for anything going to users.
+  if ! style_dmg_window "$(basename "$MOUNT")"; then
+    if ((notarize)); then
+      hdiutil detach "$MOUNT" -quiet || true
+      die "could not lay out the DMG window: allow this terminal to control Finder (System Settings → Privacy & Security → Automation)"
+    fi
+    echo "(could not lay out the DMG window — it will open as a plain Finder window)"
+  fi
+  chmod -Rf go-w "$MOUNT" || true
+  sync
+  # Finder can hold the volume for a moment after closing its window.
+  for _ in 1 2 3 4 5; do
+    hdiutil detach "$MOUNT" -quiet && break
+    sleep 2
+  done
+  [ ! -d "$MOUNT" ] || hdiutil detach "$MOUNT" -force -quiet
+
+  rm -f "$DMG"
+  hdiutil convert "$RW_DMG" -format UDZO -imagekey zlib-level=9 -o "$DMG" >/dev/null
+  rm -f "$RW_DMG"
   say "verifying image"
   hdiutil verify "$DMG" >/dev/null || die "hdiutil verify failed for $DMG"
 
