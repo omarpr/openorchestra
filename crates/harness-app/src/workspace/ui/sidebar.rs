@@ -552,29 +552,40 @@ impl HarnessWorkspace {
                                 )
                             }),
                     )
-                    .when(task.dirty > 0, |d| {
-                        d.child(
-                            div()
-                                .flex_none()
-                                .text_xs()
-                                .font_family(hx.font_mono)
-                                .text_color(hx.amber)
-                                .child(format!("~{}", task.dirty)),
-                        )
-                    })
-                    .when(multi && task_ending.is_none(), |d| {
-                        d.when(a2a_active > 0, |d| {
-                            d.child(
-                                div()
-                                    .flex_none()
-                                    .text_size(px(10.0))
-                                    .font_family(hx.font_mono)
-                                    .text_color(hx.amber)
-                                    .child(format!("{a2a_active} A2A")),
-                            )
-                        })
-                        .child(agent_pill(hx, coord_state, now))
-                    }),
+                    // Trailing items in one strip the avatar's height, so they
+                    // centre on the name line (the row is top-aligned for the
+                    // two-line name/branch). Same 10px mono and the same order
+                    // as a repo row — counts, then the pill — so `~N` here
+                    // lines up over the repos' `~N` below.
+                    .child(
+                        div()
+                            .flex_none()
+                            .h(px(22.0))
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .text_size(px(10.0))
+                            .font_family(hx.font_mono)
+                            .when(multi && task_ending.is_none() && a2a_active > 0, |d| {
+                                d.child(
+                                    div()
+                                        .px_1()
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(hx.amber)
+                                        .text_color(hx.amber)
+                                        .child(format!("{a2a_active} A2A")),
+                                )
+                            })
+                            .when(task.dirty > 0, |d| {
+                                d.child(
+                                    div().text_color(hx.amber).child(format!("~{}", task.dirty)),
+                                )
+                            })
+                            .when(multi && task_ending.is_none(), |d| {
+                                d.child(agent_pill(hx, coord_state, now))
+                            }),
+                    ),
             );
         // Multi-project tasks draw live connectors in the gutter (see
         // `links`); a single-member task keeps the plain rule.
