@@ -105,18 +105,38 @@ impl HarnessWorkspace {
     pub(crate) fn shutdown_task_broker(&mut self, task_id: &str) {
         if let Some(info) = self.task_brokers.remove(task_id) {
             info.handle.shutdown();
+            self.a2a_links.retain_tasks(|tid| tid != task_id);
             log::info!("a2a broker stopped for task {task_id}");
         }
     }
 
     /// Snapshot of A2A task states for the selected openOrchestra task (UI).
     pub(crate) fn a2a_delegation_summary(&self) -> Vec<(String, String, String)> {
-        let Some(r) = self.resolve() else {
-            return Vec::new();
-        };
-        let Some(tid) = &r.task_id else {
-            return Vec::new();
-        };
+        match self.resolve().and_then(|r| r.task_id) {
+            Some(tid) => self.a2a_rows_for(&tid),
+            None => Vec::new(),
+        }
+    }
+
+    /// Feed every running broker's snapshot to the connector-line tracker,
+    /// and forget tasks whose broker has stopped.
+    pub(crate) fn observe_a2a_links(&mut self) {
+        let snapshots: Vec<(String, Vec<crate::workspace::ui::sidebar::links::A2aRow>)> = self
+            .task_brokers
+            .keys()
+            .map(|tid| (tid.clone(), self.a2a_rows_for(tid)))
+            .collect();
+        let now = self.anim_secs();
+        let brokers = &self.task_brokers;
+        self.a2a_links.retain_tasks(|tid| brokers.contains_key(tid));
+        for (tid, rows) in snapshots {
+            self.a2a_links.observe(&tid, rows, now);
+        }
+    }
+
+    /// `(a2a_task_id, tenant, state)` for every A2A task in `tid`'s broker;
+    /// empty when it has none running.
+    pub(crate) fn a2a_rows_for(&self, tid: &str) -> Vec<(String, String, String)> {
         let Some(info) = self.task_brokers.get(tid) else {
             return Vec::new();
         };

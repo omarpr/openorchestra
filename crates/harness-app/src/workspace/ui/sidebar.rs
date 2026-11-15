@@ -4,6 +4,7 @@
 use super::super::*;
 
 mod projects;
+pub(crate) mod links;
 
 /// The sidebar's three top-level sections, in render order.
 ///
@@ -398,6 +399,28 @@ impl HarnessWorkspace {
         let color = SWATCHES[(task.color as usize) % SWATCHES.len()];
         let tid_click = task_id.clone();
         let menu_id = task_id.clone();
+        // A multi-project task's tile is its coordinator agent; the repo rows
+        // under it are the specialists it delegates to.
+        let multi = task.members.len() >= 2;
+        let coord_focused = multi && self.focused_coordinator_task().as_deref() == Some(task.id.as_str());
+        let coord_state = if multi {
+            self.task_store
+                .get(&task.id)
+                .map(|t| worktrees::task_coordinator_dir(&self.data_dir.join("tasks"), &t.slug))
+                .and_then(|dir| self.agent_status.get(&dir).copied())
+                .unwrap_or(AgentState::Unknown)
+        } else {
+            AgentState::Unknown
+        };
+        let a2a_rows = if multi { self.a2a_rows_for(&task.id) } else { Vec::new() };
+        let in_flight = |tenant: Option<&str>| {
+            a2a_rows
+                .iter()
+                .filter(|(_, t, s)| tenant.is_none_or(|x| x == t) && (s == "working" || s == "submitted"))
+                .count()
+        };
+        let a2a_active = in_flight(None);
+        let now = self.anim_secs();
 
         let name_el: AnyElement = if let Some(editor) = renaming.then(|| self.edit_editor()).flatten() {
             self.render_input(hx, editor, cx).into_any_element()
@@ -462,7 +485,14 @@ impl HarnessWorkspace {
                     .px_2()
                     .py_1()
                     .cursor_pointer()
-                    .hover(|d| d.bg(hx.surface_hover))
+                    .when(coord_focused, |d| d.bg(selected_row_bg(hx)))
+                    .hover({
+                        let hover_bg = if multi { row_hover_bg(hx, coord_focused) } else { hx.surface_hover };
+                        move |d| d.bg(hover_bg)
+                    })
+                    .when(multi, |d| {
+                        d.tooltip(tip("Coordinator: plans the task and delegates to each repo's agent"))
+                    })
                     .on_click(cx.listener(move |ws, _, window, cx| {
                         ws.select(
                             Selection::Task {
@@ -529,30 +559,62 @@ impl HarnessWorkspace {
                                 .text_color(hx.amber)
                                 .child(format!("~{}", task.dirty)),
                         )
+                    })
+                    .when(multi && task_ending.is_none(), |d| {
+                        d.when(a2a_active > 0, |d| {
+                            d.child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(10.0))
+                                    .font_family(hx.font_mono)
+                                    .text_color(hx.amber)
+                                    .child(format!("{a2a_active} A2A")),
+                            )
+                        })
+                        .child(agent_pill(hx, coord_state, now))
                     }),
             );
-        let mut members = div()
-            .flex()
-            .flex_col()
-            .ml(px(12.0))
-            .pl_1()
-            .border_l_1()
-            .border_color(hx.border);
+        // Multi-project tasks draw live connectors in the gutter (see
+        // `links`); a single-member task keeps the plain rule.
+        let mut members = if multi {
+            div().relative().flex().flex_col()
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .ml(px(12.0))
+                .pl_1()
+                .border_l_1()
+                .border_color(hx.border)
+        };
+        let mut visuals: Vec<links::LinkVisual> = Vec::new();
         for m in task.members.iter() {
             let tid = task.id.clone();
             let mid = m.worktree_id.clone();
-            // Match where the selection lands, not its shape: clicking the task
-            // row selects `member_id: None`, which resolves to the home member,
-            // and that row must light up too.
-            let mem_selected = matches!(
-                &self.selection,
-                Selection::Task { task_id: t, .. } if t == &task.id
-            ) && self.resolve().is_some_and(|r| r.path == m.path);
-            let label = if m.is_home {
-                format!("★ {}", m.repo)
+            // With a coordinator, the task row is the coordinator and a repo
+            // row lights only when it is the one picked. A single-member task
+            // has no coordinator: its row is the task, so match where the
+            // selection lands (`member_id: None` resolves to it).
+            let mem_selected = if multi {
+                matches!(
+                    &self.selection,
+                    Selection::Task { task_id: t, member_id: Some(id) }
+                        if t == &task.id && id == &m.worktree_id
+                )
             } else {
-                m.repo.clone()
+                matches!(
+                    &self.selection,
+                    Selection::Task { task_id: t, .. } if t == &task.id
+                ) && self.resolve().is_some_and(|r| r.path == m.path)
             };
+            if multi {
+                visuals.push(links::link_visual(
+                    in_flight(Some(&m.worktree_id)) > 0,
+                    &self.a2a_links.events_for(&task.id, &m.worktree_id),
+                    now,
+                ));
+            }
+            let label = m.repo.clone();
             let agent = self
                 .agent_status
                 .get(&m.path)
@@ -599,6 +661,9 @@ impl HarnessWorkspace {
                     .gap_2()
                     .px_2()
                     .py_0p5()
+                    // Fixed height and offset with connectors, so their
+                    // geometry is known without measuring the layout.
+                    .when(multi, |d| d.h(ui_px(links::ROW_H)).ml(ui_px(ROW_INSET)))
                     .rounded_md()
                     // The whole block is already `surface` while its task is
                     // selected, so a `surface` fill here was invisible. The
@@ -626,7 +691,7 @@ impl HarnessWorkspace {
                             .flex_1()
                             .min_w_0()
                             .text_xs()
-                            .text_color(if m.is_home { hx.accent } else { hx.tx1 })
+                            .text_color(hx.tx1)
                             .whitespace_nowrap()
                             .overflow_hidden()
                             .text_ellipsis()
@@ -651,10 +716,13 @@ impl HarnessWorkspace {
                     })
                     .child(badges)
                     .child(match task_ending {
-                        Some(kind) => busy_pill(hx, kind.doing_label(), self.anim_secs()).into_any_element(),
-                        None => agent_pill(hx, agent, self.anim_secs()).into_any_element(),
+                        Some(kind) => busy_pill(hx, kind.doing_label(), now).into_any_element(),
+                        None => agent_pill(hx, agent, now).into_any_element(),
                     }),
             );
+        }
+        if multi {
+            members = members.children(link_connectors(hx, &visuals));
         }
         block = block.child(members);
         block
@@ -803,6 +871,75 @@ const REPO_ID_PREFIXES: [&str; 4] = [ID_TOGGLE, ID_MORE, ID_MAIN, ID_NEW_WT];
 /// it (its own hitbox isn't under the cursor) before the row you actually
 /// clicked can fire — so the later project was simply dead. `task-block-`
 /// documents the same trap for tasks, which is where it was fixed once already.
+/// How far a connected repo row sits in from the task block's edge: past
+/// the spine, where the old rule plus its padding put it.
+const ROW_INSET: f32 = links::SPINE_X + 5.0;
+
+/// A length given in px at the default 16px rem, scaled with the UI font
+/// size (Settings ⌘± changes the rem), so the fixed-height rows and the
+/// connectors drawn against them grow with the text they hold.
+fn ui_px(v: f32) -> gpui::Rems {
+    gpui::rems(v / 16.0)
+}
+
+/// The coordinator → repo connectors for one task block, as absolutely
+/// positioned children of its (relative) members column: a grey spine and an
+/// elbow per row, then a coloured overlay along the path to every row whose
+/// link is doing something, and the travelling dot.
+fn link_connectors(hx: &HarnessTheme, visuals: &[links::LinkVisual]) -> Vec<AnyElement> {
+    use links::{ELBOW_END_X, LinkEventKind, LinkVisual, ROW_H, SPINE_X};
+    let mid = |i: usize| i as f32 * ROW_H + ROW_H / 2.0;
+    let spine = |to: f32, color: gpui::Rgba| {
+        div().absolute().left(ui_px(SPINE_X)).top(px(0.0)).w(px(1.0)).h(ui_px(to)).bg(color).into_any_element()
+    };
+    let elbow = |i: usize, color: gpui::Rgba| {
+        div()
+            .absolute()
+            .left(ui_px(SPINE_X))
+            .top(ui_px(mid(i)))
+            .w(ui_px(ELBOW_END_X - SPINE_X))
+            .h(px(1.0))
+            .bg(color)
+            .into_any_element()
+    };
+    let Some(last) = visuals.len().checked_sub(1) else {
+        return Vec::new();
+    };
+    let mut out = vec![spine(mid(last) + 1.0, hx.border)];
+    out.extend((0..visuals.len()).map(|i| elbow(i, hx.border)));
+    let up_color = |ok: bool| if ok { hx.green } else { hx.red };
+    for (i, v) in visuals.iter().enumerate() {
+        let (color, alpha) = match *v {
+            LinkVisual::Idle => continue,
+            LinkVisual::Active { pulse } => (hx.accent, 0.35 + 0.5 * pulse),
+            LinkVisual::Travel { kind: LinkEventKind::Down, .. } => (hx.accent, 0.7),
+            LinkVisual::Travel { kind: LinkEventKind::Up { ok }, .. } => (up_color(ok), 0.7),
+            LinkVisual::Flash { ok, fade } => (up_color(ok), fade.clamp(0.0, 1.0)),
+        };
+        let c = tint(color, alpha);
+        out.push(spine(mid(i) + 1.0, c));
+        out.push(elbow(i, c));
+        if let LinkVisual::Travel { kind, progress } = *v {
+            let (x, y) = links::dot_position(i, progress, kind);
+            let dot = match kind {
+                LinkEventKind::Down => hx.accent,
+                LinkEventKind::Up { ok } => up_color(ok),
+            };
+            out.push(
+                div()
+                    .absolute()
+                    .left(ui_px(x + 0.5 - 2.5))
+                    .top(ui_px(y + 0.5 - 2.5))
+                    .size(ui_px(5.0))
+                    .rounded_full()
+                    .bg(dot)
+                    .into_any_element(),
+            );
+        }
+    }
+    out
+}
+
 fn repo_element_id(prefix: &str, repo_name: &str) -> gpui::SharedString {
     gpui::SharedString::from(format!("{prefix}-{repo_name}"))
 }

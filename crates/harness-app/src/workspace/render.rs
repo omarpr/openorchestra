@@ -69,7 +69,6 @@ impl Render for HarnessWorkspace {
             .font_family(hx.font_ui)
             .text_color(hx.tx0)
             .child(self.render_top_bar(&hx, window, cx))
-            .children(self.render_task_strip(&hx, cx))
             .child(
                 div()
                     .flex()
@@ -384,6 +383,10 @@ impl HarnessWorkspace {
         let animating = |ws: &Self| {
             ws.agent_status.values().any(|s| matches!(s, AgentState::Running | AgentState::Waiting))
                 || !ws.ending.is_empty()
+                // The sidebar's A2A connectors: a message dot or flash in
+                // flight, or a delegation pulsing while it is worked on.
+                || ws.a2a_links.is_animating(ws.anim_secs())
+                || ws.a2a_links.any_active()
         };
         if self.indicator_ticking || !animating(self) {
             return;

@@ -104,6 +104,8 @@ impl HarnessWorkspace {
             .iter()
             .find(|e| e.path == path)
             .map(|e| e.agent_kind.clone())
+            // A coordinator has no registry entry: it runs the task's agent.
+            .or_else(|| self.coordinator_task_for_path(&path).map(|t| t.agent_kind.clone()))
             .unwrap_or_default();
         let nav = super::state::alert_nav_id(&id, &kind);
         self.navigate_to_alert(&nav, window, cx);

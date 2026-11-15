@@ -22,6 +22,11 @@ impl HarnessWorkspace {
                 self.new_task_home = name.to_string();
             }
         }
+        // Two or more: no Home radio is shown (the coordinator leads), so
+        // record the first checked repo rather than a stale pick.
+        if self.new_task_repos.len() >= 2 {
+            self.new_task_home = self.new_task_repos[0].clone();
+        }
         self.new_target_repo = self.new_task_home.clone();
         cx.notify();
     }

@@ -551,6 +551,9 @@ pub struct HarnessWorkspace {
     a2a_inbox_tx: crossbeam_channel::Sender<a2a_broker::InboxDelivery>,
     /// Queued inbox messages awaiting a live Agent session (keyed by pane key).
     a2a_pending_inject: HashMap<String, Vec<a2a_broker::InboxMessage>>,
+    /// Recent A2A snapshots and events per task, for the sidebar's
+    /// coordinator → repo connector animation.
+    a2a_links: ui::sidebar::links::LinkTracker,
     new_target_repo: String,
     menu: Option<CardMenu>,
     /// The ⋯ menu on a project header: repo name and where it opened.

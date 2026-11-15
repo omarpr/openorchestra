@@ -51,7 +51,7 @@ impl HarnessWorkspace {
     }
 
     /// Persist the chosen agent on the task + member registry entries, then
-    /// open an Agent tab in every member (home last so focus lands there).
+    /// open an Agent tab in every member and finish on the coordinator.
     pub(crate) fn confirm_start_all_agents(
         &mut self,
         window: &mut Window,
@@ -76,27 +76,21 @@ impl HarnessWorkspace {
         self.prefs.last_task_agent = Some(kind.as_str().to_string());
         self.save_prefs(cx);
 
-        let (home_id, mut member_ids) = match self.task_store.get(&task_id) {
+        let (member_ids, coordinated) = match self.task_store.get(&task_id) {
             Some(task) => (
-                task.home_member().map(|m| m.worktree_id.clone()),
                 task.members
                     .iter()
                     .map(|m| m.worktree_id.clone())
                     .collect::<Vec<_>>(),
+                super::super::coordinator::has_coordinator(task),
             ),
             None => {
                 self.close_start_specialists(cx);
                 return;
             }
         };
-        // Open specialists first; home last so the selection stays on the
-        // orchestrator after the loop.
-        if let Some(hid) = home_id
-            && let Some(pos) = member_ids.iter().position(|id| id == &hid) {
-                let home = member_ids.remove(pos);
-                member_ids.push(home);
-            }
-
+        // Every repo is a specialist and none is special: open each one's
+        // agent, then land on the coordinator, which delegates to them.
         for mid in member_ids {
             self.select(
                 Selection::Task {
@@ -107,6 +101,26 @@ impl HarnessWorkspace {
                 cx,
             );
             self.open_tab(TabKind::Agent(kind.clone()), window, cx);
+        }
+        if coordinated {
+            self.select(
+                Selection::Task {
+                    task_id: task_id.clone(),
+                    member_id: None,
+                },
+                window,
+                cx,
+            );
+            // Task creation already selected the task, so the coordinator
+            // may be running the pre-dialog kind: open the chosen one unless
+            // a tab of it is there (the earlier agent is left alone).
+            let has_agent = self
+                .panes
+                .get(&a2a_broker::coordinator_pane_key(&task_id))
+                .is_some_and(|p| p.tabs.iter().any(|t| t.agent.as_ref() == Some(&kind)));
+            if !has_agent {
+                self.open_tab(TabKind::Agent(kind.clone()), window, cx);
+            }
         }
         self.close_start_specialists(cx);
     }
@@ -185,13 +199,7 @@ impl HarnessWorkspace {
         let project_list = task
             .members
             .iter()
-            .map(|m| {
-                if m.repo == task.home_repo {
-                    format!("{} ★", m.repo)
-                } else {
-                    m.repo.clone()
-                }
-            })
+            .map(|m| m.repo.clone())
             .collect::<Vec<_>>()
             .join(", ");
 
@@ -223,7 +231,7 @@ impl HarnessWorkspace {
                     .text_sm()
                     .text_color(hx.tx2)
                     .child(format!(
-                        "Open an agent in each of these {n} projects? Each gets its own cwd; the home agent orchestrates.",
+                        "Open an agent in each of these {n} projects? Each gets its own cwd; the task's coordinator delegates to them.",
                     )),
             )
             .child(

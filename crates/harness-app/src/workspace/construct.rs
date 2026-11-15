@@ -217,6 +217,7 @@ impl HarnessWorkspace {
             a2a_change_tx,
             a2a_inbox_tx,
             a2a_pending_inject: HashMap::new(),
+            a2a_links: Default::default(),
             new_target_repo,
             menu: None,
             project_menu: None,
@@ -363,13 +364,20 @@ impl HarnessWorkspace {
         })
         .detach();
 
-        // A2A broker task-state changes (delegation chip in the chrome).
+        // A2A broker task-state changes: the delegation chip in the chrome
+        // and the sidebar's connector lines.
         cx.spawn(async move |view, cx| {
             loop {
                 match a2a_change_rx.try_recv() {
                     Ok(()) => {
                         while a2a_change_rx.try_recv().is_ok() {}
-                        if view.update(cx, |_, cx| cx.notify()).is_err() {
+                        if view
+                            .update(cx, |ws, cx| {
+                                ws.observe_a2a_links();
+                                cx.notify()
+                            })
+                            .is_err()
+                        {
                             break;
                         }
                     }

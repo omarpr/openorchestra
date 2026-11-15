@@ -255,14 +255,17 @@ impl HarnessWorkspace {
             .tooltip(tip(if is_worktree {
                 "Creates a git worktree of this project on its own branch, with an agent and the project's setup scripts. It is listed under the project and under TASKS."
             } else {
-                "Name labels the effort. Brief is the starting prompt injected into agents. Home is where the orchestrator runs. Multi-project tasks coordinate via A2A — project AGENTS.md is never overwritten."
+                "Name labels the effort. Brief is the starting prompt injected into agents. Multi-project tasks get a coordinator agent that delegates to each project's agent over A2A — project AGENTS.md is never overwritten."
             }))
             .child("ⓘ")
     }
 
     fn render_new_task_members(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
         // One row per project, previewing the post-create member list: checkbox
-        // for include, Home radio among included members.
+        // for include, and a Home radio only while a single project is in. With
+        // two or more the task's coordinator leads and every repo is a peer, so
+        // there is no home to pick (the first checked one is recorded).
+        let multi = self.new_task_repos.len() >= 2;
         let mut col = div()
             .flex()
             .flex_col()
@@ -272,13 +275,9 @@ impl HarnessWorkspace {
         for (i, repo) in self.data.repos.iter().enumerate() {
             let name = repo.name.clone();
             let included = self.new_task_repos.iter().any(|n| n == &name);
-            let is_home = included && self.new_task_home == name;
+            let is_home = included && !multi && self.new_task_home == name;
             let check = if included { "☑" } else { "☐" };
-            let label = if is_home {
-                format!("★ {}", repo.name)
-            } else {
-                repo.name.clone()
-            };
+            let label = repo.name.clone();
             let name_for_check = name.clone();
             let name_for_home = name.clone();
 
@@ -329,7 +328,7 @@ impl HarnessWorkspace {
                     .child(label),
             );
 
-            if included {
+            if included && !multi {
                 let radio = if is_home { "●" } else { "○" };
                 row = row.child(
                     div()
