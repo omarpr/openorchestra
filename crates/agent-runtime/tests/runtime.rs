@@ -373,3 +373,24 @@ fn unwatching_stops_signals_for_that_worktree() {
         "no signals after unwatch — a closed worktree must not keep pinging"
     );
 }
+
+// A restart after an agent went missing continues its conversation only where
+// the CLI scopes "most recent" to the launch directory.
+#[test]
+fn continue_args_only_for_directory_scoped_resume() {
+    use agent_runtime::{AgentKind, continue_args};
+    let base = vec!["--permission-mode".to_string(), "auto".to_string()];
+    assert_eq!(
+        continue_args(&AgentKind::ClaudeCode, &base),
+        Some(vec!["--permission-mode".into(), "auto".into(), "--continue".into()])
+    );
+    assert_eq!(continue_args(&AgentKind::Pi, &[]), Some(vec!["--continue".to_string()]));
+    // Codex: subcommand first, then the usual flags (resume accepts them).
+    assert_eq!(
+        continue_args(&AgentKind::Codex, &["--ask-for-approval".into(), "never".into()]),
+        Some(vec!["resume".into(), "--last".into(), "--ask-for-approval".into(), "never".into()])
+    );
+    assert_eq!(continue_args(&AgentKind::OpenCode, &[]), None);
+    assert_eq!(continue_args(&AgentKind::Kimi, &[]), None);
+    assert_eq!(continue_args(&AgentKind::Other("x".into()), &[]), None);
+}

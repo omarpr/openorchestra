@@ -403,6 +403,9 @@ impl HarnessWorkspace {
         // under it are the specialists it delegates to.
         let multi = task.members.len() >= 2;
         let coord_focused = multi && self.focused_coordinator_task().as_deref() == Some(task.id.as_str());
+        let coord_missing = multi && self.agent_missing(&task.id, None);
+        let coord_fresh = self.restart_is_fresh(&task.id, None);
+        let tid_restart = task.id.clone();
         let coord_state = if multi {
             self.task_store
                 .get(&task.id)
@@ -583,7 +586,11 @@ impl HarnessWorkspace {
                                 )
                             })
                             .when(multi && task_ending.is_none(), |d| {
-                                d.child(agent_pill(hx, coord_state, now))
+                                if coord_missing {
+                                    d.child(restart_pill(hx, coord_fresh, tid_restart.clone(), None, cx))
+                                } else {
+                                    d.child(agent_pill(hx, coord_state, now))
+                                }
                             }),
                     ),
             );
@@ -730,6 +737,14 @@ impl HarnessWorkspace {
                     .child(badges)
                     .child(match task_ending {
                         Some(kind) => busy_pill(hx, kind.doing_label(), now).into_any_element(),
+                        None if self.agent_missing(&task.id, Some(&m.worktree_id)) => restart_pill(
+                            hx,
+                            self.restart_is_fresh(&task.id, Some(&m.worktree_id)),
+                            task.id.clone(),
+                            Some(m.worktree_id.clone()),
+                            cx,
+                        )
+                        .into_any_element(),
                         None => agent_pill(hx, agent, now).into_any_element(),
                     }),
             );
@@ -881,6 +896,37 @@ const ROW_INSET: f32 = links::SPINE_X + 5.0;
 /// A length given in px at the default 16px rem, scaled with the UI font
 /// size (Settings ⌘± changes the rem), so the fixed-height rows and the
 /// connectors drawn against them grow with the text they hold.
+/// STOPPED pill for a task agent that should be running but is not; a click
+/// restarts it (continuing its conversation first, fresh if that already
+/// failed). Stops propagation so the row's own click does not also fire.
+fn restart_pill(
+    hx: &HarnessTheme,
+    fresh: bool,
+    task_id: String,
+    member_id: Option<String>,
+    cx: &mut Context<HarnessWorkspace>,
+) -> gpui::Stateful<gpui::Div> {
+    let tip_text = if fresh {
+        "Agent not running and could not continue — click to start it fresh"
+    } else {
+        "Agent not running — click to restart it where it left off"
+    };
+    let hover_bg = tint(hx.accent, 0.16);
+    let hover_fg = hx.accent;
+    crate::workspace::render::stopped_pill(hx)
+        .id(gpui::SharedString::from(format!(
+            "restart-{task_id}-{}",
+            member_id.as_deref().unwrap_or("coordinator")
+        )))
+        .cursor_pointer()
+        .hover(move |d| d.bg(hover_bg).text_color(hover_fg))
+        .tooltip(tip(tip_text))
+        .on_click(cx.listener(move |ws, _, window, cx| {
+            cx.stop_propagation();
+            ws.restart_task_agent(task_id.clone(), member_id.clone(), window, cx);
+        }))
+}
+
 fn ui_px(v: f32) -> gpui::Rems {
     gpui::rems(v / 16.0)
 }

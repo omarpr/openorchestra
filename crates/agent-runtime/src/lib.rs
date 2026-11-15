@@ -230,6 +230,34 @@ pub fn default_invocation(kind: &AgentKind) -> (&str, &'static [&'static str]) {
     }
 }
 
+/// `args` rewritten to continue the agent's most recent conversation **in the
+/// directory it is launched in**, for a restart after the agent went missing
+/// (computer restart, agent quit). `None` when the kind has no
+/// directory-scoped continue: a resume that could land in another folder's
+/// conversation is worse than a fresh start, so those kinds restart fresh.
+///
+/// - Claude Code `--continue`: "most recent conversation in the current directory".
+/// - pi `--continue`: "most recent session for the current directory".
+/// - Codex `resume --last`: `resume` filters by cwd unless `--all` is given.
+/// - OpenCode `--continue` is "the last session" of a *project*, which sibling
+///   worktrees of one repo can share, so it is not used.
+pub fn continue_args(kind: &AgentKind, args: &[String]) -> Option<Vec<String>> {
+    let owned = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    match kind {
+        AgentKind::ClaudeCode | AgentKind::Pi => {
+            let mut out = args.to_vec();
+            out.push("--continue".into());
+            Some(out)
+        }
+        AgentKind::Codex => {
+            let mut out = owned(&["resume", "--last"]);
+            out.extend(args.iter().cloned());
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
 /// The default launch command for a kind, as one displayable line — e.g.
 /// `"claude --permission-mode auto"`.
 ///

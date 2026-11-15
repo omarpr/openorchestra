@@ -51,6 +51,12 @@ pub struct WorktreePanes {
     pub active: Option<u64>,
     #[serde(default)]
     pub tabs: Vec<TabRecord>,
+    /// The agent this pane is meant to be running, kept even when its tab
+    /// came back as a plain shell (the agent died with tmux on a computer
+    /// restart). A task pane with this set and no live agent shows STOPPED
+    /// with a Restart. Cleared only when the user closes the agent tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentKind>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -130,6 +136,7 @@ mod tests {
                     TabRecord { id: 3, kind: TabRecordKind::Agent(AgentKind::Pi), title: "pi".into() },
                     TabRecord { id: 4, kind: TabRecordKind::Shell, title: "shell".into() },
                 ],
+                agent: None,
             },
         );
 
@@ -151,6 +158,7 @@ mod tests {
             WorktreePanes {
                 active: Some(1),
                 tabs: vec![TabRecord { id: 1, kind: TabRecordKind::Diff, title: "⑂ diff".into() }],
+                agent: None,
             },
         );
         save(&path, &mut state);
@@ -169,6 +177,7 @@ mod tests {
                     kind: TabRecordKind::Shell,
                     title: "shell".into(),
                 }],
+                agent: None,
             },
         );
         let n = migrate_task_pane_keys(
@@ -186,6 +195,7 @@ mod tests {
         WorktreePanes {
             active: Some(id),
             tabs: vec![TabRecord { id, kind: TabRecordKind::Shell, title: "shell".into() }],
+            agent: None,
         }
     }
 

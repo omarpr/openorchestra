@@ -199,6 +199,47 @@ impl HarnessWorkspace {
 
     /// Close a tab, dropping whatever it held — a terminal's pty and its
     /// process, a chat's `pi --mode rpc` sidecar, or a service-Workspace item.
+    /// Close a tab from the UI. Closing a task pane's agent tab stops one of
+    /// the task's agents, so it asks first; everything else closes directly.
+    pub(crate) fn request_close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(r) = self.resolve() else { return };
+        let agent_label = self
+            .panes
+            .get(&r.key)
+            .and_then(|p| p.tabs.iter().find(|t| t.id == id))
+            .filter(|t| t.agent.is_some())
+            .map(|t| t.title.clone());
+        let task_member = a2a_broker::parse_task_member_pane_key(&r.key)
+            .map(|(tid, member)| (tid.to_string(), member.to_string()));
+        let (Some(label), Some((tid, member))) = (agent_label, task_member) else {
+            self.close_tab(id, window, cx);
+            return;
+        };
+        let task_name = self.task_store.get(&tid).map(|t| t.name.clone()).unwrap_or(tid);
+        let who = if member == a2a_broker::COORDINATOR_TENANT {
+            "coordinator".to_string()
+        } else {
+            member.split('/').next().unwrap_or(&member).to_string()
+        };
+        let message = format!("Stop the {who} agent for {task_name}?");
+        let detail = format!(
+            "This ends the {label} session. Delegations to it stop until you start an agent here again."
+        );
+        let answer = window.prompt(
+            gpui::PromptLevel::Warning,
+            &message,
+            Some(&detail),
+            &["Stop agent", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |ws, cx| {
+            if answer.await.ok() == Some(0) {
+                let _ = ws.update_in(cx, |ws, window, cx| ws.close_tab(id, window, cx));
+            }
+        })
+        .detach();
+    }
+
     pub(crate) fn close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(r) = self.resolve() else { return };
         let key = r.key.clone();
@@ -252,6 +293,16 @@ impl HarnessWorkspace {
         let Some(pane) = self.panes.get_mut(&key) else { return };
         let Some(ix) = pane.tabs.iter().position(|t| t.id == id) else { return };
         pane.tabs.remove(ix);
+        // Closing the last agent tab is the user stopping the pane's agent on
+        // purpose: forget it, so the pane does not show STOPPED/Restart.
+        let no_agent_left = !pane.tabs.iter().any(|t| t.agent.is_some());
+        if was_agent && no_agent_left {
+            if let Some(rec) = self.panes_state.worktrees.get_mut(&key) {
+                rec.agent = None;
+            }
+            self.missing_agents.remove(&key);
+        }
+        let Some(pane) = self.panes.get_mut(&key) else { return };
         if pane.active == id {
             // Prefer the tab to the left, which is where the eye already is.
             pane.active = pane
@@ -391,7 +442,15 @@ impl HarnessWorkspace {
                     .find(|t| t.id == pane.active && !matches!(t.content, TabContent::File { .. }))
                     .map(|t| t.id)
                     .or_else(|| tabs.first().map(|t| t.id));
-                (key.clone(), WorktreePanes { active, tabs })
+                // A live agent tab names the pane's agent; with none (it came
+                // back as a shell after a restart) keep the kind on record so
+                // the pane can still show STOPPED and be restarted.
+                let agent = pane
+                    .tabs
+                    .iter()
+                    .find_map(|t| t.agent.clone())
+                    .or_else(|| self.panes_state.worktrees.get(key).and_then(|w| w.agent.clone()));
+                (key.clone(), WorktreePanes { active, tabs, agent })
             })
             .collect();
         for (key, wp) in updates {

@@ -140,11 +140,27 @@ pub fn client_args(
         "set-option".into(), "-t".into(), session.into(), "status".into(), "off".into(),
         ";".into(),
         "set-option".into(), "-t".into(), session.into(), "mouse".into(), "on".into(),
+    ]);
+    if let Some(cmd) = command {
+        // Mark the session as an agent's, so a restart can tell a running
+        // agent from a shell even when the launch line is a user override
+        // whose start command names no known program (see
+        // `missing_agent_keys`). `new-session -A` on an existing session
+        // re-marks it, which is harmless.
+        args.extend([
+            ";".into(),
+            "set-option".into(), "-t".into(), session.into(), AGENT_OPTION.into(), cmd.label.clone(),
+        ]);
+    }
+    args.extend([
         ";".into(),
         "attach-session".into(), "-t".into(), session.into(),
     ]);
     args
 }
+
+/// Session user option naming the agent a session was started for.
+pub const AGENT_OPTION: &str = "@oo_agent";
 
 /// Parse `tmux ls -F '#{session_name}'` output into session names.
 pub fn parse_sessions(ls_output: &str) -> Vec<String> {
@@ -267,6 +283,76 @@ pub fn agent_from_start_command(cmd: &str) -> Option<(AgentKind, &'static str)> 
         let quoted_bare = format!("'{prog}'");
         (cmd.contains(&quoted_path) || cmd.contains(&quoted_bare)).then_some((kind, prog))
     })
+}
+
+/// What [`missing_agent_keys`] needs to know about one tmux pane.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PaneInfo {
+    pub session: String,
+    /// Foreground process name (`zsh` once an agent has exited).
+    pub current: String,
+    /// Started for an agent: tagged with [`AGENT_OPTION`], or (older,
+    /// untagged sessions) a start command naming a known agent program.
+    pub agent_session: bool,
+}
+
+/// One entry per tmux pane. `None` when tmux could not be asked (no server, timed out), so callers can
+/// tell "nothing is running" from "don't know" and not flag every agent as
+/// stopped on a hiccup.
+pub fn pane_commands() -> Option<Vec<PaneInfo>> {
+    let out = run_bounded(
+        &["list-panes", "-a", "-F", "#{session_name}\t#{pane_current_command}\t#{@oo_agent}\t#{pane_start_command}"],
+        LIST_TIMEOUT,
+    )?;
+    if !out.status.success() {
+        // No server at all is a real answer: nothing is running.
+        let err = String::from_utf8_lossy(&out.stderr);
+        return (err.contains("no server running") || err.contains("No such file"))
+            .then(Vec::new);
+    }
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| {
+                let mut it = l.splitn(4, '\t');
+                let session = it.next()?.to_string();
+                let current = it.next()?.to_string();
+                let tag = it.next().unwrap_or("");
+                let start = it.next().unwrap_or("");
+                let agent_session = !tag.is_empty() || agent_from_start_command(start).is_some();
+                Some(PaneInfo { session, current, agent_session })
+            })
+            .collect(),
+    )
+}
+
+/// A login/interactive shell, i.e. what an agent session drops to when the
+/// agent exits (`agent_script` ends in `exec "$SHELL" -li`).
+pub fn is_shell(command: &str) -> bool {
+    matches!(
+        command.trim_start_matches('-'),
+        "zsh" | "bash" | "fish" | "sh" | "dash" | "ksh" | "tcsh" | "csh" | "nu" | "login"
+    )
+}
+
+/// Which of `expected` pane keys have no agent running. A key has a running
+/// agent when one of its sessions was started with an agent command and is
+/// not back at its shell (the agent quit, leaving the session's shell).
+pub fn missing_agent_keys(expected: &[String], panes: &[PaneInfo]) -> std::collections::BTreeSet<String> {
+    expected
+        .iter()
+        .filter(|key| {
+            let prefix = session_prefix(key);
+            !panes.iter().any(|p| {
+                p.session
+                    .strip_prefix(&prefix)
+                    .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+                    && p.agent_session
+                    && !is_shell(&p.current)
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 /// Tear down a session (used on explicit tab close). Best-effort.
@@ -659,5 +745,41 @@ mod tests {
         let _ = run_bounded(&["-L", &sock, "kill-server"], std::time::Duration::from_secs(2));
         assert!(got.is_none(), "a hung tmux client must time out");
         assert!(start.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn an_agent_is_missing_unless_a_session_is_still_running_it() {
+        let key = "task:t:member:repo/t".to_string();
+        let row = |name: &str, cur: &str, agent: bool| PaneInfo {
+            session: name.to_string(),
+            current: cur.to_string(),
+            agent_session: agent,
+        };
+        let expected = vec![key.clone()];
+        // Running: an agent session whose foreground is the agent (Claude
+        // shows its version as the process name).
+        assert!(missing_agent_keys(&expected, &[row("harness_task-t-member-repo-t_7", "2.1.325", true)]).is_empty());
+        // The agent quit: same session, back at its shell.
+        assert_eq!(missing_agent_keys(&expected, &[row("harness_task-t-member-repo-t_7", "zsh", true)]).len(), 1);
+        assert_eq!(missing_agent_keys(&expected, &[row("harness_task-t-member-repo-t_7", "-zsh", true)]).len(), 1);
+        // Only a shell tab (e.g. after a reboot), even one running something.
+        assert_eq!(missing_agent_keys(&expected, &[row("harness_task-t-member-repo-t_3", "cargo", false)]).len(), 1);
+        // Another key's agent does not count.
+        assert_eq!(missing_agent_keys(&expected, &[row("harness_task-t-member-other-t_7", "2.1.325", true)]).len(), 1);
+        // Nothing at all.
+        assert_eq!(missing_agent_keys(&expected, &[]).len(), 1);
+    }
+
+    #[test]
+    fn agent_sessions_are_tagged_shell_sessions_are_not() {
+        let tagged = |args: &[String]| args.windows(2).any(|w| w[0] == AGENT_OPTION && w[1] == "pi");
+        let agent = client_args("s_1", Path::new("/tmp"), Some(&cmd()), false, &[]);
+        assert!(tagged(&agent), "{agent:?}");
+        // The tag is set before attaching (attach-session blocks until detach).
+        let tag_at = agent.iter().position(|a| a == AGENT_OPTION).unwrap();
+        let attach_at = agent.iter().position(|a| a == "attach-session").unwrap();
+        assert!(tag_at < attach_at);
+        let shell = client_args("s_2", Path::new("/tmp"), None, false, &[]);
+        assert!(!shell.iter().any(|a| a == AGENT_OPTION));
     }
 }

@@ -396,6 +396,16 @@ impl HarnessWorkspace {
         if let (Some(cmd), Some(path)) = (runtime_cmd.as_mut(), context_path.as_ref()) {
             agent_runtime::apply_task_context(cmd, kind, path);
         }
+        // A restart of a missing agent continues its last conversation in this
+        // folder, where the CLI can scope that to the folder (see
+        // `continue_args`). User overrides above are free-form lines and start
+        // fresh.
+        if self.continue_next_agent
+            && let Some(cmd) = runtime_cmd.as_mut()
+            && let Some(args) = agent_runtime::continue_args(kind, &cmd.args)
+        {
+            cmd.args = args;
+        }
         runtime_cmd
     }
 

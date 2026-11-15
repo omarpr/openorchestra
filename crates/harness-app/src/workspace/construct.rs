@@ -217,6 +217,9 @@ impl HarnessWorkspace {
             a2a_change_tx,
             a2a_inbox_tx,
             a2a_pending_inject: HashMap::new(),
+            missing_agents: Default::default(),
+            restart_tried: Default::default(),
+            continue_next_agent: false,
             a2a_links: Default::default(),
             new_target_repo,
             menu: None,
@@ -546,6 +549,29 @@ impl HarnessWorkspace {
             }
         })
         .detach();
+
+        // Missing task agents. Which panes should run an agent is read on the
+        // UI thread (cheap); asking tmux what is running happens off it.
+        if has_tmux {
+            cx.spawn(async move |view, cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_secs(3)).await;
+                    let Ok(expected) = view.update(cx, |ws, _| ws.task_panes_expecting_agents()) else {
+                        break;
+                    };
+                    if expected.is_empty() {
+                        continue;
+                    }
+                    let panes = cx.background_spawn(async move { crate::tmux::pane_commands() }).await;
+                    let Some(panes) = panes else { continue };
+                    let missing = crate::tmux::missing_agent_keys(&expected, &panes);
+                    if view.update(cx, |ws, cx| ws.set_missing_agents(missing, cx)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
 
         // Unstick agent pills. A status file left on waiting/running by a
         // process that died without writing "idle" (killed mid-dialog, crashed)
