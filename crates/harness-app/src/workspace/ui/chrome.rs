@@ -3,9 +3,23 @@
 
 use super::super::*;
 
+/// The top bar's height. The traffic lights' y offset in `main.rs` (12px)
+/// centres their 14px row on it.
+const TOP_BAR_H: f32 = 38.0;
+
+/// Room left of the top bar's content for the macOS traffic lights: the
+/// buttons plus the window's 1px border, matching zed's `TRAFFIC_LIGHT_PADDING`
+/// for current SDKs.
+const TRAFFIC_LIGHT_PADDING: f32 = 80.0;
+
 impl HarnessWorkspace {
 
-    pub(crate) fn render_top_bar(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The top bar, which is also the window's title bar (the native one is
+    /// transparent — see `main.rs`): it leaves room for the traffic lights,
+    /// drags the window, and zooms it on double-click, as a native bar would.
+    pub(crate) fn render_top_bar(&self, hx: &HarnessTheme, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Fullscreen hides the traffic lights, so their padding goes too.
+        let traffic_light_room = if window.is_fullscreen() { 12.0 } else { TRAFFIC_LIGHT_PADDING };
         let r = self.resolve();
         let branch = r.as_ref().map(|r| r.branch.clone()).unwrap_or_default();
         let (project, task) = self.location_names();
@@ -23,7 +37,12 @@ impl HarnessWorkspace {
             .tooltip(tip("Toggle sidebar (⌘B)"))
             .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
             .child("▤ sidebar")
-            .on_click(cx.listener(|ws, _, _, cx| ws.toggle_sidebar(cx)));
+            // Stop here so a double-click on the toggle doesn't also zoom the
+            // window through the bar's title-bar handler.
+            .on_click(cx.listener(|ws, _, _, cx| {
+                cx.stop_propagation();
+                ws.toggle_sidebar(cx);
+            }));
 
         // Tools panel visibility. Always available so Files/Git stay reachable
         // even when Review lives in a center tab.
@@ -39,17 +58,46 @@ impl HarnessWorkspace {
             .tooltip(tip("Toggle tools panel: Files / Git / Review (⌘⇧B)"))
             .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
             .child("tools ▤")
-            .on_click(cx.listener(|ws, _, window, cx| ws.toggle_diff(window, cx)));
+            .on_click(cx.listener(|ws, _, window, cx| {
+                cx.stop_propagation();
+                ws.toggle_diff(window, cx);
+            }));
 
         div()
+            .id("top-bar")
+            .window_control_area(gpui::WindowControlArea::Drag)
             .flex()
             .flex_none()
             .items_center()
-            .h(px(38.0))
-            .px_3()
+            .h(px(TOP_BAR_H))
+            .pl(px(traffic_light_room))
+            .pr_3()
             .bg(hx.bg0)
             .border_b_1()
             .border_color(hx.border)
+            // Zed's title bar does the same: arm on press, move on the first
+            // drag motion, disarm on release. Starting the move on press would
+            // swallow clicks meant for the toggles.
+            .on_mouse_down(MouseButton::Left, cx.listener(|ws, _: &MouseDownEvent, _, _| {
+                ws.titlebar_should_move = true;
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|ws, _: &MouseUpEvent, _, _| {
+                ws.titlebar_should_move = false;
+            }))
+            .on_mouse_down_out(cx.listener(|ws, _: &MouseDownEvent, _, _| {
+                ws.titlebar_should_move = false;
+            }))
+            .on_mouse_move(cx.listener(|ws, _: &MouseMoveEvent, window, _| {
+                if ws.titlebar_should_move {
+                    ws.titlebar_should_move = false;
+                    window.start_window_move();
+                }
+            }))
+            .on_click(|ev, window, _| {
+                if ev.click_count() == 2 {
+                    window.titlebar_double_click();
+                }
+            })
             // Left: sidebar toggle. Center: title. Right: tools panel toggle.
             .child(sidebar_toggle)
             .child(

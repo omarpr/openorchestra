@@ -514,6 +514,9 @@ pub struct HarnessWorkspace {
     /// phase), and whether the loop that repaints them is running.
     anim_clock: std::time::Instant,
     indicator_ticking: bool,
+    /// A press on the top bar that becomes a window move once the pointer
+    /// moves — deferred so clicks on the bar's own buttons still land.
+    titlebar_should_move: bool,
     /// A shortcut row waiting for its new chord (`shortcuts::key_id`).
     rebinding: Option<String>,
     /// Focus target while capturing a chord.

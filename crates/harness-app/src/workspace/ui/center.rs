@@ -332,8 +332,10 @@ impl HarnessWorkspace {
         let ghost_label = tab.title.clone();
         let ghost_theme = hx.clone();
         let hover_bg = hx.surface_hover;
+        let group = gpui::SharedString::from(format!("tab-{}", tab.id));
         div()
             .id(("tab", tab.id as usize))
+            .group(group.clone())
             .flex()
             .items_center()
             .gap_1()
@@ -348,8 +350,9 @@ impl HarnessWorkspace {
             .border_1()
             .border_color(if active { hx.border } else { Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 } })
             .when(active, |d| d.bg(hx.bg0))
+            // The UI face, like the rest of the chrome: the labels are names,
+            // not code, and monospace here was the one place it stood out.
             .text_xs()
-            .font_family(hx.font_mono)
             .text_color(if active { hx.tx0 } else { hx.tx2 })
             .when(
                 matches!(
@@ -406,6 +409,10 @@ impl HarnessWorkspace {
                     .text_color(hx.tx2)
                     .cursor_pointer()
                     .tooltip(tip("Close tab"))
+                    // On the active tab, and on whichever one is hovered: an ×
+                    // on every tab was as loud as the labels themselves. It is
+                    // only faded, so the tab keeps its width.
+                    .when(!active, |d| d.opacity(0.0).group_hover(group, |s| s.opacity(1.0)))
                     .hover(|d| d.bg(hx.surface).text_color(hx.red))
                     .child("×")
                     .on_click(cx.listener(move |ws, _, window, cx| {

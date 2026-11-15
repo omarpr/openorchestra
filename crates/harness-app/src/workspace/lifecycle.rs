@@ -127,6 +127,31 @@ struct EndOutcome {
     errors: Vec<String>,
 }
 
+/// The repo's hooks if it has teardown scripts to run, `None` if it has none,
+/// or the message to show when they can't run.
+///
+/// Trust covers a repo's whole hooks file, so a repo with untrusted *setup*
+/// scripts fails `load_trusted` even when its teardown list is empty. That
+/// isn't worth a warning at delete time: nothing was skipped.
+fn teardown_hooks(repo_root: &Path, data_dir: &Path, repo: &str) -> Result<Option<HooksConfig>, String> {
+    match HooksConfig::load_trusted(repo_root, data_dir, repo) {
+        Ok(hooks) if hooks.teardown.is_empty() => Ok(None),
+        Ok(hooks) => Ok(Some(hooks)),
+        // Never approved: skip their scripts, not the removal.
+        Err(HooksError::Untrusted { .. }) => {
+            let has_teardown = HooksConfig::load(repo_root, data_dir, repo)
+                .map(|c| !c.teardown.is_empty())
+                .unwrap_or(true);
+            if has_teardown {
+                Err(format!("{repo}: teardown skipped (hooks not trusted)"))
+            } else {
+                Ok(None)
+            }
+        }
+        Err(e) => Err(format!("{repo} hooks: {e}")),
+    }
+}
+
 /// Teardown hooks, then git. Blocking: run off-thread.
 fn run_end(plan: &EndPlan, data_dir: &Path) -> EndOutcome {
     let git = GitWorktrees::new(SystemRunner);
@@ -147,17 +172,14 @@ fn run_end(plan: &EndPlan, data_dir: &Path) -> EndOutcome {
             task_id: m.task_id.clone(),
             home_worktree: plan.home_worktree.clone(),
         };
-        match HooksConfig::load_trusted(&m.repo_root, data_dir, &m.repo) {
-            Ok(hooks) => {
+        match teardown_hooks(&m.repo_root, data_dir, &m.repo) {
+            Ok(Some(hooks)) => {
                 if let Err(e) = hooks.run_teardown(git.runner(), &env) {
                     errors.push(format!("{} teardown: {e}", m.repo));
                 }
             }
-            // Never approved: skip their scripts, not the removal.
-            Err(HooksError::Untrusted { .. }) => {
-                errors.push(format!("{}: teardown skipped (hooks not trusted)", m.repo));
-            }
-            Err(e) => errors.push(format!("{} hooks: {e}", m.repo)),
+            Ok(None) => {}
+            Err(e) => errors.push(e),
         }
     }
 
@@ -425,6 +447,52 @@ mod tests {
         // Unpushed commits stay on the branch, which archive keeps.
         assert!(!needs_confirmation(EndKind::Archive, &[loss(0, 5)]));
         assert!(needs_confirmation(EndKind::Archive, &[loss(0, 0), loss(2, 0)]));
+    }
+
+    /// A repo whose committed hooks list `setup` and `teardown` scripts, with
+    /// nothing approved yet.
+    fn untrusted_repo(setup: bool, teardown: bool) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let data = tmp.path().join("data");
+        let hooks = repo.join(".openorchestra");
+        std::fs::create_dir_all(hooks.join("scripts")).unwrap();
+        let list = |on: bool, name: &str| if on { format!("[\"scripts/{name}\"]") } else { "[]".into() };
+        std::fs::write(
+            hooks.join("hooks.toml"),
+            format!(
+                "[setup]\nscripts = {}\n\n[teardown]\nscripts = {}\n",
+                list(setup, "setup.sh"),
+                list(teardown, "teardown.sh")
+            ),
+        )
+        .unwrap();
+        std::fs::write(hooks.join("scripts/setup.sh"), "echo up\n").unwrap();
+        std::fs::write(hooks.join("scripts/teardown.sh"), "echo down\n").unwrap();
+        (tmp, repo, data)
+    }
+
+    /// Untrusted setup-only hooks have no teardown to skip, so ending a
+    /// worktree must not warn about one.
+    #[test]
+    fn untrusted_setup_only_hooks_skip_nothing_at_teardown() {
+        let (_tmp, repo, data) = untrusted_repo(true, false);
+        assert!(matches!(teardown_hooks(&repo, &data, "repo"), Ok(None)));
+    }
+
+    #[test]
+    fn untrusted_teardown_scripts_are_reported_as_skipped() {
+        let (_tmp, repo, data) = untrusted_repo(true, true);
+        let err = teardown_hooks(&repo, &data, "repo").unwrap_err();
+        assert_eq!(err, "repo: teardown skipped (hooks not trusted)");
+    }
+
+    #[test]
+    fn trusted_teardown_scripts_load() {
+        let (_tmp, repo, data) = untrusted_repo(false, true);
+        HookTrust::trust(&data, &repo).unwrap();
+        let cfg = teardown_hooks(&repo, &data, "repo").unwrap().expect("teardown to run");
+        assert_eq!(cfg.teardown.len(), 1);
     }
 
     /// The losses a real worktree reports: uncommitted files and commits that

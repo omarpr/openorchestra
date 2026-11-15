@@ -18,11 +18,15 @@ impl HarnessWorkspace {
         let count = repo.worktrees.len();
 
         // A small icon button in the repo header, styled like the section `+`
-        // controls.
+        // controls. Shown only while the header is hovered (or its menu is
+        // open): on every project at once they were clutter, and they are
+        // second-nature targets for the row you're already pointing at.
+        let header_group = repo_element_id("repo-header", &repo.name);
+        let menu_open = self.project_menu.as_ref().is_some_and(|(r, _, _)| r == &repo.name);
         let header_icon = |id_prefix: &'static str, glyph: AnyElement, tip_text: &'static str| {
             div()
                 .id(repo_element_id(id_prefix, &repo.name))
-                .group(repo_element_id(id_prefix, &repo.name).to_string())
+                .when(!menu_open, |d| d.opacity(0.0).group_hover(header_group.clone(), |s| s.opacity(1.0)))
                 .size(px(20.0))
                 .flex()
                 .flex_none()
@@ -39,6 +43,7 @@ impl HarnessWorkspace {
         let text = |glyph: &'static str| div().child(glyph).into_any_element();
 
         let header = div()
+            .group(header_group.clone())
             .flex()
             .items_center()
             .gap_2()
@@ -194,16 +199,7 @@ impl HarnessWorkspace {
                 .child(wt.name.clone())
                 .into_any_element(),
         };
-        let mut badges = div().flex().flex_none().items_center().gap_1();
-        if let Some(m) = member {
-            for (n, glyph, color) in [(m.ahead, "↑", hx.green), (m.behind, "↓", hx.amber), (m.dirty, "~", hx.amber)] {
-                if n > 0 {
-                    badges = badges.child(
-                        div().text_size(px(10.0)).font_family(hx.font_mono).text_color(color).child(format!("{glyph}{n}")),
-                    );
-                }
-            }
-        }
+        let counts = member.and_then(|m| git_counts(hx, m.ahead, m.behind, m.dirty));
         div()
             .id(gpui::SharedString::from(format!("project-wt-{}", wt.id)))
             .flex()
@@ -213,14 +209,13 @@ impl HarnessWorkspace {
             .px_2()
             .py_1()
             .rounded_md()
-            // Same accent left-border the selected main entry gets; the bare
-            // surface fill alone barely shows against the sidebar.
-            .when(selected, |d| d.bg(hx.surface).border_l_1().border_color(hx.accent))
+            .when(selected, |d| d.bg(selected_row_bg(hx)))
             // Going away: dimmed and inert until it's gone.
             .when(ending.is_some(), |d| d.opacity(0.55))
             .when(ending.is_none(), |d| {
+                let hover_bg = row_hover_bg(hx, selected);
                 d.cursor_pointer()
-                    .hover(|d| d.bg(hx.surface_hover))
+                    .hover(move |d| d.bg(hover_bg))
                     .on_click(cx.listener(move |ws, _, window, cx| ws.select(sel.clone(), window, cx)))
             })
             // The same Rename / Archive / Delete menu the TASKS card has —
@@ -236,36 +231,40 @@ impl HarnessWorkspace {
             // Name and branch both ellipsize in a narrow sidebar; the tooltip
             // always has them in full.
             .tooltip(tip(format!("{} · {} — right-click to rename, archive or delete", wt.name, wt.branch)))
-            .child(
-                div()
-                    .size(px(24.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_md()
-                    .bg(hx.surface)
-                    .text_xs()
-                    .text_color(hx.tx1)
-                    .child("⑂"),
-            )
+            // Grey while it's being archived or deleted: the busy pill says
+            // so, and a state colour there would be about an agent going away.
+            .child(state_tile(
+                hx,
+                ICON_WORKTREE,
+                if ending.is_some() { AgentState::Unknown } else { agent },
+                self.anim_secs(),
+            ))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .child(name_el)
+                    // Branch, then its git counts on the same line: on a line
+                    // of their own the counts made rows uneven heights.
                     .child(
                         div()
-                            .text_xs()
-                            .font_family(hx.font_mono)
-                            .text_color(hx.tx2)
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(wt.branch.clone()),
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .text_xs()
+                                    .font_family(hx.font_mono)
+                                    .text_color(hx.tx2)
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .child(wt.branch.clone()),
+                            )
+                            .children(counts),
                     ),
             )
-            .child(badges)
             .child(match ending {
                 Some(kind) => busy_pill(hx, kind.doing_label(), self.anim_secs()).into_any_element(),
                 None => agent_pill(hx, agent, self.anim_secs()).into_any_element(),
@@ -386,23 +385,65 @@ impl HarnessWorkspace {
             .copied()
             .unwrap_or(AgentState::Unknown);
 
-        let header = div()
+        // The branch HEAD is on is the row's name — it is what you scan for.
+        // Titled "main" with the branch underneath, a main checkout on
+        // `review-fixes` read as a contradiction. Git counts and CI share the
+        // subtitle line, so every row is the same two lines tall.
+        let fs = self.forge_status.get(&repo.default_branch);
+        let ci = fs.and_then(|s| ci_summary(hx, &s.checks)).map(|(c, label)| {
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap_1()
+                .text_xs()
+                .text_color(c)
+                .child(div().size(px(5.0)).rounded_full().bg(c))
+                .child(label)
+        });
+        // "<default branch> · ↑7 ~9": the branch this checkout tracks says
+        // which row it is without a phrase for it, and the dot only appears
+        // when there are counts to separate.
+        let counts = git_counts(hx, repo.ahead, repo.behind, repo.dirty);
+        let subtitle = div()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .text_xs()
+            .text_color(hx.tx2)
+            .child(
+                div()
+                    .min_w_0()
+                    .font_family(hx.font_mono)
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(repo.default_branch.clone()),
+            )
+            .when(counts.is_some(), |d| d.child(div().flex_none().child("·")))
+            .children(counts)
+            .children(ci);
+
+        div()
+            .id(repo_element_id(ID_MAIN, &repo.name))
             .flex()
             .items_center()
             .gap_2()
-            .child(
-                div()
-                    .size(px(24.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_md()
-                    .bg(tint(hx.accent, 0.15))
-                    .text_xs()
-                    .text_color(hx.accent)
-                    .child("⌂"),
-            )
+            .mx_1()
+            .my_0p5()
+            .p_2()
+            .rounded_md()
+            .when(selected, |d| d.bg(selected_row_bg(hx)))
+            .cursor_pointer()
+            .hover({
+                let hover_bg = row_hover_bg(hx, selected);
+                move |d| d.bg(hover_bg)
+            })
+            .tooltip(tip(format!("{} · main checkout on {}", repo.name, repo.head_branch)))
+            .on_click(cx.listener(move |ws, _, window, cx| {
+                ws.select(Selection::Main(repo_name.clone()), window, cx);
+            }))
+            .child(state_tile(hx, ICON_MAIN_CHECKOUT, agent, self.anim_secs()))
             .child(
                 div()
                     .flex_1()
@@ -414,79 +455,11 @@ impl HarnessWorkspace {
                             .whitespace_nowrap()
                             .overflow_hidden()
                             .text_ellipsis()
-                            .child("main"),
+                            .child(repo.head_branch.clone()),
                     )
-                    // The main checkout usually sits on the default branch, but
-                    // it can be on a feature branch — show where HEAD actually
-                    // is. Only the default branch earns the "default ·" tag; any
-                    // other branch is shown by name so it never reads as master.
-                    //
-                    // Clipped like the task rows: `min_w_0` above lets the column
-                    // shrink, but without this the text paints straight over the
-                    // status pill instead of ellipsing.
-                    .child(div().text_xs().text_color(hx.tx2).whitespace_nowrap().overflow_hidden().text_ellipsis().child(if repo.head_branch == repo.default_branch {
-                        format!("default · {}", repo.default_branch)
-                    } else {
-                        repo.head_branch.clone()
-                    })),
+                    .child(subtitle),
             )
-            .child(agent_pill(hx, agent, self.anim_secs()));
-
-        // Badges mirror the worktree card's, minus the PR badge: a PR is a
-        // feature-branch concept, and main is the target, not a PR head. CI is
-        // the default branch's checks.
-        let fs = self.forge_status.get(&repo.default_branch);
-        let mut badges = div().flex().items_center().gap_2().mt_1();
-        if repo.ahead > 0 {
-            badges = badges.child(div().text_xs().text_color(hx.green).child(format!("↑{}", repo.ahead)));
-        }
-        if repo.behind > 0 {
-            badges = badges.child(div().text_xs().text_color(hx.amber).child(format!("↓{}", repo.behind)));
-        }
-        if repo.dirty > 0 {
-            badges = badges.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .text_xs()
-                    .text_color(hx.amber)
-                    .child(div().size(px(5.0)).rounded_full().bg(hx.amber))
-                    .child(format!("~{}", repo.dirty)),
-            );
-        }
-        if let Some((c, label)) = fs.and_then(|s| ci_summary(hx, &s.checks)) {
-            badges = badges.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .text_xs()
-                    .text_color(c)
-                    .child(div().size(px(5.0)).rounded_full().bg(c))
-                    .child(label),
-            );
-        }
-
-        div()
-            .id(repo_element_id(ID_MAIN, &repo.name))
-            .flex()
-            .flex_col()
-            .mx_1()
-            .my_0p5()
-            .p_2()
-            .rounded_md()
-            // Same accent left-border a selected worktree card gets, so "which
-            // entry is selected" reads the same whether it's main or a worktree.
-            .when(selected, |d| d.bg(hx.surface).border_l_1().border_color(hx.accent))
-            .cursor_pointer()
-            .hover(|d| d.bg(hx.surface))
-            .tooltip(tip(format!("{} · main checkout on {}", repo.name, repo.head_branch)))
-            .on_click(cx.listener(move |ws, _, window, cx| {
-                ws.select(Selection::Main(repo_name.clone()), window, cx);
-            }))
-            .child(header)
-            .child(badges)
+            .child(agent_pill(hx, agent, self.anim_secs()))
     }
 
     /// The project header's ⋯ / right-click menu.

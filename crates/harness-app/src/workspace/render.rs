@@ -68,7 +68,7 @@ impl Render for HarnessWorkspace {
             .bg(hx.bg0)
             .font_family(hx.font_ui)
             .text_color(hx.tx0)
-            .child(self.render_top_bar(&hx, cx))
+            .child(self.render_top_bar(&hx, window, cx))
             .children(self.render_task_strip(&hx, cx))
             .child(
                 div()
@@ -412,7 +412,6 @@ impl HarnessWorkspace {
 /// In place of the agent pill while a row's worktree is being archived or
 /// deleted: the same spinning arc, in grey, saying which.
 pub(crate) fn busy_pill(hx: &HarnessTheme, label: &'static str, t: f32) -> impl IntoElement {
-    let angle = (t / SPIN_PERIOD).fract() * std::f32::consts::TAU;
     div()
         .flex_none()
         .flex()
@@ -424,79 +423,57 @@ pub(crate) fn busy_pill(hx: &HarnessTheme, label: &'static str, t: f32) -> impl 
         .bg(hx.surface2)
         .text_xs()
         .text_color(hx.tx1)
-        .child(
-            div()
-                .relative()
-                .size(px(10.0))
-                .child(div().absolute().size_full().rounded_full().border_1().border_color(tint(hx.tx2, 0.4)))
-                .child(
-                    gpui::svg()
-                        .absolute()
-                        .size_full()
-                        .path("icons/load_circle.svg")
-                        .text_color(hx.tx1)
-                        .with_transformation(gpui::Transformation::rotate(gpui::radians(angle))),
-                ),
-        )
+        .child(spin_arc(hx.tx1, tint(hx.tx2, 0.4), 10.0, t))
         .child(label)
 }
 
+/// The spinning arc every "working" indicator shares: `color` arc turning on a
+/// faint full `track` ring, `size` px square. `t` is the shared animation
+/// clock, so every spinner on screen turns in step.
+pub(crate) fn spin_arc(color: gpui::Rgba, track: gpui::Rgba, size: f32, t: f32) -> gpui::Div {
+    let angle = (t / SPIN_PERIOD).fract() * std::f32::consts::TAU;
+    div()
+        .flex_none()
+        .relative()
+        .size(px(size))
+        .child(div().absolute().size_full().rounded_full().border_1().border_color(track))
+        .child(
+            gpui::svg()
+                .absolute()
+                .size_full()
+                .path("icons/load_circle.svg")
+                .text_color(color)
+                .with_transformation(gpui::Transformation::rotate(gpui::radians(angle))),
+        )
+}
+
 /// The agent state pill: a spinning accent arc while running, a breathing
-/// amber dot while waiting on you, a still grey ring at rest. `t` is the
-/// shared animation clock in seconds.
-pub(crate) fn agent_pill(hx: &HarnessTheme, state: AgentState, t: f32) -> impl IntoElement {
+/// amber dot while waiting on you. `t` is the shared animation clock in
+/// seconds.
+///
+/// Nothing at all at rest. Nearly every row is idle nearly all the time, so an
+/// IDLE pill on each one was noise that also made RUNNING and WAITING — the
+/// states worth a glance — harder to spot.
+pub(crate) fn agent_pill(hx: &HarnessTheme, state: AgentState, t: f32) -> AnyElement {
     let (color, label) = match state {
         AgentState::Running => (hx.accent, "RUNNING"),
         AgentState::Waiting => (hx.amber, "WAITING"),
-        AgentState::Idle | AgentState::Unknown => (hx.tx2, "IDLE"),
+        AgentState::Idle | AgentState::Unknown => return div().into_any_element(),
     };
-    let bg = if matches!(state, AgentState::Idle | AgentState::Unknown) {
-        hx.surface2
-    } else {
-        tint(color, 0.16)
-    };
+    let bg = tint(color, 0.16);
     let size = px(10.0);
-    let indicator = match state {
-        AgentState::Running => {
-            let angle = (t / SPIN_PERIOD).fract() * std::f32::consts::TAU;
-            div()
-                .relative()
-                .size(size)
-                // A faint full ring as the track the arc runs on.
-                .child(
-                    div()
-                        .absolute()
-                        .size_full()
-                        .rounded_full()
-                        .border_1()
-                        .border_color(tint(color, 0.3)),
-                )
-                .child(
-                    gpui::svg()
-                        .absolute()
-                        .size_full()
-                        .path("icons/load_circle.svg")
-                        .text_color(color)
-                        .with_transformation(gpui::Transformation::rotate(gpui::radians(angle))),
-                )
-        }
-        AgentState::Waiting => {
-            // Eased breathing between 35% and 100%.
-            let phase = (t / PULSE_PERIOD).fract() * std::f32::consts::TAU;
-            let level = 0.35 + 0.65 * (0.5 - 0.5 * phase.cos());
-            div()
-                .size(size)
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(div().size(px(7.0)).rounded_full().bg(color).opacity(level))
-        }
-        AgentState::Idle | AgentState::Unknown => div()
+    let indicator = if state == AgentState::Running {
+        spin_arc(color, tint(color, 0.3), 10.0, t)
+    } else {
+        // Waiting: eased breathing between 35% and 100%.
+        let phase = (t / PULSE_PERIOD).fract() * std::f32::consts::TAU;
+        let level = 0.35 + 0.65 * (0.5 - 0.5 * phase.cos());
+        div()
             .size(size)
             .flex()
             .items_center()
             .justify_center()
-            .child(div().size(px(7.0)).rounded_full().border_1().border_color(color)),
+            .child(div().size(px(7.0)).rounded_full().bg(color).opacity(level))
     };
     div()
         .flex_none()
@@ -511,6 +488,82 @@ pub(crate) fn agent_pill(hx: &HarnessTheme, state: AgentState, t: f32) -> impl I
         .text_color(color)
         .child(indicator)
         .child(label)
+        .into_any_element()
+}
+
+/// The sidebar's row icons, as SVG asset paths. Real icons rather than text
+/// glyphs: a `⌂` sits wherever the font's metrics put it, which was visibly
+/// below the middle of its tile.
+pub(crate) const ICON_MAIN_CHECKOUT: &str = "icons/oo/house.svg";
+pub(crate) const ICON_WORKTREE: &str = "icons/git_branch.svg";
+
+/// A sidebar row's leading icon tile (main checkout, worktree), coloured
+/// by its agent: grey at rest, accent while running, amber with a breathing
+/// glow while it waits on you. Colour only where it says something — at rest
+/// every row is the same quiet grey, so the one that needs you stands out.
+/// The glow breathes on the same clock and period as the WAITING pill's dot.
+pub(crate) fn state_tile(hx: &HarnessTheme, icon: &'static str, state: AgentState, t: f32) -> gpui::Div {
+    let (fg, tile) = match state {
+        AgentState::Running => (hx.accent, div().bg(tint(hx.accent, 0.22)).border_color(tint(hx.accent, 0.5))),
+        AgentState::Waiting => {
+            let phase = (t / PULSE_PERIOD).fract() * std::f32::consts::TAU;
+            let level = 0.35 + 0.65 * (0.5 - 0.5 * phase.cos());
+            (
+                hx.amber,
+                div().bg(tint(hx.amber, 0.2)).border_color(tint(hx.amber, 0.6)).shadow(vec![gpui::BoxShadow {
+                    color: tint(hx.amber, 0.45 * level).into(),
+                    offset: gpui::point(px(0.0), px(0.0)),
+                    blur_radius: px(10.0),
+                    spread_radius: px(0.0),
+                    inset: false,
+                }]),
+            )
+        }
+        // Fill and outline come from the text colour, not a surface step: in
+        // themes whose `surface2` is close to the sidebar's own colour, the
+        // resting tile vanished and left a lone glyph.
+        AgentState::Idle | AgentState::Unknown => {
+            (hx.tx1, div().bg(tint(hx.tx2, 0.12)).border_color(tint(hx.tx2, 0.35)))
+        }
+    };
+    tile.size(px(24.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .border_1()
+        .child(gpui::svg().size(px(14.0)).flex_none().path(icon).text_color(fg))
+}
+
+/// The fill a selected sidebar row gets. An accent wash rather than the
+/// neutral `surface` step plus a 1px accent edge: that pair barely showed
+/// against the sidebar, and the edge read as part of the tree's guide line.
+pub(crate) fn selected_row_bg(hx: &HarnessTheme) -> Rgba {
+    tint(hx.accent, 0.2)
+}
+
+/// The hover fill for a selectable sidebar row: a faint accent wash, or a
+/// stronger one on the selected row. Hover paints over the selected fill, and
+/// the pointer is still on a row just after it's clicked — with a neutral
+/// hover, the click showed grey instead of the selection and looked like it
+/// had done nothing.
+pub(crate) fn row_hover_bg(hx: &HarnessTheme, selected: bool) -> Rgba {
+    tint(hx.accent, if selected { 0.26 } else { 0.09 })
+}
+
+/// A row's git counts — `↑ahead ↓behind ~dirty`, zeros left out — sized to
+/// sit on the row's subtitle line after its branch. `None` when all are zero.
+pub(crate) fn git_counts(hx: &HarnessTheme, ahead: usize, behind: usize, dirty: usize) -> Option<gpui::Div> {
+    let mut row = div().flex().flex_none().items_center().gap_1().text_xs().font_family(hx.font_mono);
+    let mut any = false;
+    for (n, glyph, color) in [(ahead, "↑", hx.green), (behind, "↓", hx.amber), (dirty, "~", hx.amber)] {
+        if n > 0 {
+            any = true;
+            row = row.child(div().text_color(color).child(format!("{glyph}{n}")));
+        }
+    }
+    any.then_some(row)
 }
 
 pub(crate) fn ci_summary(hx: &HarnessTheme, checks: &[forge::CheckRun]) -> Option<(Rgba, &'static str)> {

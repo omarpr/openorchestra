@@ -239,7 +239,11 @@ impl HarnessWorkspace {
                 .occlude()
                 .absolute()
                 .bottom(px(bottom + FIGURE * 0.42))
-                .px_2()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .pl_2()
+                .pr_1p5()
                 .py_0p5()
                 .rounded_full()
                 .bg(hx.surface2)
@@ -249,6 +253,14 @@ impl HarnessWorkspace {
                 .text_color(hx.tx1)
                 .whitespace_nowrap()
                 .child(if n == 1 { "1 agent working".to_string() } else { format!("{n} agents working") })
+                // Same arc as the sidebar's RUNNING pill, on the same clock,
+                // so the badge and the rows it summarises spin together.
+                .child(spin_arc(
+                    hx.accent,
+                    tint(hx.accent, 0.3),
+                    10.0,
+                    self.anim_secs(),
+                ))
                 .on_hover(cx.listener(|ws, hovered: &bool, _, cx| {
                     ws.conductor_hovered = *hovered;
                     cx.notify();

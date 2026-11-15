@@ -191,6 +191,7 @@ impl HarnessWorkspace {
             conductor_drag: None,
             anim_clock: std::time::Instant::now(),
             indicator_ticking: false,
+            titlebar_should_move: false,
             rebinding: None,
             rebind_focus: cx.focus_handle(),
             md_preview: None,

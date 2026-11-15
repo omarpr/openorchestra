@@ -94,6 +94,10 @@ impl HarnessWorkspace {
     /// STATS is the only section without a top border — it sits directly under
     /// the window chrome, which already draws that edge. Every other section
     /// carries one so the sidebar reads as stacked bands.
+    ///
+    /// Only a collapsed header draws a bottom rule. An open section's content
+    /// hangs straight off its header: a rule between them made PROJECTS read
+    /// as an empty band with the projects in some unlabelled section below.
     fn section_header(
         &self,
         hx: &HarnessTheme,
@@ -112,7 +116,7 @@ impl HarnessWorkspace {
             .h(px(SECTION_HEADER_H))
             .px_3()
             .when(section != SidebarSection::Stats, |d| d.border_t_1())
-            .border_b_1()
+            .when(collapsed, |d| d.border_b_1())
             .border_color(hx.border)
             .cursor_pointer()
             .hover(|d| d.bg(hx.surface))
@@ -214,13 +218,31 @@ impl HarnessWorkspace {
             .flex_col()
             .flex_none()
             .px_3()
-            .py_1p5()
+            .pt_0p5()
+            .pb_2()
             .gap_0p5()
-            .border_b_1()
-            .border_color(hx.border)
             .tooltip(move |_window, cx| cx.new(|_| ResourceTooltip { rows: rows.clone() }).into())
             .child(series("CPU", cpu_label, cpu_hist, hx.accent))
             .child(series("MEM", mem_label, mem_hist, hx.green))
+    }
+
+    /// While STATS is collapsed, its totals ride on the header line
+    /// ("34% · 618 MB") so collapsing it hides the sparklines, not the numbers.
+    /// `None` while open (the band below shows them) or before the first sample.
+    fn stats_summary(&self, hx: &HarnessTheme) -> Option<AnyElement> {
+        use crate::resource_monitor::{fmt_cpu, fmt_mem};
+        if !self.section_collapsed(SidebarSection::Stats) {
+            return None;
+        }
+        let total = self.resource.as_ref()?.total;
+        Some(
+            div()
+                .flex_none()
+                .text_xs()
+                .text_color(hx.tx1)
+                .child(format!("{} · {}", fmt_cpu(total.cpu_pct), fmt_mem(total.rss_bytes)))
+                .into_any_element(),
+        )
     }
 
     /// PROJECTS' trailing `+` — adds a git repository.
@@ -258,7 +280,7 @@ impl HarnessWorkspace {
             .border_r_1()
             .border_color(hx.border)
             .overflow_hidden()
-            .child(self.section_header(hx, SidebarSection::Stats, None, cx));
+            .child(self.section_header(hx, SidebarSection::Stats, self.stats_summary(hx), cx));
         if !self.section_collapsed(SidebarSection::Stats) {
             column = column.child(self.render_resource_band(hx, cx));
         }
@@ -315,6 +337,19 @@ impl HarnessWorkspace {
             // otherwise squash to fit before the body ever scrolled.
             for task in &self.data.tasks {
                 body = body.child(div().flex_none().child(self.render_task_row(hx, task, cx)));
+            }
+            // An open TASKS with nothing in it read as a stray header; one
+            // muted line says what the section is for and how to fill it.
+            if self.data.tasks.is_empty() {
+                body = body.child(
+                    div()
+                        .flex_none()
+                        .px_3()
+                        .pb_2()
+                        .text_xs()
+                        .text_color(hx.tx2)
+                        .child("No tasks — + to start one"),
+                );
             }
             tasks_col = tasks_col.child(body);
         }
@@ -566,15 +601,16 @@ impl HarnessWorkspace {
                     .py_0p5()
                     .rounded_md()
                     // The whole block is already `surface` while its task is
-                    // selected, so a `surface` fill here was invisible. Use the
-                    // accent left-border PROJECTS rows use for "selected".
-                    .when(mem_selected, |d| {
-                        d.bg(hx.surface_hover).border_l_1().border_color(hx.accent)
-                    })
+                    // selected, so a `surface` fill here was invisible. The
+                    // accent wash every selected sidebar row uses shows on it.
+                    .when(mem_selected, |d| d.bg(selected_row_bg(hx)))
                     .cursor_pointer()
                     // The second step of the hover: the block is already lifted
                     // to `surface`, so this marks which row a click would take.
-                    .hover(|d| d.bg(hx.surface_hover))
+                    .hover({
+                        let hover_bg = row_hover_bg(hx, mem_selected);
+                        move |d| d.bg(hover_bg)
+                    })
                     .on_click(cx.listener(move |ws, _, window, cx| {
                         ws.select(
                             Selection::Task {

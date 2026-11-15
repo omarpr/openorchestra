@@ -760,6 +760,41 @@ impl HarnessWorkspace {
             reset = reset.text_color(hx.tx2);
         }
         body = body.child(reset);
+
+        // ---- Terminals on quit ----------------------------------------------
+        // The same choice the quit prompt's "Remember" box saves. Without this
+        // row, a remembered answer could only be undone by editing prefs.json.
+        {
+            let current = self.prefs.close_terminals_on_exit;
+            let mut row = div().flex().gap_1p5().pb_1();
+            for (label, value) in [
+                ("Ask", None),
+                ("Keep running", Some(false)),
+                ("Close", Some(true)),
+            ] {
+                row = row.child(
+                    div()
+                        .id(gpui::SharedString::from(format!("quit-terminals-{label}")))
+                        .child(chip(label.to_string(), current == value, hx))
+                        .on_click(cx.listener(move |ws, _, _, cx| {
+                            cx.stop_propagation();
+                            ws.prefs.close_terminals_on_exit = value;
+                            save_prefs_to(&ws.prefs_path, &ws.prefs);
+                            cx.notify();
+                        })),
+                );
+            }
+            body = body
+                .child(section_title("Terminals on quit"))
+                .child(row)
+                .child(
+                    div()
+                        .pb_1()
+                        .text_xs()
+                        .text_color(hx.tx2)
+                        .child("Keep running leaves agent tmux sessions alive so they reattach on the next launch."),
+                );
+        }
         }
 
         // Keyboard shortcuts: their own tab. They used to trail the Agents

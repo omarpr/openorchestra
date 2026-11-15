@@ -8,6 +8,7 @@
 // The harness-theme `json!` literal (Spike 3c) nests past the default limit.
 #![recursion_limit = "256"]
 
+mod app_assets;
 mod chat_pane;
 mod conductor;
 mod data;
@@ -132,7 +133,7 @@ fn main() {
     // through the app's AssetSource at paint time, and gpui's default source
     // is empty: without this the file tree renders as bare text with
     // invisible, unclickable disclosure arrows.
-    gpui_platform::application().with_assets(assets::Assets).run(move |cx: &mut App| {
+    gpui_platform::application().with_assets(app_assets::AppAssets).run(move |cx: &mut App| {
         // Fonts ship inside the same asset tree but are NOT auto-loaded;
         // zed's main.rs does this same walk. Without it the default ui font
         // ("Zed Plex Sans", from the default settings we DO load) resolves to
@@ -313,9 +314,14 @@ fn main() {
                 // Space hides the menu bar, and the menu is now where
                 // Settings lives. The bounds are the restore size.
                 window_bounds: Some(WindowBounds::Maximized(bounds)),
+                // The top bar *is* the title bar: the native one only repeated
+                // the project name the top bar already shows, and cost a row.
+                // The traffic lights sit in the top bar's left padding,
+                // vertically centred on its 38px (see `TOP_BAR_H`).
                 titlebar: Some(TitlebarOptions {
                     title: Some("openOrchestra".into()),
-                    ..Default::default()
+                    appears_transparent: true,
+                    traffic_light_position: Some(gpui::point(gpui::px(12.0), gpui::px(12.0))),
                 }),
                 ..Default::default()
             },
