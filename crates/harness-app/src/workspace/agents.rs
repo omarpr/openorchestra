@@ -18,8 +18,8 @@ pub(crate) fn agent_display(kind: &AgentKind) -> String {
     }
 }
 
-/// An agent's monogram mark and brand-adjacent color, shared by the ＋ menu
-/// and the settings screen.
+/// An agent's fallback monogram and color, used for custom agents without a
+/// bundled brand logo.
 pub(crate) fn agent_mark(kind: &AgentKind) -> (&'static str, Rgba) {
     match kind {
         AgentKind::Pi => ("π", rgb(0x8b7cf6)),
@@ -28,6 +28,42 @@ pub(crate) fn agent_mark(kind: &AgentKind) -> (&'static str, Rgba) {
         AgentKind::Kimi => ("K", rgb(0x4f9cf9)),
         AgentKind::OpenCode => ("⟡", rgb(0x3fb950)),
         AgentKind::Other(_) => ("◇", rgb(0x9aa3af)),
+    }
+}
+
+/// Render a bundled agent brand mark, falling back to the custom-agent
+/// monogram where the catalog has no logo.
+pub(crate) fn agent_icon(kind: &AgentKind, size: f32) -> AnyElement {
+    let (glyph, color) = agent_mark(kind);
+    let logo = match kind {
+        AgentKind::Pi => Some("pi"),
+        AgentKind::ClaudeCode => Some("claudecode"),
+        AgentKind::Codex => Some("codex"),
+        AgentKind::Kimi => Some("kimi"),
+        AgentKind::OpenCode => Some("opencode"),
+        AgentKind::Other(slug) if matches!(slug.as_str(), "cursor" | "cursor-agent") => {
+            Some("cursor")
+        }
+        AgentKind::Other(_) => None,
+    };
+
+    if let Some(logo) = logo {
+        svg()
+            .path(format!("icons/oo/agents/{logo}.svg"))
+            .size(px(size))
+            .text_color(color)
+            .into_any_element()
+    } else {
+        div()
+            .size(px(size))
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_xs()
+            .font_weight(gpui::FontWeight::BOLD)
+            .text_color(color)
+            .child(glyph)
+            .into_any_element()
     }
 }
 

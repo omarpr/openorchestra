@@ -18,7 +18,7 @@ use std::time::Duration;
 use gpui::{
     AnyElement, App, AppContext, Context, Entity, EntityId, FocusHandle, Focusable, IntoElement,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
-    PathPromptOptions, Pixels, Render, Rgba, Styled, Window, div, prelude::*, px, rgb, rgba,
+    PathPromptOptions, Pixels, Render, Rgba, Styled, Window, div, prelude::*, px, rgb, rgba, svg,
 };
 
 use editor::Editor;

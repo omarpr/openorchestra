@@ -365,14 +365,7 @@ impl HarnessWorkspace {
                 |d| d.italic(),
             )
             .when_some(tab.agent.clone(), |d, kind| {
-                let (glyph, color) = agent_mark(&kind);
-                d.child(
-                    div()
-                        .mr_1()
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(color)
-                        .child(glyph),
-                )
+                d.child(div().mr_1().size(px(14.0)).child(agent_icon(&kind, 13.0)))
             })
             .cursor_pointer()
             .hover(|d| d.text_color(hx.tx1))
@@ -633,16 +626,7 @@ impl HarnessWorkspace {
                 if disabled {
                     continue;
                 }
-                let (glyph, color) = agent_mark(&kind);
-                let label = format!("{glyph}  {kind}");
-                menu = menu.child(self.tab_menu_item_colored(
-                    hx,
-                    &label,
-                    "",
-                    TabKind::Agent(kind.clone()),
-                    color,
-                    cx,
-                ));
+                menu = menu.child(self.tab_menu_item_agent(hx, &kind, cx));
             }
         }
         // The chat tab is pi's RPC surface specifically — approvals as UI,
@@ -689,21 +673,18 @@ impl HarnessWorkspace {
             }))
     }
 
-    /// A tab-menu item whose leading glyph carries an agent's brand color.
-    /// Monogram marks, not logos: hand-drawn approximations of trademarks
-    /// would be worse than none, and real logo files can slot in later.
-    pub(crate) fn tab_menu_item_colored(
+    /// A tab-menu item with the agent's brand mark.
+    pub(crate) fn tab_menu_item_agent(
         &self,
         hx: &HarnessTheme,
-        label: &str,
-        shortcut: &str,
-        kind: TabKind,
-        color: Rgba,
+        agent: &AgentKind,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let (glyph, rest) = label.split_once("  ").unwrap_or(("", label));
+        let label = agent_display(agent);
+        let id = format!("tabmenu-agent-{}", agent.as_str());
+        let kind = TabKind::Agent(agent.clone());
         div()
-            .id(gpui::SharedString::from(format!("tabmenu-{label}")))
+            .id(gpui::SharedString::from(id))
             .flex()
             .items_center()
             .justify_between()
@@ -720,17 +701,9 @@ impl HarnessWorkspace {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(
-                        div()
-                            .w(px(16.0))
-                            .text_center()
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(color)
-                            .child(glyph.to_string()),
-                    )
-                    .child(div().font_family(hx.font_mono).child(rest.to_string())),
+                    .child(div().size(px(16.0)).child(agent_icon(agent, 15.0)))
+                    .child(div().font_family(hx.font_mono).child(label)),
             )
-            .child(div().text_color(hx.tx2).child(shortcut.to_string()))
             .on_click(cx.listener(move |ws, _, window, cx| {
                 cx.stop_propagation();
                 ws.tab_menu = None;

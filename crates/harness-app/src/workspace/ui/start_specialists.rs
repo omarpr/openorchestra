@@ -301,7 +301,6 @@ impl HarnessWorkspace {
         } else {
             for kind in &enabled {
                 let is_sel = kind == selected;
-                let (mark, color) = agent_mark(kind);
                 let label = agent_display(kind);
                 let kind_click = kind.clone();
                 rows = rows.child(
@@ -327,12 +326,7 @@ impl HarnessWorkspace {
                         .on_click(cx.listener(move |ws, _, _, cx| {
                             ws.start_specialists_select_agent(kind_click.clone(), cx);
                         }))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(color)
-                                .child(mark.to_string()),
-                        )
+                        .child(div().size(px(18.0)).child(agent_icon(kind, 17.0)))
                         .child(
                             div()
                                 .flex_1()

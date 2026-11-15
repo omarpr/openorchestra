@@ -9,7 +9,33 @@ use std::borrow::Cow;
 use gpui::{AssetSource, SharedString};
 
 /// Icons bundled with the app itself, by asset path.
-const OWN: &[(&str, &[u8])] = &[("icons/oo/house.svg", include_bytes!("../icons/house.svg"))];
+const OWN: &[(&str, &[u8])] = &[
+    ("icons/oo/house.svg", include_bytes!("../icons/house.svg")),
+    (
+        "icons/oo/agents/claudecode.svg",
+        include_bytes!("../icons/agents/claudecode.svg"),
+    ),
+    (
+        "icons/oo/agents/codex.svg",
+        include_bytes!("../icons/agents/codex.svg"),
+    ),
+    (
+        "icons/oo/agents/cursor.svg",
+        include_bytes!("../icons/agents/cursor.svg"),
+    ),
+    (
+        "icons/oo/agents/kimi.svg",
+        include_bytes!("../icons/agents/kimi.svg"),
+    ),
+    (
+        "icons/oo/agents/opencode.svg",
+        include_bytes!("../icons/agents/opencode.svg"),
+    ),
+    (
+        "icons/oo/agents/pi.svg",
+        include_bytes!("../icons/agents/pi.svg"),
+    ),
+];
 
 pub struct AppAssets;
 

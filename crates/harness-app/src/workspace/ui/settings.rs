@@ -532,7 +532,6 @@ impl HarnessWorkspace {
             let key = kind.as_str().to_string();
             let pref = self.prefs.agents.get(&key).cloned().unwrap_or_default();
             let is_custom = matches!(kind, AgentKind::Other(_));
-            let (glyph, color) = agent_mark(&kind);
             // The command each adapter actually launches when no override is
             // set — defined once per agent in agent-runtime, not here.
             let default_cmd = agent_runtime::default_command_display(&kind);
@@ -554,10 +553,11 @@ impl HarnessWorkspace {
                 .child(
                     div()
                         .w(px(18.0))
-                        .text_center()
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(color)
-                        .child(glyph),
+                        .h(px(18.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(agent_icon(&kind, 16.0)),
                 )
                 .child(
                     div()
