@@ -15,6 +15,9 @@ pub struct InboxMessage {
     pub from_tenant: Option<String>,
     pub text: String,
     pub created_at: String,
+    /// A specialist's result pushed back to the coordinator, not a delegation.
+    #[serde(default)]
+    pub reply: bool,
 }
 
 /// Harness-facing notification that a message was enqueued for a tenant.
@@ -35,6 +38,11 @@ pub enum BridgeEvent {
     Failed {
         a2a_task_id: String,
         error: String,
+    },
+    /// The specialist declined the delegation.
+    Rejected {
+        a2a_task_id: String,
+        reason: String,
     },
 }
 
@@ -98,6 +106,15 @@ impl FileBridge {
                 "kind": "failed",
                 "a2a_task_id": a2a_task_id,
                 "error": error,
+            }),
+            BridgeEvent::Rejected {
+                a2a_task_id,
+                reason,
+            } => serde_json::json!({
+                "kind": "rejected",
+                "state": "rejected",
+                "a2a_task_id": a2a_task_id,
+                "reason": reason,
             }),
         };
         writeln!(f, "{}", serde_json::to_string(&line).unwrap())?;
@@ -165,6 +182,14 @@ fn parse_completion(line: &str) -> Option<BridgeEvent> {
                     .get("error")
                     .and_then(|s| s.as_str())
                     .unwrap_or("failed")
+                    .to_string(),
+            }),
+            "rejected" => Some(BridgeEvent::Rejected {
+                a2a_task_id: id,
+                reason: v
+                    .get("reason")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("rejected")
                     .to_string(),
             }),
             _ => None,
