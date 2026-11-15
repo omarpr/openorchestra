@@ -105,6 +105,12 @@ impl HarnessWorkspace {
             for root in &self.repo_roots {
                 let _ = source.watch(root, AgentKind::default());
             }
+            // And each multi-project task's coordinator (task folder).
+            let tasks_root = self.data_dir.join("tasks");
+            for task in self.task_store.active().filter(|t| super::coordinator::has_coordinator(t)) {
+                let dir = worktrees::task_coordinator_dir(&tasks_root, &task.slug);
+                let _ = source.watch(&dir, task.agent_kind.clone());
+            }
         }
 
         self.ensure_pane(window, cx);

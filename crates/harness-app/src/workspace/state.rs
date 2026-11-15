@@ -96,20 +96,41 @@ impl HarnessWorkspace {
     }
 
     fn resolve_task(&self, task_id: &str, member_id: Option<&str>) -> Option<Resolved> {
+        use super::coordinator::{task_focus, TaskFocus};
         let task = self.task_store.get(task_id)?;
         let home = task.home_member()?;
-        let focused = member_id
-            .and_then(|id| task.members.iter().find(|m| m.worktree_id == id))
-            .unwrap_or(home);
-        let compare_ref = self
-            .data
-            .repos
-            .iter()
-            .find(|r| r.name == focused.repo)
-            .map(|r| r.compare_ref.clone())
-            .unwrap_or_else(|| "HEAD".into());
+        let compare_ref_of = |repo: &str| {
+            self.data
+                .repos
+                .iter()
+                .find(|r| r.name == repo)
+                .map(|r| r.compare_ref.clone())
+                .unwrap_or_else(|| "HEAD".into())
+        };
+        // A member id that no longer names a member (stale selection) falls
+        // back to the task itself rather than blanking the pane.
+        let focus = task_focus(task, member_id).or_else(|| task_focus(task, None))?;
+        let focused = match focus {
+            TaskFocus::Member(m) => m,
+            // The coordinator has no repo: its cwd is the task folder. Editor
+            // and diff baseline borrow the home member's so the editor and
+            // DIFF still have a project to show.
+            TaskFocus::Coordinator => {
+                let tasks_root = self.data_dir.join("tasks");
+                return Some(Resolved {
+                    key: a2a_broker::coordinator_pane_key(task_id),
+                    path: worktrees::task_coordinator_dir(&tasks_root, &task.slug),
+                    editor_path: home.path.clone(),
+                    agent_kind: Some(task.agent_kind.clone()),
+                    compare_ref: compare_ref_of(&home.repo),
+                    branch: home.branch.clone(),
+                    task_id: Some(task_id.to_string()),
+                });
+            }
+        };
+        let compare_ref = compare_ref_of(&focused.repo);
         // Per-member context: agent/shell cwd and pane key follow the focused
-        // member (home when none selected). Unified DIFF stays task-scoped.
+        // member. Unified DIFF stays task-scoped.
         Some(Resolved {
             key: a2a_broker::task_member_pane_key(task_id, &focused.worktree_id),
             path: focused.path.clone(),
@@ -134,6 +155,37 @@ impl HarnessWorkspace {
         let Some(task) = self.task_store.get(task_id) else {
             return Vec::new();
         };
+        let tasks_root = self.data_dir.join("tasks");
+        if r.key == a2a_broker::coordinator_pane_key(task_id) {
+            // The coordinator owns no repo, so no HARNESS_WORKTREE /
+            // REPO_ROOT / BRANCH: handing it the home member's would make
+            // hooks and the agent treat the home repo as its own again.
+            let mut pairs = vec![
+                ("HARNESS_TASK_ID".to_string(), task_id.clone()),
+                ("HARNESS_TASK_SLUG".to_string(), task.slug.clone()),
+            ];
+            if let Some(home) = task.home_path() {
+                pairs.push((
+                    "HARNESS_HOME_WORKTREE".into(),
+                    home.to_string_lossy().into_owned(),
+                ));
+            }
+            if let Ok(Some(path)) = worktrees::ensure_task_agent_context(task, &tasks_root) {
+                pairs.push((
+                    agent_runtime::HARNESS_TASK_CONTEXT.to_string(),
+                    path.to_string_lossy().into_owned(),
+                ));
+            }
+            if let Some(info) = self.task_brokers.get(task_id) {
+                pairs.push(("HARNESS_A2A_URL".into(), info.base_url.clone()));
+                pairs.push(("HARNESS_A2A_KEY".into(), info.api_key.clone()));
+                pairs.push((
+                    "HARNESS_A2A_TENANT".into(),
+                    a2a_broker::COORDINATOR_TENANT.to_string(),
+                ));
+            }
+            return pairs;
+        }
         let member = match task
             .members
             .iter()
@@ -155,7 +207,6 @@ impl HarnessWorkspace {
             home_worktree: task.home_path().map(|p| p.to_path_buf()),
         };
         let mut pairs: Vec<(String, String)> = env.to_map().into_iter().collect();
-        let tasks_root = self.data_dir.join("tasks");
         if let Ok(Some(path)) = worktrees::ensure_task_agent_context(task, &tasks_root) {
             pairs.push((
                 agent_runtime::HARNESS_TASK_CONTEXT.to_string(),
@@ -182,18 +233,22 @@ impl HarnessWorkspace {
             return;
         }
 
+        // The coordinator's cwd is the task folder, which nothing else
+        // creates: make it before a shell, agent, or status watch lands there.
+        let is_coordinator = r
+            .task_id
+            .as_ref()
+            .is_some_and(|tid| r.key == a2a_broker::coordinator_pane_key(tid));
+        if is_coordinator && let Err(e) = std::fs::create_dir_all(&r.path) {
+            log::warn!("could not create coordinator dir {}: {e}", r.path.display());
+        }
+
         let restored = self.restore_tabs(&r.key, window, cx);
         if !restored {
-            // A multi-project task's HOME is its task chat: open the
-            // orchestrator agent there rather than a bare shell, so clicking
-            // the task lands somewhere you can talk to.
-            let home_agent = r.task_id.as_ref().and_then(|tid| {
-                let task = self.task_store.get(tid)?;
-                (task.members.len() >= 2 && task.home_path() == Some(r.path.as_path()))
-                    .then(|| r.agent_kind.clone())
-                    .flatten()
-            });
-            match home_agent {
+            // A multi-project task opens on its coordinator agent, so
+            // clicking the task lands somewhere you can talk to. Repo
+            // members are specialists and open on a shell.
+            match r.agent_kind.clone().filter(|_| is_coordinator) {
                 Some(kind) => self.open_tab(TabKind::Agent(kind), window, cx),
                 None => self.open_tab(TabKind::Shell, window, cx),
             }
@@ -245,12 +300,21 @@ impl HarnessWorkspace {
         // The harness runs inside the user's own repository, so anything it
         // drops there would otherwise show up as uncommitted changes in their
         // project. Exclude locally rather than touching their .gitignore.
-        if let Err(e) = self
-            .manager
-            .git()
-            .exclude_locally(&r.path, runtime.ignored_paths())
+        // A coordinator's task folder is not a checkout (`.git` is a dir in
+        // a main checkout, a file in a linked worktree; absent here).
+        if r.path.join(".git").exists()
+            && let Err(e) = self
+                .manager
+                .git()
+                .exclude_locally(&r.path, runtime.ignored_paths())
         {
             log::warn!("could not add local git excludes for {}: {e}", r.path.display());
+        }
+        // Worktrees and main checkouts are watched up front; this covers
+        // roots that only exist once an agent opens (the coordinator's task
+        // folder). Already-watched roots are a harmless error.
+        if let Some(source) = &mut self.status_source {
+            let _ = source.watch(&r.path, kind.clone());
         }
         self.agent_fidelity.insert(r.path.clone(), runtime.fidelity());
         // Adapters that stream their own signals (OpenCode's SSE) publish

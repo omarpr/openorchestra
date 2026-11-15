@@ -696,6 +696,7 @@ pub(crate) use prefs::*;
 pub(crate) use render::*;
 pub(crate) mod lifecycle;
 mod a2a;
+mod coordinator;
 mod state;
 mod ui;
 

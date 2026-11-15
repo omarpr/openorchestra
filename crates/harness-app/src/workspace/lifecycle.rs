@@ -335,6 +335,9 @@ impl HarnessWorkspace {
                 self.teardown_sessions(&m.worktree_id);
                 self.panes.remove(&m.worktree_id);
             }
+            let coordinator = a2a_broker::coordinator_pane_key(tid);
+            self.teardown_sessions(&coordinator);
+            self.panes.remove(&coordinator);
             let legacy = format!("task:{tid}");
             self.teardown_sessions(&legacy);
             self.panes.remove(&legacy);

@@ -87,7 +87,15 @@ impl HarnessWorkspace {
                 return Some(crate::tmux::session_prefix(&w.id));
             }
         }
+        let tasks_root = self.data_dir.join("tasks");
         for task in self.task_store.active() {
+            if super::super::coordinator::has_coordinator(task)
+                && worktrees::task_coordinator_dir(&tasks_root, &task.slug) == path
+            {
+                return Some(crate::tmux::session_prefix(
+                    &a2a_broker::coordinator_pane_key(&task.id),
+                ));
+            }
             for m in &task.members {
                 if m.path == path {
                     return Some(crate::tmux::session_prefix(
@@ -284,6 +292,11 @@ impl HarnessWorkspace {
                 .and_then(|w| w.task_id.clone());
             match task_id {
                 Some(task_id) => Selection::Task { task_id, member_id: Some(target.to_string()) },
+                // A coordinator alert carries its task id: land on the task
+                // itself, which is the coordinator.
+                None if self.task_store.get(target).is_some() => {
+                    Selection::Task { task_id: target.to_string(), member_id: None }
+                }
                 None => Selection::Worktree(target.to_string()),
             }
         };
@@ -322,6 +335,13 @@ impl HarnessWorkspace {
         }
         if let Some(r) = self.data.repos.iter().find(|r| r.repo_root == path) {
             return ("main".to_string(), r.name.clone(), format!("{MAIN_NAV_PREFIX}{}", r.name));
+        }
+        let tasks_root = self.data_dir.join("tasks");
+        if let Some(task) = self.task_store.active().find(|t| {
+            super::super::coordinator::has_coordinator(t)
+                && worktrees::task_coordinator_dir(&tasks_root, &t.slug) == path
+        }) {
+            return (format!("{} · coordinator", task.name), String::new(), task.id.clone());
         }
         (crate::notifier::label_for("", path), String::new(), String::new())
     }

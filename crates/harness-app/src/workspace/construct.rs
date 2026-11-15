@@ -105,6 +105,15 @@ impl HarnessWorkspace {
                         log::warn!("cannot watch main {}: {err}", root.display());
                     }
                 }
+                // A multi-project task's coordinator runs in the task folder,
+                // not a worktree: watch it so its pill works from launch.
+                let tasks_root = data_dir.join("tasks");
+                for task in task_store.active().filter(|t| super::coordinator::has_coordinator(t)) {
+                    let dir = worktrees::task_coordinator_dir(&tasks_root, &task.slug);
+                    if let Err(err) = source.watch(&dir, task.agent_kind.clone()) {
+                        log::warn!("cannot watch coordinator {}: {err}", dir.display());
+                    }
+                }
                 Some(source)
             }
             Err(e) => {
