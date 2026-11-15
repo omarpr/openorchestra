@@ -348,16 +348,19 @@ impl HarnessWorkspace {
                 crate::tmux::kill_session(&name);
             }
         }
-        self.panes_state.worktrees.remove(id);
-        crate::panes_state::save(&self.panes_path, &self.panes_state);
+        self.panes_state.remove(id);
+        crate::panes_state::save(&self.panes_path, &mut self.panes_state);
     }
 
     /// Draw the next globally-unique, persisted tab id.
     pub(crate) fn next_tab_id(&mut self) -> u64 {
         // next_tab_id starts at 0 on a fresh install; first id handed out is 1.
-        self.panes_state.next_tab_id += 1;
+        // Catch up with any other instance sharing the file first, so the id
+        // (and the tmux session name built from it) is never handed out twice.
+        let on_disk = crate::panes_state::load(&self.panes_path).next_tab_id;
+        self.panes_state.next_tab_id = self.panes_state.next_tab_id.max(on_disk) + 1;
         let id = self.panes_state.next_tab_id;
-        crate::panes_state::save(&self.panes_path, &self.panes_state);
+        crate::panes_state::save(&self.panes_path, &mut self.panes_state);
         id
     }
 
@@ -394,7 +397,7 @@ impl HarnessWorkspace {
         for (key, wp) in updates {
             self.panes_state.worktrees.insert(key, wp);
         }
-        crate::panes_state::save(&self.panes_path, &self.panes_state);
+        crate::panes_state::save(&self.panes_path, &mut self.panes_state);
     }
 
     /// Recreate a worktree's persisted tabs on first build. Live tmux sessions
@@ -403,18 +406,41 @@ impl HarnessWorkspace {
     /// restore.
     pub(crate) fn restore_tabs(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
         use crate::panes_state::TabRecordKind as K;
-        let Some(saved) = self.panes_state.worktrees.get(key) else { return false };
-        if saved.tabs.is_empty() {
+        let saved = self.panes_state.worktrees.get(key);
+        // Clone out before mutating self.
+        let mut records: Vec<(u64, K, String)> = saved
+            .map(|s| s.tabs.iter().map(|t| (t.id, t.kind.clone(), t.title.clone())).collect())
+            .unwrap_or_default();
+        let saved_active = saved.and_then(|s| s.active);
+        let live = if self.has_tmux { crate::tmux::live_sessions() } else { Vec::new() };
+
+        // Adopt this worktree's live tmux sessions the saved list lost track
+        // of (another app instance overwrote panes.json, or we died before
+        // saving). Their agents are still running with their context; without
+        // this they sit detached and invisible while a fresh agent replaces
+        // them.
+        let known: Vec<u64> = records.iter().map(|r| r.0).collect();
+        let orphans = crate::tmux::orphan_tab_ids(key, &live, &known);
+        if !orphans.is_empty() {
+            let starts = crate::tmux::session_start_commands();
+            for id in orphans {
+                let name = crate::tmux::session_name(key, id);
+                let agent = starts
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .and_then(|(_, cmd)| crate::tmux::agent_from_start_command(cmd));
+                log::info!("adopting orphaned tmux session {name} ({:?})", agent.as_ref().map(|a| a.1));
+                records.push(match agent {
+                    Some((kind, prog)) => (id, K::Agent(kind), prog.to_string()),
+                    None => (id, K::Shell, "❯_ shell".to_string()),
+                });
+                // Never hand this id out again.
+                self.panes_state.next_tab_id = self.panes_state.next_tab_id.max(id);
+            }
+        }
+        if records.is_empty() {
             return false;
         }
-        // Clone out before mutating self.
-        let records: Vec<(u64, K, String)> = saved
-            .tabs
-            .iter()
-            .map(|t| (t.id, t.kind.clone(), t.title.clone()))
-            .collect();
-        let saved_active = saved.active;
-        let live = if self.has_tmux { crate::tmux::live_sessions() } else { Vec::new() };
 
         for (id, kind, title) in records {
             match kind {

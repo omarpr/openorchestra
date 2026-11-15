@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use agent_runtime::AgentCommand;
+use agent_runtime::{AgentCommand, AgentKind};
 use worktrees::interactive_login_command;
 
 /// The `harness_<slug>_` stem every session for a given key shares. The
@@ -218,6 +218,61 @@ pub fn list_session_panes() -> Vec<(String, u32)> {
         }
         _ => Vec::new(),
     }
+}
+
+/// `(session_name, pane_start_command)` for every pane the tmux server holds.
+/// Tab-separated: a start command can contain spaces but never a tab of ours.
+pub fn session_start_commands() -> Vec<(String, String)> {
+    let out = Command::new("tmux")
+        .args(["list-panes", "-a", "-F", "#{session_name}\t#{pane_start_command}"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter_map(|l| l.split_once('\t'))
+            .map(|(n, c)| (n.to_string(), c.to_string()))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Tab ids of live sessions that belong to `worktree_key` but are not in
+/// `known`, ascending. These are sessions the saved tab list lost track of
+/// (e.g. another app instance overwrote it) whose agents are still running.
+/// The suffix after the key's prefix must be all digits, so a key that is a
+/// prefix of another key's slug never claims that key's sessions.
+pub fn orphan_tab_ids(worktree_key: &str, live: &[String], known: &[u64]) -> Vec<u64> {
+    let prefix = session_prefix(worktree_key);
+    let mut ids: Vec<u64> = live
+        .iter()
+        .filter_map(|name| name.strip_prefix(&prefix))
+        .filter(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+        .filter_map(|rest| rest.parse().ok())
+        .filter(|id| !known.contains(id))
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+/// Which agent a session was started with, read from its start command
+/// (`agent_script` quotes the program path: `'/…/claude' '--flag' …`). A plain
+/// shell tab has an empty start command. `None` for shells and agents this
+/// build cannot name; such a session still reattaches, as a shell tab.
+pub fn agent_from_start_command(cmd: &str) -> Option<(AgentKind, &'static str)> {
+    use AgentKind as K;
+    const PROGRAMS: [(&str, K); 5] = [
+        ("claude", K::ClaudeCode),
+        ("codex", K::Codex),
+        ("opencode", K::OpenCode),
+        ("kimi", K::Kimi),
+        ("pi", K::Pi),
+    ];
+    PROGRAMS.into_iter().find_map(|(prog, kind)| {
+        let quoted_path = format!("/{prog}'");
+        let quoted_bare = format!("'{prog}'");
+        (cmd.contains(&quoted_path) || cmd.contains(&quoted_bare)).then_some((kind, prog))
+    })
 }
 
 /// Tear down a session (used on explicit tab close). Best-effort.
@@ -462,5 +517,35 @@ mod tests {
             .map(|o| o.status.success())
             .unwrap_or(false);
         assert_eq!(has_tmux(), via_which);
+    }
+
+    #[test]
+    fn orphan_ids_are_this_keys_unknown_sessions_only() {
+        let key = "task:t:member:@coordinator";
+        let live: Vec<String> = [
+            "harness_task-t-member--coordinator_338",
+            "harness_task-t-member--coordinator_339",
+            "harness_task-t-member--coordinator_342",
+            "harness_task-t-member--coordinator_x9",
+            "harness_task-t-member--coordinator_extra_5",
+            "harness_task-t-member-repo-t_341",
+            "harness_main-repo_1",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(orphan_tab_ids(key, &live, &[339, 342]), vec![338]);
+        assert!(orphan_tab_ids(key, &live, &[338, 339, 342]).is_empty());
+    }
+
+    #[test]
+    fn agent_is_read_from_the_quoted_program_in_the_start_command() {
+        let claude = r#"/bin/zsh -lic "HARNESS_TASK_CONTEXT='/x/agent-context.md' '/Users/u/.local/bin/claude' '--permission-mode' 'auto'; exec \"\$SHELL\" -li""#;
+        assert_eq!(agent_from_start_command(claude).map(|a| a.0), Some(AgentKind::ClaudeCode));
+        let pi = r#"/bin/zsh -lic "'/opt/bin/pi' '--mode' 'tui'; exec \"\$SHELL\" -li""#;
+        assert_eq!(agent_from_start_command(pi).map(|a| a.0), Some(AgentKind::Pi));
+        assert_eq!(agent_from_start_command(""), None);
+        // A path that merely contains a program name is not that program.
+        assert_eq!(agent_from_start_command("'/home/pilot/run.sh'"), None);
     }
 }

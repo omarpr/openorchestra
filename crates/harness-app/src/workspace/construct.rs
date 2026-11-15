@@ -58,7 +58,7 @@ impl HarnessWorkspace {
                 .collect();
             let n = crate::panes_state::migrate_task_pane_keys(&mut panes_state, &homes);
             if n > 0 {
-                crate::panes_state::save(&panes_path, &panes_state);
+                crate::panes_state::save(&panes_path, &mut panes_state);
                 log::info!("migrated {n} legacy task pane keys to per-member keys");
             }
         }
