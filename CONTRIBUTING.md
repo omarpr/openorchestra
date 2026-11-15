@@ -67,7 +67,7 @@ rest; `make doctor` reports what is present.
 
 ```sh
 make setup   # install/verify build + runtime tools (idempotent)
-make run     # build and launch the debug binary
+make run     # build and launch the debug app in a .app bundle
 make build   # build the app
 make test    # headless crate tests
 make app     # release bundle into dist/openOrchestra.app

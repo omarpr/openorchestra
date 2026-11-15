@@ -1,10 +1,18 @@
 # openOrchestra — Architecture Document
 
-**Status:** Draft v3.2 · July 24, 2026
+**Status:** Historical design snapshot · last built-state update July 24, 2026
 **Scope:** A native Rust desktop harness (product name and repo **openOrchestra**) for running coding agents across parallel git worktrees, with embedded Zed-grade editing, navigation, and terminals.
-**v3 changes:** All four §9 spikes are **complete** and a post-spike MVP integration pass ("openOrchestra") has landed — this doc is rewritten to record what the spikes *proved* rather than what they *planned*. Key updates: R1 (Zed `editor` cone) and R6 (theme mapping) **retired/resolved**; the pi package is **`@mariozechner/pi-coding-agent`** (not `@mariozechner/pi`); the terminal now uses Zed's real **`terminal_view`** (the Spike 1 custom view was interim); the product is renamed **openOrchestra**; §9 recast as a completed record; new §11 (current built state) and §12 (MVP → 1.0 roadmap). Phase 2 (RPC chat) and the `agent-schema`/`training` stubs remain the principal unbuilt pieces.
-**v3.1 additions (design, not yet built):** two new directions folded in. (1) **Project navigation** — adopt Zed's `Workspace` entity to get a real file explorer (`project_panel`), quick-open **⌘P** (`file_finder`), and project-wide search **⌘⇧F** (`search`), opening real worktree files; this brings `Project::local` in and absorbs the LSP work (new §3.6, reverses Spike 3's "render without a Project" for the navigation direction). (2) **Agent-agnostic runtime** — the substrate is running any agent's own CLI (**pi, OpenCode, Codex, Claude Code, Kimi**) in the embedded terminal, like pi today; an `AgentRuntime` adapter layer adds an *optional* status/notification enhancement where the agent exposes a signal, feeding a unified bus and **native OS notifications when an agent needs input** (new §4.5–4.6). pi remains the *reference* runtime that closes the training loop. New risks R10–R12, decisions D12–D14, roadmap items incl. a proving Spike 5.
+**v3 changes:** All four §9 spikes were complete when this revision was written, followed by an MVP integration pass. This record captures what the spikes *proved* rather than what they *planned*: R1 (Zed `editor` cone) and R6 (theme mapping) were retired/resolved; the pi package is `@mariozechner/pi-coding-agent`; the terminal uses Zed's real `terminal_view`; and the product is named openOrchestra. The RPC chat, schema, and training features described here as unfinished were implemented later.
+**v3.1 additions (proposed, then implemented):** This revision added two directions: (1) **Project navigation** — Zed's `Workspace`, `project_panel`, quick-open **⌘P**, and project-wide search **⌘⇧F**, backed by `Project::local`; (2) **Agent-agnostic runtime** — user-installed agent CLIs in embedded terminals, with optional status signals and native notifications. See the dated roadmap below for the original sequencing; current behavior is in the source and crate READMEs.
 **v3.2 additions (built, July 22–24, 2026):** five changes now live, all in `harness-app`. (1) **Persistent terminal sessions via tmux** — each worktree tab runs a `tmux` client *inside* the `terminal_view` pty (not the shell directly), so agents survive an app restart, a closed tab, and a crash, and reattach on reopen; sessions are named per worktree/tab, torn down on explicit close/delete/archive, and degrade to a plain direct-spawn shell when tmux is absent (§3.3). (2) **Sidebar resource monitor** — a STATS band showing openOrchestra's *own* CPU/memory footprint (main process + every worktree's tmux pane subtree), attributed per worktree by session-name prefix, with a hover breakdown (§3.4). (3) **Project (folder) management** — archive / trash / restore of whole repos from the sidebar, distinct from worktree archive/delete (§6.1). (4) **Agent-pill self-heal extended** — a stuck `Waiting`/`Running` pill whose writer stamped no pid now clears by checking whether a real agent process is alive in the worktree's tmux pane subtree (§6.2). (5) **Chrome tweaks** — sidebar toggle moved to the top-bar left and renamed, tmux scroll fixed via per-session mouse mode (§3.3–3.4). No new crates; new module `harness-app/src/resource_monitor.rs`.
+
+> **Documentation status:** This is a dated design and implementation record, not
+> a maintained description of the current product. Sections 11–12 and some
+> implementation-status notes below are snapshots from July 2026; later code
+> may have completed roadmap items or changed behavior. Use the root
+> [`README.md`](../README.md), [`CONTRIBUTING.md`](../CONTRIBUTING.md), crate
+> READMEs, and the current source as operational guidance. Treat plans and
+> spike notes as historical context unless a current source points to them.
 
 ---
 
@@ -176,7 +184,7 @@ Also worth recording: the harness passes a **blocked HTTP client**, so zed's col
 | `agent_settled` | **RPC-only; not an extension event.** Approximated as `agent_end` + `!ctx.hasPendingMessages()` + a debounced write (`HARNESS_STATUS_SETTLE_MS`, default 750 ms) cancelled by a following `agent_start`. Auto-retry re-fires `agent_end`/`agent_start` per attempt with no `willRetry` flag; the debounce absorbs fast retries, but long provider-backoff gaps still blip idle (R8). | `idle` |
 | — | `session_start` / `session_shutdown` | initial/forced `idle` + fresh `sessionFile` |
 
-**Phase 2: custom agent chat panel over RPC.** When "Agent chat" graduates from "soon," the agent supervisor additionally spawns `pi --mode rpc` sidecars and the chat tab renders the event stream natively. §4.2–4.3 is the contract for that phase — specified now so Phase 1 decisions (session layout, extension architecture, status schema) stay compatible. **Not yet built** (the `pi-client` crate does not exist); see §12.
+**Phase 2: custom agent chat panel over RPC.** The original design called for the agent supervisor to spawn `pi --mode rpc` sidecars and render their event stream in a native chat tab. This phase was implemented after this snapshot; see `crates/pi-client` and the app chat-tab code. §4.2–4.3 remain useful as the protocol design record, while §12's implementation status is stale.
 
 ### 4.2 IPC contract (Phase 2)
 
@@ -207,7 +215,7 @@ Why pi: the loop is minimal and everything we need to co-evolve with training is
 - `pi.registerTool()` / `pi.setActiveTools()` — make the runtime toolset exactly match our training tool schema (names, arg shapes, result formats). Harness-specific tools (worktree-aware ops, "request review") are extensions too, as is the status extension (§4.1).
 - System prompt and prompt templates are overridable; the SDK (`createAgentSession`) is the escape hatch if we outgrow the stock CLI entry point. pi is MIT — forking is a supported failure mode, not a crisis.
 
-**Contract discipline:** the tool schema is versioned in this repo (`agent-schema/`) as the single source of truth; the training-data generator (`training/`) and the pi extension both import from it. Model checkpoints declare their schema version; the harness refuses (or adapts) on mismatch. **Both directories are currently empty stubs** — see §12. *(This contract applies to the pi reference runtime only; peer agents in §4.5 bring their own tool schemas.)*
+**Contract discipline:** the tool schema is versioned in this repo (`agent-schema/`) as the single source of truth; the training-data generator (`training/`) and the pi extension both import from it. Model checkpoints declare their schema version; the harness refuses (or adapts) on mismatch. The schema and harvesting implementations were completed after this snapshot; see [`agent-schema/README.md`](../agent-schema/README.md) and [`training/README.md`](../training/README.md). *(This contract applies to the pi reference runtime only; peer agents in §4.5 bring their own tool schemas.)*
 
 ### 4.5 Multi-agent runtime: agents are CLIs in a terminal (design)
 
@@ -405,7 +413,7 @@ Backend workspace test count: **44 pass** (worktrees 8, forge 25, status-watch 1
 
 Architecture-level questions from v1–v3 are closed. v3.1's two new directions (§3.6 navigation, §4.5–4.6 multi-agent) are **designed but unproven**; their remaining risk (R10–R12) is retired by the roadmap below (esp. Spike 5), not by more up-front design.
 
-## 11. Current built state (what runs today)
+## 11. Built-state snapshot (July 24, 2026)
 
 *Updated July 24, 2026 — v3.2 (persistent tmux sessions, resource monitor, project management) folded in.*
 
@@ -438,7 +446,7 @@ Backend crates are UI-free and fully tested — **130 headless tests** across `w
 
 Both are the same lesson: the spike-era suites tested the pieces, and the pieces were fine. What had never been tested was that they were connected.
 
-## 12. MVP → 1.0 roadmap
+## 12. Historical MVP → 1.0 roadmap (July 2026)
 
 The spikes proved feasibility; this is the sequenced path from the current MVP to a 1.0 we'd use daily and harvest for training. Ordered by dependency and value; the two "closes the training loop" items (M6/M7) are what make the project pay for itself. Two **v3.1 tracks** — **navigation** (N-track, §3.6) and **multi-agent** (A-track, §4.5–4.6) — are interleaved below; the N-track opens with a proving **Spike 5** because it is the largest structural change since the original spikes.
 

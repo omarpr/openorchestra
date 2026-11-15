@@ -20,9 +20,9 @@ make setup && make app && open dist/openOrchestra.app
 - First launch will ask for notification permission — that's the
   "agent needs your attention" banners with their View button.
 
-For development iterations, `make run` builds and launches the debug binary
-directly (native notifications fall back to plain banners there — the
-notification framework requires a real app bundle).
+For development iterations, `make run` builds and launches the debug app in a
+separate `.app` bundle. This lets the development build use native macOS
+notifications; logs remain attached to the terminal.
 
 ## Contributors
 
