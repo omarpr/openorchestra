@@ -782,4 +782,81 @@ mod tests {
         let shell = client_args("s_2", Path::new("/tmp"), None, false, &[]);
         assert!(!shell.iter().any(|a| a == AGENT_OPTION));
     }
+
+    /// Against a real tmux server on a private socket dir (never the user's):
+    /// an agent session counts as running, then as missing once the agent
+    /// exits back to the session's shell. Ignored by default because it
+    /// changes TMUX_TMPDIR for the whole test process; run it alone with
+    /// `cargo test live_tmux_missing_agent -- --ignored`.
+    #[test]
+    #[ignore]
+    fn live_tmux_missing_agent_round_trip() {
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        // SAFETY: this test runs alone (--ignored), so no other thread reads env.
+        // TMUX must go too: inside a tmux pane it names the user's server and
+        // wins over TMUX_TMPDIR.
+        unsafe {
+            std::env::remove_var("TMUX");
+            std::env::set_var("TMUX_TMPDIR", dir.path());
+        }
+        // Refuse to touch anything unless we really are on a fresh, private
+        // server: it must have no sessions at all yet.
+        let pre = run_bounded(&["ls"], Duration::from_secs(2)).expect("tmux answered");
+        assert!(
+            !pre.status.success() && pre.stdout.is_empty(),
+            "not isolated from the user's tmux server: {}",
+            String::from_utf8_lossy(&pre.stdout)
+        );
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        // A stand-in agent named like a real one. It exits cleanly (as an
+        // agent does on /exit) once `quit` appears. Python, so its process
+        // name is not a shell's while it runs.
+        let quit = dir.path().join("quit");
+        let fake = bin.join("claude");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/usr/bin/env python3\nimport os, time\nwhile not os.path.exists({:?}):\n    time.sleep(0.1)\n",
+                quit.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let key = "task:t:member:repo/t".to_string();
+        let session = session_name(&key, 7);
+        let cmd = AgentCommand { program: fake.clone(), args: vec![], env: vec![], label: "claude".into() };
+        let mut args = client_args(&session, dir.path(), Some(&cmd), false, &[]);
+        // Everything before attach-session (which needs a terminal).
+        let attach = args.iter().position(|a| a == "attach-session").unwrap();
+        args.truncate(attach - 1);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = run_bounded(&argv, Duration::from_secs(5)).expect("tmux ran");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+        let wait_for = |want_missing: bool| {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                let panes = pane_commands().expect("tmux answered");
+                let missing = missing_agent_keys(std::slice::from_ref(&key), &panes);
+                if missing.contains(&key) == want_missing {
+                    return panes;
+                }
+                assert!(Instant::now() < deadline, "never became missing={want_missing}: {panes:?}");
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        };
+        let running = wait_for(false);
+        assert!(running.iter().any(|p| p.session == session && p.agent_session), "{running:?}");
+
+        // The agent quits: the session falls back to its login shell.
+        std::fs::write(&quit, "").unwrap();
+        let after = wait_for(true);
+        assert!(after.iter().any(|p| p.session == session && is_shell(&p.current)), "{after:?}");
+
+        let _ = run_bounded(&["kill-server"], Duration::from_secs(2));
+    }
 }
