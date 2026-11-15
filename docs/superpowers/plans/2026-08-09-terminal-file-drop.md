@@ -54,8 +54,8 @@ mod tests {
     #[test]
     fn single_clean_path_is_unquoted_and_padded() {
         assert_eq!(
-            paths_to_prompt_text(&[PathBuf::from("/Users/sorce/notes.md")]),
-            Some(" /Users/sorce/notes.md ".to_string())
+            paths_to_prompt_text(&[PathBuf::from("/Users/example/notes.md")]),
+            Some(" /Users/example/notes.md ".to_string())
         );
     }
 
@@ -63,11 +63,11 @@ mod tests {
     fn screenshot_name_with_spaces_is_quoted_intact() {
         // The case this feature exists for: macOS names every screenshot with
         // spaces, which is exactly what makes typing the path by hand awful.
-        let p = PathBuf::from("/Users/sorce/Desktop/Screenshot 2026-08-09 at 1.23.45 PM.png");
+        let p = PathBuf::from("/Users/example/Desktop/sample-image.png");
         assert_eq!(
             paths_to_prompt_text(&[p]),
             Some(
-                " '/Users/sorce/Desktop/Screenshot 2026-08-09 at 1.23.45 PM.png' ".to_string()
+                " '/Users/example/Desktop/sample-image.png' ".to_string()
             )
         );
     }

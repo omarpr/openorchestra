@@ -312,7 +312,7 @@ impl HarnessWorkspace {
     ///
     /// The registry only holds worktrees, so an agent running in a project's
     /// *main checkout* used to resolve to nothing: the banner read
-    /// "msrosa-tutoring () is waiting on you" (directory name, empty repo) and
+    /// "sample-repo () is waiting on you" (directory name, empty repo) and
     /// its View button carried an empty id that navigated nowhere. A main
     /// checkout is now named "main" in its project and navigates via a
     /// `main:<repo>` id, which the View handler maps to `Selection::Main`.

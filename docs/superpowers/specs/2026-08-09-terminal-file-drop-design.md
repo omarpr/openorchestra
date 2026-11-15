@@ -204,7 +204,7 @@ in `tmux.rs`, `login_env.rs`, and `shortcuts.rs`:
 
 | Case | Expectation |
 |---|---|
-| One clean path | `" /Users/sorce/notes.md "` |
+| One clean path | `" /Users/example/notes.md "` |
 | macOS screenshot name (spaces) | Single-quoted, spaces preserved |
 | Three paths, mixed | Quoted only where required, single-space separated |
 | Empty slice | `None` |

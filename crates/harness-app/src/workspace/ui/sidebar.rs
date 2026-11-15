@@ -949,7 +949,7 @@ mod tests {
     fn task(members: Vec<TaskMemberView>) -> TaskView {
         TaskView {
             id: "t1".into(),
-            name: "tmux-zshrc-fix".into(),
+            name: "terminal-session".into(),
             initials: "TZ".into(),
             color: 0,
             members,
@@ -962,15 +962,15 @@ mod tests {
         // Not simply the first: member order is registry order, and the home
         // checkout is the one the task is named for.
         let t = task(vec![
-            member("lithepg", "hotfix/x", false),
-            member("omar-harness", "feat/tmux-zshrc-fix", true),
+            member("sample-project", "hotfix/x", false),
+            member("openorchestra", "feat/terminal-session", true),
         ]);
-        assert_eq!(task_branch(&t), Some("feat/tmux-zshrc-fix"));
+        assert_eq!(task_branch(&t), Some("feat/terminal-session"));
     }
 
     #[test]
     fn a_task_with_no_home_member_falls_back_to_the_first() {
-        let t = task(vec![member("lithepg", "feat/a", false)]);
+        let t = task(vec![member("sample-project", "feat/a", false)]);
         assert_eq!(task_branch(&t), Some("feat/a"));
         assert_eq!(task_branch(&task(vec![])), None, "no members, no branch line");
     }
@@ -980,8 +980,8 @@ mod tests {
         // Repeating `feat/<slug>` on every row is what pushed the status pill
         // off the right edge of the sidebar.
         let t = task(vec![
-            member("omar-harness", "feat/tmux-zshrc-fix", true),
-            member("lithepg", "feat/tmux-zshrc-fix", false),
+            member("openorchestra", "feat/terminal-session", true),
+            member("sample-project", "feat/terminal-session", false),
         ]);
         for m in &t.members {
             assert_eq!(member_branch(&t, m), None, "{} should stay bare", m.repo);
@@ -1008,8 +1008,8 @@ mod tests {
     #[test]
     fn a_repo_that_has_drifted_off_the_task_branch_shows_its_own() {
         let t = task(vec![
-            member("omar-harness", "feat/tmux-zshrc-fix", true),
-            member("lithepg", "hotfix/urgent", false),
+            member("openorchestra", "feat/terminal-session", true),
+            member("sample-project", "hotfix/urgent", false),
         ]);
         assert_eq!(member_branch(&t, &t.members[0]), None);
         assert_eq!(member_branch(&t, &t.members[1]), Some("hotfix/urgent"));

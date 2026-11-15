@@ -283,14 +283,14 @@ atomic-persist. **8 tests, all pass; workspace total now 41.**
   `+ new worktree`, **Archive**, and **Delete (two-click confirm)** call the real
   `Manager`. The `main` entry gets a plain shell (no pi) via a new
   `TerminalPane::new(_, spawn_agent, _)` flag (§6.1 D8).
-- Harness state lives in `<repo_parent>/.omar-harness/` (`registry.json` +
+- Harness state lives in `<repo_parent>/.openorchestra/` (`registry.json` +
   `worktrees/`) so worktrees don't nest inside the repo.
 
 ## Verified
 
 - `cargo test` at root: **41 pass** (worktrees 8, forge 23, status-watch 9,
   +1 doc). `cargo check`/`build` on harness-app clean.
-- Headless run against the real `omar-harness` repo: no panic — registry load,
+- Headless run against the real `openorchestra` repo: no panic — registry load,
   `WorkspaceData::build` (real `git rev-parse`/`default_branch`/`status`), pane
   creation, and the `main` merge-base diff all execute. (gpui headless fallback,
   same bar as Spikes 1 & 3.)

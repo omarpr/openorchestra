@@ -1,9 +1,8 @@
 //! M7 tests — session parsing and harvesting (architecture §6.4).
 //!
-//! `fixtures/pi-session-v3.jsonl` is a **real** capture from
-//! `@mariozechner/pi-coding-agent@0.73.1`, not a hand-written approximation,
-//! so a session-format change breaks a test instead of quietly poisoning a
-//! training set.
+//! `fixtures/pi-session-v3.jsonl` is a sanitized capture from
+//! `@mariozechner/pi-coding-agent@0.73.1`, not a hand-written approximation.
+//! Local paths and model labels are replaced with generic fixture values.
 
 use std::path::{Path, PathBuf};
 
@@ -45,7 +44,7 @@ fn parses_a_real_pi_session() {
     assert_eq!(s.format_version, SUPPORTED_FORMAT_VERSION);
     assert!(!s.id.is_empty());
     assert_eq!(s.provider.as_deref(), Some("lmstudio"));
-    assert_eq!(s.model.as_deref(), Some("omar-agent-v1"));
+    assert_eq!(s.model.as_deref(), Some("test-model"));
 
     // user -> assistant(toolCall) -> toolResult -> assistant(text)
     assert_eq!(s.turns.len(), 4, "{:#?}", s.turns);
@@ -221,7 +220,7 @@ fn harvests_a_full_record_from_registry_forge_and_git() {
     assert_eq!(record.provenance.branch, "feat/nav");
     assert_eq!(record.provenance.pr_number, Some(128));
     assert_eq!(record.provenance.agent_kind, "pi");
-    assert_eq!(record.provenance.model.as_deref(), Some("omar-agent-v1"));
+    assert_eq!(record.provenance.model.as_deref(), Some("test-model"));
 
     let diff_summary = record.diff.unwrap();
     assert_eq!(diff_summary.files_changed, 2);

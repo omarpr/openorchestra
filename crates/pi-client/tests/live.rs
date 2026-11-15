@@ -28,13 +28,13 @@ const sse = (res, o) => res.write("data: " + JSON.stringify(o) + "\n\n");
 http.createServer((req, res) => {{
   if (req.url === "/v1/models") {{
     res.writeHead(200, {{"content-type": "application/json"}});
-    return res.end(JSON.stringify({{object: "list", data: [{{id: "omar-agent-v1"}}]}}));
+    return res.end(JSON.stringify({{object: "list", data: [{{id: "test-model"}}]}}));
   }}
   let body = "";
   req.on("data", c => body += c);
   req.on("end", () => {{
     res.writeHead(200, {{"content-type": "text/event-stream"}});
-    const base = {{id: "c", object: "chat.completion.chunk", created: 0, model: "omar-agent-v1"}};
+    const base = {{id: "c", object: "chat.completion.chunk", created: 0, model: "test-model"}};
     turn++;
     setTimeout(() => {{
       sse(res, {{...base, choices: [{{index: 0, delta: {{role: "assistant", content: "pong"}}, finish_reason: null}}]}});
@@ -72,7 +72,7 @@ fn drives_a_real_pi_rpc_process() {
         format!(
             r#"{{"providers":{{"lmstudio":{{"baseUrl":"http://localhost:{port}/v1",
                "api":"openai-completions","apiKey":"lmstudio",
-               "models":[{{"id":"omar-agent-v1","name":"Omar Agent v1","reasoning":false,
+               "models":[{{"id":"test-model","name":"Test Model","reasoning":false,
                "contextWindow":131072,"maxTokens":16384,
                "cost":{{"input":0,"output":0,"cacheRead":0,"cacheWrite":0}}}}]}}}}}}"#
         ),
@@ -81,7 +81,7 @@ fn drives_a_real_pi_rpc_process() {
     // Sandbox pi so the user's own ~/.pi is never read or written.
     std::env::set_var("PI_CODING_AGENT_DIR", agent_dir.path());
 
-    let mut pi = PiRpc::spawn("pi", work.path(), &["--model", "lmstudio/omar-agent-v1"])
+    let mut pi = PiRpc::spawn("pi", work.path(), &["--model", "lmstudio/test-model"])
         .expect("pi must be on PATH");
     let records = pi.subscribe();
 

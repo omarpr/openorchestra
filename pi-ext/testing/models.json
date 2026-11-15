@@ -7,8 +7,8 @@
 			"compat": { "supportsDeveloperRole": false, "supportsReasoningEffort": false },
 			"models": [
 				{
-					"id": "omar-agent-v1",
-					"name": "Omar Agent v1",
+					"id": "test-model",
+					"name": "Test Model",
 					"reasoning": true,
 					"contextWindow": 131072,
 					"maxTokens": 16384,

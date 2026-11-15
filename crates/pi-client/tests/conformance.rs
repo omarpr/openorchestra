@@ -1,9 +1,9 @@
 //! M8 conformance tests — replay a recorded `pi --mode rpc` session
 //! (architecture §4.2).
 //!
-//! `fixtures/rpc-session-0.73.1.jsonl` is verbatim stdout from a real pi 0.73.1
-//! RPC run (get_state, a prompt that calls a tool, get_session_stats), so a
-//! protocol change breaks a test rather than a chat panel.
+//! `fixtures/rpc-session-0.73.1.jsonl` is a sanitized recording of a real pi
+//! 0.73.1 RPC run (get_state, a prompt that calls a tool, get_session_stats).
+//! Local paths and model labels are replaced with generic fixture values.
 
 use std::io::BufReader;
 

@@ -33,13 +33,13 @@ const sse = (res, o) => res.write("data: " + JSON.stringify(o) + "\n\n");
 http.createServer((req, res) => {{
   if (req.url === "/v1/models") {{
     res.writeHead(200, {{"content-type": "application/json"}});
-    return res.end(JSON.stringify({{object: "list", data: [{{id: "omar-agent-v1"}}]}}));
+    return res.end(JSON.stringify({{object: "list", data: [{{id: "test-model"}}]}}));
   }}
   let body = "";
   req.on("data", c => body += c);
   req.on("end", () => {{
     res.writeHead(200, {{"content-type": "text/event-stream"}});
-    const base = {{id: "c", object: "chat.completion.chunk", created: 0, model: "omar-agent-v1"}};
+    const base = {{id: "c", object: "chat.completion.chunk", created: 0, model: "test-model"}};
     // Delay so `running` is observable before the turn ends.
     setTimeout(() => {{
       sse(res, {{...base, choices: [{{index: 0, delta: {{role: "assistant", content: "ok"}}, finish_reason: null}}]}});
@@ -79,7 +79,7 @@ fn pi_spawned_through_the_adapter_drives_the_sidebar_pill() {
         format!(
             r#"{{"providers":{{"lmstudio":{{"baseUrl":"http://localhost:{port}/v1",
                "api":"openai-completions","apiKey":"lmstudio",
-               "models":[{{"id":"omar-agent-v1","name":"Omar Agent v1","reasoning":false,
+               "models":[{{"id":"test-model","name":"Test Model","reasoning":false,
                "contextWindow":131072,"maxTokens":16384,
                "cost":{{"input":0,"output":0,"cacheRead":0,"cacheWrite":0}}}}]}}}}}}"#
         ),
@@ -106,7 +106,7 @@ fn pi_spawned_through_the_adapter_drives_the_sidebar_pill() {
 
     let mut pi = std::process::Command::new(&command.program)
         .args(&command.args)
-        .args(["-p", "say ok", "--model", "lmstudio/omar-agent-v1"])
+        .args(["-p", "say ok", "--model", "lmstudio/test-model"])
         .arg("--session-dir")
         .arg(sessions.path())
         .envs(command.env.iter().cloned())

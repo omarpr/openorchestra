@@ -78,7 +78,7 @@ guessed at — quietly mis-parsing sessions would poison the set.
     "worktreeId": "app/nav", "repo": "app", "branch": "feat/nav",
     "taskSlug": "nav", "createdAt": "...", "agentKind": "pi",
     "prNumber": 128, "sessionId": "...", "provider": "lmstudio",
-    "model": "omar-agent-v1"
+    "model": "test-model"
   },
   "diff": { "base": "...", "filesChanged": 2, "adds": 38, "dels": 8,
             "paths": ["src/nav.rs"], "unified": "..." },

@@ -35,8 +35,8 @@ curl -sf http://127.0.0.1:1234/v1/models >/dev/null || { echo "FAIL: stub server
 echo "==> stub server up"
 
 # Verify pi actually parses the §5 models.json shape before relying on it.
-if PI_CODING_AGENT_DIR="$work/agentdir" pi --list-models 2>&1 | grep -q 'omar-agent-v1'; then
-  echo "PASS: models.json (architecture §5 shape) resolves lmstudio/omar-agent-v1"
+if PI_CODING_AGENT_DIR="$work/agentdir" pi --list-models 2>&1 | grep -q 'test-model'; then
+  echo "PASS: models.json (architecture §5 shape) resolves lmstudio/test-model"
 else
   echo "FAIL: pi did not resolve the model from models.json"; exit 1
 fi
@@ -52,7 +52,7 @@ sampler_pid=$!
 PI_CODING_AGENT_DIR="$work/agentdir" \
 HARNESS_AGENT_SCHEMA="$here/../../agent-schema/v1/tools.json" \
   pi -p "run the probe" -e "$ext" -e "$here/../harness-tools.ts" \
-  --model lmstudio/omar-agent-v1 --session-dir "$work/sessions" > "$work/pi.log" 2>&1
+  --model lmstudio/test-model --session-dir "$work/sessions" > "$work/pi.log" 2>&1
 pi_status=$?
 sleep 2
 kill "$sampler_pid" 2>/dev/null

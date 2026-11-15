@@ -10,7 +10,7 @@
 //!
 //! ```no_run
 //! use pi_client::{PiRpc, RpcCommand};
-//! let mut pi = PiRpc::spawn("pi", "/path/to/worktree", &["--model", "lmstudio/omar-agent-v1"]).unwrap();
+//! let mut pi = PiRpc::spawn("pi", "/path/to/worktree", &["--model", "lmstudio/test-model"]).unwrap();
 //! let events = pi.subscribe();
 //! pi.send(&RpcCommand::Prompt {
 //!     id: Some("c1".into()),

@@ -86,7 +86,7 @@ Result against pi 0.73.1:
 
 ```
 ==> pi 0.73.1
-PASS: models.json (architecture §5 shape) resolves lmstudio/omar-agent-v1
+PASS: models.json (architecture §5 shape) resolves lmstudio/test-model
 ==> observed state sequence: [running idle]
 PASS: pi exited cleanly
 PASS: the tool actually ran
@@ -106,7 +106,7 @@ when the installed pi differs from the pin.
 
 §5 noted that Spike 2 could not confirm the LM Studio provider block because the build
 container blocked even localhost sockets. The capture harness loads **the exact JSON
-printed in §5** and pi resolves `lmstudio/omar-agent-v1` from it, streams an
+printed in §5** and pi resolves `lmstudio/test-model` from it, streams an
 OpenAI-compatible response through it, and records `"provider":"lmstudio"` in the
 session. The block is correct as written, including the dummy `apiKey` and the `compat`
 flags. *Caveat:* this validates the shape pi expects, not LM Studio's own behavior —

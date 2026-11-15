@@ -360,7 +360,7 @@ class Component extends DCLogic {
         {id:'t2',type:'editor',title:'worktree_card.rs'}
       ],
       projects: [
-        {id:'p1',name:'coding-harness',expanded:true,
+        {id:'p1',name:'openorchestra',expanded:true,
           main:{id:'main1',name:'main',ci:'passing'},
           worktrees:[
             {id:'wt-nav',name:'worktree-nav',letters:'WN',color:'#4ec26b',branch:'feat/worktree-nav',pr:{num:142,status:'open'},ahead:6,behind:2,dirty:true,files:11,agent:'running',ci:'running'},
@@ -488,11 +488,11 @@ class Component extends DCLogic {
       termGlyph:this.icons.term, codeGlyph:this.icons.code, agentGlyph:this.icons.agent,
       isTerminal: activeTab.type==='terminal',
       isEditor: activeTab.type==='editor',
-      prompt: '~/coding-harness/.wt/'+(active.name||'nav')+' \u276F ',
+      prompt: '~/openorchestra/.wt/'+(active.name||'nav')+' \u276F ',
       termLines: [
         {text:'harness ~ spawned pty · '+(active.branch||'feat/worktree-nav'), color:'var(--tx3)'},
         {text:'\u276F cargo run --bin harness', color:'var(--tx)'},
-        {text:'   Compiling harness v0.3.1 (/Users/dev/coding-harness)', color:'var(--tx2)'},
+        {text:'   Compiling harness v0.3.1 (/Users/example/sample-repo)', color:'var(--tx2)'},
         {text:'    Finished dev [unoptimized] target(s) in 4.82s', color:'var(--green)'},
         {text:'     Running `target/debug/harness`', color:'var(--tx2)'},
         {text:'[agent] attached to worktree '+(active.name||'worktree-nav'), color:'var(--accent)'},

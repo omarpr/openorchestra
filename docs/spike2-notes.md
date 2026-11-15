@@ -201,7 +201,7 @@ cargo run -p status-watch --example demo -- /path/to/worktree [more...]
 #   → [repo/wt-nav] agent: running
 
 # Feed it from real pi (needs @mariozechner/pi-coding-agent installed):
-cd /path/to/worktree && pi -e /path/to/omar-harness/pi-ext/harness-status.ts
+cd /path/to/worktree && pi -e /path/to/openorchestra/pi-ext/harness-status.ts
 # or fake a write:
 mkdir -p .harness && printf '{"state":"running","timestamp":"2026-07-19T00:00:00Z","sessionFile":null}' > .harness/t && mv .harness/t .harness/status.json
 

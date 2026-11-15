@@ -378,8 +378,8 @@ mod tests {
     #[test]
     fn an_alert_never_shows_empty_parentheses() {
         use super::{alert_text, AgentAlert};
-        let (_, body) = alert_text("Claude Code", "main", "msrosa-tutoring", AgentAlert::NeedsAttention);
-        assert_eq!(body, "main (msrosa-tutoring) is waiting on you");
+        let (_, body) = alert_text("Claude Code", "main", "sample-repo", AgentAlert::NeedsAttention);
+        assert_eq!(body, "main (sample-repo) is waiting on you");
         let (_, body) = alert_text("Claude Code", "scratch", "", AgentAlert::Finished);
         assert_eq!(body, "scratch is ready for review");
     }

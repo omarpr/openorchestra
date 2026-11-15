@@ -16,7 +16,7 @@ import http from "node:http";
 
 const PORT = Number(process.env.FAKE_LLM_PORT ?? 1234);
 const RESPONSE_DELAY_MS = Number(process.env.RESPONSE_DELAY_MS ?? 1500);
-const MODEL = "omar-agent-v1";
+const MODEL = "test-model";
 
 let turn = 0;
 const sse = (res, obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);

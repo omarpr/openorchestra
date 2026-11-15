@@ -464,7 +464,7 @@ mod tests {
     #[test]
     fn parse_ps_normalizes_comm_to_a_bare_basename() {
         // The exact shapes observed from `ps -axo pid=,ppid=,comm=`.
-        let out = "97973 82836 -zsh\n99906 82836 sh\n99909 99906 /Users/omar/.local/bin/claude\n1 0 /sbin/launchd\n";
+        let out = "97973 82836 -zsh\n99906 82836 sh\n99909 99906 /opt/test/bin/claude\n1 0 /sbin/launchd\n";
         let procs = parse_ps(out);
         assert_eq!(
             procs,
@@ -480,7 +480,7 @@ mod tests {
 
     #[test]
     fn a_pane_of_only_shells_has_no_agent() {
-        // lithepg's stale case: the pane fell back to `-zsh`, agent long gone.
+        // sample-project's stale case: the pane fell back to `-zsh`, agent long gone.
         let procs = parse_ps("97973 82836 -zsh\n98039 97973 -zsh\n");
         assert!(!agent_running_in(&procs, &[97973]), "only shells → no agent");
     }
@@ -488,7 +488,7 @@ mod tests {
     #[test]
     fn a_live_agent_under_the_pane_shell_is_detected() {
         // openOrchestra: pane runs `sh -lc`, with claude as its child.
-        let procs = parse_ps("99906 82836 sh\n99909 99906 /Users/omar/.local/bin/claude\n");
+        let procs = parse_ps("99906 82836 sh\n99909 99906 /opt/test/bin/claude\n");
         assert!(agent_running_in(&procs, &[99906]), "claude under the pane → alive");
     }
 
