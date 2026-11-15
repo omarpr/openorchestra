@@ -73,28 +73,44 @@ fn is_active_state(state: &str) -> bool {
     state == "working" || state == "submitted"
 }
 
+/// The `Up` a terminal state means, if it is one.
+fn terminal_kind(state: &str) -> Option<LinkEventKind> {
+    match state {
+        "completed" => Some(LinkEventKind::Up { ok: true }),
+        "failed" | "rejected" => Some(LinkEventKind::Up { ok: false }),
+        _ => None,
+    }
+}
+
 /// Events implied by going from `prev` to `next` for one task: a new id is a
 /// delegation sent (`Down`); an id that just became `completed` is `Up ok`,
-/// `failed`/`rejected` is `Up` not ok. Anything else emits nothing.
+/// `failed`/`rejected` is `Up` not ok. Anything else emits nothing. An id
+/// first seen already finished (sent and done between two polls) gets both:
+/// the `Down` now and its `Up` once that has travelled.
 pub(crate) fn diff_snapshots(task_id: &str, prev: &[A2aRow], next: &[A2aRow], now: f32) -> Vec<LinkEvent> {
     let mut out = Vec::new();
     for (id, tenant, state) in next {
-        let kind = match prev.iter().find(|(pid, _, _)| pid == id) {
-            None => Some(LinkEventKind::Down),
-            Some((_, _, before)) if before == state => None,
-            Some(_) => match state.as_str() {
-                "completed" => Some(LinkEventKind::Up { ok: true }),
-                "failed" | "rejected" => Some(LinkEventKind::Up { ok: false }),
-                _ => None,
-            },
-        };
-        if let Some(kind) = kind {
+        let mut push = |kind, started| {
             out.push(LinkEvent {
                 task_id: task_id.to_string(),
                 tenant: tenant.clone(),
                 kind,
-                started: now,
-            });
+                started,
+            })
+        };
+        match prev.iter().find(|(pid, _, _)| pid == id) {
+            None => {
+                push(LinkEventKind::Down, now);
+                if let Some(up) = terminal_kind(state) {
+                    push(up, now + TRAVEL_SECS);
+                }
+            }
+            Some((_, _, before)) if before == state => {}
+            Some(_) => {
+                if let Some(up) = terminal_kind(state) {
+                    push(up, now);
+                }
+            }
         }
     }
     out
@@ -261,6 +277,29 @@ mod tests {
             assert_eq!(ev.len(), 1, "{end}");
             assert_eq!(ev[0].kind, LinkEventKind::Up { ok: false }, "{end}");
         }
+    }
+
+    #[test]
+    fn new_and_already_completed_emits_down_then_up() {
+        let ev = diff_snapshots("t", &[], &[row("a1", "wt-a", "completed")], 4.0);
+        assert_eq!(ev.len(), 2, "{ev:?}");
+        assert_eq!(ev[0].kind, LinkEventKind::Down);
+        assert_eq!(ev[0].started, 4.0);
+        assert_eq!(ev[1].kind, LinkEventKind::Up { ok: true });
+        assert_eq!(ev[1].started, 4.0 + TRAVEL_SECS);
+        let refs: Vec<&LinkEvent> = ev.iter().collect();
+        assert!(matches!(
+            link_visual(false, &refs, 4.5),
+            LinkVisual::Travel { kind: LinkEventKind::Down, .. }
+        ));
+        assert!(matches!(
+            link_visual(false, &refs, 5.5),
+            LinkVisual::Travel { kind: LinkEventKind::Up { ok: true }, .. }
+        ));
+        // Failed/rejected the same way, not ok.
+        let ev = diff_snapshots("t", &[], &[row("a2", "wt-b", "rejected")], 0.0);
+        assert_eq!(ev.len(), 2);
+        assert_eq!(ev[1].kind, LinkEventKind::Up { ok: false });
     }
 
     #[test]

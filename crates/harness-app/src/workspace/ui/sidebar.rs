@@ -911,8 +911,8 @@ fn link_connectors(hx: &HarnessTheme, visuals: &[links::LinkVisual]) -> Vec<AnyE
     for (i, v) in visuals.iter().enumerate() {
         let (color, alpha) = match *v {
             LinkVisual::Idle => continue,
-            LinkVisual::Active { pulse } => (hx.accent, 0.35 + 0.5 * pulse),
-            LinkVisual::Travel { kind: LinkEventKind::Down, .. } => (hx.accent, 0.7),
+            LinkVisual::Active { pulse } => (hx.amber, 0.35 + 0.5 * pulse),
+            LinkVisual::Travel { kind: LinkEventKind::Down, .. } => (hx.amber, 0.7),
             LinkVisual::Travel { kind: LinkEventKind::Up { ok }, .. } => (up_color(ok), 0.7),
             LinkVisual::Flash { ok, fade } => (up_color(ok), fade.clamp(0.0, 1.0)),
         };
@@ -922,7 +922,7 @@ fn link_connectors(hx: &HarnessTheme, visuals: &[links::LinkVisual]) -> Vec<AnyE
         if let LinkVisual::Travel { kind, progress } = *v {
             let (x, y) = links::dot_position(i, progress, kind);
             let dot = match kind {
-                LinkEventKind::Down => hx.accent,
+                LinkEventKind::Down => hx.amber,
                 LinkEventKind::Up { ok } => up_color(ok),
             };
             out.push(

@@ -112,12 +112,12 @@ impl HarnessWorkspace {
                 cx,
             );
             // Task creation already selected the task, so the coordinator
-            // may be running the pre-dialog kind: open the chosen one unless
-            // a tab of it is there (the earlier agent is left alone).
+            // usually has its agent. Never open a second one: two live
+            // agents would make A2A inbox injection ambiguous.
             let has_agent = self
                 .panes
                 .get(&a2a_broker::coordinator_pane_key(&task_id))
-                .is_some_and(|p| p.tabs.iter().any(|t| t.agent.as_ref() == Some(&kind)));
+                .is_some_and(|p| p.tabs.iter().any(|t| t.agent.is_some()));
             if !has_agent {
                 self.open_tab(TabKind::Agent(kind.clone()), window, cx);
             }
