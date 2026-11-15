@@ -55,16 +55,48 @@ impl HarnessWorkspace {
 
     /// Every selectable entry in sidebar (PROJECTS) order: each project's main
     /// checkout, then its worktrees. Paired with the path it resolves to.
+    ///
+    /// A multi-project task's coordinator agent is a target too (its path is
+    /// the task folder, where its status lives), placed just before the first
+    /// of its members, so cycling and "next waiting agent" both reach it.
     fn navigation_targets(&self) -> Vec<(Selection, PathBuf)> {
+        let tasks_root = self.data_dir.join("tasks");
+        let coordinator = |task_id: &str| {
+            self.task_store
+                .get(task_id)
+                .filter(|t| !t.archived && super::coordinator::has_coordinator(t))
+                .map(|t| {
+                    (
+                        Selection::Task { task_id: t.id.clone(), member_id: None },
+                        worktrees::task_coordinator_dir(&tasks_root, &t.slug),
+                    )
+                })
+        };
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut out = Vec::new();
         for repo in &self.data.repos {
             out.push((Selection::Main(repo.name.clone()), repo.repo_root.clone()));
             for wt in &repo.worktrees {
                 let sel = match &wt.task_id {
-                    Some(t) => Selection::Task { task_id: t.clone(), member_id: Some(wt.id.clone()) },
+                    Some(t) => {
+                        if seen.insert(t.clone())
+                            && let Some(c) = coordinator(t)
+                        {
+                            out.push(c);
+                        }
+                        Selection::Task { task_id: t.clone(), member_id: Some(wt.id.clone()) }
+                    }
                     None => Selection::Worktree(wt.id.clone()),
                 };
                 out.push((sel, wt.path.clone()));
+            }
+        }
+        // A coordinator whose members are not listed under any project.
+        for task in self.task_store.active() {
+            if !seen.contains(&task.id)
+                && let Some(c) = coordinator(&task.id)
+            {
+                out.push(c);
             }
         }
         out

@@ -40,6 +40,23 @@ pub(crate) fn task_focus<'a>(
     }
 }
 
+/// Roots the live DIFF watch covers for a selection.
+///
+/// A task's diff is unified across every member worktree, so a task
+/// selection (coordinator or member) watches all of them. The task folder
+/// itself is never watched: it holds the coordinator's status file, A2A
+/// queues and agent config, none of which belong in the diff. Anything that
+/// is not a task watches `selected` alone.
+pub(crate) fn diff_watch_roots(
+    task: Option<&worktrees::Task>,
+    selected: &std::path::Path,
+) -> Vec<std::path::PathBuf> {
+    match task {
+        Some(t) => t.members.iter().map(|m| m.path.clone()).collect(),
+        None => vec![selected.to_path_buf()],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,6 +122,19 @@ mod tests {
             task_focus(&t, None),
             Some(TaskFocus::Member(&t.members[0]))
         );
+    }
+
+    #[test]
+    fn coordinator_diff_watch_covers_every_member_not_the_task_folder() {
+        let t = two();
+        let roots = diff_watch_roots(Some(&t), std::path::Path::new("/tasks/ship-it"));
+        assert_eq!(roots, vec![PathBuf::from("/wt/wt-api"), PathBuf::from("/wt/wt-web")]);
+    }
+
+    #[test]
+    fn non_task_diff_watch_is_the_selected_root() {
+        let roots = diff_watch_roots(None, std::path::Path::new("/repo"));
+        assert_eq!(roots, vec![PathBuf::from("/repo")]);
     }
 
     #[test]

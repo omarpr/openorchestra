@@ -163,7 +163,20 @@ impl HarnessWorkspace {
             cx.notify();
             return;
         };
-        crate::workspace_host::open_file_at(&hosted, &r.path, &file, line, false, window, cx);
+        // A task's diff keys files `repo/path`: open it in its member's
+        // worktree. Anything else is relative to the editor root, never
+        // `r.path`: for a coordinator that is the task folder, which holds
+        // the A2A bearer-key scripts and is no project to root an editor in.
+        let (root, rel) = match self
+            .unified_diff
+            .files
+            .iter()
+            .find(|f| format!("{}/{}", f.repo, f.file.path) == file)
+        {
+            Some(f) => (f.worktree.clone(), f.file.path.clone()),
+            None => (r.editor_path.clone(), file),
+        };
+        crate::workspace_host::open_file_at(&hosted, &root, &rel, line, false, window, cx);
         cx.notify();
     }
 

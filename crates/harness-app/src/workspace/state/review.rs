@@ -211,8 +211,11 @@ impl HarnessWorkspace {
         self.diff_focus = None;
         self.md_preview = None;
         if let Some(r) = self.resolve() {
-            // Keep the live watch pointed at whatever the diff panel shows.
-            self.diff_watch.watch(&r.path);
+            // Keep the live watch pointed at whatever the diff panel shows: a
+            // task's diff spans all its members (never the task folder).
+            let task = r.task_id.as_deref().and_then(|id| self.task_store.get(id));
+            let roots = crate::workspace::coordinator::diff_watch_roots(task, &r.path);
+            self.diff_watch.watch_all(&roots);
         }
         // A push offer belongs to one branch. Carrying an armed control — or a
         // count — across a selection change would let a click aimed at one
