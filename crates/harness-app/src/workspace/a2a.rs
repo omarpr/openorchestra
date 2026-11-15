@@ -40,7 +40,7 @@ impl HarnessWorkspace {
                 worktree_id: m.worktree_id.clone(),
                 repo: m.repo.clone(),
                 path: m.path.clone(),
-                is_home: m.repo == task.home_repo,
+                is_coordinator: m.repo == task.home_repo,
             })
             .collect();
 
@@ -246,8 +246,7 @@ fn start_broker_with_port_fallback(
             oo_task_id: task.id.clone(),
             task_slug: task.slug.clone(),
             task_name: task.name.clone(),
-            home_worktree_id: home.worktree_id.clone(),
-            home_repo: home.repo.clone(),
+            coordinator_tenant: home.worktree_id.clone(),
             members: members.to_vec(),
             api_key: api_key.to_string(),
             a2a_dir: a2a_dir.to_path_buf(),

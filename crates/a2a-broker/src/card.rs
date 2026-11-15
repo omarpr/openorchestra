@@ -62,7 +62,7 @@ pub fn agent_card_for_member(
     task_slug: &str,
     member: &MemberEndpoint,
 ) -> AgentCard {
-    let role = if member.is_home {
+    let role = if member.is_coordinator {
         "orchestrator"
     } else {
         "specialist"
@@ -102,7 +102,7 @@ pub fn agent_card_for_member(
                 "worktreeId": member.worktree_id,
                 "repo": member.repo,
                 "path": member.path,
-                "isHome": member.is_home,
+                "isCoordinator": member.is_coordinator,
                 "taskSlug": task_slug,
             }
         })),
@@ -128,7 +128,7 @@ pub fn orchestrator_card(
     ];
     let sibling_urls: Vec<String> = siblings
         .iter()
-        .filter(|m| !m.is_home)
+        .filter(|m| !m.is_coordinator)
         .map(|m| {
             format!(
                 "{base_url}/t/{}/.well-known/agent-card.json",

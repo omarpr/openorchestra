@@ -332,24 +332,24 @@ fn handle_connection(mut stream: TcpStream, state: Arc<BrokerState>) -> std::io:
         return Ok(());
     }
 
-    // Root card = orchestrator
+    // Root card = coordinator
     if method == "GET" && (path == "/.well-known/agent-card.json" || path == "/.well-known/agent.json")
     {
         let home = state
             .config
             .members
             .iter()
-            .find(|m| m.is_home)
+            .find(|m| m.is_coordinator)
             .or_else(|| state.config.members.first());
         let Some(home) = home else {
-            write_response(&mut stream, 404, "text/plain", b"no home")?;
+            write_response(&mut stream, 404, "text/plain", b"no coordinator")?;
             return Ok(());
         };
         let siblings: Vec<_> = state
             .config
             .members
             .iter()
-            .filter(|m| !m.is_home)
+            .filter(|m| !m.is_coordinator)
             .cloned()
             .collect();
         let card = orchestrator_card(
@@ -622,7 +622,7 @@ fn handle_send_message(
         serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
     let target = tenant
         .map(|s| s.to_string())
-        .unwrap_or_else(|| state.config.home_worktree_id.clone());
+        .unwrap_or_else(|| state.config.coordinator_tenant.clone());
 
     if state.member(&target).is_none() {
         return Err(format!("unknown tenant {target}"));
@@ -881,20 +881,25 @@ mod tests {
             oo_task_id: "auth".into(),
             task_slug: "auth".into(),
             task_name: "Auth".into(),
-            home_worktree_id: "jam/auth".into(),
-            home_repo: "jam".into(),
+            coordinator_tenant: crate::COORDINATOR_TENANT.into(),
             members: vec![
+                MemberEndpoint {
+                    worktree_id: crate::COORDINATOR_TENANT.into(),
+                    repo: "coordinator".into(),
+                    path: PathBuf::from("/tasks/auth"),
+                    is_coordinator: true,
+                },
                 MemberEndpoint {
                     worktree_id: "jam/auth".into(),
                     repo: "jam".into(),
                     path: PathBuf::from("/wt/jam/auth"),
-                    is_home: true,
+                    is_coordinator: false,
                 },
                 MemberEndpoint {
                     worktree_id: "api/auth".into(),
                     repo: "api".into(),
                     path: PathBuf::from("/wt/api/auth"),
-                    is_home: false,
+                    is_coordinator: false,
                 },
             ],
             api_key: "test-key".into(),
@@ -967,6 +972,100 @@ mod tests {
         let gv: serde_json::Value = serde_json::from_str(&got).unwrap();
         assert_eq!(gv["result"]["status"]["state"], "completed");
 
+        handle.shutdown();
+    }
+
+    fn send_body(text: &str) -> String {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "message/send",
+            "params": { "message": {
+                "message_id": "m1", "role": "user", "parts": [{ "text": text }]
+            } }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn send_without_tenant_targets_the_coordinator() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = BrokerServer::start(test_state(dir.path())).unwrap();
+        let key = handle.api_key().to_string();
+        let resp = http_post(
+            &format!("{}/jsonrpc", handle.base_url()),
+            &key,
+            &send_body("plan this"),
+        );
+        let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        let id = v["result"]["id"].as_str().unwrap().to_string();
+        let tasks = handle.state.tasks.lock().unwrap();
+        assert_eq!(tasks.get(&id).unwrap().tenant, "@coordinator");
+        drop(tasks);
+        handle.shutdown();
+    }
+
+    #[test]
+    fn former_home_repo_is_a_delegation_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = BrokerServer::start(test_state(dir.path())).unwrap();
+        let key = handle.api_key().to_string();
+        let resp = http_post(
+            &format!("{}/t/jam%2Fauth/jsonrpc", handle.base_url()),
+            &key,
+            &send_body("do it"),
+        );
+        let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        let id = v["result"]["id"].as_str().expect(&resp).to_string();
+        let tasks = handle.state.tasks.lock().unwrap();
+        assert_eq!(tasks.get(&id).unwrap().tenant, "jam/auth");
+        drop(tasks);
+        let inbox = handle.state.config.a2a_dir.join("inbox");
+        assert!(
+            std::fs::read_dir(&inbox)
+                .unwrap()
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().contains("jam")),
+            "expected an inbox entry for jam/auth under {inbox:?}"
+        );
+        handle.shutdown();
+    }
+
+    #[test]
+    fn root_card_lists_every_repo_as_specialist() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = BrokerServer::start(test_state(dir.path())).unwrap();
+        let key = handle.api_key().to_string();
+        let card = http_get(
+            &format!("{}/.well-known/agent-card.json", handle.base_url()),
+            &key,
+        );
+        let v: serde_json::Value = serde_json::from_str(&card).unwrap();
+        let siblings: Vec<String> = v["metadata"]["openOrchestra"]["siblingCards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(siblings.len(), 2, "{siblings:?}");
+        assert!(siblings.iter().any(|s| s.contains("jam%2Fauth")));
+        assert!(siblings.iter().any(|s| s.contains("api%2Fauth")));
+        assert!(!siblings.iter().any(|s| s.contains("coordinator")));
+        assert_eq!(v["metadata"]["openOrchestra"]["worktreeId"], "@coordinator");
+        handle.shutdown();
+    }
+
+    #[test]
+    fn unknown_tenant_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = BrokerServer::start(test_state(dir.path())).unwrap();
+        let key = handle.api_key().to_string();
+        let resp = http_post(
+            &format!("{}/t/nope%2Fx/jsonrpc", handle.base_url()),
+            &key,
+            &send_body("hi"),
+        );
+        assert!(resp.contains("unknown tenant"), "{resp}");
         handle.shutdown();
     }
 
