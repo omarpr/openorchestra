@@ -67,15 +67,19 @@
 
 **Interfaces:**
 - Consumes: `COORDINATOR_TENANT`, `BrokerState::notify_inbox`.
-- Produces: `InboxMessage` gains `#[serde(default)] pub reply: bool`. A reply has `from_tenant: Some(<specialist tenant>)` and `reply: true`. Its `text` is `"<state> by <repo>: <summary-or-error>"`, where `<state>` is `completed` or `failed` and `<repo>` is the specialist's `MemberEndpoint.repo`.
+- Produces:
+  - `InboxMessage` gains `#[serde(default)] pub reply: bool`. A reply has `from_tenant: Some(<specialist tenant>)` and `reply: true`. Its `text` is `"<state> by <repo>: <summary-or-reason>"`, where `<state>` is `completed`, `failed` or `rejected` and `<repo>` is the specialist's `MemberEndpoint.repo`.
+  - `BridgeEvent::Rejected { a2a_task_id: String, reason: String }` (serialized in the outbox like `Failed`, with `"state":"rejected"`).
+  - `/v1/complete` accepts `rejected=1&reason=<text>` (form) or `{"rejected":true,"reason":…}` (JSON), which produces `BridgeEvent::Rejected`. `reason` defaults to `"rejected"`.
 
 - [ ] **Step 1: Write the failing tests**
   - `completion_pushes_one_reply_to_coordinator`: send to `api/auth`, then POST `/v1/complete` with `summary=shipped`. After the drain (poll up to 2s), exactly one `InboxDelivery` arrived on `on_inbox` with `tenant == "@coordinator"`, `message.reply == true`, `message.text == "completed by api: shipped"`, and `message.a2a_task_id` equal to the delegated id. The coordinator inbox file has one line.
   - `failure_pushes_failed_reply`: `/v1/complete` with `failed=1&error=boom` gives the text `"failed by api: boom"`.
+  - `rejection_pushes_rejected_reply`: `/v1/complete` with `rejected=1&reason=not+my+repo` sets the broker task state to `rejected`, and gives the text `"rejected by api: not my repo"`.
   - `repeated_complete_does_not_push_twice`: complete the same id twice. Exactly one coordinator delivery.
   - `delegation_inbox_is_not_a_reply`: the specialist delivery from `message/send` has `reply == false`.
 - [ ] **Step 2: Run** `cargo test -p a2a-broker`. Expected: FAIL.
-- [ ] **Step 3: Implement** in `drain_bridge`: read the task's current state and tenant before `set_state`. Push only when the previous state wasn't terminal (`Completed | Failed | Canceled | Rejected`). Enqueue through `state.bridge.enqueue(COORDINATOR_TENANT, &msg)`, then `state.notify_inbox(...)`. Release the `tasks` lock before notifying. Canceled/rejected don't push: they only come from the coordinator's own action.
+- [ ] **Step 3: Implement** in `drain_bridge`: read the task's current state and tenant before `set_state`. Handle `Rejected` like `Failed`, setting `TaskState::Rejected`. Push only when the previous state wasn't terminal (`Completed | Failed | Canceled | Rejected`). Enqueue through `state.bridge.enqueue(COORDINATOR_TENANT, &msg)`, then `state.notify_inbox(...)`. Release the `tasks` lock before notifying. Canceled doesn't push: it only comes from the coordinator's own action.
 - [ ] **Step 4: Run** `cargo test -p a2a-broker`. Expected: PASS.
 - [ ] **Step 5: Commit** `feat(a2a): push finished delegations to the coordinator`
 
@@ -91,11 +95,12 @@
   - The header line is `Coordinator: <coordinator dir>`.
   - A `Repos (each has its own specialist agent):` list of every member, as `- <repo> `<path>` (worktree id `<id>`)`.
   - Role section: **"If your cwd is `<coordinator dir>` you are the COORDINATOR."** Plan across all repos, delegate each repo's part with `delegate.sh <worktree_id> "…"`, don't edit any repo tree, and report back to the user. Results arrive in your chat on their own as `[openOrchestra A2A] task_id=… completed by <repo>: …`; use `status.sh` only to check work still in progress.
-  - **"Otherwise you are the SPECIALIST"** text, unchanged.
+  - **"Otherwise you are the SPECIALIST"** text as today, plus: if a request is outside your repo or you can't do it, run `{dir}/reject.sh <a2a_task_id> "why"` instead of `complete.sh`.
 - Single-member tasks: no role section, unchanged.
 
 - [ ] **Step 1: Write/adjust failing tests**
   - `multi_member_context_names_the_coordinator`: it contains `Coordinator: /oo/tasks/auth` (with `tasks_root=/oo/tasks`, slug `auth`), contains `you are the COORDINATOR`, and does not contain `Home / orchestrator` or `ORCHESTRATOR`.
+  - `specialist_text_mentions_reject`: it contains `reject.sh <a2a_task_id>`.
   - `every_repo_is_listed_as_a_specialist`: both member repos appear under `Repos`.
   - `coordinator_dir_is_the_task_folder`: `task_coordinator_dir(Path::new("/oo/tasks"), "auth") == PathBuf::from("/oo/tasks/auth")`.
   - Replace the existing `contains("Home / orchestrator: jam")` asserts.
@@ -134,6 +139,7 @@
   - `pane_env`: for the coordinator, `HARNESS_A2A_TENANT=@coordinator`, the task context path, `HARNESS_TASK_ID`/slug, and the home member's `HARNESS_HOME_WORKTREE`. Omit `HARNESS_WORKTREE`/`HARNESS_REPO_ROOT`/branch.
   - `ensure_pane`: open `TabKind::Agent(task.agent_kind)` on first open when the focus is `Coordinator`; members open `TabKind::Shell`. This replaces the home-agent branch.
   - `agent_command_for`: skip `exclude_locally` when `r.path` has no `.git` (Review Focus 4). After `on_spawn`, `status_source.watch(&r.path, kind)` so the coordinator's status file drives a pill.
+  - `write_a2a_helpers`: also write an executable `reject.sh` (`TASK_ID="${1:?a2a_task_id}"`, `REASON="${2:-rejected}"`; POST form `a2a_task_id`, `rejected=1`, `reason` to `/v1/complete` with the bearer key, mirroring `complete.sh`). Add `reject` to `mcp-tools.json`. Test: `helpers_include_reject_script` checks the file exists and is executable, and contains `rejected=1`.
   - `ensure_task_broker`: build members as one coordinator endpoint plus all repos with `is_coordinator: false`. Set `coordinator_tenant: COORDINATOR_TENANT`. Drop the `home` parameter from `start_broker_with_port_fallback`.
   - `deliver_a2a_inbox` needs no change: tenant `@coordinator` maps to `coordinator_pane_key` through `task_member_pane_key`.
   - `session_prefix_for_path`: a path equal to an active task's coordinator dir maps to `session_prefix(&coordinator_pane_key(id))`. `alert_target` labels it `("<task name> · coordinator", "", <task id>)`, so the notification click navigates to the task.

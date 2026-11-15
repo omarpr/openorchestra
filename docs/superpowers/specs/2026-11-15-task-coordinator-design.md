@@ -115,9 +115,11 @@ coordination. This design makes that true and makes it obvious in the UI.
 
 ### Completion push to the coordinator
 
-- When an A2A task moves to a terminal state (`completed`, `failed`, `canceled`,
-  `rejected`), whether through `/v1/complete`, `complete.sh` or a JSON-RPC status
-  update, the broker enqueues an inbox message for `@coordinator` through the
+- A specialist can decline a delegation with a new `reject.sh <a2a_task_id>
+  "reason"` helper (`/v1/complete` with `rejected=1`), which sets the task to
+  `rejected`. The specialist role text tells it to use this when a request is
+  outside its repo or it can't do it.
+- When an A2A task moves to `completed`, `failed` or `rejected`, the broker enqueues an inbox message for `@coordinator` through the
   same `FileBridge`/`InboxDelivery` path that specialists use.
 - The app injects it into the coordinator pane as one line:
   `[openOrchestra A2A] task_id=<id> <state> by <repo>: <summary or error>`.
