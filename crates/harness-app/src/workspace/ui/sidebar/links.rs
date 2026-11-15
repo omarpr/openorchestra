@@ -73,6 +73,18 @@ fn is_active_state(state: &str) -> bool {
     state == "working" || state == "submitted"
 }
 
+/// Whether a row to `tenant` is a delegation: only coordinator → specialist
+/// messages are drawn. One addressed to the coordinator itself (a
+/// specialist asking it something) has no connector.
+fn is_delegation(tenant: &str) -> bool {
+    tenant != a2a_broker::COORDINATOR_TENANT
+}
+
+/// Whether a row counts toward a task's in-flight delegations ("N A2A").
+pub(crate) fn is_in_flight_delegation(tenant: &str, state: &str) -> bool {
+    is_delegation(tenant) && is_active_state(state)
+}
+
 /// The `Up` a terminal state means, if it is one.
 fn terminal_kind(state: &str) -> Option<LinkEventKind> {
     match state {
@@ -89,7 +101,7 @@ fn terminal_kind(state: &str) -> Option<LinkEventKind> {
 /// the `Down` now and its `Up` once that has travelled.
 pub(crate) fn diff_snapshots(task_id: &str, prev: &[A2aRow], next: &[A2aRow], now: f32) -> Vec<LinkEvent> {
     let mut out = Vec::new();
-    for (id, tenant, state) in next {
+    for (id, tenant, state) in next.iter().filter(|(_, t, _)| is_delegation(t)) {
         let mut push = |kind, started| {
             out.push(LinkEvent {
                 task_id: task_id.to_string(),
@@ -212,7 +224,7 @@ impl LinkTracker {
         self.prev
             .values()
             .flatten()
-            .any(|(_, _, s)| is_active_state(s))
+            .any(|(_, t, s)| is_in_flight_delegation(t, s))
     }
 
     /// Drop events past their last frame.
@@ -371,6 +383,23 @@ mod tests {
         assert!(!tr.is_animating(2.6));
         tr.prune(2.7);
         assert!(tr.events_for("t", "wt-a").is_empty());
+    }
+
+    #[test]
+    fn coordinator_tenant_row_is_not_a_delegation() {
+        // A specialist messaging the coordinator is not a link to draw.
+        let coord = a2a_broker::COORDINATOR_TENANT;
+        assert!(!is_in_flight_delegation(coord, "working"));
+        assert!(is_in_flight_delegation("wt-a", "working"));
+        assert!(diff_snapshots("t", &[], &[row("c1", coord, "working")], 0.0).is_empty());
+        assert!(
+            diff_snapshots("t", &[row("c1", coord, "working")], &[row("c1", coord, "completed")], 1.0)
+                .is_empty()
+        );
+        let mut tr = LinkTracker::default();
+        tr.observe("t", vec![row("c1", coord, "working")], 0.0);
+        assert!(!tr.any_active(), "a coordinator-bound row keeps nothing pulsing");
+        assert!(!tr.is_animating(0.1));
     }
 
     #[test]

@@ -416,7 +416,9 @@ impl HarnessWorkspace {
         let in_flight = |tenant: Option<&str>| {
             a2a_rows
                 .iter()
-                .filter(|(_, t, s)| tenant.is_none_or(|x| x == t) && (s == "working" || s == "submitted"))
+                .filter(|(_, t, s)| {
+                    tenant.is_none_or(|x| x == t) && links::is_in_flight_delegation(t, s)
+                })
                 .count()
         };
         let a2a_active = in_flight(None);
@@ -861,16 +863,6 @@ const ID_NEW_WT: &str = "repo-new-worktree";
 #[cfg(test)]
 const REPO_ID_PREFIXES: [&str; 4] = [ID_TOGGLE, ID_MORE, ID_MAIN, ID_NEW_WT];
 
-/// The element id for one control in a project's row, keyed on the project
-/// name — never on its length.
-///
-/// GPUI tracks hover, press and click state per element id, so
-/// `("repo-toggle", repo.name.len())` gave two projects whose names were the
-/// same length one shared identity. Sharing an identity shares one
-/// `pending_mouse_down`, and on mouse-up the *first* of the pair painted clears
-/// it (its own hitbox isn't under the cursor) before the row you actually
-/// clicked can fire — so the later project was simply dead. `task-block-`
-/// documents the same trap for tasks, which is where it was fixed once already.
 /// How far a connected repo row sits in from the task block's edge: past
 /// the spine, where the old rule plus its padding put it.
 const ROW_INSET: f32 = links::SPINE_X + 5.0;
@@ -940,6 +932,16 @@ fn link_connectors(hx: &HarnessTheme, visuals: &[links::LinkVisual]) -> Vec<AnyE
     out
 }
 
+/// The element id for one control in a project's row, keyed on the project
+/// name — never on its length.
+///
+/// GPUI tracks hover, press and click state per element id, so
+/// `("repo-toggle", repo.name.len())` gave two projects whose names were the
+/// same length one shared identity. Sharing an identity shares one
+/// `pending_mouse_down`, and on mouse-up the *first* of the pair painted clears
+/// it (its own hitbox isn't under the cursor) before the row you actually
+/// clicked can fire — so the later project was simply dead. `task-block-`
+/// documents the same trap for tasks, which is where it was fixed once already.
 fn repo_element_id(prefix: &str, repo_name: &str) -> gpui::SharedString {
     gpui::SharedString::from(format!("{prefix}-{repo_name}"))
 }
