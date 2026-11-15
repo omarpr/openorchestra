@@ -227,6 +227,14 @@ impl HarnessWorkspace {
 
     pub(crate) fn ensure_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(r) = self.resolve() else { return };
+        // Every path that can spawn a task pane (select, startup restore,
+        // notification click) goes through here, so start the broker first:
+        // a coordinator spawned before it would bake a tmux env with no
+        // HARNESS_A2A_* and nothing would put them back. Idempotent, and a
+        // no-op for single-member tasks.
+        if let Some(tid) = &r.task_id {
+            self.ensure_task_broker(tid);
+        }
         self.pane_clock = self.pane_clock.wrapping_add(1);
         if let Some(existing) = self.panes.get_mut(&r.key) {
             existing.last_used = self.pane_clock;
@@ -310,10 +318,15 @@ impl HarnessWorkspace {
         {
             log::warn!("could not add local git excludes for {}: {e}", r.path.display());
         }
-        // Worktrees and main checkouts are watched up front; this covers
-        // roots that only exist once an agent opens (the coordinator's task
-        // folder). Already-watched roots are a harmless error.
-        if let Some(source) = &mut self.status_source {
+        // Worktrees and main checkouts are watched up front with their own
+        // kinds; only the coordinator's task folder (created on first open)
+        // is watched here, so opening an agent in a worktree never retags
+        // that root's fallback kind. Already watched is a harmless error.
+        let is_coordinator = r
+            .task_id
+            .as_ref()
+            .is_some_and(|tid| r.key == a2a_broker::coordinator_pane_key(tid));
+        if is_coordinator && let Some(source) = &mut self.status_source {
             let _ = source.watch(&r.path, kind.clone());
         }
         self.agent_fidelity.insert(r.path.clone(), runtime.fidelity());
