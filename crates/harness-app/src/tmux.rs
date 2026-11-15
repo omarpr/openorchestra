@@ -196,11 +196,9 @@ pub fn has_tmux() -> bool {
 /// Names of currently-live tmux sessions. Empty on any error (no server yet,
 /// tmux missing) — callers treat "unknown" as "not live", which restores fresh.
 pub fn live_sessions() -> Vec<String> {
-    let out = Command::new("tmux")
-        .args(["ls", "-F", "#{session_name}"])
-        .output();
+    let out = run_bounded(&["ls", "-F", "#{session_name}"], LIST_TIMEOUT);
     match out {
-        Ok(o) if o.status.success() => parse_sessions(&String::from_utf8_lossy(&o.stdout)),
+        Some(o) if o.status.success() => parse_sessions(&String::from_utf8_lossy(&o.stdout)),
         _ => Vec::new(),
     }
 }
@@ -209,11 +207,9 @@ pub fn live_sessions() -> Vec<String> {
 /// any error (no server, tmux missing) — the resource band then attributes
 /// nothing to worktrees and shows the base-app total only.
 pub fn list_session_panes() -> Vec<(String, u32)> {
-    let out = Command::new("tmux")
-        .args(["list-panes", "-a", "-F", "#{session_name} #{pane_pid}"])
-        .output();
+    let out = run_bounded(&["list-panes", "-a", "-F", "#{session_name} #{pane_pid}"], LIST_TIMEOUT);
     match out {
-        Ok(o) if o.status.success() => {
+        Some(o) if o.status.success() => {
             parse_session_panes(&String::from_utf8_lossy(&o.stdout))
         }
         _ => Vec::new(),
@@ -223,11 +219,9 @@ pub fn list_session_panes() -> Vec<(String, u32)> {
 /// `(session_name, pane_start_command)` for every pane the tmux server holds.
 /// Tab-separated: a start command can contain spaces but never a tab of ours.
 pub fn session_start_commands() -> Vec<(String, String)> {
-    let out = Command::new("tmux")
-        .args(["list-panes", "-a", "-F", "#{session_name}\t#{pane_start_command}"])
-        .output();
+    let out = run_bounded(&["list-panes", "-a", "-F", "#{session_name}\t#{pane_start_command}"], LIST_TIMEOUT);
     match out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+        Some(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
             .lines()
             .filter_map(|l| l.split_once('\t'))
             .map(|(n, c)| (n.to_string(), c.to_string()))
@@ -277,18 +271,112 @@ pub fn agent_from_start_command(cmd: &str) -> Option<(AgentKind, &'static str)> 
 
 /// Tear down a session (used on explicit tab close). Best-effort.
 pub fn kill_session(name: &str) {
-    let _ = Command::new("tmux").args(["kill-session", "-t", name]).output();
+    let _ = run_bounded(&["kill-session", "-t", name], LIST_TIMEOUT);
 }
 
-/// Send a command line to a live session and press Enter. Best-effort — used
-/// to surface setup hooks in the visible shell tab.
-pub fn send_keys(session: &str, command: &str) {
-    let _ = Command::new("tmux")
-        .args(["send-keys", "-t", session, "-l", command])
-        .output();
-    let _ = Command::new("tmux")
-        .args(["send-keys", "-t", session, "Enter"])
-        .output();
+/// Run `tmux <args>` and wait at most `timeout` for it. A tmux client can
+/// block indefinitely (one `send-keys` sat for minutes waiting on the server
+/// and, being called on the UI thread, froze the whole app), so anything that
+/// talks to tmux on a path the user is waiting on goes through here. On
+/// timeout the client is killed and `None` returned. Output must be small: it
+/// is read only after exit, so a client filling its pipe would time out.
+pub fn run_bounded(args: &[&str], timeout: std::time::Duration) -> Option<std::process::Output> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = Command::new("tmux")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                log::warn!("tmux {} timed out after {timeout:?}", args.first().unwrap_or(&""));
+                return None;
+            }
+        }
+    };
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = out.read_to_end(&mut stdout);
+    }
+    if let Some(mut err) = child.stderr.take() {
+        let _ = err.read_to_end(&mut stderr);
+    }
+    Some(std::process::Output { status, stdout, stderr })
+}
+
+/// Listing/killing sessions: these run on the UI thread during restore.
+const LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long a `send-keys` may take before we give up on it.
+const SEND_KEYS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Send a command line to a live session and press Enter. Best-effort and
+/// bounded; callers on the UI thread should still run it off-thread. Enter is
+/// skipped if the text did not go through, so a half-delivered line is never
+/// submitted (and Enter alone never submits what the user was typing).
+pub fn send_keys(session: &str, command: &str) -> bool {
+    let typed = run_bounded(&["send-keys", "-t", session, "-l", command], SEND_KEYS_TIMEOUT)
+        .is_some_and(|o| o.status.success());
+    if !typed {
+        log::warn!("send-keys to {session} failed or timed out; not pressing Enter");
+        return false;
+    }
+    run_bounded(&["send-keys", "-t", session, "Enter"], SEND_KEYS_TIMEOUT)
+        .is_some_and(|o| o.status.success())
+}
+
+/// Queue [`send_keys`] on a single background worker and return at once.
+/// Never block the UI thread on tmux; one worker (not a thread per call) keeps
+/// lines to the same session in order, so two messages cannot interleave.
+pub fn send_keys_async(session: &str, command: &str) {
+    use std::sync::{Mutex, OnceLock, mpsc};
+    static WORKER: OnceLock<Mutex<mpsc::Sender<(String, String)>>> = OnceLock::new();
+    let tx = WORKER.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<(String, String)>();
+        std::thread::Builder::new()
+            .name("tmux-send-keys".into())
+            .spawn(move || {
+                for (session, command) in rx {
+                    send_keys(&session, &command);
+                }
+            })
+            .expect("spawn tmux send-keys worker");
+        Mutex::new(tx)
+    });
+    if let Ok(tx) = tx.lock() {
+        let _ = tx.send((session.to_string(), command.to_string()));
+    }
+}
+
+/// Whether the session's active pane is in a tmux mode (copy mode, entered by
+/// scrolling up or drag-selecting). `false` on any error.
+pub fn pane_in_mode(session: &str) -> bool {
+    run_bounded(
+        &["display-message", "-p", "-t", session, "#{pane_in_mode}"],
+        std::time::Duration::from_millis(500),
+    )
+    .is_some_and(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "1")
+}
+
+/// Leave copy mode if the pane is in it; a no-op otherwise.
+pub fn cancel_copy_mode(session: &str) {
+    let inner = format!("send-keys -X -t {session} cancel");
+    let _ = run_bounded(
+        &["if-shell", "-F", "-t", session, "#{pane_in_mode}", &inner],
+        std::time::Duration::from_millis(500),
+    );
 }
 
 #[cfg(test)]
@@ -547,5 +635,29 @@ mod tests {
         assert_eq!(agent_from_start_command(""), None);
         // A path that merely contains a program name is not that program.
         assert_eq!(agent_from_start_command("'/home/pilot/run.sh'"), None);
+    }
+
+    #[test]
+    fn run_bounded_gives_up_on_a_hung_client() {
+        if !has_tmux() {
+            return;
+        }
+        // A private server, so the user's sessions are never touched.
+        let sock = format!("oo-test-{}", std::process::id());
+        let ok = run_bounded(
+            &["-L", &sock, "new-session", "-d", "-s", "t", "sleep 30"],
+            std::time::Duration::from_secs(5),
+        )
+        .is_some_and(|o| o.status.success());
+        assert!(ok, "could not start a private tmux server");
+        // `wait-for` blocks until signalled; nobody signals it.
+        let start = std::time::Instant::now();
+        let got = run_bounded(
+            &["-L", &sock, "wait-for", "never"],
+            std::time::Duration::from_millis(300),
+        );
+        let _ = run_bounded(&["-L", &sock, "kill-server"], std::time::Duration::from_secs(2));
+        assert!(got.is_none(), "a hung tmux client must time out");
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
     }
 }

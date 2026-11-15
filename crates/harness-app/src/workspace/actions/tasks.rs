@@ -417,7 +417,7 @@ impl HarnessWorkspace {
                 .timer(std::time::Duration::from_millis(400))
                 .await;
 
-            crate::tmux::send_keys(&session, &invoke);
+            crate::tmux::send_keys_async(&session, &invoke);
 
             let _ = view.update(cx, |ws, cx| {
                 ws.set_note("setup finished (see shell)".into());

@@ -454,12 +454,19 @@ impl HarnessWorkspace {
 
         // Restore the active tab if its id survived (ids are stable for
         // terminal/agent tabs; editor/chat drew fresh ids so may not match).
-        if let Some(active) = saved_active
-            && let Some(pane) = self.panes.get_mut(key)
-            && pane.tabs.iter().any(|t| t.id == active)
-        {
-            pane.active = active;
-            self.focus_active_pane(window, cx);
+        if let Some(pane) = self.panes.get_mut(key) {
+            let saved = saved_active.filter(|a| pane.tabs.iter().any(|t| t.id == *a));
+            // No usable saved choice (e.g. tabs recovered from orphaned tmux
+            // sessions): open on the oldest agent, the one holding the longest
+            // conversation and the one A2A should deliver to, not whichever
+            // tab happened to be rebuilt last.
+            let pick = saved.or_else(|| {
+                pane.tabs.iter().filter(|t| t.agent.is_some()).map(|t| t.id).min()
+            });
+            if let Some(active) = pick {
+                pane.active = active;
+                self.focus_active_pane(window, cx);
+            }
         }
         let restored = self.panes.contains_key(key);
         if restored {

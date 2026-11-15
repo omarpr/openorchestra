@@ -205,8 +205,8 @@ impl HarnessWorkspace {
             None => None,
         };
         let line = format_a2a_inject(msg, a2a_dir.as_deref());
-        crate::tmux::send_keys(&session, &line);
-        log::info!("a2a inbox injected into session {session}");
+        crate::tmux::send_keys_async(&session, &line);
+        log::info!("a2a inbox queued for injection into session {session}");
         true
     }
 
