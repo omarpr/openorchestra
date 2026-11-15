@@ -178,30 +178,27 @@ fn drain_bridge(state: &BrokerState) {
             Ok(t) => t,
             Err(_) => return,
         };
-        let (a2a_task_id, new_state, text, label) = match ev {
+        let (a2a_task_id, new_state, text, label, summary) = match ev {
             BridgeEvent::Completed {
                 a2a_task_id,
                 summary,
-            } => {
-                let artifact = Artifact {
-                    artifact_id: uuid::Uuid::new_v4().to_string(),
-                    name: Some("summary".into()),
-                    parts: vec![MessagePart::text(summary.clone())],
-                };
-                if let Some(task) = tasks.get_mut(&a2a_task_id) {
-                    task.artifacts.push(artifact);
-                }
-                (a2a_task_id, TaskState::Completed, summary, "completed")
-            }
+            } => (
+                a2a_task_id,
+                TaskState::Completed,
+                summary.clone(),
+                "completed",
+                Some(summary),
+            ),
             BridgeEvent::Failed { a2a_task_id, error } => {
-                (a2a_task_id, TaskState::Failed, error, "failed")
+                (a2a_task_id, TaskState::Failed, error, "failed", None)
             }
             BridgeEvent::Rejected { a2a_task_id, reason } => {
-                (a2a_task_id, TaskState::Rejected, reason, "rejected")
+                (a2a_task_id, TaskState::Rejected, reason, "rejected", None)
             }
         };
-        // Read before `set_state` overwrites it: only the first result for a
-        // task is pushed to the coordinator.
+        // A terminal state is final: a repeated or late complete/reject must
+        // not flip it, duplicate the summary artifact, or re-notify. Read
+        // before anything below touches the task.
         let (prev_terminal, tenant, context_id) = match tasks.get(&a2a_task_id) {
             Some(t) => (
                 matches!(
@@ -211,11 +208,34 @@ fn drain_bridge(state: &BrokerState) {
                         | TaskState::Canceled
                         | TaskState::Rejected
                 ),
-                Some(t.tenant.clone()),
+                t.tenant.clone(),
                 t.context_id.clone(),
             ),
-            None => (true, None, String::new()),
+            None => continue,
         };
+        if prev_terminal {
+            drop(tasks);
+            if let Ok(mut audit) = state.audit.lock() {
+                let _ = audit.append(&AuditEvent {
+                    ts: &ts,
+                    kind: "task.result_ignored",
+                    oo_task_id: &state.config.oo_task_id,
+                    tenant: Some(&tenant),
+                    a2a_task_id: Some(&a2a_task_id),
+                    detail: Some(serde_json::json!({ "state": label })),
+                });
+            }
+            continue;
+        }
+        if let Some(summary) = summary {
+            if let Some(task) = tasks.get_mut(&a2a_task_id) {
+                task.artifacts.push(Artifact {
+                    artifact_id: uuid::Uuid::new_v4().to_string(),
+                    name: Some("summary".into()),
+                    parts: vec![MessagePart::text(summary)],
+                });
+            }
+        }
         let _ = tasks.set_state(
             &a2a_task_id,
             new_state,
@@ -244,8 +264,10 @@ fn drain_bridge(state: &BrokerState) {
         }
         state.notify_change();
 
-        let Some(tenant) = tenant else { continue };
-        if prev_terminal {
+        let coordinator = state.config.coordinator_tenant.clone();
+        // The coordinator completing a message sent to it: pushing that back
+        // would echo its own answer into its inbox.
+        if tenant == coordinator {
             continue;
         }
         let repo = state
@@ -260,13 +282,15 @@ fn drain_bridge(state: &BrokerState) {
             created_at: ts,
             reply: true,
         };
-        let coordinator = state.config.coordinator_tenant.clone();
-        if state.bridge.enqueue(&coordinator, &msg).is_ok() {
-            state.notify_inbox(InboxDelivery {
+        match state.bridge.enqueue(&coordinator, &msg) {
+            Ok(()) => state.notify_inbox(InboxDelivery {
                 oo_task_id: state.config.oo_task_id.clone(),
                 tenant: coordinator,
                 message: msg,
-            });
+            }),
+            Err(e) => log_warn(&format!(
+                "push {label} reply for {a2a_task_id} to {coordinator}: {e}"
+            )),
         }
     }
 }
@@ -1414,6 +1438,79 @@ mod coordinator_push_tests {
         form(&handle, "/v1/complete", &body);
         thread::sleep(Duration::from_millis(700));
         assert!(rx.try_recv().is_err(), "second complete must not push");
+        handle.shutdown();
+    }
+
+    fn json_post(handle: &BrokerHandle, path: &str, body: &str) -> String {
+        let mut s = TcpStream::connect(handle.addr).unwrap();
+        write!(
+            s,
+            "POST {path} HTTP/1.1\r\nAuthorization: Bearer test-key\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).unwrap();
+        out
+    }
+
+    fn state_of(handle: &BrokerHandle, id: &str) -> TaskState {
+        handle.state.tasks.lock().unwrap().get(id).unwrap().status.state
+    }
+
+    #[test]
+    fn terminal_state_is_final() {
+        let (_dir, handle, rx) = start();
+        let (id, _) = delegate(&handle, &rx);
+        form(&handle, "/v1/complete", &format!("a2a_task_id={id}&summary=shipped"));
+        coordinator_reply(&rx);
+        assert_eq!(state_of(&handle, &id), TaskState::Completed);
+        form(
+            &handle,
+            "/v1/complete",
+            &format!("a2a_task_id={id}&rejected=1&reason=late"),
+        );
+        thread::sleep(Duration::from_millis(700));
+        assert_eq!(state_of(&handle, &id), TaskState::Completed, "a late reject must not flip it");
+        let tasks = handle.state.tasks.lock().unwrap();
+        assert_eq!(tasks.get(&id).unwrap().artifacts.len(), 1, "one summary artifact");
+        drop(tasks);
+        // A repeated complete must not duplicate the summary artifact either.
+        form(&handle, "/v1/complete", &format!("a2a_task_id={id}&summary=again"));
+        thread::sleep(Duration::from_millis(700));
+        let tasks = handle.state.tasks.lock().unwrap();
+        assert_eq!(tasks.get(&id).unwrap().artifacts.len(), 1, "no duplicate artifact");
+        drop(tasks);
+        assert!(rx.try_recv().is_err(), "no second push");
+        handle.shutdown();
+    }
+
+    #[test]
+    fn json_rejected_body_rejects() {
+        let (_dir, handle, rx) = start();
+        let (id, _) = delegate(&handle, &rx);
+        let body = serde_json::json!({ "a2a_task_id": id, "rejected": true, "reason": "not mine" })
+            .to_string();
+        let out = json_post(&handle, "/v1/complete", &body);
+        assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+        assert_eq!(coordinator_reply(&rx).message.text, "rejected by api: not mine");
+        assert_eq!(state_of(&handle, &id), TaskState::Rejected);
+        handle.shutdown();
+    }
+
+    #[test]
+    fn coordinator_completing_its_own_inbox_is_not_echoed() {
+        let (_dir, handle, rx) = start();
+        // A specialist messages the coordinator.
+        let sent = form(&handle, "/t/@coordinator/send", "text=question");
+        let id = sent["result"]["id"].as_str().unwrap().to_string();
+        let d = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(d.tenant, "@coordinator");
+        // The coordinator completes it: no reply is pushed back to itself.
+        form(&handle, "/v1/complete", &format!("a2a_task_id={id}&summary=answered"));
+        thread::sleep(Duration::from_millis(700));
+        assert_eq!(state_of(&handle, &id), TaskState::Completed);
+        assert!(rx.try_recv().is_err(), "no echo to the coordinator");
         handle.shutdown();
     }
 
