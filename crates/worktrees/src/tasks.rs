@@ -430,6 +430,11 @@ pub struct A2aContextInfo {
     pub a2a_dir: PathBuf,
 }
 
+/// Working directory of a task's coordinator agent: the task folder itself.
+pub fn task_coordinator_dir(tasks_root: &Path, slug: &str) -> PathBuf {
+    tasks_root.join(slug)
+}
+
 /// Whether this task needs a harness-owned agent-context file.
 ///
 /// Multi-member tasks always do (coordination + A2A). Single-member tasks only
@@ -460,29 +465,18 @@ pub fn task_agent_context_with_a2a(
         out.push_str(
             "\nopenOrchestra multi-context task: each member project has its own agent cwd.\n",
         );
-        if let Some(home) = task.home_member() {
-            out.push_str(&format!(
-                "Home / orchestrator: {} `{}` (worktree id `{}`)\n",
-                home.repo,
-                home.path.display(),
-                home.worktree_id
-            ));
+        let coordinator = a2a.and_then(|a| a.a2a_dir.parent());
+        if let Some(coord) = coordinator {
+            out.push_str(&format!("Coordinator: {}\n", coord.display()));
         }
-        let siblings: Vec<_> = task
-            .members
-            .iter()
-            .filter(|m| m.repo != task.home_repo)
-            .collect();
-        if !siblings.is_empty() {
-            out.push_str("Specialists (do not edit these trees from home — delegate via A2A):\n");
-            for m in &siblings {
-                out.push_str(&format!(
-                    "- {}: path `{}` · worktree id `{}`\n",
-                    m.repo,
-                    m.path.display(),
-                    m.worktree_id
-                ));
-            }
+        out.push_str("Repos (each has its own specialist agent):\n");
+        for m in &task.members {
+            out.push_str(&format!(
+                "- {} `{}` (worktree id `{}`)\n",
+                m.repo,
+                m.path.display(),
+                m.worktree_id
+            ));
         }
         if let Some(a2a) = a2a {
             out.push_str("\n## A2A broker (localhost)\n");
@@ -492,10 +486,10 @@ pub fn task_agent_context_with_a2a(
                 a2a.api_key
             ));
             out.push_str(&format!(
-                "Orchestrator card: {}/.well-known/agent-card.json\n",
+                "Coordinator card: {}/.well-known/agent-card.json\n",
                 a2a.base_url
             ));
-            for m in &siblings {
+            for m in &task.members {
                 let enc = m.worktree_id.replace('/', "%2F");
                 out.push_str(&format!(
                     "- {} card: {}/t/{}/.well-known/agent-card.json\n",
@@ -504,25 +498,26 @@ pub fn task_agent_context_with_a2a(
             }
             let dir = a2a.a2a_dir.display();
             out.push_str("\n## Your role\n");
-            if let Some(home) = task.home_member() {
-                out.push_str(&format!(
-                    "Check your working directory to tell which role is yours.\n\n\
-                     **If your cwd is `{home}` you are the ORCHESTRATOR.** The user talks to \
-                     you about the whole task. Plan the work across all repos, do the \
-                     {repo} part yourself, and hand each other repo's part to its \
-                     specialist instead of editing that tree:\n\
-                     - `{dir}/delegate.sh <worktree_id> \"what to do\"` — returns an A2A task id\n\
-                     - `{dir}/status.sh <a2a_task_id>` — check progress (completed carries the summary)\n\
-                     Tell the user what you delegated and report back when specialists finish.\n\n\
-                     **Otherwise you are a SPECIALIST** for your cwd's repo. Work only in your \
-                     own tree. Requests from the orchestrator arrive as lines starting \
-                     `[openOrchestra A2A] task_id=…`; when one is done run \
-                     `{dir}/complete.sh <a2a_task_id> \"short summary\"` so the orchestrator \
-                     sees it.\n",
-                    home = home.path.display(),
-                    repo = home.repo,
-                ));
-            }
+            let coord = coordinator
+                .map(|c| c.display().to_string())
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "Check your working directory to tell which role is yours.\n\n\
+                 **If your cwd is `{coord}` you are the COORDINATOR.** The user talks to \
+                 you about the whole task. Plan the work across all repos and delegate each \
+                 repo's part to its specialist; do not edit any repo tree yourself:\n\
+                 - `{dir}/delegate.sh <worktree_id> \"what to do\"` — returns an A2A task id\n\
+                 - `{dir}/status.sh <a2a_task_id>` — only to check work still in progress\n\
+                 Results arrive in your chat on their own as \
+                 `[openOrchestra A2A] task_id=… completed by <repo>: …`. Tell the user what \
+                 you delegated and report back to them when specialists finish.\n\n\
+                 **Otherwise you are the SPECIALIST** for your cwd's repo. Work only in your \
+                 own tree. Requests from the coordinator arrive as lines starting \
+                 `[openOrchestra A2A] task_id=…`; when one is done run \
+                 `{dir}/complete.sh <a2a_task_id> \"short summary\"` so the coordinator \
+                 sees it. If a request is outside your repo or you can't do it, run \
+                 `{dir}/reject.sh <a2a_task_id> \"why\"` instead of `complete.sh`.\n",
+            ));
             out.push_str(&format!(
                 "\nAlso in `{dir}/`: `mcp-tools.json` (tool descriptors for MCP-capable agents).\n"
             ));
@@ -643,11 +638,78 @@ mod tests {
             archived: false,
         };
         let md = task_agent_context(&task);
-        assert!(md.contains("Home / orchestrator: jam"));
-        assert!(md.contains("Specialists"));
-        assert!(md.contains("api"));
-        assert!(md.contains("- api:"));
+        assert!(!md.contains("Home / orchestrator"));
+        assert!(md.contains("Repos (each has its own specialist agent):"));
+        assert!(md.contains("- jam `/wt/jam/auth` (worktree id `jam/auth`)"));
+        assert!(md.contains("- api `/wt/api/auth` (worktree id `api/auth`)"));
         assert!(!md.contains("do not commit"));
+    }
+
+    fn two_member_task() -> Task {
+        Task {
+            id: "auth".into(),
+            name: "add auth".into(),
+            slug: "auth".into(),
+            home_repo: "jam".into(),
+            members: vec![
+                TaskMember {
+                    repo: "jam".into(),
+                    worktree_id: "jam/auth".into(),
+                    path: PathBuf::from("/wt/jam/auth"),
+                    branch: "feat/auth".into(),
+                },
+                TaskMember {
+                    repo: "api".into(),
+                    worktree_id: "api/auth".into(),
+                    path: PathBuf::from("/wt/api/auth"),
+                    branch: "feat/auth".into(),
+                },
+            ],
+            agent_kind: AgentKind::default(),
+            created_at: "t".into(),
+            archived: false,
+        }
+    }
+
+    fn test_a2a() -> A2aContextInfo {
+        A2aContextInfo {
+            base_url: "http://127.0.0.1:9".into(),
+            api_key: "k".into(),
+            a2a_dir: PathBuf::from("/oo/tasks/auth/a2a"),
+        }
+    }
+
+    #[test]
+    fn multi_member_context_names_the_coordinator() {
+        let md = task_agent_context_with_a2a(&two_member_task(), Some(&test_a2a()), None);
+        assert!(md.contains("Coordinator: /oo/tasks/auth"));
+        assert!(md.contains("If your cwd is `/oo/tasks/auth` you are the COORDINATOR"));
+        assert!(md.contains("completed by <repo>"));
+        assert!(!md.contains("Home / orchestrator"));
+        assert!(!md.contains("ORCHESTRATOR"));
+    }
+
+    #[test]
+    fn specialist_text_mentions_reject() {
+        let md = task_agent_context_with_a2a(&two_member_task(), Some(&test_a2a()), None);
+        assert!(md.contains("Otherwise you are the SPECIALIST"));
+        assert!(md.contains("reject.sh <a2a_task_id>"));
+    }
+
+    #[test]
+    fn every_repo_is_listed_as_a_specialist() {
+        let md = task_agent_context_with_a2a(&two_member_task(), Some(&test_a2a()), None);
+        let repos = md.split("Repos (each has its own specialist agent):").nth(1).unwrap();
+        assert!(repos.contains("- jam `/wt/jam/auth`"));
+        assert!(repos.contains("- api `/wt/api/auth`"));
+    }
+
+    #[test]
+    fn coordinator_dir_is_the_task_folder() {
+        assert_eq!(
+            task_coordinator_dir(Path::new("/oo/tasks"), "auth"),
+            PathBuf::from("/oo/tasks/auth")
+        );
     }
 
     #[test]
@@ -678,7 +740,7 @@ mod tests {
         let md = task_agent_context_with_a2a(&task, None, Some("Wire JWT across jam + api"));
         assert!(md.contains("## User brief"));
         assert!(md.contains("Wire JWT across jam + api"));
-        assert!(md.contains("Home / orchestrator: jam"));
+        assert!(!md.contains("Home / orchestrator"));
 
         // With a live broker, both roles are spelled out and the helpers are
         // named by absolute path (agents run with a worktree cwd).
@@ -689,7 +751,7 @@ mod tests {
         };
         let md = task_agent_context_with_a2a(&task, Some(&a2a), None);
         assert!(md.contains("## Your role"));
-        assert!(md.contains("If your cwd is `/wt/jam/auth` you are the ORCHESTRATOR"));
+        assert!(md.contains("you are the COORDINATOR"));
         assert!(md.contains("`/oo/tasks/auth/a2a/delegate.sh <worktree_id>"));
         assert!(md.contains("`/oo/tasks/auth/a2a/complete.sh <a2a_task_id>"));
         assert!(md.contains("SPECIALIST"));
@@ -777,6 +839,6 @@ mod tests {
             .expect("multi-member writes a file");
         assert_eq!(path, task_agent_context_path(dir.path(), "auth"));
         let body = fs::read_to_string(&path).unwrap();
-        assert!(body.contains("- api:"));
+        assert!(body.contains("- api `/wt/api/"));
     }
 }
