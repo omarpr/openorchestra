@@ -20,6 +20,10 @@ coordination. This design makes that true and makes it obvious in the UI.
   repo's agent. With N repos there are N specialists + 1 coordinator.
 - Clicking the task tile in the sidebar opens the coordinator. Clicking a repo
   row opens that repo's specialist.
+- When a specialist finishes (or fails) a delegation, the result shows up in the
+  coordinator's chat on its own; the coordinator doesn't have to poll.
+- The sidebar shows the agents communicating: connector lines from the task tile
+  to each repo light up and carry a travelling dot when messages flow.
 - The TASK AGENTS strip is removed.
 - Every repo is a plain specialist. No repo is marked special (no ★ in the
   sidebar, no "orchestrator" label on a repo).
@@ -28,9 +32,6 @@ coordination. This design makes that true and makes it obvious in the UI.
 
 - Single-repo tasks don't change. They get no coordinator, and clicking them
   opens a shell as it does today.
-- No push of specialist completions into the coordinator's session. The
-  coordinator still checks progress with `status.sh`, as HOME does today. This
-  is a good follow-up but a separate change.
 - No new A2A protocol features.
 
 ## Anti-goals
@@ -112,6 +113,21 @@ coordination. This design makes that true and makes it obvious in the UI.
 - Inbox delivery to `@coordinator` injects into the coordinator pane via the
   same `deliver_a2a_inbox` path.
 
+### Completion push to the coordinator
+
+- When an A2A task moves to a terminal state (`completed`, `failed`, `canceled`,
+  `rejected`), whether through `/v1/complete`, `complete.sh` or a JSON-RPC status
+  update, the broker enqueues an inbox message for `@coordinator` through the
+  same `FileBridge`/`InboxDelivery` path that specialists use.
+- The app injects it into the coordinator pane as one line:
+  `[openOrchestra A2A] task_id=<id> <state> by <repo>: <summary or error>`.
+  - If the coordinator has no Agent tab yet, the message is queued in the
+    existing `a2a_pending_inject` and flushed when the tab opens.
+- Exactly one push per task reaching a terminal state; a repeated complete call
+  does not push twice. `status.sh` keeps working.
+- The coordinator role text says results arrive on their own and `status.sh` is
+  for checking on work that is still in progress.
+
 ### Agent context (`worktrees::task_agent_context_with_a2a`)
 
 - "Your role" is rewritten by cwd:
@@ -134,6 +150,25 @@ coordination. This design makes that true and makes it obvious in the UI.
     above zero.
   - It is highlighted when the coordinator is selected. Its tooltip says
     "Coordinator: plans the task and delegates to each repo's agent".
+- **Connector lines (communication indicator).** Replace the members block's
+  plain `border_l_1` with drawn tree connectors: a vertical spine from the tile
+  plus one elbow per repo row. Each repo's connector has a state, derived from
+  the broker's task list and change events:
+  - *idle*: thin grey (`hx.border`), the look the rule has today.
+  - *active* (a delegation to that repo is `submitted`/`working`): amber, with a
+    slow opacity pulse driven by `anim_secs()` (the same clock `agent_pill`
+    uses).
+  - *message down*: a one-shot dot travelling from the tile to the repo's
+    elbow, about 1s, on delegate (a new A2A task for that tenant).
+  - *message up*: a one-shot dot from the elbow to the tile on a terminal
+    state, followed by a green (completed) or red (failed/rejected) flash of
+    about 1.5s, then back to idle or active.
+  - The one-shot animations are recorded as `(task_id, tenant, kind, started_at)`
+    events when `a2a_change_rx` fires (diff the previous snapshot to tell sent
+    from finished). Repaint only while an event or pulse is live, so an idle
+    sidebar doesn't animate.
+  - It must not shift layout: connectors are absolutely positioned in the
+    left gutter the rule uses now.
 - **Repo rows:** drop the `★` prefix and the accent color for home. A repo row
   is highlighted only when *that* specialist is selected. Remove today's rule
   that lights up the home row when `member_id` is `None`.
@@ -164,6 +199,8 @@ coordination. This design makes that true and makes it obvious in the UI.
 ## Builder's calls (marked as my calls, not the user's)
 
 - The tenant string `@coordinator` and the pane-key helper name.
+- Connector timings (1s travel, 1.5s flash) and colors (amber/green/red from
+  the theme).
 - Keeping the top-bar delegation chip while adding the count to the tile.
 - Hiding, not deleting, the Home field for multi-project tasks, and keeping
   `home_repo` in the store.
@@ -178,5 +215,10 @@ coordination. This design makes that true and makes it obvious in the UI.
   `worktrees` and `a2a-broker` change).
 - Visual check in an isolated scratch app bundle: the strip is gone; the
   2-repo task tile opens the coordinator; each repo row opens its own agent; a
-  delegation from the coordinator lands in the target repo's agent, and the
-  tile count updates.
+  delegation from the coordinator lands in the target repo's agent, the tile
+  count updates, and the connector sends a dot down and turns amber; running
+  `complete.sh` sends a dot up with a green flash, and the result line appears
+  in the coordinator's chat exactly once.
+- Unit tests for the completion push (one message per terminal transition, none
+  on a repeated complete) and for classifying snapshot diffs into down/up
+  events.
