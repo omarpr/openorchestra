@@ -128,13 +128,11 @@ impl HarnessWorkspace {
                         )),
                 );
         } else {
-            col = col.child(
-                div()
-                    .pb_1()
-                    .text_xs()
-                    .text_color(hx.tx2)
-                    .child("Turn on Remote control to add a phone."),
-            );
+            col = col.child(div().pb_1().text_xs().text_color(hx.tx2).child(if enabled {
+                "Available once Remote control is listening."
+            } else {
+                "Turn on Remote control to add a phone."
+            }));
         }
 
         // ---- Paired devices ------------------------------------------------
@@ -278,8 +276,12 @@ impl HarnessWorkspace {
             .remote
             .status
             .as_ref()
-            .map(|s| s.ca_fingerprint.clone())
+            .map(|s| fingerprint_lines(&s.ca_fingerprint))
             .unwrap_or_default();
+        let mut fp = div().flex().flex_col();
+        for line in fingerprint {
+            fp = fp.child(line);
+        }
         trust = trust
             .child(
                 div()
@@ -292,7 +294,7 @@ impl HarnessWorkspace {
                     .text_xs()
                     .font_family(hx.font_mono)
                     .text_color(hx.tx0)
-                    .child(fingerprint),
+                    .child(fp),
             )
             .child(
                 div()
@@ -459,6 +461,14 @@ pub(crate) fn last_seen_text(last_seen: Option<&str>, now: SystemTime) -> String
     format!("last seen {rel} ago")
 }
 
+/// The CA fingerprint (`AB:CD:…`, 32 bytes) as lines of 16 bytes: one
+/// colon-joined token doesn't wrap, and a clipped fingerprint can't be
+/// compared.
+pub(crate) fn fingerprint_lines(fp: &str) -> Vec<String> {
+    let parts: Vec<&str> = fp.split(':').filter(|p| !p.is_empty()).collect();
+    parts.chunks(16).map(|c| c.join(":")).collect()
+}
+
 /// The Status line under the On/Off chips.
 pub(crate) fn status_line(
     serve: &RemoteServe,
@@ -526,6 +536,16 @@ mod tests {
         // Clock skew: a future stamp reads as now, not "-3 min".
         assert_eq!(at("2023-11-14T22:16:20Z"), "last seen just now");
         assert_eq!(at("garbage"), "last seen at an unknown time");
+        // The shape `oo_remote::auth` writes (Rfc3339 with nanoseconds).
+        assert_eq!(at("2023-11-14T22:08:19.123456789Z"), "last seen 5 min ago");
+    }
+
+    #[test]
+    fn fingerprint_splits_into_lines_of_16_bytes() {
+        let bytes: Vec<String> = (0..32).map(|b| format!("{b:02X}")).collect();
+        let lines = fingerprint_lines(&bytes.join(":"));
+        assert_eq!(lines, [bytes[..16].join(":"), bytes[16..].join(":")]);
+        assert_eq!(fingerprint_lines(""), Vec::<String>::new());
     }
 
     #[test]
