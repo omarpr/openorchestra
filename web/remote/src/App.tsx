@@ -1,9 +1,9 @@
 import { useState, useSyncExternalStore } from "react";
-import { PanelLeftClose, PanelLeftOpen, ChevronLeft } from "lucide-react";
+import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { useAgents } from "@/hooks/useAgents";
 import { useIsTablet } from "@/hooks/useMedia";
 import { getToken, subscribeToken } from "@/lib/token";
-import { navigate, useRoute } from "@/lib/router";
+import { useRoute } from "@/lib/router";
 import { AgentList } from "@/components/AgentList";
 import { AgentView } from "@/components/AgentView";
 import { ConnectionBanner } from "@/components/ConnectionBanner";
@@ -17,6 +17,7 @@ function Main() {
   const route = useRoute();
   const [collapsed, setCollapsed] = useState(false);
   const selectedId = route.name === "agent" ? route.id : undefined;
+  const selectedAgent = agents.find((a) => a.id === selectedId);
 
   const header = (
     <header className="flex h-14 shrink-0 items-center justify-between border-b px-4">
@@ -51,7 +52,7 @@ function Main() {
           )}
           <div className="min-h-0 flex-1">
             {selectedId ? (
-              <AgentView key={selectedId} id={selectedId} />
+              <AgentView key={selectedId} id={selectedId} agent={selectedAgent} />
             ) : (
               <div className="flex h-full items-center justify-center text-muted-foreground">Select an agent</div>
             )}
@@ -61,15 +62,8 @@ function Main() {
     );
   } else if (selectedId) {
     body = (
-      <div className="flex min-h-0 flex-1 flex-col">
-        <div className="flex h-14 shrink-0 items-center border-b px-1">
-          <Button variant="ghost" size="icon" aria-label="Back to agents" onClick={() => navigate("#/")}>
-            <ChevronLeft />
-          </Button>
-        </div>
-        <div className="min-h-0 flex-1">
-          <AgentView key={selectedId} id={selectedId} />
-        </div>
+      <div className="min-h-0 flex-1">
+        <AgentView key={selectedId} id={selectedId} agent={selectedAgent} />
       </div>
     );
   } else {
