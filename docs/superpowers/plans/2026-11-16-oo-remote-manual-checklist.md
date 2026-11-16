@@ -68,6 +68,7 @@ Device: ______________  Date: __________
 - [ ] Quick reply into a real agent (for example Claude Code) submits the message, not just types it into the prompt.
 - [ ] Fit to phone on: the text re-flows to the phone width and the Mac's pane isn't broken. Fit off: it returns to the original size and redraws cleanly. Also check the font-size stepper and pinch zoom.
 - [ ] The on-screen keyboard coming up doesn't hide the key bar or the cursor line.
+- [ ] Re-check the keyboard items above (key bar, cursor line, and the reply box in section G) on each of: iPhone Safari, the installed app (PWA) on iPhone, and Android Chrome. The keyboard-gap change was reverted, so note any gap between the keyboard and the input; open the app with `?debug=vv` and screenshot the overlay if there is one.
 - [ ] Prefix keys typed from the phone (for example Ctrl+B then a digit or n/p) don't switch sessions on the Mac.
 - [ ] Phone (under 768px): list, then full-screen agent with a Back button. Tablet (768px and up): list on the left, terminal on the right, with Hide/Show agent list. The thin "Show agent list" row is acceptable above the header.
 - [ ] Rotate the device: layout adapts, terminal redraws, nothing is cut off by the notch or home bar.
@@ -93,6 +94,8 @@ Device: ______________  Date: __________
 - [ ] In the non-serving build, mark a tab: the note says phones reach it through the other openOrchestra build, and the agent appears on the phone within a few seconds.
 - [ ] Revoke a device from either build: the phone is cut off within about 1 second.
 - [ ] Quit the serving build: the other can start serving when you turn Remote Off and On.
+- [ ] With this build, reorder tasks and projects and mark a tab (writing remote.json); then start an older installed release: nothing is lost (every task, project and mark is still there in both builds) and the order is kept.
+- [ ] Add a task or project in one build, then reorder in the other: the new item is kept, and appears in the reordering build's sidebar.
 
 ## G. Conversation view (Claude Code and pi)
 
@@ -123,3 +126,7 @@ Use a Claude Code agent and a pi agent marked for remote control.
 - [ ] With 2 or more projects, the ⇅ button to the left of PROJECTS' + opens "Reorder projects" with a four-dot grip on each row (with fewer than 2 projects the button is absent). Dragging a row reorders the list; with many rows the list scrolls inside the panel, and the sidebar order follows after closing the panel.
 - [ ] A project's menu has "Move up" and "Move down" (absent at the ends of the list); each moves the project one place.
 - [ ] Quit and reopen: the order is kept.
+- [ ] With 2 or more tasks, the ⇅ button next to TASKS' + opens "Reorder tasks" (absent with fewer than 2 tasks). Dragging a row reorders the tasks; the sidebar follows.
+- [ ] Tasks: quit and reopen: the order is kept.
+- [ ] Rows can't be dropped across lists: "Reorder tasks" shows only tasks and "Reorder projects" only projects, and dropping a dragged row anywhere outside its panel's list changes no order.
+- [ ] Open either panel from near the bottom of a short window: the whole panel (title, list, Done) stays on screen.
