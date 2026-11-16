@@ -403,6 +403,13 @@ impl HarnessWorkspace {
                 }
                 cx.notify();
             }
+            EditKind::RemotePort => {
+                match super::ui::settings_remote::parse_port(&text) {
+                    Ok(port) => self.remote_set_port(port, cx),
+                    Err(e) => self.remote.ui.port_error = Some(e),
+                }
+                cx.notify();
+            }
         }
     }
 

@@ -11,24 +11,26 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use agent_runtime::AgentState;
 use oo_remote::{
     AgentInfo, KeepAwake, RemoteFile, RemoteServer, ServerConfig, ServerStatus, Snapshot,
-    StartError, Store, Tmux, snapshot_channel,
+    StartError, Store, Tmux, auth, snapshot_channel,
 };
 
 use super::*;
 
 /// Plain-HTTP setup port (served only while "Add a phone" is open).
-const SETUP_PORT: u16 = 7080;
+pub(crate) const SETUP_PORT: u16 = 7080;
 /// Watcher/refresh poll cadence; also the debounce for `remote.json` events.
 const TICK: Duration = Duration::from_millis(250);
 /// Snapshot + status refresh every this many ticks (1 s).
 const REFRESH_TICKS: u32 = 4;
 /// While another build holds the port, retry every this many ticks (30 s).
 const RETRY_TICKS: u32 = 120;
+/// How long a device's "Confirm revoke" stays armed.
+pub(crate) const REVOKE_CONFIRM: Duration = Duration::from_secs(4);
 
 /// Whether this app instance is serving phones.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,6 +44,54 @@ pub(crate) enum RemoteServe {
     Error(String),
 }
 
+/// Settings → Remote panel state. Transient, never persisted.
+#[derive(Default)]
+pub(crate) struct RemoteUi {
+    /// "Add a phone" is open; the setup port listens while it is, and a
+    /// server (re)started meanwhile opens it too.
+    pub setup_open: bool,
+    /// `http://<first private IP>:7080/setup` and its QR modules, fixed when
+    /// the panel opens. `None` when this Mac has no private IPv4 address.
+    pub setup_url: Option<String>,
+    pub setup_qr: Vec<Vec<bool>>,
+    /// The pairing code on show and when it was issued.
+    pub code: Option<(String, Instant)>,
+    pub code_error: Option<String>,
+    /// The device whose Revoke was clicked once, and when.
+    pub revoke_armed: Option<(String, Instant)>,
+    /// Why the last Port entry was refused.
+    pub port_error: Option<String>,
+}
+
+/// What `remote_reconcile` should do with the server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReconcileAction {
+    Nothing,
+    Start,
+    Stop,
+    /// Running on a port other than `remote.json`'s: stop, then start anew.
+    Restart,
+}
+
+/// The reconcile decision, pure. `running` is the live server's port; `busy`
+/// is a start or stop in flight (it calls back into reconcile when done).
+fn reconcile_action(
+    enabled: bool,
+    running: Option<u16>,
+    want_port: u16,
+    busy: bool,
+    serve: &RemoteServe,
+) -> ReconcileAction {
+    match (enabled, running) {
+        (false, Some(_)) => ReconcileAction::Stop,
+        (false, None) => ReconcileAction::Nothing,
+        (true, Some(port)) if port != want_port && !busy => ReconcileAction::Restart,
+        (true, Some(_)) => ReconcileAction::Nothing,
+        (true, None) if !busy && *serve == RemoteServe::Off => ReconcileAction::Start,
+        (true, None) => ReconcileAction::Nothing,
+    }
+}
+
 pub(crate) struct RemoteRuntime {
     pub store: Store,
     /// UI cache of `remote.json`, reloaded after our own writes and on every
@@ -49,6 +99,7 @@ pub(crate) struct RemoteRuntime {
     pub file: RemoteFile,
     pub serve: RemoteServe,
     pub status: Option<ServerStatus>,
+    pub ui: RemoteUi,
     state_dir: PathBuf,
     server: Option<RemoteServer>,
     snapshot_tx: tokio::sync::watch::Sender<Snapshot>,
@@ -79,6 +130,7 @@ impl RemoteRuntime {
             file,
             serve: RemoteServe::Off,
             status: None,
+            ui: RemoteUi::default(),
             state_dir: state_dir.to_path_buf(),
             server: None,
             snapshot_tx,
@@ -106,6 +158,11 @@ impl RemoteRuntime {
                 log::warn!("remote: stop thread failed to spawn: {e}");
             }
         }
+    }
+
+    /// A start or stop is in flight.
+    pub(crate) fn busy(&self) -> bool {
+        self.starting || self.stopping
     }
 
     fn reload(&mut self) {
@@ -384,7 +441,6 @@ impl HarnessWorkspace {
         });
     }
 
-    #[allow(dead_code)] // called by the Remote settings / tab menu UI (Tasks 10–11)
     pub(crate) fn remote_set_enabled(&mut self, on: bool, cx: &mut Context<Self>) {
         if let Err(e) = self.remote.store.update(|f| f.enabled = on) {
             log::warn!("remote: saving enabled={on} failed: {e}");
@@ -398,7 +454,6 @@ impl HarnessWorkspace {
         self.remote_reconcile(cx);
     }
 
-    #[allow(dead_code)] // called by the Remote settings / tab menu UI (Tasks 10–11)
     pub(crate) fn remote_set_keep_awake(&mut self, on: bool, cx: &mut Context<Self>) {
         if let Err(e) = self.remote.store.update(|f| f.keep_awake = on) {
             log::warn!("remote: saving keep_awake={on} failed: {e}");
@@ -433,11 +488,130 @@ impl HarnessWorkspace {
 
     /// Open or close the plain-HTTP setup port ("Add a phone" panel). A
     /// no-op unless this instance is serving. Binding is a quick syscall.
-    #[allow(dead_code)] // called by the Remote settings / tab menu UI (Tasks 10–11)
     pub(crate) fn remote_set_setup_open(&mut self, open: bool) {
+        self.remote.ui.setup_open = open;
         if let Some(server) = &self.remote.server {
             server.set_setup_open(open);
         }
+    }
+
+    /// Open "Add a phone": fix the setup URL and its QR, issue a pairing
+    /// code, and open the setup port.
+    pub(crate) fn remote_open_setup(&mut self, cx: &mut Context<Self>) {
+        let url = oo_remote::certs::private_ipv4s()
+            .into_iter()
+            .next()
+            .map(|ip| format!("http://{ip}:{SETUP_PORT}/setup"));
+        self.remote.ui.setup_qr = url
+            .as_deref()
+            .map(super::ui::settings_remote::qr_cells)
+            .unwrap_or_default();
+        self.remote.ui.setup_url = url;
+        self.remote_new_code(cx);
+        self.remote_set_setup_open(true);
+        cx.notify();
+    }
+
+    /// Close "Add a phone" (and the setup port). Called when the panel is
+    /// closed, and whenever Settings closes or leaves the Remote section.
+    pub(crate) fn remote_close_setup(&mut self) {
+        if !self.remote.ui.setup_open {
+            return;
+        }
+        self.remote_set_setup_open(false);
+        let ui = &mut self.remote.ui;
+        ui.setup_url = None;
+        ui.setup_qr = Vec::new();
+        ui.code = None;
+        ui.code_error = None;
+    }
+
+    /// Issue a fresh pairing code for the open panel.
+    pub(crate) fn remote_new_code(&mut self, cx: &mut Context<Self>) {
+        match auth::issue_code(&self.remote.store, SystemTime::now()) {
+            Ok(code) => {
+                self.remote.ui.code = Some((code, Instant::now()));
+                self.remote.ui.code_error = None;
+            }
+            Err(e) => {
+                log::warn!("remote: issuing a pairing code failed: {e}");
+                self.remote.ui.code = None;
+                self.remote.ui.code_error = Some(format!("Could not create a code: {e}"));
+            }
+        }
+        self.remote.reload();
+        cx.notify();
+    }
+
+    /// Save the HTTPS port; a running server restarts on it (off-thread,
+    /// through `remote_reconcile`). `port` is already validated.
+    pub(crate) fn remote_set_port(&mut self, port: u16, cx: &mut Context<Self>) {
+        self.remote.ui.port_error = None;
+        if let Err(e) = self.remote.store.update(|f| f.port = port) {
+            log::warn!("remote: saving port={port} failed: {e}");
+            self.remote.ui.port_error = Some(format!("Could not save the port: {e}"));
+        }
+        self.remote.reload();
+        // A failed or blocked start retries on the new port now, not in 30 s.
+        if self.remote.server.is_none()
+            && matches!(
+                self.remote.serve,
+                RemoteServe::Error(_) | RemoteServe::OtherBuild
+            )
+        {
+            self.remote.serve = RemoteServe::Off;
+        }
+        self.remote_reconcile(cx);
+    }
+
+    /// Revoke, behind a confirm: the first click arms the device's button
+    /// for `REVOKE_CONFIRM`, a second click within it revokes.
+    pub(crate) fn remote_revoke_click(&mut self, device_id: &str, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        let armed = matches!(
+            &self.remote.ui.revoke_armed,
+            Some((id, at)) if id == device_id && now.duration_since(*at) < REVOKE_CONFIRM
+        );
+        if !armed {
+            self.remote.ui.revoke_armed = Some((device_id.to_string(), now));
+            let id = device_id.to_string();
+            cx.spawn(async move |view, cx| {
+                cx.background_executor().timer(REVOKE_CONFIRM).await;
+                let _ = view.update(cx, |ws, cx| {
+                    // Only this arming: a later click re-armed with a new time.
+                    if matches!(&ws.remote.ui.revoke_armed, Some((d, at)) if *d == id && *at == now)
+                    {
+                        ws.remote.ui.revoke_armed = None;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+            cx.notify();
+            return;
+        }
+        self.remote.ui.revoke_armed = None;
+        if let Err(e) = auth::revoke(&self.remote.store, device_id) {
+            log::warn!("remote: revoking {device_id} failed: {e}");
+            self.set_note(format!("remote: could not revoke device: {e}"));
+        }
+        self.remote.reload();
+        self.remote_refresh(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn remote_set_read_only(
+        &mut self,
+        device_id: &str,
+        read_only: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(e) = auth::set_read_only(&self.remote.store, device_id, read_only) {
+            log::warn!("remote: saving read_only for {device_id} failed: {e}");
+            self.set_note(format!("remote: could not save setting: {e}"));
+        }
+        self.remote.reload();
+        cx.notify();
     }
 
     /// Drop marks for a closed tab (`Some`) or a removed worktree (`None`).
@@ -458,19 +632,31 @@ impl HarnessWorkspace {
         self.remote_publish();
     }
 
-    /// Bring the server in line with `file.enabled`. Idempotent; a start or
-    /// stop in flight finishes first and calls back in here.
+    /// Bring the server in line with `file.enabled` and `file.port`.
+    /// Idempotent; a start or stop in flight finishes first and calls back
+    /// in here.
     fn remote_reconcile(&mut self, cx: &mut Context<Self>) {
-        if self.remote.file.enabled {
-            if self.remote.server.is_none()
-                && !self.remote.starting
-                && !self.remote.stopping
-                && self.remote.serve == RemoteServe::Off
-            {
-                self.remote_start(cx);
+        let r = &self.remote;
+        let action = reconcile_action(
+            r.file.enabled,
+            r.server.as_ref().map(RemoteServer::port),
+            r.file.port,
+            r.busy(),
+            &r.serve,
+        );
+        match action {
+            ReconcileAction::Start => self.remote_start(cx),
+            ReconcileAction::Stop => self.remote_stop(cx),
+            // The stop's callback reconciles again and, being `Off`, starts
+            // on the new port.
+            ReconcileAction::Restart => {
+                log::info!("remote: port changed; restarting the server");
+                self.remote_stop(cx);
+                self.remote.serve = RemoteServe::Off;
             }
-        } else {
-            self.remote_stop(cx);
+            ReconcileAction::Nothing => {}
+        }
+        if !self.remote.file.enabled {
             self.remote.serve = RemoteServe::Off;
             self.remote.status = None;
         }
@@ -493,9 +679,10 @@ impl HarnessWorkspace {
         self.remote.starting = true;
         // The server reads the channel's current value on start.
         self.remote_publish();
+        let port = self.remote.file.port;
         let cfg = ServerConfig {
             state_dir: self.remote.state_dir.clone(),
-            port: self.remote.file.port,
+            port,
             setup_port: SETUP_PORT,
             tmux: Tmux::default(),
             bind_ip: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -509,7 +696,7 @@ impl HarnessWorkspace {
             let mut result = Some(result);
             let _ = view.update(cx, |ws, cx| {
                 if let Some(r) = result.take() {
-                    ws.remote_started(r, cx);
+                    ws.remote_started(r, port, cx);
                 }
             });
             // The workspace is gone: stop off-thread rather than blocking
@@ -521,11 +708,21 @@ impl HarnessWorkspace {
         .detach();
     }
 
-    fn remote_started(&mut self, result: Result<RemoteServer, StartError>, cx: &mut Context<Self>) {
+    /// `port` is the port this start tried (`file.port` may have moved on).
+    fn remote_started(
+        &mut self,
+        result: Result<RemoteServer, StartError>,
+        port: u16,
+        cx: &mut Context<Self>,
+    ) {
         self.remote.starting = false;
         let enabled = self.remote.file.enabled;
         match result {
             Ok(server) if enabled => {
+                // "Add a phone" is open across a (re)start.
+                if self.remote.ui.setup_open {
+                    server.set_setup_open(true);
+                }
                 self.remote.status = Some(server.status());
                 self.remote.server = Some(server);
                 self.remote.serve = RemoteServe::Serving;
@@ -553,8 +750,12 @@ impl HarnessWorkspace {
                 };
             }
         }
-        self.remote.sync_keep_awake();
-        cx.notify();
+        // The port changed while starting: a failure on the old port retries
+        // on the new one now; a server on the old port restarts (reconcile).
+        if enabled && port != self.remote.file.port && self.remote.server.is_none() {
+            self.remote.serve = RemoteServe::Off;
+        }
+        self.remote_reconcile(cx);
     }
 
     /// Stop the server (if running) on the background executor: `stop`
@@ -769,5 +970,23 @@ mod tests {
         assert_eq!(mark_note(false, false), None);
         assert_eq!(mark_note(true, false), None);
     }
-}
 
+    #[test]
+    fn reconcile_decisions() {
+        use ReconcileAction::*;
+        use RemoteServe as S;
+        let act = reconcile_action;
+        // Off: stop a live server, else nothing.
+        assert_eq!(act(false, Some(7443), 7443, false, &S::Serving), Stop);
+        assert_eq!(act(false, None, 7443, false, &S::Off), Nothing);
+        // On, nothing running: start only when idle and Off.
+        assert_eq!(act(true, None, 7443, false, &S::Off), Start);
+        assert_eq!(act(true, None, 7443, true, &S::Off), Nothing);
+        assert_eq!(act(true, None, 7443, false, &S::OtherBuild), Nothing);
+        assert_eq!(act(true, None, 7443, false, &S::Error("x".into())), Nothing);
+        // On and running: restart on a port change, unless busy.
+        assert_eq!(act(true, Some(7443), 7443, false, &S::Serving), Nothing);
+        assert_eq!(act(true, Some(7443), 9000, false, &S::Serving), Restart);
+        assert_eq!(act(true, Some(7443), 9000, true, &S::Serving), Nothing);
+    }
+}

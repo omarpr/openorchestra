@@ -3,6 +3,37 @@
 
 use super::super::*;
 
+/// A Settings section heading. Shared by every pane (and `settings_remote`).
+pub(super) fn section_title(label: &str, hx: &HarnessTheme) -> gpui::Div {
+    div()
+        .pt_3()
+        .pb_1()
+        .text_xs()
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(hx.tx2)
+        .child(label.to_uppercase())
+}
+
+/// A selectable option chip. Shared by every pane (and `settings_remote`).
+pub(super) fn chip(label: String, selected: bool, hx: &HarnessTheme) -> gpui::Div {
+    div()
+        .px_2()
+        .py_0p5()
+        .rounded_md()
+        .text_xs()
+        .cursor_pointer()
+        .border_1()
+        .border_color(if selected { hx.accent } else { hx.border })
+        .bg(if selected {
+            tint(hx.accent, 0.16)
+        } else {
+            hx.surface
+        })
+        .text_color(if selected { hx.accent } else { hx.tx1 })
+        .hover(|d| d.bg(hx.surface_hover))
+        .child(label)
+}
+
 impl HarnessWorkspace {
 
     /// zed's modal layer (file finder, pickers) rendered as OUR window-root
@@ -115,6 +146,7 @@ impl HarnessWorkspace {
                             .child("✕")
                             .on_click(cx.listener(|ws, _, _, cx| {
                                 ws.settings_open = false;
+                                ws.remote_close_setup();
                                 cx.notify();
                             })),
                     ),
@@ -126,29 +158,7 @@ impl HarnessWorkspace {
         let mut body = div().id("settings-body").flex_1().min_h_0().overflow_y_scroll().px_4().py_2();
 
         // Shared by every pane.
-        let section_title = |label: &str| {
-            div()
-                .pt_3()
-                .pb_1()
-                .text_xs()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(hx.tx2)
-                .child(label.to_uppercase())
-        };
-        let chip = |label: String, selected: bool, hx: &HarnessTheme| {
-            div()
-                .px_2()
-                .py_0p5()
-                .rounded_md()
-                .text_xs()
-                .cursor_pointer()
-                .border_1()
-                .border_color(if selected { hx.accent } else { hx.border })
-                .bg(if selected { tint(hx.accent, 0.16) } else { hx.surface })
-                .text_color(if selected { hx.accent } else { hx.tx1 })
-                .hover(|d| d.bg(hx.surface_hover))
-                .child(label)
-        };
+        let section_title = |label: &str| section_title(label, hx);
         if sec == S::Appearance {
 
         // Mode decides which theme family the list below offers. Switching
@@ -797,6 +807,10 @@ impl HarnessWorkspace {
         }
         }
 
+        if sec == S::Remote {
+            body = body.child(self.render_remote_settings(hx, cx));
+        }
+
         // Keyboard shortcuts: their own tab. They used to trail the Agents
         // section, where nobody looking for a key binding would think to go.
         if sec == S::Shortcuts {
@@ -935,6 +949,9 @@ impl HarnessWorkspace {
                     .on_click(cx.listener(move |ws, _, _, cx| {
                         cx.stop_propagation();
                         ws.settings_section = s;
+                        if s != S::Remote {
+                            ws.remote_close_setup();
+                        }
                         cx.notify();
                     })),
             );
@@ -983,6 +1000,7 @@ impl HarnessWorkspace {
             .on_scroll(|_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(|ws, _, _, cx| {
                 ws.settings_open = false;
+                ws.remote_close_setup();
                 cx.notify();
             }))
             .child(card.on_click(|_, _, cx| cx.stop_propagation()))

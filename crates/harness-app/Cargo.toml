@@ -97,7 +97,7 @@ oo-remote = { path = "../remote" }
 # Name the snapshot channel type and format `status_since` (RFC 3339); both
 # already in the graph through oo-remote.
 tokio = { version = "1", features = ["sync"] }
-time = { version = "0.3", features = ["formatting"] }
+time = { version = "0.3", features = ["formatting", "parsing"] }
 
 # Proper terminal view (pty sizing, input, IME, scrollback, selection) replacing
 # the custom renderer. workspace + project are already compiled transitively by
@@ -187,6 +187,9 @@ shlex = "1.3.0"
 # The conductor's frames are handed to gpui as `image::Frame`s. Already in
 # the lockfile via gpui, so this adds no new copy.
 image = { version = "0.25", default-features = false }
+# Settings → Remote draws the "Add a phone" QR from its modules (as divs), so
+# none of its image/svg renderers are needed.
+qrcode = { version = "0.14.1", default-features = false }
 
 # Zed's workspace [patch.crates-io] entries do NOT propagate to out-of-tree
 # consumers, so we replicate the ones inside our dependency cone (from zed's

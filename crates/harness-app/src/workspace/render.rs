@@ -29,7 +29,10 @@ impl Render for HarnessWorkspace {
         // off the editor. Re-assert only for this exact case, and only once
         // focus has actually escaped, so it converges instead of thrashing.
         if self.settings_open
-            && matches!(self.edit_kind(), Some(EditKind::AgentCmd(_)))
+            && matches!(
+                self.edit_kind(),
+                Some(EditKind::AgentCmd(_) | EditKind::RemotePort)
+            )
             && let Some(editor) = self.edit_editor()
         {
             let handle = editor.focus_handle(cx);
@@ -165,6 +168,9 @@ impl Render for HarnessWorkspace {
                     return;
                 }
                 ws.settings_open = !ws.settings_open;
+                if !ws.settings_open {
+                    ws.remote_close_setup();
+                }
                 cx.notify();
             }))
             .on_action(cx.listener(|ws, _: &crate::ActivateTab1, w, cx| ws.activate_tab_at(Some(0), w, cx)))

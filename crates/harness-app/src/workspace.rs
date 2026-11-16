@@ -51,16 +51,18 @@ pub(crate) enum SettingsSection {
     Diff,
     Agents,
     Notifications,
+    Remote,
     Shortcuts,
 }
 
 impl SettingsSection {
-    pub(crate) const ALL: [SettingsSection; 6] = [
+    pub(crate) const ALL: [SettingsSection; 7] = [
         SettingsSection::Appearance,
         SettingsSection::Editor,
         SettingsSection::Diff,
         SettingsSection::Agents,
         SettingsSection::Notifications,
+        SettingsSection::Remote,
         SettingsSection::Shortcuts,
     ];
 
@@ -71,6 +73,7 @@ impl SettingsSection {
             SettingsSection::Diff => "Diff",
             SettingsSection::Agents => "Agents",
             SettingsSection::Notifications => "Notifications",
+            SettingsSection::Remote => "Remote",
             SettingsSection::Shortcuts => "Shortcuts",
         }
     }
@@ -238,6 +241,8 @@ pub(crate) enum EditKind {
     /// Name a new custom agent in settings. Commit inserts a custom
     /// `AgentPref` keyed by the entered slug.
     NewAgent,
+    /// Settings → Remote's HTTPS port.
+    RemotePort,
 }
 
 /// An inline edit in progress: what it targets, and the single-line `Editor`
