@@ -35,7 +35,8 @@ impl Drop for KeepAwake {
     }
 }
 
-#[cfg(test)]
+// `caffeinate` is macOS-only (the app is too); the Linux CI job has none.
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 
