@@ -12,6 +12,7 @@ mod setup;
 pub mod store;
 mod tls;
 pub mod tmux_bridge;
+pub mod transcript;
 mod ws;
 
 pub use api::flatten_newlines;
@@ -25,3 +26,4 @@ pub use server::{
 };
 pub use store::{Device, Mark, PendingCode, RemoteFile, Store};
 pub use tmux_bridge::Tmux;
+pub use transcript::{Tail, Transcripts, Update};
