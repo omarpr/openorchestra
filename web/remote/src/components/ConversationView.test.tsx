@@ -4,15 +4,19 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Agent } from "@/lib/api";
 import type { ConvEntry } from "@/lib/conversation";
 
-const stream: { onEvent: ((e: { event: string; data: string }) => void) | null; urls: string[] } = {
+const stream: { onEvent: ((e: { event: string; data: string }) => void) | null; urls: string[]; reject: ((e: Error) => void) | null } = {
   onEvent: null,
+  reject: null,
   urls: [],
 };
 vi.mock("@/lib/sse", () => ({
   streamEvents: (url: string, _t: string, onEvent: (e: { event: string; data: string }) => void, signal: AbortSignal) => {
     stream.urls.push(url);
     stream.onEvent = onEvent;
-    return new Promise<void>((_res, rej) => signal.addEventListener("abort", () => rej(new Error("abort"))));
+    return new Promise<void>((_res, rej) => {
+      stream.reject = rej;
+      signal.addEventListener("abort", () => rej(new Error("abort")));
+    });
   },
 }));
 const fetchToolMock = vi.fn();
@@ -169,6 +173,26 @@ describe("ConversationView", () => {
     expect(screen.queryByRole("button", { name: "New messages ↓" })).not.toBeInTheDocument();
   });
 
+  it("no pill for in-place upserts or empty replace while scrolled up", () => {
+    render(<ConversationView id="a1" />);
+    push([{ id: "t", kind: "tool", tool: { id: "t1", name: "Bash", summary: "x", status: "pending" } }]);
+    const sc = screen.getByTestId("conversation-scroll");
+    Object.defineProperty(sc, "scrollHeight", { value: 1000, configurable: true });
+    Object.defineProperty(sc, "clientHeight", { value: 500, configurable: true });
+    sc.scrollTop = 100;
+    fireEvent.scroll(sc);
+    push([{ id: "t", kind: "tool", tool: { id: "t1", name: "Bash", summary: "x", status: "ok" } }]);
+    expect(screen.queryByRole("button", { name: "New messages ↓" })).not.toBeInTheDocument();
+    push([], true);
+    expect(screen.queryByRole("button", { name: "New messages ↓" })).not.toBeInTheDocument();
+  });
+
+  it("images in markdown are not rendered", () => {
+    render(<ConversationView id="a1" />);
+    push([{ id: "1", kind: "assistant", text: "hi ![x](http://evil.test/a.png) there" }]);
+    expect(document.querySelector("img")).toBeNull();
+  });
+
   it("sticks to bottom when at bottom", () => {
     render(<ConversationView id="a1" />);
     const sc = screen.getByTestId("conversation-scroll");
@@ -224,6 +248,33 @@ describe("AgentView conversation switch", () => {
     render(<AgentView id="a1" agent={agent()} />);
     expect(screen.getByRole("tab", { name: "Terminal" })).toHaveAttribute("aria-selected", "true");
     expect(sockets).toHaveLength(1);
+  });
+
+  it("no socket before the agent list arrives (cold deep link)", () => {
+    const { rerender } = render(<AgentView id="a1" />);
+    expect(sockets).toHaveLength(0);
+    expect(stream.urls).toHaveLength(0);
+    rerender(<AgentView id="a1" agent={agent()} />);
+    expect(sockets).toHaveLength(0);
+    expect(stream.urls).toHaveLength(1);
+  });
+
+  it("closed is scoped per view; real unmarked applies to both", async () => {
+    render(<AgentView id="a1" agent={agent()} />);
+    act(() => stream.onEvent?.({ event: "closed", data: JSON.stringify({ reason: "unmarked" }) }));
+    expect(screen.getByRole("status")).toHaveTextContent(/Remote control was turned off/);
+    await userEvent.click(screen.getByRole("tab", { name: "Terminal" }));
+    expect(screen.getByRole("status")).toHaveTextContent(/Remote control was turned off/);
+  });
+
+  it("a conversation 404 does not close the terminal view", async () => {
+    render(<AgentView id="a1" agent={agent()} />);
+    // simulate the hook's synthetic closure by rejecting the stream with HTTP 404
+    stream.reject?.(new Error("HTTP 404"));
+    await screen.findByText(/conversation isn't available/);
+    await userEvent.click(screen.getByRole("tab", { name: "Terminal" }));
+    expect(screen.queryByText(/conversation isn't available/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
   it("no conversation: Terminal and no switch", () => {

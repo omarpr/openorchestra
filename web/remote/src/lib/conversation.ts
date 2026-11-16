@@ -102,8 +102,8 @@ export function useConversation(id: string): ConversationState {
       } catch (err) {
         if (mine.signal.aborted || stopped) return;
         if (err instanceof UnauthorizedError) return finish("revoked");
-        // 404: the agent has no (more) conversation; retrying cannot help.
-        if (err instanceof Error && err.message === "HTTP 404") return finish("unmarked");
+        // 404: no conversation for this agent (view-local, unlike a real `unmarked`); retrying cannot help.
+        if (err instanceof Error && err.message === "HTTP 404") return finish("no_conversation");
       }
       if (mine.signal.aborted || stopped) return;
       setState((s) => ({ ...s, connected: false }));

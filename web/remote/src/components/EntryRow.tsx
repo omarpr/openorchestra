@@ -43,6 +43,7 @@ export const EntryRow = memo(function EntryRow({ e, onTool }: { e: ConvEntry; on
       return (
         <div className="max-w-full break-words text-sm leading-relaxed [&_a]:underline [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:font-mono [&_code]:text-[0.85em] [&_h1]:text-base [&_h1]:font-semibold [&_h2]:font-semibold [&_h3]:font-semibold [&_li]:ml-5 [&_ol]:list-decimal [&_p]:my-2 [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-muted [&_pre]:p-2 [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_ul]:list-disc">
           <Markdown
+            disallowedElements={["img"]}
             components={{
               a: ({ node: _n, ...p }) => <a {...p} target="_blank" rel="noreferrer noopener" />,
             }}

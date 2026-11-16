@@ -21,6 +21,7 @@ const MAX_FONT = 18;
 
 const CLOSED_COPY: Record<string, string> = {
   stopped: "Agent stopped",
+  no_conversation: "The conversation isn't available. Use the terminal.",
   unmarked: "Remote control was turned off for this agent",
   disabled: "Remote control is off on the Mac",
   revoked: "This device was removed. Pair again.",
@@ -65,13 +66,14 @@ export function AgentView({ id, agent }: { id: string; agent?: Agent }) {
   });
   const [hideKeys, setHideKeys] = useState(() => load("oo.hideKeys") === "1");
   const [ctrl, setCtrl] = useState(false);
-  const [closed, setClosed] = useState<string | null>(null);
+  const [closedBy, setClosedBy] = useState<{ conversation?: string; terminal?: string }>({});
   const [connected, setConnected] = useState(true);
   const hasConv = agent?.has_conversation === true;
   const [savedView, setSavedView] = useState<View | null>(() => {
     const v = load(`oo.view.${id}`);
     return v === "conversation" || v === "terminal" ? v : null;
   });
+  const loading = !agent && savedView !== "terminal";
   const view: View = hasConv ? (savedView ?? "conversation") : "terminal";
   const pickView = (v: View) => {
     setSavedView(v);
@@ -91,6 +93,10 @@ export function AgentView({ id, agent }: { id: string; agent?: Agent }) {
     };
   }, []);
 
+  // Real remote-wide closures apply to both views; the rest belong to the view that reported them.
+  const GLOBAL = ["unmarked", "revoked", "disabled"];
+  const other = view === "terminal" ? closedBy.conversation : closedBy.terminal;
+  const closed = closedBy[view] ?? (other && GLOBAL.includes(other) ? other : null);
   const stopped = closed === "stopped" || agent?.status === "stopped";
   // Controls stay hidden until /api/me confirms the device may type.
   const readOnly = meReadOnly !== false || initReadOnly;
@@ -129,11 +135,11 @@ export function AgentView({ id, agent }: { id: string; agent?: Agent }) {
         >
           {agent ? (
             <>
-              <span className="shrink-0 whitespace-pre">{agent.project}</span>
+              <span className="min-w-0 max-w-[35%] shrink-0 truncate whitespace-pre">{agent.project}</span>
               <span className="shrink-0 whitespace-pre text-muted-foreground"> · </span>
               <span className="min-w-0 truncate">{where}</span>
               <span className="shrink-0 whitespace-pre text-muted-foreground"> · </span>
-              <span className="shrink-0 whitespace-pre">{agentName(agent.agent_kind)}</span>
+              <span className="min-w-0 max-w-[35%] shrink-0 truncate whitespace-pre">{agentName(agent.agent_kind)}</span>
             </>
           ) : (
             <span className="truncate">{id}</span>
@@ -185,8 +191,8 @@ export function AgentView({ id, agent }: { id: string; agent?: Agent }) {
       )}
 
       <div className="min-h-0 flex-1" style={{ paddingBottom: canType ? bottom : 0 }}>
-        {view === "conversation" ? (
-          <ConversationView id={id} onClosed={setClosed} onConnection={setConnected} />
+        {loading ? null : view === "conversation" ? (
+          <ConversationView id={id} onClosed={(r) => setClosedBy((c) => ({ ...c, [view]: r }))} onConnection={setConnected} />
         ) : (
           <TerminalView
             ref={term}
@@ -196,7 +202,7 @@ export function AgentView({ id, agent }: { id: string; agent?: Agent }) {
             ctrl={ctrl}
             onCtrlUsed={() => setCtrl(false)}
             onInit={setInitReadOnly}
-            onClosed={setClosed}
+            onClosed={(r) => setClosedBy((c) => ({ ...c, [view]: r }))}
             onConnection={setConnected}
           />
         )}

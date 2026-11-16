@@ -29,16 +29,17 @@ export function ConversationView({ id, onClosed, onConnection }: Props) {
     if (closed) cb.current.onClosed?.(closed);
   }, [closed]);
 
-  const first = useRef(true);
+  const seen = useRef<Set<string>>(new Set());
   useLayoutEffect(() => {
     const el = scroller.current;
     if (!el) return;
+    const fresh = entries.some((e) => !seen.current.has(e.id));
+    seen.current = new Set(entries.map((e) => e.id));
     if (stuck.current) {
       el.scrollTop = el.scrollHeight;
-    } else if (!first.current) {
+    } else if (fresh) {
       setUnseen(true);
     }
-    first.current = false;
   }, [entries]);
 
   const onScroll = () => {
