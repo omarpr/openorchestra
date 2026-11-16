@@ -92,6 +92,8 @@ agent-runtime = { path = "../agent-runtime" }
 a2a-broker = { path = "../a2a-broker" }
 # M8: the Phase 2 chat tab drives a `pi --mode rpc` sidecar through this.
 pi-client = { path = "../pi-client" }
+# oo-remote: phone-reachable HTTP/SSE server + embedded PWA for remote agent control.
+oo-remote = { path = "../remote" }
 
 # Proper terminal view (pty sizing, input, IME, scrollback, selection) replacing
 # the custom renderer. workspace + project are already compiled transitively by

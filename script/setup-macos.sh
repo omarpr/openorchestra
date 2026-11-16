@@ -99,6 +99,20 @@ else
   say "tmux + node + gh OK"
 fi
 
+# Remote web client toolchain (make web): node >= 20 and pnpm are REQUIRED.
+node_major="$(node --version 2>/dev/null | sed 's/^v\([0-9]*\).*/\1/')"
+if [[ "${node_major:-0}" -lt 20 ]]; then
+  say "node >= 20 required for the remote web client — upgrading via Homebrew"
+  brew install node || brew upgrade node
+  node_major="$(node --version 2>/dev/null | sed 's/^v\([0-9]*\).*/\1/')"
+  [[ "${node_major:-0}" -ge 20 ]] || die "node >= 20 required (found $(node --version 2>/dev/null || echo none)); open a new shell and re-run: make setup"
+fi
+if ! command -v pnpm >/dev/null 2>&1; then
+  say "Installing pnpm via Homebrew"
+  brew install pnpm
+fi
+say "node $(node --version) + pnpm $(pnpm --version) OK"
+
 # pi (the coding agent) via npm.
 if command -v pi >/dev/null 2>&1; then
   say "pi OK ($(command -v pi))"

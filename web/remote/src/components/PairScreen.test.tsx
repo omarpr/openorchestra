@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PairScreen } from "./PairScreen";
@@ -10,7 +10,14 @@ beforeEach(() => {
   vi.stubGlobal("fetch", fetchMock);
   localStorage.clear();
 });
-afterEach(() => vi.unstubAllGlobals());
+afterEach(async () => {
+  vi.unstubAllGlobals();
+  // input-otp schedules setTimeout()s (selection mirroring) that can fire after
+  // vitest tears the jsdom window down ("window is not defined", exit 1).
+  // Unmount, then let them drain while the environment is still alive.
+  cleanup();
+  await new Promise((r) => setTimeout(r, 150));
+});
 
 async function enterCode() {
   const user = userEvent.setup();
