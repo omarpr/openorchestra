@@ -399,8 +399,13 @@ impl HarnessWorkspace {
             .flex_col()
             .gap_1()
             .child(step("1", "Trust this Mac"));
-        match &ui.setup_url {
-            Some(url) => {
+        let setup_error = setup_error(self.remote.status.as_ref());
+        match (setup_error, &ui.setup_url) {
+            // The setup port didn't open: a QR would lead nowhere.
+            (Some(err), _) => {
+                trust = trust.child(div().text_xs().text_color(hx.amber).child(err.to_string()));
+            }
+            (None, Some(url)) => {
                 trust = trust.child(qr_view(&ui.setup_qr)).child(
                     div()
                         .text_xs()
@@ -409,7 +414,7 @@ impl HarnessWorkspace {
                         .child(url.clone()),
                 );
             }
-            None => {
+            (None, None) => {
                 trust = trust.child(div().text_xs().text_color(hx.amber).child(
                     "This Mac has no local network address. Connect it to Wi-Fi or Ethernet.",
                 ));
@@ -613,6 +618,11 @@ pub(crate) fn fingerprint_lines(fp: &str) -> Vec<String> {
 }
 
 /// The addresses listed (one per row, each copyable) under "Listening on".
+/// Why "Add a phone" can't offer its QR (the setup port failed to open).
+pub(crate) fn setup_error(status: Option<&ServerStatus>) -> Option<&str> {
+    status.and_then(|s| s.setup_error.as_deref())
+}
+
 pub(crate) fn serving_urls<'a>(serve: &RemoteServe, status: Option<&'a ServerStatus>) -> &'a [String] {
     match (serve, status) {
         (RemoteServe::Serving, Some(st)) => &st.urls,
@@ -697,6 +707,17 @@ mod tests {
         let lines = fingerprint_lines(&bytes.join(":"));
         assert_eq!(lines, [bytes[..16].join(":"), bytes[16..].join(":")]);
         assert_eq!(fingerprint_lines(""), Vec::<String>::new());
+    }
+
+    #[test]
+    fn setup_error_replaces_the_qr() {
+        assert_eq!(setup_error(None), None);
+        assert_eq!(setup_error(Some(&ServerStatus::default())), None);
+        let st = ServerStatus {
+            setup_error: Some("Couldn't open port 7080".into()),
+            ..ServerStatus::default()
+        };
+        assert_eq!(setup_error(Some(&st)), Some("Couldn't open port 7080"));
     }
 
     #[test]

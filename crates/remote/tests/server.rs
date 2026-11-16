@@ -683,6 +683,36 @@ async fn setup_port_only_when_open() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn setup_port_bind_failure_is_reported() {
+    let h = Harness::start(Harness::unused_tmux());
+    assert_eq!(h.server().status().setup_error, None);
+    // Another app holds the setup port.
+    let blocker = std::net::TcpListener::bind(("127.0.0.1", h.setup_port)).unwrap();
+    h.server().set_setup_open(true);
+    let err = h
+        .server()
+        .status()
+        .setup_error
+        .expect("bind failure reported");
+    assert!(err.contains(&h.setup_port.to_string()), "{err}");
+    assert!(err.contains("another app"), "{err}");
+
+    // Closing the panel clears it; reopening once the port is free works.
+    h.server().set_setup_open(false);
+    assert_eq!(h.server().status().setup_error, None);
+    drop(blocker);
+    h.server().set_setup_open(true);
+    assert_eq!(h.server().status().setup_error, None);
+    let r = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{}/setup", h.setup_port))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    h.server().set_setup_open(false);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn port_in_use() {
     let tmp = TempDir::new().unwrap();
     let (_tx, rx) = snapshot_channel();

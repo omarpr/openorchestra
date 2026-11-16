@@ -122,6 +122,9 @@ pub struct ServerStatus {
     /// The LAN address to hand phones (setup QR, Android link): the
     /// default-route interface's private IPv4, when the cert covers it.
     pub primary_ip: Option<IpAddr>,
+    /// Why the setup port ("Add a phone") could not be opened, for the UI.
+    /// Cleared when the port opens or is closed.
+    pub setup_error: Option<String>,
 }
 
 /// CA artifacts served on the setup port.
@@ -550,13 +553,15 @@ impl RemoteServer {
     }
 
     /// Open or close the plain-HTTP setup port. Opening binds before it
-    /// returns; a bind failure is logged and leaves it closed.
+    /// returns; a bind failure leaves it closed and is reported in
+    /// [`ServerStatus::setup_error`] until the next open or close.
     pub fn set_setup_open(&self, open: bool) {
         let mut slot = self.setup.lock().unwrap_or_else(|e| e.into_inner());
         if !open {
             if let Some(h) = slot.take() {
                 h.shutdown();
             }
+            self.set_setup_error(None);
             return;
         }
         if slot.is_some() {
@@ -567,9 +572,14 @@ impl RemoteServer {
             Ok(l) => l,
             Err(e) => {
                 eprintln!("oo-remote: setup port {}: {e}", self.setup_port);
+                self.set_setup_error(Some(format!(
+                    "Couldn't open port {} for phone setup \u{2014} is another app using it?",
+                    self.setup_port
+                )));
                 return;
             }
         };
+        self.set_setup_error(None);
         let handle = axum_server::Handle::new();
         let app = crate::setup::router(self.shared.clone());
         let h = handle.clone();
@@ -588,6 +598,14 @@ impl RemoteServer {
             }
         });
         *slot = Some(handle);
+    }
+
+    fn set_setup_error(&self, error: Option<String>) {
+        self.shared
+            .status
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .setup_error = error;
     }
 
     /// Replace the cert SAN set and re-check the cert now (tests).

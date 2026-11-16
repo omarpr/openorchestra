@@ -767,6 +767,8 @@ impl HarnessWorkspace {
         self.remote.ui.setup_open = open;
         if let Some(server) = &self.remote.server {
             server.set_setup_open(open);
+            // Show a bind failure (or its clearing) now, not on the next tick.
+            self.remote.status = Some(server.status());
         }
     }
 
