@@ -216,6 +216,19 @@ impl HarnessWorkspace {
         }
     }
 
+    /// After a refresh that followed the other build's changes: if the
+    /// selected project or task is gone, select as after a removal.
+    fn reselect_if_gone(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let gone = match &self.selection {
+            Selection::Main(name) => !self.data.repos.iter().any(|r| &r.name == name),
+            Selection::Task { task_id, .. } => !self.data.tasks.iter().any(|t| &t.id == task_id),
+            Selection::Worktree(_) => false,
+        };
+        if gone {
+            self.reselect_after_removal(window, cx);
+        }
+    }
+
     /// Archive a whole project: move its root to the restorable archived list.
     /// Non-destructive — worktrees and files stay on disk; the group just leaves
     /// the active sidebar until restored (from the Archived section, or by
@@ -263,6 +276,7 @@ impl HarnessWorkspace {
         if !same_members(&active, &shown) {
             // The other build added or removed tasks: rebuild the views.
             self.refresh(window, cx);
+            self.reselect_if_gone(window, cx);
             return;
         }
         let order: Vec<String> = self.task_store.tasks().iter().map(|t| t.id.clone()).collect();
@@ -303,6 +317,7 @@ impl HarnessWorkspace {
             // archived; then rebuild the views.
             self.archived_repos = load_repos(&self.archived_path);
             self.refresh(window, cx);
+            self.reselect_if_gone(window, cx);
             return;
         }
         let roots = &self.repo_roots;
