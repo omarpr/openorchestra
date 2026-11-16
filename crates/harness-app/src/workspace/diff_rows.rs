@@ -382,8 +382,8 @@ pub(crate) const INLINE_BODY_MAX_H: f32 = 420.0;
 #[cfg(test)]
 mod diff_render_tests {
     use super::{
-        load_prefs, max_diff_width, move_task_on_disk, readable_diff_lines, reorder_base, reorder_panel_origin, reordered, same_members,
-        save_prefs_to, shifted, split_rows,
+        load_prefs, max_diff_width, move_task_on_disk, readable_diff_lines, reorder_base, reorder_panel_origin,
+        reordered, same_members, save_prefs_to, shifted, split_rows,
         split_dock_width, target_line_for_row, use_split, use_two_pane, DiffLineKind, DiffLocation, DiffView,
         Prefs, SplitRow, ToolTab, DIFF_TWO_PANE_MIN, MAX_PANEL_W, MIN_CENTER_W, SPLIT_MIN_W,
     };
@@ -763,7 +763,10 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
         let task = |id: &str| {
             format!(r#"{{"id":"{id}","name":"{id}","slug":"{id}","home_repo":"app","members":[],"created_at":"2026-11-16T00:00:00Z"}}"#)
         };
-        let file = |ids: &[&str]| format!(r#"{{"tasks":[{}]}}"#, ids.iter().map(|i| task(i)).collect::<Vec<_>>().join(","));
+        let file = |ids: &[&str]| {
+            let tasks: Vec<String> = ids.iter().map(|i| task(i)).collect();
+            format!(r#"{{"tasks":[{}]}}"#, tasks.join(","))
+        };
         let ids = |s: &worktrees::TaskStore| s.tasks().iter().map(|t| t.id.clone()).collect::<Vec<_>>();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tasks.json");

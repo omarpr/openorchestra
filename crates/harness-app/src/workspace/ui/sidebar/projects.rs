@@ -326,7 +326,7 @@ impl HarnessWorkspace {
                             .children(counts),
                     ),
             )
-                        .children(self.remote_dot(
+            .children(self.remote_dot(
                 hx,
                 format!("remote-dot-wt-{}", wt.id),
                 &worktree_pane_key(wt.task_id.as_deref(), &wt.id),
@@ -525,7 +525,7 @@ impl HarnessWorkspace {
                     )
                     .child(subtitle),
             )
-                        .children(self.remote_dot(
+            .children(self.remote_dot(
                 hx,
                 format!("remote-dot-main-{}", repo.name),
                 &format!("main:{}", repo.name),
