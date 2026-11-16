@@ -178,6 +178,36 @@ fn reordered<T: PartialEq + Clone>(items: &[T], dragged: T, onto: T) -> Vec<T> {
     out
 }
 
+/// The list a reorder applies to: the copy on disk now, since the other
+/// build (Dev and the installed release share ~/.openorchestra) may have
+/// added or removed entries since this one loaded. An empty disk copy
+/// (missing or unreadable file) while this build has entries falls back to
+/// this build's list, so a reorder never empties it.
+fn reorder_base<T: Clone>(disk: Vec<T>, current: &[T]) -> Vec<T> {
+    if disk.is_empty() { current.to_vec() } else { disk }
+}
+
+/// Whether `a` and `b` hold the same items, ignoring order.
+fn same_members<T: PartialEq>(a: &[T], b: &[T]) -> bool {
+    a.len() == b.len() && a.iter().all(|x| b.contains(x))
+}
+
+/// Move task `dragged` to `onto`'s position in the task list on disk (see
+/// [`reorder_base`]), save it, and return the store as saved. `Ok(None)` when
+/// nothing changed (same or unknown ids). An unreadable file is an error and
+/// is left untouched rather than overwritten.
+fn move_task_on_disk(current: &TaskStore, dragged: &str, onto: &str) -> std::io::Result<Option<TaskStore>> {
+    let mut fresh = TaskStore::load(current.path())?;
+    if fresh.tasks().is_empty() {
+        fresh = current.clone();
+    }
+    if !fresh.move_task(dragged, onto) {
+        return Ok(None);
+    }
+    fresh.save()?;
+    Ok(Some(fresh))
+}
+
 /// Which sidebar list a reorder panel (and a row dragged in it) belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReorderList {

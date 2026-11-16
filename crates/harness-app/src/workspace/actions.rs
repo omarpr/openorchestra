@@ -238,22 +238,32 @@ impl HarnessWorkspace {
     }
 
     /// Drop project `dragged` onto `onto`'s position (reorder panel).
-    pub(crate) fn move_repo(&mut self, dragged: &str, onto: &str, cx: &mut Context<Self>) {
+    pub(crate) fn move_repo(&mut self, dragged: &str, onto: &str, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(from), Some(to)) = (self.repo_root_for_name(dragged), self.repo_root_for_name(onto)) else {
             return;
         };
-        let order = reordered(&self.repo_roots, from, to);
-        self.apply_repo_order(order, cx);
+        self.apply_repo_order(|roots| reordered(roots, from.clone(), to.clone()), window, cx);
     }
 
-    /// Drop task `dragged` onto `onto`'s position (reorder panel), persist
-    /// the order, and re-sort the loaded task views to match.
-    pub(crate) fn move_task(&mut self, dragged: &str, onto: &str, cx: &mut Context<Self>) {
-        if !self.task_store.move_task(dragged, onto) {
-            return;
+    /// Drop task `dragged` onto `onto`'s position (reorder panel). The move
+    /// is applied to tasks.json as it is on disk now, so tasks the other
+    /// build (Dev / installed release) added meanwhile are kept, and shown.
+    pub(crate) fn move_task(&mut self, dragged: &str, onto: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match move_task_on_disk(&self.task_store, dragged, onto) {
+            Ok(Some(store)) => self.task_store = store,
+            Ok(None) => return,
+            Err(e) => {
+                self.set_note(format!("couldn't save the task order: {e}"));
+                cx.notify();
+                return;
+            }
         }
-        if let Err(e) = self.task_store.save() {
-            self.set_note(format!("couldn't save the task order: {e}"));
+        let active: Vec<&str> = self.task_store.active().map(|t| t.id.as_str()).collect();
+        let shown: Vec<&str> = self.data.tasks.iter().map(|t| t.id.as_str()).collect();
+        if !same_members(&active, &shown) {
+            // The other build added or removed tasks: rebuild the views.
+            self.refresh(window, cx);
+            return;
         }
         let order: Vec<String> = self.task_store.tasks().iter().map(|t| t.id.clone()).collect();
         self.data
@@ -263,20 +273,38 @@ impl HarnessWorkspace {
     }
 
     /// "Move up" / "Move down" from the project menu.
-    pub(crate) fn shift_repo(&mut self, name: &str, up: bool, cx: &mut Context<Self>) {
+    pub(crate) fn shift_repo(&mut self, name: &str, up: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.repo_root_for_name(name) else { return };
-        let order = shifted(&self.repo_roots, &root, up);
-        self.apply_repo_order(order, cx);
+        self.apply_repo_order(|roots| shifted(roots, &root, up), window, cx);
     }
 
-    /// Persist a new project order and re-sort the loaded views to match,
-    /// without a full refresh (which would re-run git for every repo).
-    fn apply_repo_order(&mut self, order: Vec<PathBuf>, cx: &mut Context<Self>) {
-        if order == self.repo_roots {
+    /// Apply `reorder` to the project list as it is on disk now (the other
+    /// build may have added or removed projects; see `reorder_base`),
+    /// persist it, and re-sort the loaded views to match — without a full
+    /// refresh (which would re-run git for every repo) unless the set of
+    /// projects changed.
+    fn apply_repo_order(
+        &mut self,
+        reorder: impl FnOnce(&[PathBuf]) -> Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let base = reorder_base(load_repos(&self.repos_path), &self.repo_roots);
+        let order = reorder(&base);
+        if order == base {
             return;
         }
+        save_repos(&self.repos_path, &order);
+        let same = same_members(&order, &self.repo_roots);
         self.repo_roots = order;
-        save_repos(&self.repos_path, &self.repo_roots);
+        if !same {
+            // Projects the other build added, archived or removed: follow its
+            // archive list too, so a later save here can't drop an entry it
+            // archived; then rebuild the views.
+            self.archived_repos = load_repos(&self.archived_path);
+            self.refresh(window, cx);
+            return;
+        }
         let roots = &self.repo_roots;
         self.data
             .repos

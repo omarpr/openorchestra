@@ -382,7 +382,8 @@ pub(crate) const INLINE_BODY_MAX_H: f32 = 420.0;
 #[cfg(test)]
 mod diff_render_tests {
     use super::{
-        load_prefs, max_diff_width, readable_diff_lines, reordered, save_prefs_to, shifted, split_rows,
+        load_prefs, max_diff_width, move_task_on_disk, readable_diff_lines, reorder_base, reordered, same_members,
+        save_prefs_to, shifted, split_rows,
         split_dock_width, target_line_for_row, use_split, use_two_pane, DiffLineKind, DiffLocation, DiffView,
         Prefs, SplitRow, ToolTab, DIFF_TWO_PANE_MIN, MAX_PANEL_W, MIN_CENTER_W, SPLIT_MIN_W,
     };
@@ -739,6 +740,55 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
         assert_eq!(shifted(&[1, 2, 3], &1, true), vec![1, 2, 3]);
         assert_eq!(shifted(&[1, 2, 3], &3, false), vec![1, 2, 3]);
         assert_eq!(shifted(&[1, 2, 3], &9, true), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn a_project_reorder_keeps_projects_the_other_build_added() {
+        let p = |s: &str| std::path::PathBuf::from(s);
+        // This build loaded a, b, c; the other build has since added x.
+        let current = [p("/a"), p("/b"), p("/c")];
+        let disk = vec![p("/a"), p("/x"), p("/b"), p("/c")];
+        let base = reorder_base(disk, &current);
+        assert_eq!(reordered(&base, p("/a"), p("/c")), vec![p("/x"), p("/b"), p("/c"), p("/a")]);
+        assert_eq!(shifted(&base, &p("/c"), true), vec![p("/a"), p("/x"), p("/c"), p("/b")]);
+        // A missing or unreadable repos.json never empties the list.
+        assert_eq!(reorder_base(Vec::new(), &current), current.to_vec());
+        assert!(same_members(&[1, 2, 3], &[3, 1, 2]));
+        assert!(!same_members(&[1, 2, 3], &[1, 2, 3, 4]));
+        assert!(!same_members(&[1, 2], &[1, 3]));
+    }
+
+    #[test]
+    fn a_task_reorder_keeps_tasks_the_other_build_added() {
+        let task = |id: &str| {
+            format!(r#"{{"id":"{id}","name":"{id}","slug":"{id}","home_repo":"app","members":[],"created_at":"2026-11-16T00:00:00Z"}}"#)
+        };
+        let file = |ids: &[&str]| format!(r#"{{"tasks":[{}]}}"#, ids.iter().map(|i| task(i)).collect::<Vec<_>>().join(","));
+        let ids = |s: &worktrees::TaskStore| s.tasks().iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.json");
+
+        // This build loaded a, b; the other build has since added x.
+        std::fs::write(&path, file(&["a", "b"])).unwrap();
+        let current = worktrees::TaskStore::load(&path).unwrap();
+        std::fs::write(&path, file(&["a", "b", "x"])).unwrap();
+        let moved = move_task_on_disk(&current, "a", "b").unwrap().expect("order changed");
+        assert_eq!(ids(&moved), ["b", "a", "x"]);
+        assert_eq!(ids(&worktrees::TaskStore::load(&path).unwrap()), ["b", "a", "x"]);
+
+        // Unknown or same ids change nothing on disk.
+        assert!(move_task_on_disk(&moved, "a", "a").unwrap().is_none());
+        assert!(move_task_on_disk(&moved, "zz", "a").unwrap().is_none());
+
+        // A missing file falls back to this build's list.
+        std::fs::remove_file(&path).unwrap();
+        let moved = move_task_on_disk(&current, "b", "a").unwrap().expect("order changed");
+        assert_eq!(ids(&moved), ["b", "a"]);
+
+        // An unreadable file is reported and left alone.
+        std::fs::write(&path, "{not json").unwrap();
+        assert!(move_task_on_disk(&current, "b", "a").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{not json");
     }
 
     #[test]

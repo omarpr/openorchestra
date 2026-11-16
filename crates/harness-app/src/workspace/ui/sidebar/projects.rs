@@ -603,13 +603,13 @@ impl HarnessWorkspace {
                     .drag_over::<DraggedReorderRow>(move |d, dragged, _, _| {
                         if dragged.list == list_kind { d.bg(drop_bg) } else { d }
                     })
-                    .on_drop(cx.listener(move |ws, dragged: &DraggedReorderRow, _, cx| {
+                    .on_drop(cx.listener(move |ws, dragged: &DraggedReorderRow, window, cx| {
                         if dragged.list != list_kind {
                             return;
                         }
                         match list_kind {
-                            ReorderList::Projects => ws.move_repo(&dragged.key, &drop_key, cx),
-                            ReorderList::Tasks => ws.move_task(&dragged.key, &drop_key, cx),
+                            ReorderList::Projects => ws.move_repo(&dragged.key, &drop_key, window, cx),
+                            ReorderList::Tasks => ws.move_task(&dragged.key, &drop_key, window, cx),
                         }
                     }))
                     .child(reorder_row_content(hx, &label, grip(hx.tx2))),
@@ -702,8 +702,8 @@ impl HarnessWorkspace {
                 false,
                 Box::new(move |ws, w, cx| ws.open_project_hooks(&r2, HookScriptPhase::Setup, HookLayer::Repo, w, cx)),
             ))
-            .when(up, |d| d.child(item("Move up", false, Box::new(move |ws, _, cx| ws.shift_repo(&r5, true, cx)))))
-            .when(down, |d| d.child(item("Move down", false, Box::new(move |ws, _, cx| ws.shift_repo(&r6, false, cx)))))
+            .when(up, |d| d.child(item("Move up", false, Box::new(move |ws, w, cx| ws.shift_repo(&r5, true, w, cx)))))
+            .when(down, |d| d.child(item("Move down", false, Box::new(move |ws, w, cx| ws.shift_repo(&r6, false, w, cx)))))
             .child(div().h(px(1.0)).mx_1().bg(hx.border))
             .child(item("Archive project", false, Box::new(move |ws, w, cx| ws.archive_repo(r3.clone(), w, cx))))
             .child(item(
