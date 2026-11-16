@@ -92,10 +92,48 @@ fn links(s: &Shared) -> (String, String) {
     (apple, lan_ip)
 }
 
-async fn page(State(s): AppState) -> Response {
+/// An iPhone/iPad browser that is not Safari (Chrome, Firefox, Edge, the
+/// Google app, …). iOS installs configuration profiles only from Safari, so
+/// these get told to reopen the page there.
+pub(crate) fn ios_non_safari(ua: &str) -> bool {
+    let ios = ["iPhone", "iPad", "iPod"].iter().any(|d| ua.contains(d));
+    let other = [
+        "CriOS",
+        "FxiOS",
+        "EdgiOS",
+        "OPiOS",
+        "GSA/",
+        "DuckDuckGo",
+        "FBAN",
+        "Instagram",
+    ]
+    .iter()
+    .any(|b| ua.contains(b));
+    ios && other
+}
+
+async fn page(State(s): AppState, headers: axum::http::HeaderMap) -> Response {
     let (apple, android) = links(&s);
     let fp = escape(&s.ca.fingerprint);
     let (apple, android) = (escape(&apple), escape(&android));
+    let header_str = |name| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+    };
+    let banner = if ios_non_safari(header_str(header::USER_AGENT)) {
+        let here = escape(&format!("http://{}/setup", header_str(header::HOST)));
+        format!(
+            r#"<div id="use-safari" class="warn">
+  <b>Open this page in Safari.</b> iPhone and iPad only install certificate profiles from Safari —
+  this browser can’t. Copy this address into Safari:
+  <input readonly value="{here}" onclick="this.select()">
+</div>"#
+        )
+    } else {
+        String::new()
+    };
     let html = format!(
         r#"<!doctype html>
 <html lang="en">
@@ -111,20 +149,24 @@ async fn page(State(s): AppState) -> Response {
   a.btn {{ display: block; text-align: center; padding: .9rem; min-height: 44px; box-sizing: border-box; border-radius: .6rem; background: #2563eb; color: #fff; text-decoration: none; margin: .75rem 0; }}
   ol li {{ margin: .4rem 0; }}
   .hidden {{ display: none; }}
+  .warn {{ border: 2px solid #d97706; border-radius: .6rem; padding: .8rem; margin: 1rem 0; }}
+  .warn input {{ display: block; width: 100%; box-sizing: border-box; margin-top: .5rem; padding: .6rem; font: 15px ui-monospace, monospace; }}
 </style>
 </head>
 <body>
 <h1>Set up openOrchestra Remote</h1>
+{banner}
 <p>Check that this fingerprint matches the one in openOrchestra → Settings → Remote:</p>
 <p class="fp">{fp}</p>
 
 <section id="apple">
   <h2>iPhone / iPad</h2>
+  <p>Do steps 1–2 in <b>Safari</b>: iOS won’t install a certificate profile from Chrome or other browsers.</p>
   <ol>
-    <li><a class="btn" href="/ca.mobileconfig">Download the certificate profile</a></li>
-    <li>Open <b>Settings</b> → <b>Profile Downloaded</b> → <b>Install</b>.</li>
+    <li><a class="btn" href="/ca.mobileconfig">Download the certificate profile</a> and tap <b>Allow</b> when asked.</li>
+    <li>Open the <b>Settings</b> app → <b>Profile Downloaded</b> (near the top) → <b>Install</b>. If it isn’t there, look in <b>General → VPN &amp; Device Management</b>. iOS discards a downloaded profile after a few minutes; download it again if it’s gone.</li>
     <li>Then <b>Settings → General → About → Certificate Trust Settings</b> and turn on full trust for “openOrchestra Remote CA”.</li>
-    <li><a class="btn" href="{apple}">Open openOrchestra Remote</a> in Safari, then Share → <b>Add to Home Screen</b>, and pair from the home-screen app.</li>
+    <li><a class="btn" href="{apple}">Open openOrchestra Remote</a>, then Share → <b>Add to Home Screen</b>, and pair from the home-screen app.</li>
   </ol>
 </section>
 
@@ -157,4 +199,26 @@ async fn page(State(s): AppState) -> Response {
         html,
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ios_non_safari;
+
+    #[test]
+    fn only_non_safari_ios_browsers_are_told_to_switch() {
+        let safari = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 \
+            (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1";
+        let chrome = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 \
+            (KHTML, like Gecko) CriOS/131.0.6778.73 Mobile/15E148 Safari/604.1";
+        let google_app = "Mozilla/5.0 (iPad; CPU OS 18_1 like Mac OS X) AppleWebKit/605.1.15 \
+            (KHTML, like Gecko) GSA/340.0.700 Mobile/15E148 Safari/604.1";
+        let android_chrome = "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 \
+            (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36";
+        assert!(!ios_non_safari(safari));
+        assert!(ios_non_safari(chrome));
+        assert!(ios_non_safari(google_app));
+        assert!(!ios_non_safari(android_chrome));
+        assert!(!ios_non_safari(""));
+    }
 }

@@ -629,6 +629,30 @@ async fn setup_port_only_when_open() {
     assert_eq!(r.status(), 200);
     let page = r.text().await.unwrap();
     assert!(page.contains(&h.server().status().ca_fingerprint), "{page}");
+    // iOS only installs profiles from Safari, and "Profile Downloaded" is
+    // short-lived — the page must say both.
+    assert!(page.contains("Safari"), "{page}");
+    assert!(page.contains("VPN &amp; Device Management"), "{page}");
+    assert!(
+        !page.contains("id=\"use-safari\""),
+        "banner shown to a non-iOS client"
+    );
+
+    // Chrome on iPhone gets a banner telling it to reopen this page in Safari.
+    let chrome_ios = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) \
+        AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/131.0.6778.73 Mobile/15E148 Safari/604.1";
+    let r = plain
+        .get(setup("/setup"))
+        .header("user-agent", chrome_ios)
+        .send()
+        .await
+        .unwrap();
+    let page = r.text().await.unwrap();
+    assert!(page.contains("id=\"use-safari\""), "{page}");
+    assert!(
+        page.contains(&setup("/setup")),
+        "banner should show this page's URL: {page}"
+    );
 
     let r = plain.get(setup("/ca.crt")).send().await.unwrap();
     assert_eq!(r.status(), 200);
