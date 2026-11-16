@@ -88,20 +88,6 @@
   }
 }
 
-/* App shell. With visualViewport (data-vv) it is pinned to the visible area, so on iOS the reply box
-   sits right on the keyboard: no lift, no bottom inset while the keyboard covers the home indicator. */
-.oo-shell {
-  height: 100%;
-  padding-bottom: var(--oo-safe-bottom, env(safe-area-inset-bottom));
-}
-.oo-shell[data-vv] {
-  position: fixed;
-  left: 0;
-  right: 0;
-  top: var(--oo-vv-top, 0px);
-  height: var(--oo-vv-height, 100%);
-}
-
 /* Status pills, matching the desktop app. */
 :root {
   --oo-accent: #1f6feb;

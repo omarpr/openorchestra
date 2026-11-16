@@ -4,6 +4,7 @@ import { me, type Agent } from "@/lib/api";
 import { keyBytes, type Key } from "@/lib/keys";
 import { navigate } from "@/lib/router";
 import { useIsTablet } from "@/hooks/useMedia";
+import { useVisualViewport } from "@/hooks/useVisualViewport";
 import { KeyBar } from "@/components/KeyBar";
 import { QuickReply } from "@/components/QuickReply";
 import { StatusPill } from "@/components/StatusPill";
@@ -57,6 +58,7 @@ function save(key: string, v: string) {
 
 export function AgentView({ id, agent, agentsLoaded = false }: { id: string; agent?: Agent; agentsLoaded?: boolean }) {
   const isTablet = useIsTablet();
+  const { bottom } = useVisualViewport();
   const term = useRef<TerminalHandle>(null);
   const replyInput = useRef<HTMLInputElement>(null);
   const focusedWaiting = useRef(false);
@@ -226,7 +228,7 @@ export function AgentView({ id, agent, agentsLoaded = false }: { id: string; age
         )
       )}
 
-      <div className="min-h-0 flex-1">
+      <div className="min-h-0 flex-1" style={{ paddingBottom: canType ? bottom : 0 }}>
         {notFound ? (
           <div className="flex h-full flex-col items-center justify-center gap-3 text-muted-foreground">
             <p>Agent not found</p>
@@ -256,7 +258,7 @@ export function AgentView({ id, agent, agentsLoaded = false }: { id: string; age
       {agent && view === "conversation" && !closed && <StatusBar status={agent.status} tool={agent.tool} />}
 
       {canType && (
-        <div className="shrink-0 border-t bg-background">
+        <div className="shrink-0 border-t bg-background" style={{ transform: `translateY(${-bottom}px)` }}>
           {view === "terminal" && !hideKeys && <KeyBar ctrl={ctrl} onToggleCtrl={() => setCtrl((c) => !c)} onKey={sendKey} />}
           <div className="flex items-center gap-2 px-2 pb-2">
             <QuickReply id={id} disabled={stopped} inputRef={replyInput} />
