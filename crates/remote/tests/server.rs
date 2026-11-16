@@ -1482,18 +1482,41 @@ mod conversation {
         let h = Harness::start(Harness::unused_tmux());
         let token = h.device(false);
         let tmp = TempDir::new().unwrap();
-        let (a, path) = setup(&h, &tmp);
+        let (a, _) = setup(&h, &tmp);
         let mut sse = open(&h, &a, &token).await;
         sse.entries().await;
-        // Still marked, but the app no longer vouches for a transcript.
-        let mut gone = conv_agent(&a, "claude-code", &path);
-        gone.transcript = None;
-        h.set_agents(vec![gone]);
+        // Still marked, but the app no longer lists the id.
+        h.set_agents(vec![]);
         let (ev, data) = sse.next().await.expect("closed event");
         assert_eq!(
             (ev.as_str(), data.as_str()),
             ("closed", r#"{"reason":"unmarked"}"#)
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn conversation_waits_when_transcript_goes_away() {
+        let h = Harness::start(Harness::unused_tmux());
+        let token = h.device(false);
+        let tmp = TempDir::new().unwrap();
+        let (a, path) = setup(&h, &tmp);
+        let mut sse = open(&h, &a, &token).await;
+        let (_, first) = sse.entries().await;
+        assert!(!first.is_empty());
+
+        // Same id, still marked and listed, no transcript: empty, not closed.
+        let mut none = conv_agent(&a, "claude-code", &path);
+        none.transcript = None;
+        h.set_agents(vec![none]);
+        let (replace, entries) = sse.entries().await;
+        assert!(replace);
+        assert!(entries.is_empty(), "{entries:?}");
+
+        // A path appears again: its entries replace the empty list.
+        h.set_agents(vec![conv_agent(&a, "claude-code", &path)]);
+        let (replace, entries) = sse.entries().await;
+        assert!(replace);
+        assert_eq!(ids(&entries), ids(&first));
     }
 
     #[tokio::test(flavor = "multi_thread")]

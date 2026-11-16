@@ -5,8 +5,12 @@
 //!   `{"replace":false,"entries":[…]}` (merge by id: known ids replace in
 //!   place, unknown ids append; keep the last 200) or `{"replace":true,…}`
 //!   (replace the whole list) as the transcript changes. A new transcript
-//!   for the id sends a fresh `replace:true`. Ends with `event: closed`
-//!   `{"reason":"unmarked"|"revoked"|"disabled"}`. `:keepalive` every 15 s.
+//!   for the id sends a fresh `replace:true`; if the app stops giving the
+//!   (still marked, still listed) id a supported transcript, the stream
+//!   sends `replace:true` with `[]` and waits for one. Ends with
+//!   `event: closed` `{"reason":"unmarked"|"revoked"|"disabled"}` (unmarked:
+//!   the mark is gone or the app no longer lists the id). `:keepalive`
+//!   every 15 s.
 //!   404 for an unknown/unmarked id or one without a supported transcript.
 //! - `GET /api/agents/{id}/conversation/tool/{tool_id}`:
 //!   `{"text","is_error","truncated"}` (text capped at 64 KiB); 404 when
@@ -31,9 +35,9 @@ use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::sync::watch;
 
 use crate::api::{authed, closed_event, error, AppState, SSE_KEEPALIVE};
-use crate::conversation::{Entry, TranscriptKind};
+use crate::conversation::{self, Entry, TranscriptKind};
 use crate::server::{Shared, Snapshot};
-use crate::transcript::{Tail, Update};
+use crate::transcript::{read_capped, Tail, Update, READ_CAP};
 use crate::RemoteFile;
 
 /// Tool ids are short (`toolu_…`, pi call ids); anything longer is unknown.
@@ -87,9 +91,9 @@ pub(crate) async fn stream(
         file: file_rx,
         snap,
         snap_open: true,
-        target,
-        tail,
-        updates,
+        target: Some(target),
+        tail: Some(tail),
+        updates: Some(updates),
         first: Some(window),
         done: false,
     };
@@ -107,21 +111,31 @@ struct St {
     snap: watch::Receiver<Snapshot>,
     /// False once the app dropped its snapshot sender.
     snap_open: bool,
-    target: Target,
+    /// `None` while the id is marked and listed but the app gives it no
+    /// supported transcript (the stream waits for one).
+    target: Option<Target>,
     /// Held so the tailer keeps running while this stream is open.
-    tail: Arc<Tail>,
-    updates: broadcast::Receiver<Update>,
+    tail: Option<Arc<Tail>>,
+    updates: Option<broadcast::Receiver<Update>>,
     first: Option<Vec<Entry>>,
     done: bool,
     _open: Arc<()>,
 }
 
 impl St {
-    /// Start over from the tail's current window.
+    /// Start over from the tail's current window (empty without a tail).
     fn resubscribe(&mut self) -> Event {
-        let (window, updates) = self.tail.subscribe();
-        self.updates = updates;
-        entries_event(true, &window)
+        match &self.tail {
+            Some(tail) => {
+                let (window, updates) = tail.subscribe();
+                self.updates = Some(updates);
+                entries_event(true, &window)
+            }
+            None => {
+                self.updates = None;
+                entries_event(true, &[])
+            }
+        }
     }
 
     fn close(&mut self, reason: &str) -> Event {
@@ -177,12 +191,25 @@ fn events(st: St) -> impl Stream<Item = Result<Event, Infallible>> {
                         let ev = st.close("revoked");
                         return Some((Ok(ev), st));
                     }
-                    let Some(target) = st.s.transcript_for(&file, &st.id) else {
-                        // The app no longer vouches for a transcript here.
+                    // Like the terminal: gone from the marks or the app's
+                    // snapshot means unmarked.
+                    let listed = st.s.snapshot.borrow().agents.iter().any(|a| a.id == st.id);
+                    if file.mark_by_id(&st.id).is_none() || !listed {
                         let ev = st.close("unmarked");
                         return Some((Ok(ev), st));
+                    }
+                    let Some(target) = st.s.transcript_for(&file, &st.id) else {
+                        // Listed without a supported transcript: stop
+                        // reading the old file, send an empty list and wait.
+                        if st.target.is_none() {
+                            continue;
+                        }
+                        st.target = None;
+                        st.tail = None;
+                        let ev = st.resubscribe();
+                        return Some((Ok(ev), st));
                     };
-                    if target == st.target {
+                    if st.target.as_ref() == Some(&target) {
                         // Status-only change.
                         continue;
                     }
@@ -192,12 +219,12 @@ fn events(st: St) -> impl Stream<Item = Result<Event, Infallible>> {
                     if st.s.transcript_for(&st.s.current_file(), &st.id).as_ref() != Some(&target) {
                         continue;
                     }
-                    st.tail = tail;
-                    st.target = target;
+                    st.tail = Some(tail);
+                    st.target = Some(target);
                     let ev = st.resubscribe();
                     return Some((Ok(ev), st));
                 }
-                u = st.updates.recv() => match u {
+                u = next_update(&mut st.updates) => match u {
                     Ok(Update::Upsert(es)) => {
                         return Some((Ok(entries_event(false, &es)), st));
                     }
@@ -215,6 +242,14 @@ fn events(st: St) -> impl Stream<Item = Result<Event, Infallible>> {
     })
 }
 
+/// The next tail update; never resolves without a tail.
+async fn next_update(rx: &mut Option<broadcast::Receiver<Update>>) -> Result<Update, RecvError> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 /// One tool call's full result. 404 for an unknown/unmarked id, an id
 /// without a supported transcript, or an unknown tool id.
 pub(crate) async fn tool(
@@ -229,14 +264,20 @@ pub(crate) async fn tool(
     if tool_id.len() > MAX_TOOL_ID {
         return not_found();
     }
-    let Some((_, tail)) = open_tail(&s, &file, &id).await else {
+    let Some((path, kind)) = s.transcript_for(&file, &id) else {
         return not_found();
     };
-    match tail.tool_result(&tool_id).await {
-        Ok(Some(r)) => Json(r).into_response(),
-        Ok(None) => not_found(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => not_found(),
+    // A direct capped read: no tailer is started for a one-off fetch.
+    let result = tokio::task::spawn_blocking(move || {
+        let text = read_capped(&path, READ_CAP)?;
+        Ok::<_, std::io::Error>(conversation::tool_result(kind, &text, &tool_id))
+    })
+    .await;
+    match result {
+        Ok(Ok(Some(r))) => Json(r).into_response(),
+        Ok(Ok(None)) => not_found(),
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => not_found(),
         // No detail: an io error may name the file.
-        Err(_) => error(StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
+        _ => error(StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
     }
 }
