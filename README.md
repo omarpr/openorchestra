@@ -58,9 +58,10 @@ Opening an agent shows a **Conversation | Terminal** switch. For Claude Code and
 pi agents the Conversation view is the default: your messages and the agent's
 replies verbatim (with Markdown), one-line tool calls with a check or cross
 (tap one to see its output, capped at 64 KB), collapsed thinking, and a status
-bar ("Working..." with the current tool, "Needs your input", "Agent stopped").
-Images in replies are not shown. Other agents (for example Codex) show the
-Terminal only.
+bar ("Working…" with the current tool, "Needs your input", "Agent stopped").
+Images in replies are not shown. The switch appears once the agent has a transcript (a brand-new Claude Code or
+pi agent shows the Terminal until its first message), and your last choice per
+agent is remembered. Other agents (for example Codex) show the Terminal only.
 
 On the Mac, a chip in the top bar shows whether the current terminal or agent
 tab is reachable from a phone, and **Settings → Remote → Agents on phone**

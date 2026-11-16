@@ -98,14 +98,14 @@ Device: ______________  Date: __________
 
 Use a Claude Code agent and a pi agent marked for remote control.
 
-- [ ] Open the agent: the header reads `[icon] repo · branch · agent`, with a Conversation | Terminal switch and Conversation selected.
+- [ ] Open a Claude Code or pi agent that has a transcript: the header reads `[icon] repo · branch · agent`, with a Conversation | Terminal switch and Conversation selected. A brand-new agent shows Terminal only until its first message. Leave on Terminal, close and reopen the agent: the last choice is remembered.
 - [ ] Your earlier messages and the agent's replies appear verbatim, with Markdown (lists, code blocks, links) rendered. Images in replies are not shown.
 - [ ] A tool call is one line with a check mark on success or a cross on failure. Tap it: a sheet shows the output. Output over 64 KB ends with "…[truncated]".
-- [ ] Thinking is collapsed: "💭 Thinking…" while it runs, "💭 Thought for N s" afterwards, and "💭 Thinking (not recorded)" when no duration was saved. Tapping expands it where text exists.
+- [ ] Thinking is collapsed. With text: "💭 Thinking…" plus its first line; tap to expand. Without text: "💭 Thought for N s" when a duration was recorded, otherwise "💭 Thinking (not recorded)".
 - [ ] Send a message from the reply box: it appears in the conversation and the agent answers.
 - [ ] Status bar while the agent works: three bouncing dots, "Working…" and the current tool name. With the device's reduced-motion setting on, the dots do not bounce.
-- [ ] Status bar when the agent asks for permission or a question: amber "Needs your input"; tapping it focuses the reply box.
-- [ ] Quit the agent on the Mac: the bar reads "Agent stopped" and the reply box is disabled.
+- [ ] When the agent starts waiting for you (permission or question): the status bar turns amber and reads "Needs your input", and the reply box is focused automatically once (Conversation view only; there is nothing to tap).
+- [ ] Quit the agent on the Mac: the bar reads "Agent stopped" and the reply box goes away.
 - [ ] Scroll up while the agent keeps writing: a "New messages ↓" pill appears and the view does not jump. Tap it: you land at the bottom and the pill goes away. At the bottom the view follows new messages.
 - [ ] In Claude Code, rewind to an earlier message (Esc Esc): the conversation redraws to match, without duplicates.
 - [ ] Start a new session in the same tab (/clear or /new): the phone switches to the new conversation.
@@ -116,6 +116,6 @@ Use a Claude Code agent and a pi agent marked for remote control.
 
 ## H. Projects sidebar order
 
-- [ ] The ⇅ button to the left of PROJECTS' + opens "Reorder projects" with a four-dot grip on each row. Dragging a row by its grip reorders the list, and the sidebar order follows after closing the panel.
+- [ ] With 2 or more projects, the ⇅ button to the left of PROJECTS' + opens "Reorder projects" with a four-dot grip on each row (with fewer than 2 projects the button is absent). Dragging a row by its grip reorders the list, and the sidebar order follows after closing the panel.
 - [ ] A project's menu has "Move up" and "Move down" (absent at the ends of the list); each moves the project one place.
 - [ ] Quit and reopen: the order is kept.
