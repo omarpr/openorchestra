@@ -98,7 +98,27 @@ fn reconcile_action(
     }
 }
 
+/// One on/off cycle of the remote-control dot while phones can reach it.
+pub(crate) const REMOTE_BLINK_PERIOD: f32 = 1.2;
+/// The blink's "off" half, and the steady level when remote control is off.
+pub(crate) const REMOTE_DOT_DIM: f32 = 0.25;
+pub(crate) const REMOTE_DOT_OFF: f32 = 0.45;
+/// Repaint cadence for the blink — a two-state blink needs only a few frames
+/// a second, unlike the spinners' ~15 fps.
+const REMOTE_BLINK_FRAME: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Opacity of a marked tab's remote dot at clock time `t`: blinking while a
+/// phone can reach it (`live`), steady and dimmed otherwise.
+pub(crate) fn remote_dot_opacity(live: bool, t: f32) -> f32 {
+    if !live {
+        return REMOTE_DOT_OFF;
+    }
+    if (t / REMOTE_BLINK_PERIOD).fract() < 0.5 { 1.0 } else { REMOTE_DOT_DIM }
+}
+
 pub(crate) struct RemoteRuntime {
+    /// The blink repaint loop is running.
+    pub blinking: bool,
     pub store: Store,
     /// UI cache of `remote.json`, reloaded after our own writes and on every
     /// watcher event. Never written back: every change goes through `store`.
@@ -135,6 +155,7 @@ impl RemoteRuntime {
         };
         let (snapshot_tx, _) = snapshot_channel();
         RemoteRuntime {
+            blinking: false,
             store,
             file,
             serve: RemoteServe::Off,
@@ -491,7 +512,45 @@ impl HarnessWorkspace {
     }
 
     /// Rebuild the snapshot and publish it if it changed.
+    /// Phones can reach marked tabs: this build or the other one is serving.
+    pub(crate) fn remote_live(&self) -> bool {
+        matches!(self.remote.serve, RemoteServe::Serving | RemoteServe::OtherBuild)
+    }
+
+    /// Current opacity for every remote dot (they blink in step).
+    pub(crate) fn remote_dot_opacity(&self) -> f32 {
+        remote_dot_opacity(self.remote_live(), self.anim_secs())
+    }
+
+    /// Keep the dots blinking while remote is live and something is marked;
+    /// the loop stops by itself when either goes away.
+    fn ensure_remote_blink(&mut self, cx: &mut Context<Self>) {
+        let wanted = |ws: &Self| ws.remote_live() && !ws.remote.file.marked.is_empty();
+        if self.remote.blinking || !wanted(self) {
+            return;
+        }
+        self.remote.blinking = true;
+        cx.spawn(async move |view, cx| {
+            loop {
+                cx.background_executor().timer(REMOTE_BLINK_FRAME).await;
+                let keep = view
+                    .update(cx, |ws, cx| {
+                        let keep = wanted(ws);
+                        ws.remote.blinking = keep;
+                        cx.notify();
+                        keep
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     pub(crate) fn remote_refresh(&mut self, cx: &mut Context<Self>) {
+        self.ensure_remote_blink(cx);
         self.remote_publish();
         if let Some(server) = &self.remote.server {
             let status = server.status();
@@ -895,6 +954,17 @@ mod tests {
     use super::*;
     use oo_remote::Mark;
     use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn remote_dot_blinks_only_while_reachable() {
+        // Reachable: on for the first half of each period, dim for the second.
+        assert_eq!(remote_dot_opacity(true, 0.1), 1.0);
+        assert_eq!(remote_dot_opacity(true, REMOTE_BLINK_PERIOD * 0.75), REMOTE_DOT_DIM);
+        assert_eq!(remote_dot_opacity(true, REMOTE_BLINK_PERIOD + 0.1), 1.0);
+        // Remote off: steady and dimmed, whatever the clock says.
+        assert_eq!(remote_dot_opacity(false, 0.1), REMOTE_DOT_OFF);
+        assert_eq!(remote_dot_opacity(false, REMOTE_BLINK_PERIOD * 0.75), REMOTE_DOT_OFF);
+    }
 
     fn mark(key: &str, tab: u64, id: &str) -> Mark {
         Mark {

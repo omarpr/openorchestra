@@ -328,6 +328,7 @@ impl HarnessWorkspace {
         let close_id = tab.id;
         let key = self.resolve().map(|r| r.key).unwrap_or_default();
         let remote_on = self.remote_is_marked(&key, tab.id);
+        let remote_dot_alpha = self.remote_dot_opacity();
         let remote_menu = Self::remote_tab_kind(tab).is_some();
         let drag_key = key.clone();
         let drop_key = key;
@@ -415,6 +416,7 @@ impl HarnessWorkspace {
                         .mr_1()
                         .rounded_full()
                         .bg(hx.accent)
+                        .opacity(remote_dot_alpha)
                         .tooltip(tip("Remote control on")),
                 )
             })

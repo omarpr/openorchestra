@@ -399,6 +399,7 @@ impl HarnessWorkspace {
                 .size(px(6.0))
                 .rounded_full()
                 .bg(hx.accent)
+                .opacity(self.remote_dot_opacity())
                 .tooltip(tip("Remote control on"))
         })
     }
