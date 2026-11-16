@@ -158,10 +158,14 @@ they asked, what the agent answered, what it is doing — and still reply.
    entries; otherwise it sends `reset` followed by the fresh window.
 3. **Which transcript a tab shows:** `session_files` is keyed by
    (worktree root, agent kind). An `Agent(kind)` tab gets the transcript of
-   its own kind only; a `Shell` tab gets the worktree's most recent one. At
-   startup it is seeded from the registry (worktrees); main checkouts get one
-   on the agent's first signal. `has_conversation` is true once a path is
-   known for that tab.
+   its own kind only. A `Shell` tab is Terminal-only. When a worktree has
+   more than one open tab of the same kind, all of them are Terminal-only
+   (the one file on record could be either's). Opening or closing an agent
+   tab of a kind forgets that kind's file for the worktree, so a new tab
+   shows Terminal until its first signal records a fresh one. At startup it
+   is seeded from the registry (worktrees); main checkouts get one on the
+   agent's first signal. `has_conversation` is true once a path is known
+   for that tab.
 4. **Wire contract:** every connect (and reconnect) sends a full snapshot
    (`entries` with `replace: true`), so the client replaces its list — no
    `Last-Event-ID` replay. Later `entries` events are merged **by id**: a known

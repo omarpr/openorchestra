@@ -109,13 +109,17 @@ Use a Claude Code agent and a pi agent marked for remote control.
 - [ ] Scroll up while the agent keeps writing: a "New messages ↓" pill appears and the view does not jump. Tap it: you land at the bottom and the pill goes away. At the bottom the view follows new messages.
 - [ ] In Claude Code, rewind to an earlier message (Esc Esc): the conversation redraws to match, without duplicates.
 - [ ] Start a new session in the same tab (/clear or /new): the phone switches to the new conversation.
-- [ ] Switch to Terminal and back: the terminal works as in section D and the conversation keeps its place.
+- [ ] Switch to Terminal and back: the terminal works as in section D, and the conversation reloads and lands at the bottom.
+- [ ] A tool line starts with its tool's icon (✎ edit, 📄 read, $ shell, 🔍 search, 🌐 web, 🤖 subagent, ☑ todo list; other tools show their name). Tap a tool that is still running: the sheet reads "Still running".
+- [ ] Run /compact in Claude Code: the conversation shows a "/compact" line and a "Conversation compacted" notice, with no long summary bubble and no file path; messages from before the compaction are still there.
+- [ ] Open a second Claude Code tab in the same worktree and mark both: both show the Terminal only, with no switch. Close one: the other gets the Conversation switch after its next message.
+- [ ] Open a new Claude Code tab in a worktree where an earlier one ran: the phone shows the Terminal only until the new tab's first message, never the earlier conversation. While you stay on Terminal, the conversation appearing does not switch you away.
 - [ ] A Codex agent shows the Terminal only, with no switch.
 - [ ] Open an old link to an agent that was removed or unmarked: "Agent not found".
 - [ ] Reconnect after locking the phone: the conversation catches up with no gaps.
 
 ## H. Projects sidebar order
 
-- [ ] With 2 or more projects, the ⇅ button to the left of PROJECTS' + opens "Reorder projects" with a four-dot grip on each row (with fewer than 2 projects the button is absent). Dragging a row by its grip reorders the list, and the sidebar order follows after closing the panel.
+- [ ] With 2 or more projects, the ⇅ button to the left of PROJECTS' + opens "Reorder projects" with a four-dot grip on each row (with fewer than 2 projects the button is absent). Dragging a row reorders the list; with many rows the list scrolls inside the panel, and the sidebar order follows after closing the panel.
 - [ ] A project's menu has "Move up" and "Move down" (absent at the ends of the list); each moves the project one place.
 - [ ] Quit and reopen: the order is kept.
