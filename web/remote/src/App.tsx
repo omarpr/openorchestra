@@ -1,7 +1,8 @@
-import { useState, useSyncExternalStore } from "react";
+import { useRef, useState, useSyncExternalStore } from "react";
 import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { useAgents } from "@/hooks/useAgents";
 import { useIsTablet } from "@/hooks/useMedia";
+import { useVisualViewport } from "@/hooks/useVisualViewport";
 import { getToken, subscribeToken } from "@/lib/token";
 import { useRoute } from "@/lib/router";
 import { AgentList } from "@/components/AgentList";
@@ -27,6 +28,8 @@ function Main() {
   const isTablet = useIsTablet();
   const route = useRoute();
   const [collapsed, setCollapsed] = useState(false);
+  const shell = useRef<HTMLDivElement>(null);
+  useVisualViewport(shell);
   const selectedId = route.name === "agent" ? route.id : undefined;
   const selectedAgent = agents.find((a) => a.id === selectedId);
 
@@ -91,7 +94,7 @@ function Main() {
   }
 
   return (
-    <div className="flex h-full flex-col pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]">
+    <div ref={shell} className="oo-shell flex flex-col pt-[env(safe-area-inset-top)] pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]">
       <ConnectionBanner connected={connected} disabled={disabled} />
       {body}
     </div>
