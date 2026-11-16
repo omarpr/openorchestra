@@ -7,6 +7,66 @@ use crate::workspace::remote::worktree_pane_key;
 /// What a project-menu item does when picked.
 type MenuAction = dyn Fn(&mut HarnessWorkspace, &mut Window, &mut Context<HarnessWorkspace>);
 
+/// Width of a row in the "Reorder projects" panel (panel 240 − 2 × 6 padding),
+/// shared with the drag ghost so the ghost is the row's exact size.
+const REORDER_ROW_W: f32 = 228.0;
+
+/// A reorder row's inside: the name, then the four-dot grip on the right.
+fn reorder_row_content(hx: &HarnessTheme, name: &str, grip: gpui::Div) -> gpui::Div {
+    div()
+        .flex()
+        .flex_1()
+        .min_w_0()
+        .items_center()
+        .gap_1()
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .whitespace_nowrap()
+                .overflow_hidden()
+                .text_ellipsis()
+                .text_sm()
+                .text_color(hx.tx0)
+                .child(name.to_string()),
+        )
+        .child(div().size(px(22.0)).flex().flex_none().items_center().justify_center().child(grip))
+}
+
+/// The row that follows the cursor while dragging in "Reorder projects": the
+/// same row, lifted (raised surface, accent border, shadow).
+struct ProjectRowGhost {
+    name: String,
+    hx: HarnessTheme,
+}
+
+impl Render for ProjectRowGhost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let hx = &self.hx;
+        let dot = || div().size(px(3.0)).rounded_full().bg(hx.tx1);
+        let grip = div()
+            .flex()
+            .flex_col()
+            .gap(px(3.0))
+            .child(div().flex().gap(px(3.0)).child(dot()).child(dot()))
+            .child(div().flex().gap(px(3.0)).child(dot()).child(dot()));
+        div()
+            .w(px(REORDER_ROW_W))
+            .flex()
+            .items_center()
+            .pl_2()
+            .pr_1()
+            .py_1()
+            .rounded_md()
+            .bg(hx.surface2)
+            .border_1()
+            .border_color(hx.accent)
+            .shadow_lg()
+            .cursor(gpui::CursorStyle::ClosedHand)
+            .child(reorder_row_content(hx, &self.name, grip))
+    }
+}
+
 impl HarnessWorkspace {
     pub(crate) fn render_repo_group(
         &self,
@@ -496,7 +556,7 @@ impl HarnessWorkspace {
         let mut list = div().flex().flex_col().gap_0p5();
         for (i, repo) in self.data.repos.iter().enumerate() {
             let drop_name = repo.name.clone();
-            let ghost_label = repo.name.clone();
+            let ghost_name = repo.name.clone();
             let ghost_theme = hx.clone();
             let drop_bg = tint(hx.accent, 0.16);
             list = list.child(
@@ -509,43 +569,24 @@ impl HarnessWorkspace {
                     .pr_1()
                     .py_1()
                     .rounded_md()
+                    // The whole row is the drag handle; the grip just says so.
+                    .cursor(gpui::CursorStyle::OpenHand)
                     .hover(|d| d.bg(hx.surface))
+                    .tooltip(tip("Drag to reorder"))
+                    // What follows the cursor is the row itself, at its own
+                    // width, so it reads as moving the row — not a label.
+                    .on_drag(DraggedProjectRow { name: repo.name.clone() }, move |_, _, _, cx| {
+                        let name = ghost_name.clone();
+                        let hx = ghost_theme.clone();
+                        cx.new(|_| ProjectRowGhost { name, hx })
+                    })
                     // The row under the cursor while dragging is where the
                     // dragged project will land.
                     .drag_over::<DraggedProjectRow>(move |d, _, _, _| d.bg(drop_bg))
                     .on_drop(cx.listener(move |ws, dragged: &DraggedProjectRow, _, cx| {
                         ws.move_repo(&dragged.name, &drop_name, cx);
                     }))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .text_sm()
-                            .text_color(hx.tx0)
-                            .child(repo.name.clone()),
-                    )
-                    .child(
-                        div()
-                            .id(("reorder-grip", i))
-                            .size(px(22.0))
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .justify_center()
-                            .rounded_md()
-                            .cursor(gpui::CursorStyle::OpenHand)
-                            .tooltip(tip("Drag to reorder"))
-                            .hover(|d| d.bg(hx.surface_hover))
-                            .child(grip(hx.tx2))
-                            .on_drag(DraggedProjectRow { name: repo.name.clone() }, move |_, _, _, cx| {
-                                let label = ghost_label.clone();
-                                let hx = ghost_theme.clone();
-                                cx.new(|_| crate::workspace::ui::center::DragGhost { label, hx })
-                            }),
-                    ),
+                    .child(reorder_row_content(hx, &repo.name, grip(hx.tx2))),
             );
         }
         div()
