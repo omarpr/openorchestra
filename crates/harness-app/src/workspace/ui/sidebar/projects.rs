@@ -542,6 +542,7 @@ impl HarnessWorkspace {
         list_kind: ReorderList,
         x: Pixels,
         y: Pixels,
+        list_max_h: Pixels,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         // Four dots in a 2×2 grid — the drag handle.
@@ -563,7 +564,14 @@ impl HarnessWorkspace {
             ReorderList::Projects => "REORDER PROJECTS",
             ReorderList::Tasks => "REORDER TASKS",
         };
-        let mut list = div().flex().flex_col().gap_0p5();
+        let mut list = div()
+            .id("reorder-list")
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .min_h_0()
+            .max_h(list_max_h)
+            .overflow_y_scroll();
         for (i, (key, label)) in rows.into_iter().enumerate() {
             let drop_key = key.clone();
             let ghost_label = label.clone();

@@ -258,7 +258,12 @@ impl Render for HarnessWorkspace {
                             }),
                         ),
                 )
-                .child(self.render_reorder_panel(&hx, list, x, y, cx));
+                .child({
+                    // A long list scrolls inside the panel instead of running
+                    // off the window.
+                    let list_max_h = (f32::from(window.viewport_size().height) * 0.6).min(420.0);
+                    self.render_reorder_panel(&hx, list, x, y, px(list_max_h), cx)
+                });
         }
 
         if let Some((repo, x, y)) = self.project_menu.clone() {
