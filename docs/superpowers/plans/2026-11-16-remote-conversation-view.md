@@ -32,6 +32,29 @@
 
 ---
 
+### Task 0: PWA polish (name, header, agent icons, status pills, pair once on iOS)
+
+User-requested fixes to the existing PWA, done first.
+
+**Files:**
+- Modify: `web/remote/vite.config.ts` (manifest), `web/remote/index.html` (`<title>`), `web/remote/src/App.tsx` (header), `web/remote/src/components/AgentCard.tsx`, `web/remote/src/components/StatusPill.tsx`, `web/remote/src/components/PairScreen.tsx` (or `App.tsx` gate)
+- Create: `web/remote/src/components/AgentIcon.tsx`, `web/remote/src/components/InstallFirst.tsx`, `web/remote/src/lib/standalone.ts`; copy `crates/harness-app/icons/agents/{claudecode,codex,cursor,kimi,opencode,pi}.svg` (+ `ATTRIBUTION.md`, `LICENSE`) to `web/remote/src/assets/agents/`; header logo from `assets/openOrchestra-1024.png` (resize to 64 px PNG in `web/remote/public/`)
+- Test: `web/remote/src/components/AgentCard.test.tsx`, `StatusPill.test.tsx`, `web/remote/src/lib/standalone.test.ts`
+
+**Requirements (exact):**
+- Manifest `name` and `short_name`: `openOrchestra`; `<title>openOrchestra</title>`.
+- Header (phone and tablet list column): app logo (24 px, rounded) at left, then `openOrchestra Agents`.
+- `AgentIcon({kind})`: `claude-code`→claudecode.svg, `codex`, `kimi`, `opencode`, `pi`, `cursor`|`cursor-agent`→cursor.svg, tinted with the app's colours (`pi #8b7cf6`, `claude-code #d97757`, `codex #10a37f`, `kimi #4f9cf9`, `opencode #3fb950`); unknown kind → monogram `◇` in `#9aa3af`. 16 px, shown left of the title on the card's first line.
+- AgentCard: remove the separate agent-kind badge/line (the icon replaces it); keep `project · worktree`, status, time, tool.
+- StatusPill matches the desktop app: `running` → accent (`#5b9bff` dark / `#1f6feb` light) text on a 16 % tint, spinning arc (1 s per turn, CSS), label `RUNNING`; `waiting` → amber (`#e0a83b` / `#9a6700`) with a dot breathing between 35 % and 100 % opacity over 1.2 s, label `WAITING`; `idle` and `unknown` → render nothing; `stopped` → muted (`#646b76` / `#7b8493`) outline dot, label `STOPPED`. `prefers-reduced-motion` → no spin/breath (static indicator). Agent list sort order unchanged.
+- Pair once on iOS: `isStandalone()` = `matchMedia('(display-mode: standalone)').matches || navigator.standalone === true`; `isIOS()` = iPhone/iPad/iPod UA or (Macintosh UA and `maxTouchPoints > 1`). When there is no token and `isIOS() && !isStandalone()`, show `InstallFirst` instead of the pair form: heading `Add openOrchestra to your Home Screen`, steps `Tap Share`, `Choose Add to Home Screen`, `Open openOrchestra from your Home Screen and pair there`, plus a small link `Pair in this browser instead` that reveals the normal pair form. Android/desktop unchanged.
+
+- [ ] **Step 1: Failing tests:** AgentCard renders the claude icon (by `data-agent="claude-code"` or alt text) and does NOT render the text `claude-code`; StatusPill renders nothing for idle/unknown, `RUNNING` with a spinner element for running, `WAITING` for waiting, `STOPPED` for stopped, no animation class under reduced motion; `isStandalone`/`isIOS` truth table; App shows `InstallFirst` for iOS non-standalone without token, the pair form for Android, and the pair form after tapping `Pair in this browser instead`; header text `openOrchestra Agents`.
+- [ ] **Step 2:** `pnpm -C web/remote test` → FAIL.
+- [ ] **Step 3:** Implement.
+- [ ] **Step 4:** `pnpm -C web/remote test && pnpm -C web/remote exec tsc --noEmit && pnpm -C web/remote build` → PASS; `dist/manifest.webmanifest` has `"name":"openOrchestra"`; `cargo test -p oo-remote` passes.
+- [ ] **Step 5:** Commit `feat(remote-web): openOrchestra branding, agent icons, app-style status, pair once on iOS`.
+
 ### Task 1: Transcript readers → `Entry` list
 
 **Files:**
