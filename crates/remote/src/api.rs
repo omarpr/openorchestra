@@ -1,6 +1,6 @@
 //! HTTPS routes: peer filter, bearer auth, pairing, the agents list and SSE,
-//! quick-reply send. The terminal socket lives in `ws.rs`, static files in
-//! `assets.rs`.
+//! quick-reply send. The terminal socket lives in `ws.rs`, the conversation
+//! stream in `conversation_api.rs`, static files in `assets.rs`.
 //!
 //! Request paths always re-read `remote.json` (one small file) so marks,
 //! revocations and read-only flags apply immediately; the watcher only
@@ -36,7 +36,7 @@ const MAX_DEVICE_NAME: usize = 64;
 const MAX_CODE: usize = 32;
 /// Upper bound on opening a session's control client.
 pub(crate) const HUB_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
-const SSE_KEEPALIVE: Duration = Duration::from_secs(15);
+pub(crate) const SSE_KEEPALIVE: Duration = Duration::from_secs(15);
 
 pub(crate) type AppState = State<Arc<Shared>>;
 
@@ -47,6 +47,14 @@ pub(crate) fn router(shared: Arc<Shared>) -> Router {
         .route("/api/agents", get(agents))
         .route("/api/events", get(events))
         .route("/api/agents/{id}/send", post(send))
+        .route(
+            "/api/agents/{id}/conversation",
+            get(crate::conversation_api::stream),
+        )
+        .route(
+            "/api/agents/{id}/conversation/tool/{tool_id}",
+            get(crate::conversation_api::tool),
+        )
         .route("/api/term/{id}", get(crate::ws::term))
         .route("/api", any(not_found))
         .route("/api/{*rest}", any(not_found))
@@ -99,7 +107,10 @@ pub(crate) fn authenticate(s: &Arc<Shared>, token: &str) -> Option<(Device, Remo
 }
 
 #[allow(clippy::result_large_err)]
-fn authed(s: &Arc<Shared>, headers: &HeaderMap) -> Result<(Device, RemoteFile), Response> {
+pub(crate) fn authed(
+    s: &Arc<Shared>,
+    headers: &HeaderMap,
+) -> Result<(Device, RemoteFile), Response> {
     bearer(headers)
         .and_then(|t| authenticate(s, t))
         .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "unauthorized"))
@@ -226,7 +237,7 @@ fn agents_event(list: &[crate::server::AgentInfo]) -> Event {
         .data(serde_json::to_string(list).unwrap_or_else(|_| "[]".into()))
 }
 
-fn closed_event(reason: &str) -> Event {
+pub(crate) fn closed_event(reason: &str) -> Event {
     Event::default()
         .event("closed")
         .data(json!({ "reason": reason }).to_string())

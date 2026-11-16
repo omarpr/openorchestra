@@ -324,7 +324,10 @@ pub(crate) fn build_snapshot(
                 status: status.clone(),
                 status_since: status_since.clone(),
                 tool: tool.clone(),
+                branch: None,
+                has_conversation: false,
                 session: crate::tmux::session_name(&src.key, *tab_id),
+                transcript: None,
             });
         }
     }

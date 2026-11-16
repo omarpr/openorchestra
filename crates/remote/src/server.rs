@@ -21,7 +21,9 @@ use serde::Serialize;
 use tokio::sync::{watch, Notify};
 
 use crate::certs;
+use crate::conversation::TranscriptKind;
 use crate::tmux_bridge::{live_sessions, Hubs, Tmux};
+use crate::transcript::Transcripts;
 use crate::{auth, RemoteFile, Store};
 
 /// tmux liveness poll for `stopped`.
@@ -51,8 +53,16 @@ pub struct AgentInfo {
     pub status: String,
     pub status_since: Option<String>,
     pub tool: Option<String>,
+    /// Git branch of the tab's worktree (filled by the app).
+    pub branch: Option<String>,
+    /// Whether `/api/agents/{id}/conversation` serves this agent. Computed
+    /// by the server from `transcript` and `agent_kind`.
+    pub has_conversation: bool,
     #[serde(skip)]
     pub session: String,
+    /// The agent's transcript file. Never leaves the server.
+    #[serde(skip)]
+    pub transcript: Option<PathBuf>,
 }
 
 /// What the app publishes: its marked tabs with their current status.
@@ -126,6 +136,8 @@ pub(crate) struct Shared {
     pub state_dir: PathBuf,
     pub tmux: Tmux,
     pub hubs: Hubs,
+    /// Transcript tailers shared by conversation viewers.
+    pub transcripts: Transcripts,
     pub port: u16,
     pub snapshot: watch::Receiver<Snapshot>,
     /// Latest remote.json (pushed to open sockets on change).
@@ -200,6 +212,17 @@ impl Shared {
             .iter()
             .find(|a| a.id == id)
             .map(|a| a.session.clone())
+    }
+
+    /// Transcript behind `id`, only if `id` is currently marked in `file`
+    /// and the app published a supported transcript for it. The path never
+    /// leaves the server.
+    pub fn transcript_for(&self, file: &RemoteFile, id: &str) -> Option<(PathBuf, TranscriptKind)> {
+        file.mark_by_id(id)?;
+        let snap = self.snapshot.borrow();
+        let a = snap.agents.iter().find(|a| a.id == id)?;
+        let kind = TranscriptKind::from_agent_kind(a.agent_kind.as_deref()?)?;
+        Some((a.transcript.clone()?, kind))
     }
 
     /// Whether `origin` is exactly `https://<SAN>:<port>` for the cert in use.
@@ -332,6 +355,11 @@ pub fn compute_agents(
         .filter(|a| file.mark_by_id(&a.id).is_some() && seen.insert(a.id.clone()))
         .map(|a| {
             let mut a = a.clone();
+            a.has_conversation = a.transcript.is_some()
+                && a.agent_kind
+                    .as_deref()
+                    .and_then(TranscriptKind::from_agent_kind)
+                    .is_some();
             if !live.contains(&a.session) {
                 a.status = "stopped".into();
                 a.tool = None;
@@ -386,6 +414,7 @@ impl RemoteServer {
             state_dir: cfg.state_dir.clone(),
             tmux: cfg.tmux.clone(),
             hubs: Hubs::new(cfg.tmux.clone()),
+            transcripts: Transcripts::new(),
             port,
             snapshot,
             file: watch::channel(Arc::new(file0)).0,
@@ -717,7 +746,10 @@ mod tests {
             status: "waiting".into(),
             status_since: Some("2026-01-01T00:00:00Z".into()),
             tool: Some("Bash".into()),
+            branch: None,
+            has_conversation: false,
             session: session.into(),
+            transcript: None,
         }
     }
 

@@ -5,6 +5,7 @@ pub mod assets;
 pub mod auth;
 pub mod certs;
 pub mod conversation;
+mod conversation_api;
 pub mod keepawake;
 pub mod netfilter;
 pub mod server;

@@ -285,7 +285,10 @@ fn agent(id: &str, session: &str, title: &str) -> AgentInfo {
         status: "running".into(),
         status_since: None,
         tool: None,
+        branch: None,
+        has_conversation: false,
         session: session.to_string(),
+        transcript: None,
     }
 }
 
@@ -1155,4 +1158,408 @@ async fn unparseable_remote_json_keeps_last_good_copy() {
     assert_eq!(std::fs::read(&path).unwrap(), b"{ \"devices\": [ trunc");
     // An unknown token is still refused.
     assert_eq!(h.get("/api/me", Some("nope")).await.status(), 401);
+}
+
+// ---- conversation view ----
+
+/// Grouped so `cargo test --test server conversation` runs them all.
+mod conversation {
+    use super::*;
+    use oo_remote::{parse_entries, TranscriptKind};
+
+    const FIXTURE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/claude-transcript.jsonl"
+    );
+
+    /// Reads `event:`/`data:` pairs off an SSE response (comments skipped).
+    struct SseReader {
+        r: reqwest::Response,
+        buf: String,
+    }
+
+    impl SseReader {
+        /// The next event, or `None` when the stream ended. Panics after 3 s.
+        async fn next(&mut self) -> Option<(String, String)> {
+            tokio::time::timeout(Duration::from_secs(3), self.next_inner())
+                .await
+                .expect("no SSE event within 3s")
+        }
+
+        async fn next_inner(&mut self) -> Option<(String, String)> {
+            loop {
+                while let Some(i) = self.buf.find("\n\n") {
+                    let block: String = self.buf.drain(..i + 2).collect();
+                    let (mut event, mut data) = (None, Vec::new());
+                    for line in block.lines() {
+                        if let Some(v) = line.strip_prefix("event:") {
+                            event = Some(v.trim().to_string());
+                        } else if let Some(v) = line.strip_prefix("data:") {
+                            data.push(v.strip_prefix(' ').unwrap_or(v).to_string());
+                        }
+                    }
+                    if event.is_some() || !data.is_empty() {
+                        return Some((event.unwrap_or_else(|| "message".into()), data.join("\n")));
+                    }
+                }
+                match self.r.chunk().await {
+                    Ok(Some(c)) => self.buf.push_str(&String::from_utf8_lossy(&c)),
+                    _ => return None,
+                }
+            }
+        }
+
+        /// The next `entries` event as (replace, entries).
+        async fn entries(&mut self) -> (bool, Vec<serde_json::Value>) {
+            let (ev, data) = self.next().await.expect("stream ended");
+            assert_eq!(ev, "entries", "{data}");
+            let v: serde_json::Value = serde_json::from_str(&data).unwrap();
+            (
+                v["replace"].as_bool().expect("replace"),
+                v["entries"].as_array().expect("entries").clone(),
+            )
+        }
+    }
+
+    fn conv_agent(id: &str, kind: &str, path: &Path) -> AgentInfo {
+        let mut a = agent(id, "s_conv", "C");
+        a.agent_kind = Some(kind.into());
+        a.transcript = Some(path.to_path_buf());
+        a
+    }
+
+    fn copy_fixture(dir: &Path) -> PathBuf {
+        let p = dir.join("session.jsonl");
+        std::fs::copy(FIXTURE, &p).unwrap();
+        p
+    }
+
+    fn append(p: &Path, line: &str) {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().append(true).open(p).unwrap();
+        writeln!(f, "{line}").unwrap();
+    }
+
+    fn ids(entries: &[serde_json::Value]) -> Vec<String> {
+        entries
+            .iter()
+            .map(|e| e["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    async fn open(h: &Harness, id: &str, token: &str) -> SseReader {
+        let r = h
+            .get(&format!("/api/agents/{id}/conversation"), Some(token))
+            .await;
+        assert_eq!(r.status(), 200);
+        assert!(r
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("text/event-stream"));
+        SseReader {
+            r,
+            buf: String::new(),
+        }
+    }
+
+    /// A marked Claude Code agent on a copy of the fixture.
+    fn setup(h: &Harness, tmp: &TempDir) -> (String, PathBuf) {
+        let path = copy_fixture(tmp.path());
+        let a = h.store().mark("k", 1).unwrap();
+        h.set_agents(vec![conv_agent(&a, "claude-code", &path)]);
+        (a, path)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn conversation_streams_entries() {
+        let h = Harness::start(Harness::unused_tmux());
+        let token = h.device(false);
+        let tmp = TempDir::new().unwrap();
+        let (a, path) = setup(&h, &tmp);
+        let list = h.agents(&token).await;
+        assert_eq!(list[0]["has_conversation"], true);
+
+        let mut sse = open(&h, &a, &token).await;
+        let (replace, entries) = sse.entries().await;
+        assert!(replace);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let want: Vec<String> = parse_entries(TranscriptKind::ClaudeCode, &text, None)
+            .iter()
+            .map(|e| e.id.clone())
+            .collect();
+        assert!(!want.is_empty());
+        assert_eq!(ids(&entries), want);
+
+        append(
+            &path,
+            r#"{"type":"assistant","uuid":"a5","parentUuid":"a4","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"More."}]}}"#,
+        );
+        let (replace, entries) = tokio::time::timeout(Duration::from_secs(2), sse.entries())
+            .await
+            .expect("update within 2s");
+        assert!(!replace);
+        assert!(entries.iter().any(|e| e["text"] == "More."), "{entries:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn conversation_requires_mark_and_support() {
+        let h = Harness::start(Harness::unused_tmux());
+        let token = h.device(false);
+        let tmp = TempDir::new().unwrap();
+        let path = copy_fixture(tmp.path());
+        let a = h.store().mark("k", 1).unwrap();
+        h.set_agents(vec![
+            conv_agent(&a, "codex", &path),
+            conv_agent("r_unmarked000000", "claude-code", &path),
+        ]);
+        assert_eq!(
+            h.get(&format!("/api/agents/{a}/conversation"), None)
+                .await
+                .status(),
+            401
+        );
+        for id in ["r_unmarked000000", "r_nope", a.as_str()] {
+            let r = h
+                .get(&format!("/api/agents/{id}/conversation"), Some(&token))
+                .await;
+            assert_eq!(r.status(), 404, "{id}");
+            let r = h
+                .get(
+                    &format!("/api/agents/{id}/conversation/tool/toolu_1"),
+                    Some(&token),
+                )
+                .await;
+            assert_eq!(r.status(), 404, "{id}");
+        }
+        let list = h.agents(&token).await;
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["has_conversation"], false);
+        assert!(list[0].get("branch").is_some(), "branch is sent");
+
+        // Supported kind but no transcript known yet.
+        let mut no_path = conv_agent(&a, "claude-code", &path);
+        no_path.transcript = None;
+        h.set_agents(vec![no_path]);
+        let r = h
+            .get(&format!("/api/agents/{a}/conversation"), Some(&token))
+            .await;
+        assert_eq!(r.status(), 404);
+        assert_eq!(h.agents(&token).await[0]["has_conversation"], false);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn transcript_path_never_sent() {
+        let h = Harness::start(Harness::unused_tmux());
+        let token = h.device(false);
+        let tmp = TempDir::new().unwrap();
+        let (a, path) = setup(&h, &tmp);
+        let path_str = path.to_string_lossy().to_string();
+        let dir_name = tmp
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let clean = |what: &str, body: &str| {
+            assert!(!body.contains(&path_str), "{what} leaks the path: {body}");
+            assert!(!body.contains(&dir_name), "{what} leaks the dir: {body}");
+            assert!(!body.contains("transcript"), "{what}: {body}");
+        };
+
+        let body = h
+            .get("/api/agents", Some(&token))
+            .await
+            .text()
+            .await
+            .unwrap();
+        clean("/api/agents", &body);
+
+        let mut ev = h.get("/api/events", Some(&token)).await;
+        let first = ev.chunk().await.unwrap().unwrap();
+        clean("/api/events", &String::from_utf8_lossy(&first));
+
+        let mut sse = open(&h, &a, &token).await;
+        let (_, data) = sse.next().await.unwrap();
+        clean("conversation", &data);
+
+        for tool in ["toolu_1", "toolu_2", "nope"] {
+            let body = h
+                .get(
+                    &format!("/api/agents/{a}/conversation/tool/{tool}"),
+                    Some(&token),
+                )
+                .await
+                .text()
+                .await
+                .unwrap();
+            clean("tool", &body);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn new_transcript_path_replaces_stream() {
+        let h = Harness::start(Harness::unused_tmux());
+        let token = h.device(false);
+        let tmp = TempDir::new().unwrap();
+        let (a, _) = setup(&h, &tmp);
+        let mut sse = open(&h, &a, &token).await;
+        let (replace, entries) = sse.entries().await;
+        assert!(replace && !entries.is_empty());
+
+        // A status-only snapshot change sends nothing.
+        let mut same = h.snap.borrow().agents[0].clone();
+        same.status = "waiting".into();
+        h.set_agents(vec![same]);
+        // Let the stream see it on its own (watch values coalesce).
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let fresh = tmp.path().join("new.jsonl");
+        std::fs::write(
+            &fresh,
+            r#"{"type":"user","uuid":"n1","parentUuid":null,"message":{"role":"user","content":"brand new"}}"#
+                .to_string()
+                + "\n",
+        )
+        .unwrap();
+        h.set_agents(vec![conv_agent(&a, "claude-code", &fresh)]);
+        let (replace, entries) = sse.entries().await;
+        assert!(replace);
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(entries[0]["text"], "brand new");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unmark_closes_conversation() {
+        let h = Harness::start(Harness::unused_tmux());
+        let token = h.device(false);
+        let tmp = TempDir::new().unwrap();
+        let (a, _) = setup(&h, &tmp);
+        let mut sse = open(&h, &a, &token).await;
+        sse.entries().await;
+        h.store().unmark("k", Some(1)).unwrap();
+        let (ev, data) = sse.next().await.expect("closed event");
+        assert_eq!(ev, "closed");
+        assert_eq!(data, r#"{"reason":"unmarked"}"#);
+        assert!(sse.next().await.is_none(), "stream ends after closed");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn conversation_closes_on_revoke_and_stop() {
+        let mut h = Harness::start(Harness::unused_tmux());
+        let token = h.device(false);
+        let tmp = TempDir::new().unwrap();
+        let (a, _) = setup(&h, &tmp);
+
+        let mut sse = open(&h, &a, &token).await;
+        sse.entries().await;
+        let other = h.device(false);
+        let mut sse2 = open(&h, &a, &other).await;
+        sse2.entries().await;
+
+        let store = h.store();
+        let dev = store.load().devices[0].id.clone();
+        auth::revoke(&store, &dev).unwrap();
+        let (ev, data) = sse.next().await.expect("closed event");
+        assert_eq!(
+            (ev.as_str(), data.as_str()),
+            ("closed", r#"{"reason":"revoked"}"#)
+        );
+
+        let srv = h.server.take().unwrap();
+        std::thread::spawn(move || srv.stop());
+        let (ev, data) = sse2.next().await.expect("closed event");
+        assert_eq!(
+            (ev.as_str(), data.as_str()),
+            ("closed", r#"{"reason":"disabled"}"#)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn conversation_closes_when_snapshot_drops_agent() {
+        let h = Harness::start(Harness::unused_tmux());
+        let token = h.device(false);
+        let tmp = TempDir::new().unwrap();
+        let (a, path) = setup(&h, &tmp);
+        let mut sse = open(&h, &a, &token).await;
+        sse.entries().await;
+        // Still marked, but the app no longer vouches for a transcript.
+        let mut gone = conv_agent(&a, "claude-code", &path);
+        gone.transcript = None;
+        h.set_agents(vec![gone]);
+        let (ev, data) = sse.next().await.expect("closed event");
+        assert_eq!(
+            (ev.as_str(), data.as_str()),
+            ("closed", r#"{"reason":"unmarked"}"#)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tool_endpoint_caps_output() {
+        let h = Harness::start(Harness::unused_tmux());
+        let token = h.device(false);
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("big.jsonl");
+        let big = "x".repeat(200 * 1024);
+        let lines = [
+            r#"{"type":"user","uuid":"u1","parentUuid":null,"message":{"role":"user","content":"go"}}"#.to_string(),
+            r#"{"type":"assistant","uuid":"a1","parentUuid":"u1","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"yes"}}]}}"#.to_string(),
+            format!(
+                r#"{{"type":"user","uuid":"u2","parentUuid":"a1","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"t1","content":"{big}","is_error":false}}]}}}}"#
+            ),
+        ];
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        let a = h.store().mark("k", 1).unwrap();
+        h.set_agents(vec![conv_agent(&a, "claude-code", &path)]);
+
+        let r = h
+            .get(
+                &format!("/api/agents/{a}/conversation/tool/t1"),
+                Some(&token),
+            )
+            .await;
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["text"].as_str().unwrap().len(), 64 * 1024);
+        assert_eq!(v["truncated"], true);
+        assert_eq!(v["is_error"], false);
+
+        let r = h
+            .get(
+                &format!("/api/agents/{a}/conversation/tool/nope"),
+                Some(&token),
+            )
+            .await;
+        assert_eq!(r.status(), 404);
+        assert_eq!(
+            h.get(&format!("/api/agents/{a}/conversation/tool/t1"), None)
+                .await
+                .status(),
+            401
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn read_only_device_can_read_conversation() {
+        let h = Harness::start(Harness::unused_tmux());
+        let token = h.device(true);
+        let tmp = TempDir::new().unwrap();
+        let (a, _) = setup(&h, &tmp);
+        let mut sse = open(&h, &a, &token).await;
+        let (replace, entries) = sse.entries().await;
+        assert!(replace && !entries.is_empty());
+        let r = h
+            .get(
+                &format!("/api/agents/{a}/conversation/tool/toolu_2"),
+                Some(&token),
+            )
+            .await;
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["text"], "no match");
+        assert_eq!(v["is_error"], true);
+        assert_eq!(v["truncated"], false);
+    }
 }
