@@ -1,0 +1,802 @@
+//! HTTPS server / API tests. Each test gets a temp state dir, binds
+//! 127.0.0.1 on port 0, and pins the cert SANs to `localhost` + 127.0.0.1.
+//! Tests that need tmux are `#[ignore]` and use a private `-L` socket; the
+//! non-live tests point at an unused private socket so the user's default
+//! tmux server is never touched.
+//!
+//! Live: `cargo test -p oo-remote --test server -- --ignored`.
+
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener as StdListener};
+use std::path::{Path, PathBuf};
+use std::process::Command as StdCommand;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
+
+use futures_util::{SinkExt, StreamExt};
+use oo_remote::tmux_bridge::Tmux;
+use oo_remote::{
+    auth, snapshot_channel, AgentInfo, RemoteServer, ServerConfig, Snapshot, StartError, Store,
+};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, ServerName};
+use tempfile::TempDir;
+use tokio::sync::watch;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use tokio_tungstenite::tungstenite::{Error as WsError, Message};
+
+const CSP: &str = "default-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'";
+
+static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+fn unique_socket() -> String {
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let s = format!("oo-remote-srvtest-{}-{}", std::process::id(), n);
+    assert_ne!(s, "default");
+    s
+}
+
+/// A private tmux server, killed on drop.
+struct TmuxServer {
+    socket: String,
+}
+
+impl TmuxServer {
+    fn new() -> TmuxServer {
+        TmuxServer {
+            socket: unique_socket(),
+        }
+    }
+
+    fn tmux(&self) -> Tmux {
+        Tmux {
+            socket: Some(self.socket.clone()),
+        }
+    }
+
+    fn cmd(&self, args: &[&str]) -> std::process::Output {
+        StdCommand::new("tmux")
+            .arg("-L")
+            .arg(&self.socket)
+            .arg("-f")
+            .arg("/dev/null")
+            .args(args)
+            .output()
+            .expect("run tmux")
+    }
+
+    fn new_session(&self, name: &str, cmd: &str) {
+        let out = self.cmd(&[
+            "new-session",
+            "-d",
+            "-s",
+            name,
+            "-x",
+            "100",
+            "-y",
+            "30",
+            cmd,
+        ]);
+        assert!(out.status.success(), "new-session {name}");
+    }
+
+    fn capture(&self, session: &str) -> String {
+        let out = self.cmd(&["capture-pane", "-p", "-t", &format!("={session}:")]);
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+}
+
+impl Drop for TmuxServer {
+    fn drop(&mut self) {
+        let _ = StdCommand::new("tmux")
+            .arg("-L")
+            .arg(&self.socket)
+            .arg("kill-server")
+            .output();
+        let dir = std::env::var("TMUX_TMPDIR").unwrap_or_else(|_| "/tmp".into());
+        let uid = unsafe { libc::getuid() };
+        let _ = std::fs::remove_file(format!("{dir}/tmux-{uid}/{}", self.socket));
+    }
+}
+
+fn free_port() -> u16 {
+    StdListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+fn config(dir: &Path, port: u16, setup_port: u16, tmux: Tmux) -> ServerConfig {
+    ServerConfig {
+        state_dir: dir.to_path_buf(),
+        port,
+        setup_port,
+        tmux,
+        bind_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        hosts_override: Some((
+            vec!["localhost".to_string()],
+            vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+        )),
+    }
+}
+
+fn ca_root(dir: &Path) -> CertificateDer<'static> {
+    CertificateDer::from_pem_file(dir.join("remote/ca.crt")).expect("ca.crt")
+}
+
+fn tls_config(dir: &Path) -> rustls::ClientConfig {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(ca_root(dir)).unwrap();
+    rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth()
+}
+
+struct Harness {
+    _tmp: TempDir,
+    dir: PathBuf,
+    server: Option<RemoteServer>,
+    snap: watch::Sender<Snapshot>,
+    port: u16,
+    setup_port: u16,
+    client: reqwest::Client,
+}
+
+impl Harness {
+    fn start(tmux: Tmux) -> Harness {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("state");
+        let setup_port = free_port();
+        let (snap, rx) = snapshot_channel();
+        let server = RemoteServer::start(config(&dir, 0, setup_port, tmux), rx)
+            .unwrap_or_else(|e| panic!("start: {e:?}"));
+        let port = server.port();
+        assert_ne!(port, 0);
+        let client = reqwest::Client::builder()
+            .use_preconfigured_tls(tls_config(&dir))
+            .resolve("localhost", SocketAddr::from(([127, 0, 0, 1], port)))
+            .build()
+            .unwrap();
+        Harness {
+            _tmp: tmp,
+            dir,
+            server: Some(server),
+            snap,
+            port,
+            setup_port,
+            client,
+        }
+    }
+
+    fn unused_tmux() -> Tmux {
+        Tmux {
+            socket: Some(unique_socket()),
+        }
+    }
+
+    fn server(&self) -> &RemoteServer {
+        self.server.as_ref().unwrap()
+    }
+
+    fn store(&self) -> Store {
+        Store::new(&self.dir)
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("https://localhost:{}{path}", self.port)
+    }
+
+    /// A paired device's token (created through the store, like the app).
+    fn device(&self, read_only: bool) -> String {
+        let store = self.store();
+        let code = auth::issue_code(&store, SystemTime::now()).unwrap();
+        let (dev, token) =
+            auth::redeem_code(&store, &code, "test phone", "localhost", SystemTime::now()).unwrap();
+        if read_only {
+            auth::set_read_only(&store, &dev.id, true).unwrap();
+        }
+        token
+    }
+
+    fn set_agents(&self, agents: Vec<AgentInfo>) {
+        self.snap.send_replace(Snapshot { agents });
+    }
+
+    async fn get(&self, path: &str, token: Option<&str>) -> reqwest::Response {
+        let mut req = self.client.get(self.url(path));
+        if let Some(t) = token {
+            req = req.bearer_auth(t);
+        }
+        req.send().await.expect("request")
+    }
+
+    async fn send_text(&self, id: &str, token: &str, text: &str) -> reqwest::StatusCode {
+        self.client
+            .post(self.url(&format!("/api/agents/{id}/send")))
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "text": text }))
+            .send()
+            .await
+            .expect("send")
+            .status()
+    }
+
+    async fn agents(&self, token: &str) -> Vec<serde_json::Value> {
+        let r = self.get("/api/agents", Some(token)).await;
+        assert_eq!(r.status(), 200);
+        r.json().await.unwrap()
+    }
+
+    async fn ws(
+        &self,
+        id: &str,
+        origin: &str,
+    ) -> Result<
+        tokio_tungstenite::WebSocketStream<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>,
+        WsError,
+    > {
+        let tcp = tokio::net::TcpStream::connect(("127.0.0.1", self.port))
+            .await
+            .unwrap();
+        let mut cfg = tls_config(&self.dir);
+        cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let tls = tokio_rustls::TlsConnector::from(Arc::new(cfg))
+            .connect(ServerName::try_from("localhost").unwrap(), tcp)
+            .await
+            .unwrap();
+        let mut req = format!("wss://localhost:{}/api/term/{id}", self.port)
+            .into_client_request()
+            .unwrap();
+        req.headers_mut().insert("Origin", origin.parse().unwrap());
+        tokio_tungstenite::client_async(req, tls)
+            .await
+            .map(|(ws, _)| ws)
+    }
+
+    fn origin(&self) -> String {
+        format!("https://localhost:{}", self.port)
+    }
+}
+
+impl Drop for Harness {
+    fn drop(&mut self) {
+        if let Some(s) = self.server.take() {
+            s.stop();
+        }
+    }
+}
+
+fn agent(id: &str, session: &str, title: &str) -> AgentInfo {
+    AgentInfo {
+        id: id.to_string(),
+        title: title.to_string(),
+        agent_kind: Some("claude".into()),
+        project: "proj".into(),
+        worktree: "main".into(),
+        status: "running".into(),
+        status_since: None,
+        tool: None,
+        session: session.to_string(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn serves_pwa_shell_with_csp() {
+    let h = Harness::start(Harness::unused_tmux());
+    let r = h.get("/", None).await;
+    // Without `web/remote/dist` the shell is the "run `make web`" 503 page.
+    let expected = if oo_remote::assets::WEB_CLIENT_BUILT {
+        200
+    } else {
+        503
+    };
+    assert_eq!(r.status(), expected);
+    assert_eq!(
+        r.headers()
+            .get("content-security-policy")
+            .expect("csp header"),
+        CSP
+    );
+    assert!(r
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .starts_with("text/html"));
+    let body = r.text().await.unwrap();
+    if !oo_remote::assets::WEB_CLIENT_BUILT {
+        assert!(body.contains("make web"), "{body}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn api_requires_token() {
+    let h = Harness::start(Harness::unused_tmux());
+    assert_eq!(h.get("/api/agents", None).await.status(), 401);
+    assert_eq!(h.get("/api/agents", Some("bogus")).await.status(), 401);
+    assert_eq!(h.get("/api/me", Some("bogus")).await.status(), 401);
+    assert_eq!(h.get("/api/events", None).await.status(), 401);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pair_then_list_only_marked() {
+    let h = Harness::start(Harness::unused_tmux());
+    let store = h.store();
+    let a = store.mark("k", 1).unwrap();
+    let b = store.mark("k", 2).unwrap();
+    h.set_agents(vec![
+        agent(&a, "s_a", "A"),
+        agent(&b, "s_b", "B"),
+        agent("r_cccccccccccccccc", "s_c", "C"),
+    ]);
+
+    let code = auth::issue_code(&store, SystemTime::now()).unwrap();
+    let r = h
+        .client
+        .post(h.url("/api/pair"))
+        .json(&serde_json::json!({ "code": code.to_lowercase(), "device_name": "My Phone" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body: serde_json::Value = r.json().await.unwrap();
+    let token = body["token"].as_str().expect("token").to_string();
+    let dev = &store.load().devices[0];
+    assert_eq!(dev.name, "My Phone");
+    assert_eq!(dev.origin_host, "localhost");
+
+    let me: serde_json::Value = h.get("/api/me", Some(&token)).await.json().await.unwrap();
+    assert_eq!(
+        me,
+        serde_json::json!({ "name": "My Phone", "read_only": false })
+    );
+
+    let ids: Vec<String> = h
+        .agents(&token)
+        .await
+        .iter()
+        .map(|a| a["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, vec![a.clone(), b.clone()]);
+
+    store.unmark("k", Some(2)).unwrap();
+    let list = h.agents(&token).await;
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["id"], a.as_str());
+    assert_eq!(list[0]["title"], "A");
+    assert!(list[0].get("session").is_none(), "session must not leak");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pair_rate_limited() {
+    let h = Harness::start(Harness::unused_tmux());
+    for i in 0..5 {
+        let r = h
+            .client
+            .post(h.url("/api/pair"))
+            .json(&serde_json::json!({ "code": "2222-2222", "device_name": "x" }))
+            .send()
+            .await
+            .unwrap();
+        assert_ne!(r.status(), 429, "attempt {}", i + 1);
+        assert!(r.status() == 401 || r.status() == 423, "{}", r.status());
+    }
+    let r = h
+        .client
+        .post(h.url("/api/pair"))
+        .json(&serde_json::json!({ "code": "2222-2222", "device_name": "x" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 429);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn revoke_closes_sse() {
+    let h = Harness::start(Harness::unused_tmux());
+    let token = h.device(false);
+    let mut r = h.get("/api/events", Some(&token)).await;
+    assert_eq!(r.status(), 200);
+    assert!(r
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .starts_with("text/event-stream"));
+    let first = tokio::time::timeout(Duration::from_secs(2), r.chunk())
+        .await
+        .expect("first event")
+        .unwrap()
+        .expect("chunk");
+    let first = String::from_utf8_lossy(&first);
+    assert!(first.contains("event: agents"), "{first}");
+    assert!(first.contains("data: []"), "{first}");
+
+    // Revoke from a separate Store (as the other build or the UI would).
+    let other = Store::new(&h.dir);
+    let id = other.load().devices[0].id.clone();
+    auth::revoke(&other, &id).unwrap();
+
+    let ended = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Ok(Some(_)) = r.chunk().await {}
+    })
+    .await;
+    assert!(ended.is_ok(), "SSE stream still open 2s after revoke");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sse_pushes_agent_changes() {
+    let h = Harness::start(Harness::unused_tmux());
+    let token = h.device(false);
+    let a = h.store().mark("k", 1).unwrap();
+    let mut r = h.get("/api/events", Some(&token)).await;
+    let mut acc = String::new();
+    let first = r.chunk().await.unwrap().unwrap();
+    acc.push_str(&String::from_utf8_lossy(&first));
+    assert!(acc.contains("data: []"), "{acc}");
+    h.set_agents(vec![agent(&a, "s_a", "A")]);
+    let got = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let c = r.chunk().await.unwrap().unwrap();
+            acc.push_str(&String::from_utf8_lossy(&c));
+            if acc.contains(&a) {
+                return acc;
+            }
+        }
+    })
+    .await
+    .expect("agents event");
+    assert!(got.contains("\"status\":\"stopped\""), "{got}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unknown_id_404_and_unmarked_id_404() {
+    let h = Harness::start(Harness::unused_tmux());
+    let token = h.device(false);
+    let store = h.store();
+    let a = store.mark("k", 1).unwrap();
+    h.set_agents(vec![agent(&a, "s_a", "A")]);
+    assert_eq!(h.send_text("r_nope", &token, "hi").await, 404);
+    store.unmark("k", Some(1)).unwrap();
+    assert_eq!(h.send_text(&a, &token, "hi").await, 404);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn send_to_stopped_is_409_and_oversize_413() {
+    let h = Harness::start(Harness::unused_tmux());
+    let token = h.device(false);
+    let a = h.store().mark("k", 1).unwrap();
+    h.set_agents(vec![agent(&a, "no_such_session", "A")]);
+    assert_eq!(h.send_text(&a, &token, "hi").await, 409);
+    let big = "x".repeat(16 * 1024 + 1);
+    assert_eq!(h.send_text(&a, &token, &big).await, 413);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ws_rejects_bad_origin() {
+    let h = Harness::start(Harness::unused_tmux());
+    let origin = format!("https://evil.local:{}", h.port);
+    match h.ws("r_x", &origin).await {
+        Err(WsError::Http(resp)) => assert_eq!(resp.status(), 403),
+        Err(e) => panic!("unexpected error {e}"),
+        Ok(_) => panic!("upgrade accepted with a foreign Origin"),
+    }
+    // Wrong port is foreign too.
+    let origin = format!("https://localhost:{}", h.port.wrapping_add(1));
+    assert!(matches!(h.ws("r_x", &origin).await, Err(WsError::Http(r)) if r.status() == 403));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ws_requires_auth_frame() {
+    let h = Harness::start(Harness::unused_tmux());
+    let mut ws = h.ws("r_x", &h.origin()).await.expect("upgrade");
+    let start = Instant::now();
+    let msg = tokio::time::timeout(Duration::from_secs(8), ws.next())
+        .await
+        .expect("closed within 8s");
+    match msg {
+        Some(Ok(Message::Close(Some(frame)))) => {
+            assert_eq!(frame.code, CloseCode::from(4401));
+        }
+        other => panic!("expected close 4401, got {other:?}"),
+    }
+    assert!(start.elapsed() >= Duration::from_secs(4));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ws_bad_token_closes_4401() {
+    let h = Harness::start(Harness::unused_tmux());
+    let mut ws = h.ws("r_x", &h.origin()).await.expect("upgrade");
+    ws.send(Message::text(r#"{"type":"auth","token":"bogus"}"#))
+        .await
+        .unwrap();
+    match tokio::time::timeout(Duration::from_secs(2), ws.next()).await {
+        Ok(Some(Ok(Message::Close(Some(frame))))) => {
+            assert_eq!(frame.code, CloseCode::from(4401))
+        }
+        other => panic!("expected close 4401, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ws_unmarked_id_reports_unmarked() {
+    let h = Harness::start(Harness::unused_tmux());
+    let token = h.device(false);
+    let mut ws = h.ws("r_unknown", &h.origin()).await.expect("upgrade");
+    ws.send(Message::text(
+        serde_json::json!({ "type": "auth", "token": token }).to_string(),
+    ))
+    .await
+    .unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(2), ws.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!({ "type": "closed", "reason": "unmarked" })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn read_only_cannot_send() {
+    let h = Harness::start(Harness::unused_tmux());
+    let token = h.device(true);
+    let a = h.store().mark("k", 1).unwrap();
+    h.set_agents(vec![agent(&a, "s_a", "A")]);
+    assert_eq!(h.send_text(&a, &token, "hi").await, 403);
+    let me: serde_json::Value = h.get("/api/me", Some(&token)).await.json().await.unwrap();
+    assert_eq!(me["read_only"], true);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cert_reload_on_ip_change() {
+    let h = Harness::start(Harness::unused_tmux());
+    let new_ip: IpAddr = "10.123.45.67".parse().unwrap();
+    h.server().test_set_hosts(
+        vec!["localhost".to_string()],
+        vec![IpAddr::V4(Ipv4Addr::LOCALHOST), new_ip],
+    );
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let ips = presented_ips(&h).await;
+        if ips.contains(&new_ip) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "cert not reloaded within 1s: {ips:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(h
+        .server()
+        .status()
+        .urls
+        .contains(&format!("https://10.123.45.67:{}/", h.port)));
+}
+
+/// IP SANs of the certificate the server presents on a fresh handshake.
+async fn presented_ips(h: &Harness) -> Vec<IpAddr> {
+    let tcp = tokio::net::TcpStream::connect(("127.0.0.1", h.port))
+        .await
+        .unwrap();
+    let tls = tokio_rustls::TlsConnector::from(Arc::new(tls_config(&h.dir)))
+        .connect(ServerName::try_from("localhost").unwrap(), tcp)
+        .await
+        .unwrap();
+    let der = tls.get_ref().1.peer_certificates().unwrap()[0].clone();
+    let (_, cert) = x509_parser::parse_x509_certificate(&der).unwrap();
+    let san = cert.subject_alternative_name().unwrap().unwrap();
+    san.value
+        .general_names
+        .iter()
+        .filter_map(|n| match n {
+            x509_parser::extensions::GeneralName::IPAddress(b) if b.len() == 4 => {
+                Some(IpAddr::from(<[u8; 4]>::try_from(*b).unwrap()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn setup_port_only_when_open() {
+    let h = Harness::start(Harness::unused_tmux());
+    let plain = reqwest::Client::new();
+    let setup = |p: &str| format!("http://127.0.0.1:{}{p}", h.setup_port);
+    let before = plain.get(setup("/setup")).send().await;
+    assert!(
+        before.as_ref().is_err_and(|e| e.is_connect()),
+        "setup port answered while closed: {before:?}"
+    );
+
+    h.server().set_setup_open(true);
+    let r = plain.get(setup("/setup")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let page = r.text().await.unwrap();
+    assert!(page.contains(&h.server().status().ca_fingerprint), "{page}");
+
+    let r = plain.get(setup("/ca.crt")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.headers()["content-type"], "application/x-x509-ca-cert");
+    let r = plain.get(setup("/ca.mobileconfig")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(
+        r.headers()["content-type"],
+        "application/x-apple-aspen-config"
+    );
+    for p in ["/api/agents", "/", "/api/pair", "/index.html"] {
+        let r = plain.get(setup(p)).send().await.unwrap();
+        assert_eq!(r.status(), 404, "{p}");
+    }
+
+    h.server().set_setup_open(false);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if plain.get(setup("/setup")).send().await.is_err() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "setup port still open");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn port_in_use() {
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let (_tx, rx) = snapshot_channel();
+    let a = RemoteServer::start(
+        config(
+            &tmp.path().join("a"),
+            port,
+            free_port(),
+            Harness::unused_tmux(),
+        ),
+        rx.clone(),
+    )
+    .expect("first server");
+    let b = RemoteServer::start(
+        config(
+            &tmp.path().join("b"),
+            port,
+            free_port(),
+            Harness::unused_tmux(),
+        ),
+        rx,
+    );
+    match b {
+        Err(StartError::PortInUse(p)) => assert_eq!(p, port),
+        Err(e) => panic!("expected PortInUse, got {e:?}"),
+        Ok(_) => panic!("second server started on a used port"),
+    }
+    a.stop();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stop_sends_disabled_to_sse() {
+    let mut h = Harness::start(Harness::unused_tmux());
+    let token = h.device(false);
+    let mut r = h.get("/api/events", Some(&token)).await;
+    r.chunk().await.unwrap().unwrap();
+    let srv = h.server.take().unwrap();
+    std::thread::spawn(move || srv.stop());
+    let ended = tokio::time::timeout(Duration::from_secs(3), async {
+        while let Ok(Some(_)) = r.chunk().await {}
+    })
+    .await;
+    assert!(ended.is_ok(), "SSE still open after stop");
+}
+
+// ---- live tmux (private socket) ----
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn send_flattens_newlines() {
+    let tm = TmuxServer::new();
+    tm.new_session("s_live", "cat");
+    let h = Harness::start(tm.tmux());
+    let token = h.device(false);
+    let a = h.store().mark("k", 1).unwrap();
+    h.set_agents(vec![agent(&a, "s_live", "A")]);
+    assert_eq!(h.send_text(&a, &token, "a\nb").await, 204);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let screen = tm.capture("s_live");
+        // Echo of the typed line, then cat's copy after Enter.
+        if screen.lines().filter(|l| l.trim_end() == "a b").count() >= 2 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "pane: {screen:?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn next_msg<S>(ws: &mut tokio_tungstenite::WebSocketStream<S>) -> Message
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    tokio::time::timeout(Duration::from_secs(3), ws.next())
+        .await
+        .expect("message within 3s")
+        .expect("stream open")
+        .expect("ws ok")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn each_ws_gets_init_frame() {
+    let tm = TmuxServer::new();
+    tm.new_session("s_live", "cat");
+    let h = Harness::start(tm.tmux());
+    let token = h.device(false);
+    let a = h.store().mark("k", 1).unwrap();
+    h.set_agents(vec![agent(&a, "s_live", "A")]);
+    for round in 0..2 {
+        let mut ws = h.ws(&a, &h.origin()).await.expect("upgrade");
+        ws.send(Message::text(
+            serde_json::json!({ "type": "auth", "token": token }).to_string(),
+        ))
+        .await
+        .unwrap();
+        let init = next_msg(&mut ws).await;
+        let v: serde_json::Value = serde_json::from_str(init.to_text().unwrap()).unwrap();
+        assert_eq!(v["type"], "init", "round {round}: {v}");
+        assert_eq!(v["cols"], 100);
+        assert_eq!(v["rows"], 30);
+        assert_eq!(v["read_only"], false);
+        let bin = next_msg(&mut ws).await;
+        match bin {
+            Message::Binary(b) => assert!(b.starts_with(b"\x1b[0m"), "{b:?}"),
+            other => panic!("expected binary init bytes, got {other:?}"),
+        }
+        // Live data after input.
+        ws.send(Message::text(
+            serde_json::json!({ "type": "input", "data": format!("ping{round}\r") }).to_string(),
+        ))
+        .await
+        .unwrap();
+        let needle = format!("ping{round}");
+        let mut acc = Vec::new();
+        while !String::from_utf8_lossy(&acc).contains(&needle) {
+            match next_msg(&mut ws).await {
+                Message::Binary(b) => acc.extend_from_slice(&b),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        ws.close(None).await.ok();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn dead_session_listed_as_stopped() {
+    let tm = TmuxServer::new();
+    tm.new_session("s_alive", "cat");
+    let h = Harness::start(tm.tmux());
+    let token = h.device(false);
+    let store = h.store();
+    let a = store.mark("k", 1).unwrap();
+    let b = store.mark("k", 2).unwrap();
+    h.set_agents(vec![
+        agent(&a, "s_alive", "alive"),
+        agent(&b, "s_gone", "gone"),
+    ]);
+    let list = h.agents(&token).await;
+    let status = |id: &str| {
+        list.iter()
+            .find(|x| x["id"] == id)
+            .map(|x| x["status"].as_str().unwrap().to_string())
+    };
+    assert_eq!(status(&a).as_deref(), Some("running"));
+    assert_eq!(status(&b).as_deref(), Some("stopped"));
+}
