@@ -388,9 +388,8 @@ async fn send(
     if !still_allowed(&s, &device.id, &id, &session) {
         return error(StatusCode::NOT_FOUND, "not_found");
     }
-    let mut bytes = flatten_newlines(&req.text).into_bytes();
-    bytes.push(b'\r');
-    match hub.send_input(&bytes).await {
+    // Text, then Enter as a separate write (see `tmux_bridge::line_keys`).
+    match hub.send_line(flatten_newlines(&req.text).as_bytes()).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
             eprintln!("oo-remote: send failed: {e}");

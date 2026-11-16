@@ -27,6 +27,8 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 const KEYS_PER_LINE: usize = 256;
 /// Broadcast buffer (events) per hub; slow subscribers see `Lagged`.
 const EVENT_CAPACITY: usize = 1024;
+/// Pause between a quick reply's text and its Enter (separate pty writes).
+const ENTER_DELAY: Duration = Duration::from_millis(50);
 /// How long to wait for tmux to acknowledge a control command.
 const ACK_TIMEOUT: Duration = Duration::from_secs(5);
 /// Reason sent with [`HubEvent::Closed`] when the session/control client ends.
@@ -204,6 +206,13 @@ pub fn hex_keys(pane: &str, bytes: &[u8]) -> Vec<String> {
         .collect()
 }
 
+/// Quick reply as two batches, mirroring the app's `tmux::send_keys`: the
+/// text, then Enter (`0d`) on its own. One pty write of `text\r` can be read
+/// as a paste by agent TUIs, so the message would not submit.
+pub fn line_keys(pane: &str, text: &[u8]) -> (Vec<String>, Vec<String>) {
+    (hex_keys(pane, text), hex_keys(pane, b"\r"))
+}
+
 fn resize_line(pane: &str, cols: u16, rows: u16) -> String {
     format!("resize-window -t {pane} -x {cols} -y {rows}")
 }
@@ -234,6 +243,13 @@ type Pending = Arc<StdMutex<VecDeque<oneshot::Sender<bool>>>>;
 enum Cmd {
     Send {
         lines: Vec<String>,
+        done: oneshot::Sender<io::Result<()>>,
+    },
+    /// `text`, ack, a short pause, then `enter`; one command so no other
+    /// input lands in between. Enter is skipped if the text failed.
+    SendLine {
+        text: Vec<String>,
+        enter: Vec<String>,
         done: oneshot::Sender<io::Result<()>>,
     },
     Fit {
@@ -417,6 +433,17 @@ impl SessionHub {
         rx.await.map_err(|_| hub_gone())?
     }
 
+    /// Type `text` and then press Enter as a separate write (quick reply).
+    pub async fn send_line(&self, text: &[u8]) -> io::Result<()> {
+        let (text, enter) = line_keys(&self.pane, text);
+        if enter.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "bad pane"));
+        }
+        let (done, rx) = oneshot::channel();
+        self.request(Cmd::SendLine { text, enter, done })?;
+        rx.await.map_err(|_| hub_gone())?
+    }
+
     /// Resize the window to `cols`x`rows` until the returned guard (and every
     /// other outstanding guard) is dropped; then the original size returns.
     pub async fn fit(&self, cols: u16, rows: u16) -> io::Result<FitGuard> {
@@ -554,6 +581,19 @@ impl Actor {
             match cmd {
                 Cmd::Send { lines, done } => {
                     let _ = done.send(self.exec(&lines).await);
+                }
+                Cmd::SendLine { text, enter, done } => {
+                    let mut res = Ok(());
+                    if !text.is_empty() {
+                        res = self.exec(&text).await;
+                        if res.is_ok() {
+                            tokio::time::sleep(ENTER_DELAY).await;
+                        }
+                    }
+                    if res.is_ok() {
+                        res = self.exec(&enter).await;
+                    }
+                    let _ = done.send(res);
                 }
                 Cmd::Fit { cols, rows, done } => {
                     let res = match self.fit(cols, rows).await {
@@ -825,6 +865,17 @@ mod tests {
                 data: vec![0xff, b'\r']
             }
         );
+    }
+
+    #[test]
+    fn quick_reply_enter_is_its_own_batch() {
+        let (text, enter) = line_keys("%3", b"hi");
+        assert_eq!(text, vec!["send-keys -t %3 -H 68 69".to_string()]);
+        assert_eq!(enter, vec!["send-keys -t %3 -H 0d".to_string()]);
+        let (text, enter) = line_keys("%3", b"");
+        assert!(text.is_empty());
+        assert_eq!(enter.len(), 1);
+        assert_eq!(line_keys("bad", b"x"), (vec![], vec![]));
     }
 
     #[test]

@@ -318,6 +318,31 @@ async fn hub_reports_exit_with_detach_on_destroy_off() {
     assert!(hubs.get("s").await.is_err());
 }
 
+/// A quick reply reaches the program as two reads: the text, then Enter.
+/// One `text\r` write can look like a paste to an agent TUI.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn send_line_writes_text_then_enter_separately() {
+    let srv = Server::new();
+    // Raw mode: print each read() the program gets, as Python bytes reprs.
+    srv.new_session(
+        "s",
+        "python3 -c 'import os,sys,tty; tty.setraw(0); print(\"READY\", end=\"\\r\\n\", flush=True); [print(\"R\" + repr(os.read(0, 1024)), end=\"\\r\\n\", flush=True) for _ in range(2)]; sys.stdin.read(1)'",
+    );
+    let hub = open(&srv, "s").await;
+    let mut rx = hub.subscribe();
+    assert!(
+        poll_until(5, || srv
+            .run(&["capture-pane", "-p", "-t", "=s:"])
+            .contains("READY"))
+        .await
+    );
+    hub.send_line(b"hello").await.expect("send_line");
+    let out = wait_for(&mut rx, b"Rb'\\r'", 5).await;
+    let out = String::from_utf8_lossy(&out);
+    assert!(out.contains("Rb'hello'"), "{out:?}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn init_frame_matches_pane() {
