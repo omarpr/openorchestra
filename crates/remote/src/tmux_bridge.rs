@@ -808,6 +808,9 @@ impl Hubs {
         }
         let deadline = Instant::now() + budget;
         for (pane, (w, h)) in fits {
+            if Instant::now() >= deadline {
+                break;
+            }
             if !valid_pane_id(&pane) {
                 continue;
             }

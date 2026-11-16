@@ -396,6 +396,15 @@ impl HarnessWorkspace {
             }
         })
         .detach();
+        // Every quit path, including the app-level `Quit` fallback (no
+        // workspace in the focus path) and Dock/system quits that skip
+        // `request_quit`: restore fitted windows and hand off the stop.
+        // Idempotent; a no-op after `request_quit` already did it.
+        cx.on_app_quit(|ws, _cx| {
+            ws.remote.shutdown_detached();
+            async {}
+        })
+        .detach();
         self.remote_refresh(cx);
         self.remote_reconcile(cx);
     }
