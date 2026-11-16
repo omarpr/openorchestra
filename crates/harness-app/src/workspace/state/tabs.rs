@@ -163,7 +163,20 @@ impl HarnessWorkspace {
             cx.notify();
             return;
         };
-        crate::workspace_host::open_file_at(&hosted, &r.path, &file, line, false, window, cx);
+        // A task's diff keys files `repo/path`: open it in its member's
+        // worktree. Anything else is relative to the editor root, never
+        // `r.path`: for a coordinator that is the task folder, which holds
+        // the A2A bearer-key scripts and is no project to root an editor in.
+        let (root, rel) = match self
+            .unified_diff
+            .files
+            .iter()
+            .find(|f| format!("{}/{}", f.repo, f.file.path) == file)
+        {
+            Some(f) => (f.worktree.clone(), f.file.path.clone()),
+            None => (r.editor_path.clone(), file),
+        };
+        crate::workspace_host::open_file_at(&hosted, &root, &rel, line, false, window, cx);
         cx.notify();
     }
 
@@ -186,6 +199,47 @@ impl HarnessWorkspace {
 
     /// Close a tab, dropping whatever it held — a terminal's pty and its
     /// process, a chat's `pi --mode rpc` sidecar, or a service-Workspace item.
+    /// Close a tab from the UI. Closing a task pane's agent tab stops one of
+    /// the task's agents, so it asks first; everything else closes directly.
+    pub(crate) fn request_close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(r) = self.resolve() else { return };
+        let agent_label = self
+            .panes
+            .get(&r.key)
+            .and_then(|p| p.tabs.iter().find(|t| t.id == id))
+            .filter(|t| t.agent.is_some())
+            .map(|t| t.title.clone());
+        let task_member = a2a_broker::parse_task_member_pane_key(&r.key)
+            .map(|(tid, member)| (tid.to_string(), member.to_string()));
+        let (Some(label), Some((tid, member))) = (agent_label, task_member) else {
+            self.close_tab(id, window, cx);
+            return;
+        };
+        let task_name = self.task_store.get(&tid).map(|t| t.name.clone()).unwrap_or(tid);
+        let who = if member == a2a_broker::COORDINATOR_TENANT {
+            "coordinator".to_string()
+        } else {
+            member.split('/').next().unwrap_or(&member).to_string()
+        };
+        let message = format!("Stop the {who} agent for {task_name}?");
+        let detail = format!(
+            "This ends the {label} session. Its row shows STOPPED; click that to restart it where it left off."
+        );
+        let answer = window.prompt(
+            gpui::PromptLevel::Warning,
+            &message,
+            Some(&detail),
+            &["Stop agent", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |ws, cx| {
+            if answer.await.ok() == Some(0) {
+                let _ = ws.update_in(cx, |ws, window, cx| ws.close_tab(id, window, cx));
+            }
+        })
+        .detach();
+    }
+
     pub(crate) fn close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(r) = self.resolve() else { return };
         let key = r.key.clone();
@@ -239,6 +293,9 @@ impl HarnessWorkspace {
         let Some(pane) = self.panes.get_mut(&key) else { return };
         let Some(ix) = pane.tabs.iter().position(|t| t.id == id) else { return };
         pane.tabs.remove(ix);
+        // The pane keeps its agent on record even when its last agent tab is
+        // closed on purpose: a task needs every agent, so a closed one shows
+        // STOPPED with a Restart like one lost to a computer restart.
         if pane.active == id {
             // Prefer the tab to the left, which is where the eye already is.
             pane.active = pane
@@ -335,16 +392,19 @@ impl HarnessWorkspace {
                 crate::tmux::kill_session(&name);
             }
         }
-        self.panes_state.worktrees.remove(id);
-        crate::panes_state::save(&self.panes_path, &self.panes_state);
+        self.panes_state.remove(id);
+        crate::panes_state::save(&self.panes_path, &mut self.panes_state);
     }
 
     /// Draw the next globally-unique, persisted tab id.
     pub(crate) fn next_tab_id(&mut self) -> u64 {
         // next_tab_id starts at 0 on a fresh install; first id handed out is 1.
-        self.panes_state.next_tab_id += 1;
+        // Catch up with any other instance sharing the file first, so the id
+        // (and the tmux session name built from it) is never handed out twice.
+        let on_disk = crate::panes_state::load(&self.panes_path).next_tab_id;
+        self.panes_state.next_tab_id = self.panes_state.next_tab_id.max(on_disk) + 1;
         let id = self.panes_state.next_tab_id;
-        crate::panes_state::save(&self.panes_path, &self.panes_state);
+        crate::panes_state::save(&self.panes_path, &mut self.panes_state);
         id
     }
 
@@ -375,13 +435,21 @@ impl HarnessWorkspace {
                     .find(|t| t.id == pane.active && !matches!(t.content, TabContent::File { .. }))
                     .map(|t| t.id)
                     .or_else(|| tabs.first().map(|t| t.id));
-                (key.clone(), WorktreePanes { active, tabs })
+                // A live agent tab names the pane's agent; with none (it came
+                // back as a shell after a restart) keep the kind on record so
+                // the pane can still show STOPPED and be restarted.
+                let agent = pane
+                    .tabs
+                    .iter()
+                    .find_map(|t| t.agent.clone())
+                    .or_else(|| self.panes_state.worktrees.get(key).and_then(|w| w.agent.clone()));
+                (key.clone(), WorktreePanes { active, tabs, agent })
             })
             .collect();
         for (key, wp) in updates {
             self.panes_state.worktrees.insert(key, wp);
         }
-        crate::panes_state::save(&self.panes_path, &self.panes_state);
+        crate::panes_state::save(&self.panes_path, &mut self.panes_state);
     }
 
     /// Recreate a worktree's persisted tabs on first build. Live tmux sessions
@@ -390,18 +458,41 @@ impl HarnessWorkspace {
     /// restore.
     pub(crate) fn restore_tabs(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
         use crate::panes_state::TabRecordKind as K;
-        let Some(saved) = self.panes_state.worktrees.get(key) else { return false };
-        if saved.tabs.is_empty() {
+        let saved = self.panes_state.worktrees.get(key);
+        // Clone out before mutating self.
+        let mut records: Vec<(u64, K, String)> = saved
+            .map(|s| s.tabs.iter().map(|t| (t.id, t.kind.clone(), t.title.clone())).collect())
+            .unwrap_or_default();
+        let saved_active = saved.and_then(|s| s.active);
+        let live = if self.has_tmux { crate::tmux::live_sessions() } else { Vec::new() };
+
+        // Adopt this worktree's live tmux sessions the saved list lost track
+        // of (another app instance overwrote panes.json, or we died before
+        // saving). Their agents are still running with their context; without
+        // this they sit detached and invisible while a fresh agent replaces
+        // them.
+        let known: Vec<u64> = records.iter().map(|r| r.0).collect();
+        let orphans = crate::tmux::orphan_tab_ids(key, &live, &known);
+        if !orphans.is_empty() {
+            let starts = crate::tmux::session_start_commands();
+            for id in orphans {
+                let name = crate::tmux::session_name(key, id);
+                let agent = starts
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .and_then(|(_, cmd)| crate::tmux::agent_from_start_command(cmd));
+                log::info!("adopting orphaned tmux session {name} ({:?})", agent.as_ref().map(|a| a.1));
+                records.push(match agent {
+                    Some((kind, prog)) => (id, K::Agent(kind), prog.to_string()),
+                    None => (id, K::Shell, "❯_ shell".to_string()),
+                });
+                // Never hand this id out again.
+                self.panes_state.next_tab_id = self.panes_state.next_tab_id.max(id);
+            }
+        }
+        if records.is_empty() {
             return false;
         }
-        // Clone out before mutating self.
-        let records: Vec<(u64, K, String)> = saved
-            .tabs
-            .iter()
-            .map(|t| (t.id, t.kind.clone(), t.title.clone()))
-            .collect();
-        let saved_active = saved.active;
-        let live = if self.has_tmux { crate::tmux::live_sessions() } else { Vec::new() };
 
         for (id, kind, title) in records {
             match kind {
@@ -415,12 +506,19 @@ impl HarnessWorkspace {
 
         // Restore the active tab if its id survived (ids are stable for
         // terminal/agent tabs; editor/chat drew fresh ids so may not match).
-        if let Some(active) = saved_active
-            && let Some(pane) = self.panes.get_mut(key)
-            && pane.tabs.iter().any(|t| t.id == active)
-        {
-            pane.active = active;
-            self.focus_active_pane(window, cx);
+        if let Some(pane) = self.panes.get_mut(key) {
+            let saved = saved_active.filter(|a| pane.tabs.iter().any(|t| t.id == *a));
+            // No usable saved choice (e.g. tabs recovered from orphaned tmux
+            // sessions): open on the oldest agent, the one holding the longest
+            // conversation and the one A2A should deliver to, not whichever
+            // tab happened to be rebuilt last.
+            let pick = saved.or_else(|| {
+                pane.tabs.iter().filter(|t| t.agent.is_some()).map(|t| t.id).min()
+            });
+            if let Some(active) = pick {
+                pane.active = active;
+                self.focus_active_pane(window, cx);
+            }
         }
         let restored = self.panes.contains_key(key);
         if restored {

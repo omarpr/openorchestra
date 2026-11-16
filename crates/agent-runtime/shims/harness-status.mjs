@@ -72,7 +72,10 @@ export function classify(payload) {
 
 	if (event.includes("stop") || event.includes("subagentstop")) return "idle";
 	if (detail.includes("permission") || detail.includes("approval")) return "waiting";
-	if (detail.includes("idle") || detail.includes("waiting for your input")) return "waiting";
+	// Claude Code's `idle_prompt` reminder ("waiting for your input") fires 60s
+	// after a turn ends. The turn is already done (Stop said so); it is not a
+	// block, and as `waiting` it pinned the pill until the user typed again.
+	if (detail.includes("idle") || detail.includes("waiting for your input")) return "idle";
 	if (event.includes("notification")) return "waiting";
 	return "running";
 }

@@ -178,58 +178,119 @@ fn drain_bridge(state: &BrokerState) {
             Ok(t) => t,
             Err(_) => return,
         };
-        match ev {
+        let (a2a_task_id, new_state, text, label, summary) = match ev {
             BridgeEvent::Completed {
                 a2a_task_id,
                 summary,
-            } => {
-                let artifact = Artifact {
+            } => (
+                a2a_task_id,
+                TaskState::Completed,
+                summary.clone(),
+                "completed",
+                Some(summary),
+            ),
+            BridgeEvent::Failed { a2a_task_id, error } => {
+                (a2a_task_id, TaskState::Failed, error, "failed", None)
+            }
+            BridgeEvent::Rejected { a2a_task_id, reason } => {
+                (a2a_task_id, TaskState::Rejected, reason, "rejected", None)
+            }
+        };
+        // A terminal state is final: a repeated or late complete/reject must
+        // not flip it, duplicate the summary artifact, or re-notify. Read
+        // before anything below touches the task.
+        let (prev_terminal, tenant, context_id) = match tasks.get(&a2a_task_id) {
+            Some(t) => (
+                matches!(
+                    t.status.state,
+                    TaskState::Completed
+                        | TaskState::Failed
+                        | TaskState::Canceled
+                        | TaskState::Rejected
+                ),
+                t.tenant.clone(),
+                t.context_id.clone(),
+            ),
+            None => continue,
+        };
+        if prev_terminal {
+            drop(tasks);
+            if let Ok(mut audit) = state.audit.lock() {
+                let _ = audit.append(&AuditEvent {
+                    ts: &ts,
+                    kind: "task.result_ignored",
+                    oo_task_id: &state.config.oo_task_id,
+                    tenant: Some(&tenant),
+                    a2a_task_id: Some(&a2a_task_id),
+                    detail: Some(serde_json::json!({ "state": label })),
+                });
+            }
+            continue;
+        }
+        if let Some(summary) = summary {
+            if let Some(task) = tasks.get_mut(&a2a_task_id) {
+                task.artifacts.push(Artifact {
                     artifact_id: uuid::Uuid::new_v4().to_string(),
                     name: Some("summary".into()),
-                    parts: vec![MessagePart::text(summary.clone())],
-                };
-                if let Some(task) = tasks.get_mut(&a2a_task_id) {
-                    task.artifacts.push(artifact);
-                }
-                let _ = tasks.set_state(
-                    &a2a_task_id,
-                    TaskState::Completed,
-                    Some(Message {
-                        message_id: uuid::Uuid::new_v4().to_string(),
-                        context_id: Some(state.config.oo_task_id.clone()),
-                        task_id: Some(a2a_task_id.clone()),
-                        role: Role::Agent,
-                        parts: vec![MessagePart::text(summary)],
-                    }),
-                    ts.clone(),
-                );
-                if let Ok(mut audit) = state.audit.lock() {
-                    let _ = audit.append(&AuditEvent {
-                        ts: &ts,
-                        kind: "task.completed",
-                        oo_task_id: &state.config.oo_task_id,
-                        tenant: None,
-                        a2a_task_id: Some(&a2a_task_id),
-                        detail: None,
-                    });
-                }
-                state.notify_change();
+                    parts: vec![MessagePart::text(summary)],
+                });
             }
-            BridgeEvent::Failed { a2a_task_id, error } => {
-                let _ = tasks.set_state(
-                    &a2a_task_id,
-                    TaskState::Failed,
-                    Some(Message {
-                        message_id: uuid::Uuid::new_v4().to_string(),
-                        context_id: Some(state.config.oo_task_id.clone()),
-                        task_id: Some(a2a_task_id.clone()),
-                        role: Role::Agent,
-                        parts: vec![MessagePart::text(error)],
-                    }),
-                    ts,
-                );
-                state.notify_change();
+        }
+        let _ = tasks.set_state(
+            &a2a_task_id,
+            new_state,
+            Some(Message {
+                message_id: uuid::Uuid::new_v4().to_string(),
+                context_id: Some(state.config.oo_task_id.clone()),
+                task_id: Some(a2a_task_id.clone()),
+                role: Role::Agent,
+                parts: vec![MessagePart::text(text.clone())],
+            }),
+            ts.clone(),
+        );
+        // Never hold the task lock across bridge IO or the inbox hook.
+        drop(tasks);
+        if new_state == TaskState::Completed {
+            if let Ok(mut audit) = state.audit.lock() {
+                let _ = audit.append(&AuditEvent {
+                    ts: &ts,
+                    kind: "task.completed",
+                    oo_task_id: &state.config.oo_task_id,
+                    tenant: None,
+                    a2a_task_id: Some(&a2a_task_id),
+                    detail: None,
+                });
             }
+        }
+        state.notify_change();
+
+        let coordinator = state.config.coordinator_tenant.clone();
+        // The coordinator completing a message sent to it: pushing that back
+        // would echo its own answer into its inbox.
+        if tenant == coordinator {
+            continue;
+        }
+        let repo = state
+            .member(&tenant)
+            .map(|m| m.repo.clone())
+            .unwrap_or_else(|| tenant.clone());
+        let msg = InboxMessage {
+            a2a_task_id: a2a_task_id.clone(),
+            context_id,
+            from_tenant: Some(tenant),
+            text: format!("{label} by {repo}: {text}"),
+            created_at: ts,
+            reply: true,
+        };
+        match state.bridge.enqueue(&coordinator, &msg) {
+            Ok(()) => state.notify_inbox(InboxDelivery {
+                oo_task_id: state.config.oo_task_id.clone(),
+                tenant: coordinator,
+                message: msg,
+            }),
+            Err(e) => log_warn(&format!(
+                "push {label} reply for {a2a_task_id} to {coordinator}: {e}"
+            )),
         }
     }
 }
@@ -332,24 +393,24 @@ fn handle_connection(mut stream: TcpStream, state: Arc<BrokerState>) -> std::io:
         return Ok(());
     }
 
-    // Root card = orchestrator
+    // Root card = coordinator
     if method == "GET" && (path == "/.well-known/agent-card.json" || path == "/.well-known/agent.json")
     {
         let home = state
             .config
             .members
             .iter()
-            .find(|m| m.is_home)
+            .find(|m| m.is_coordinator)
             .or_else(|| state.config.members.first());
         let Some(home) = home else {
-            write_response(&mut stream, 404, "text/plain", b"no home")?;
+            write_response(&mut stream, 404, "text/plain", b"no coordinator")?;
             return Ok(());
         };
         let siblings: Vec<_> = state
             .config
             .members
             .iter()
-            .filter(|m| !m.is_home)
+            .filter(|m| !m.is_coordinator)
             .cloned()
             .collect();
         let card = orchestrator_card(
@@ -456,6 +517,10 @@ fn handle_connection(mut stream: TcpStream, state: Arc<BrokerState>) -> std::io:
             failed: bool,
             #[serde(default)]
             error: Option<String>,
+            #[serde(default)]
+            rejected: bool,
+            #[serde(default)]
+            reason: Option<String>,
         }
         let parsed: CompleteBody = if is_form {
             CompleteBody {
@@ -463,6 +528,8 @@ fn handle_connection(mut stream: TcpStream, state: Arc<BrokerState>) -> std::io:
                 summary: form_value(&body, "summary").unwrap_or_default(),
                 failed: form_value(&body, "failed").is_some_and(|v| v == "true" || v == "1"),
                 error: form_value(&body, "error"),
+                rejected: form_value(&body, "rejected").is_some_and(|v| v == "true" || v == "1"),
+                reason: form_value(&body, "reason"),
             }
         } else {
             serde_json::from_slice(&body).unwrap_or(CompleteBody {
@@ -470,13 +537,20 @@ fn handle_connection(mut stream: TcpStream, state: Arc<BrokerState>) -> std::io:
                 summary: String::new(),
                 failed: false,
                 error: None,
+                rejected: false,
+                reason: None,
             })
         };
         if parsed.a2a_task_id.is_empty() {
             write_response(&mut stream, 400, "text/plain", b"a2a_task_id required")?;
             return Ok(());
         }
-        let ev = if parsed.failed {
+        let ev = if parsed.rejected {
+            BridgeEvent::Rejected {
+                a2a_task_id: parsed.a2a_task_id,
+                reason: parsed.reason.unwrap_or_else(|| "rejected".into()),
+            }
+        } else if parsed.failed {
             BridgeEvent::Failed {
                 a2a_task_id: parsed.a2a_task_id,
                 error: parsed.error.unwrap_or_else(|| "failed".into()),
@@ -622,7 +696,7 @@ fn handle_send_message(
         serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
     let target = tenant
         .map(|s| s.to_string())
-        .unwrap_or_else(|| state.config.home_worktree_id.clone());
+        .unwrap_or_else(|| state.config.coordinator_tenant.clone());
 
     if state.member(&target).is_none() {
         return Err(format!("unknown tenant {target}"));
@@ -683,6 +757,7 @@ fn handle_send_message(
         from_tenant: None,
         text: text.clone(),
         created_at: ts.clone(),
+        reply: false,
     };
     state
         .bridge
@@ -881,20 +956,25 @@ mod tests {
             oo_task_id: "auth".into(),
             task_slug: "auth".into(),
             task_name: "Auth".into(),
-            home_worktree_id: "jam/auth".into(),
-            home_repo: "jam".into(),
+            coordinator_tenant: crate::COORDINATOR_TENANT.into(),
             members: vec![
+                MemberEndpoint {
+                    worktree_id: crate::COORDINATOR_TENANT.into(),
+                    repo: "coordinator".into(),
+                    path: PathBuf::from("/tasks/auth"),
+                    is_coordinator: true,
+                },
                 MemberEndpoint {
                     worktree_id: "jam/auth".into(),
                     repo: "jam".into(),
                     path: PathBuf::from("/wt/jam/auth"),
-                    is_home: true,
+                    is_coordinator: false,
                 },
                 MemberEndpoint {
                     worktree_id: "api/auth".into(),
                     repo: "api".into(),
                     path: PathBuf::from("/wt/api/auth"),
-                    is_home: false,
+                    is_coordinator: false,
                 },
             ],
             api_key: "test-key".into(),
@@ -967,6 +1047,100 @@ mod tests {
         let gv: serde_json::Value = serde_json::from_str(&got).unwrap();
         assert_eq!(gv["result"]["status"]["state"], "completed");
 
+        handle.shutdown();
+    }
+
+    fn send_body(text: &str) -> String {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "message/send",
+            "params": { "message": {
+                "message_id": "m1", "role": "user", "parts": [{ "text": text }]
+            } }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn send_without_tenant_targets_the_coordinator() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = BrokerServer::start(test_state(dir.path())).unwrap();
+        let key = handle.api_key().to_string();
+        let resp = http_post(
+            &format!("{}/jsonrpc", handle.base_url()),
+            &key,
+            &send_body("plan this"),
+        );
+        let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        let id = v["result"]["id"].as_str().unwrap().to_string();
+        let tasks = handle.state.tasks.lock().unwrap();
+        assert_eq!(tasks.get(&id).unwrap().tenant, "@coordinator");
+        drop(tasks);
+        handle.shutdown();
+    }
+
+    #[test]
+    fn former_home_repo_is_a_delegation_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = BrokerServer::start(test_state(dir.path())).unwrap();
+        let key = handle.api_key().to_string();
+        let resp = http_post(
+            &format!("{}/t/jam%2Fauth/jsonrpc", handle.base_url()),
+            &key,
+            &send_body("do it"),
+        );
+        let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        let id = v["result"]["id"].as_str().expect(&resp).to_string();
+        let tasks = handle.state.tasks.lock().unwrap();
+        assert_eq!(tasks.get(&id).unwrap().tenant, "jam/auth");
+        drop(tasks);
+        let inbox = handle.state.config.a2a_dir.join("inbox");
+        assert!(
+            std::fs::read_dir(&inbox)
+                .unwrap()
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().contains("jam")),
+            "expected an inbox entry for jam/auth under {inbox:?}"
+        );
+        handle.shutdown();
+    }
+
+    #[test]
+    fn root_card_lists_every_repo_as_specialist() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = BrokerServer::start(test_state(dir.path())).unwrap();
+        let key = handle.api_key().to_string();
+        let card = http_get(
+            &format!("{}/.well-known/agent-card.json", handle.base_url()),
+            &key,
+        );
+        let v: serde_json::Value = serde_json::from_str(&card).unwrap();
+        let siblings: Vec<String> = v["metadata"]["openOrchestra"]["siblingCards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(siblings.len(), 2, "{siblings:?}");
+        assert!(siblings.iter().any(|s| s.contains("jam%2Fauth")));
+        assert!(siblings.iter().any(|s| s.contains("api%2Fauth")));
+        assert!(!siblings.iter().any(|s| s.contains("coordinator")));
+        assert_eq!(v["metadata"]["openOrchestra"]["worktreeId"], "@coordinator");
+        handle.shutdown();
+    }
+
+    #[test]
+    fn unknown_tenant_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = BrokerServer::start(test_state(dir.path())).unwrap();
+        let key = handle.api_key().to_string();
+        let resp = http_post(
+            &format!("{}/t/nope%2Fx/jsonrpc", handle.base_url()),
+            &key,
+            &send_body("hi"),
+        );
+        assert!(resp.contains("unknown tenant"), "{resp}");
         handle.shutdown();
     }
 
@@ -1157,6 +1331,196 @@ mod tests {
         // Port should be reusable once accept/drain have joined.
         let listener = TcpListener::bind(addr).expect("port freed after Drop");
         drop(listener);
+    }
+}
+
+#[cfg(test)]
+mod coordinator_push_tests {
+    use super::*;
+    use super::tests::test_state;
+
+    fn start() -> (
+        tempfile::TempDir,
+        BrokerHandle,
+        crossbeam_channel::Receiver<InboxDelivery>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = test_state(dir.path());
+        let (tx, rx) = crossbeam_channel::unbounded();
+        state.on_inbox = Some(tx);
+        let handle = BrokerServer::start(state).unwrap();
+        (dir, handle, rx)
+    }
+
+    fn form(handle: &BrokerHandle, path: &str, body: &str) -> serde_json::Value {
+        let mut s = TcpStream::connect(handle.addr).unwrap();
+        write!(
+            s,
+            "POST {path} HTTP/1.1\r\nAuthorization: Bearer test-key\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).unwrap();
+        let json = out.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+        serde_json::from_str(&json).unwrap_or(serde_json::Value::Null)
+    }
+
+    /// Send to api/auth; returns the delegated task id and drops the
+    /// specialist's own delivery.
+    fn delegate(
+        handle: &BrokerHandle,
+        rx: &crossbeam_channel::Receiver<InboxDelivery>,
+    ) -> (String, InboxDelivery) {
+        let sent = form(handle, "/t/api%2Fauth/send", "text=do+it");
+        let id = sent["result"]["id"].as_str().unwrap().to_string();
+        let d = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        (id, d)
+    }
+
+    fn coordinator_reply(
+        rx: &crossbeam_channel::Receiver<InboxDelivery>,
+    ) -> InboxDelivery {
+        rx.recv_timeout(Duration::from_secs(2)).expect("reply pushed")
+    }
+
+    #[test]
+    fn completion_pushes_one_reply_to_coordinator() {
+        let (dir, handle, rx) = start();
+        let (id, _) = delegate(&handle, &rx);
+        form(&handle, "/v1/complete", &format!("a2a_task_id={id}&summary=shipped"));
+        let d = coordinator_reply(&rx);
+        assert_eq!(d.tenant, "@coordinator");
+        assert!(d.message.reply);
+        assert_eq!(d.message.text, "completed by api: shipped");
+        assert_eq!(d.message.a2a_task_id, id);
+        assert_eq!(d.message.from_tenant.as_deref(), Some("api/auth"));
+        thread::sleep(Duration::from_millis(500));
+        assert!(rx.try_recv().is_err(), "exactly one delivery");
+        let file = dir.path().join("a2a/inbox/@coordinator.jsonl");
+        assert_eq!(std::fs::read_to_string(file).unwrap().lines().count(), 1);
+        handle.shutdown();
+    }
+
+    #[test]
+    fn failure_pushes_failed_reply() {
+        let (_dir, handle, rx) = start();
+        let (id, _) = delegate(&handle, &rx);
+        form(&handle, "/v1/complete", &format!("a2a_task_id={id}&failed=1&error=boom"));
+        assert_eq!(coordinator_reply(&rx).message.text, "failed by api: boom");
+        handle.shutdown();
+    }
+
+    #[test]
+    fn rejection_pushes_rejected_reply() {
+        let (_dir, handle, rx) = start();
+        let (id, _) = delegate(&handle, &rx);
+        form(
+            &handle,
+            "/v1/complete",
+            &format!("a2a_task_id={id}&rejected=1&reason=not+my+repo"),
+        );
+        assert_eq!(coordinator_reply(&rx).message.text, "rejected by api: not my repo");
+        assert_eq!(
+            handle.state.tasks.lock().unwrap().get(&id).unwrap().status.state,
+            TaskState::Rejected
+        );
+        handle.shutdown();
+    }
+
+    #[test]
+    fn repeated_complete_does_not_push_twice() {
+        let (_dir, handle, rx) = start();
+        let (id, _) = delegate(&handle, &rx);
+        let body = format!("a2a_task_id={id}&summary=shipped");
+        form(&handle, "/v1/complete", &body);
+        coordinator_reply(&rx);
+        form(&handle, "/v1/complete", &body);
+        thread::sleep(Duration::from_millis(700));
+        assert!(rx.try_recv().is_err(), "second complete must not push");
+        handle.shutdown();
+    }
+
+    fn json_post(handle: &BrokerHandle, path: &str, body: &str) -> String {
+        let mut s = TcpStream::connect(handle.addr).unwrap();
+        write!(
+            s,
+            "POST {path} HTTP/1.1\r\nAuthorization: Bearer test-key\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).unwrap();
+        out
+    }
+
+    fn state_of(handle: &BrokerHandle, id: &str) -> TaskState {
+        handle.state.tasks.lock().unwrap().get(id).unwrap().status.state
+    }
+
+    #[test]
+    fn terminal_state_is_final() {
+        let (_dir, handle, rx) = start();
+        let (id, _) = delegate(&handle, &rx);
+        form(&handle, "/v1/complete", &format!("a2a_task_id={id}&summary=shipped"));
+        coordinator_reply(&rx);
+        assert_eq!(state_of(&handle, &id), TaskState::Completed);
+        form(
+            &handle,
+            "/v1/complete",
+            &format!("a2a_task_id={id}&rejected=1&reason=late"),
+        );
+        thread::sleep(Duration::from_millis(700));
+        assert_eq!(state_of(&handle, &id), TaskState::Completed, "a late reject must not flip it");
+        let tasks = handle.state.tasks.lock().unwrap();
+        assert_eq!(tasks.get(&id).unwrap().artifacts.len(), 1, "one summary artifact");
+        drop(tasks);
+        // A repeated complete must not duplicate the summary artifact either.
+        form(&handle, "/v1/complete", &format!("a2a_task_id={id}&summary=again"));
+        thread::sleep(Duration::from_millis(700));
+        let tasks = handle.state.tasks.lock().unwrap();
+        assert_eq!(tasks.get(&id).unwrap().artifacts.len(), 1, "no duplicate artifact");
+        drop(tasks);
+        assert!(rx.try_recv().is_err(), "no second push");
+        handle.shutdown();
+    }
+
+    #[test]
+    fn json_rejected_body_rejects() {
+        let (_dir, handle, rx) = start();
+        let (id, _) = delegate(&handle, &rx);
+        let body = serde_json::json!({ "a2a_task_id": id, "rejected": true, "reason": "not mine" })
+            .to_string();
+        let out = json_post(&handle, "/v1/complete", &body);
+        assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+        assert_eq!(coordinator_reply(&rx).message.text, "rejected by api: not mine");
+        assert_eq!(state_of(&handle, &id), TaskState::Rejected);
+        handle.shutdown();
+    }
+
+    #[test]
+    fn coordinator_completing_its_own_inbox_is_not_echoed() {
+        let (_dir, handle, rx) = start();
+        // A specialist messages the coordinator.
+        let sent = form(&handle, "/t/@coordinator/send", "text=question");
+        let id = sent["result"]["id"].as_str().unwrap().to_string();
+        let d = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(d.tenant, "@coordinator");
+        // The coordinator completes it: no reply is pushed back to itself.
+        form(&handle, "/v1/complete", &format!("a2a_task_id={id}&summary=answered"));
+        thread::sleep(Duration::from_millis(700));
+        assert_eq!(state_of(&handle, &id), TaskState::Completed);
+        assert!(rx.try_recv().is_err(), "no echo to the coordinator");
+        handle.shutdown();
+    }
+
+    #[test]
+    fn delegation_inbox_is_not_a_reply() {
+        let (_dir, handle, rx) = start();
+        let (_, d) = delegate(&handle, &rx);
+        assert_eq!(d.tenant, "api/auth");
+        assert!(!d.message.reply);
+        handle.shutdown();
     }
 }
 

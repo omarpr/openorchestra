@@ -409,7 +409,7 @@ impl HarnessWorkspace {
                     .hover(|d| d.bg(hx.surface).text_color(hx.red))
                     .child("×")
                     .on_click(cx.listener(move |ws, _, window, cx| {
-                        ws.close_tab(close_id, window, cx);
+                        ws.request_close_tab(close_id, window, cx);
                         // Otherwise the click also selects the tab being closed.
                         cx.stop_propagation();
                     })),

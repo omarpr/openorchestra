@@ -21,9 +21,6 @@ impl HarnessWorkspace {
         if task.members.len() < 2 {
             return;
         }
-        let Some(home) = task.home_member() else {
-            return;
-        };
         let a2a_dir = self.data_dir.join("tasks").join(&task.slug).join("a2a");
         let mut creds = match BrokerCredentials::load_or_create(&a2a_dir) {
             Ok(c) => c,
@@ -33,16 +30,22 @@ impl HarnessWorkspace {
             }
         };
         let api_key = creds.api_key.clone();
-        let members: Vec<MemberEndpoint> = task
-            .members
-            .iter()
-            .map(|m| MemberEndpoint {
-                worktree_id: m.worktree_id.clone(),
-                repo: m.repo.clone(),
-                path: m.path.clone(),
-                is_home: m.repo == task.home_repo,
-            })
-            .collect();
+        // The coordinator is its own endpoint, cwd the task folder; every
+        // repo, the former home included, is a specialist.
+        let tasks_root = self.data_dir.join("tasks");
+        let members: Vec<MemberEndpoint> = std::iter::once(MemberEndpoint {
+            worktree_id: a2a_broker::COORDINATOR_TENANT.into(),
+            repo: "coordinator".into(),
+            path: worktrees::task_coordinator_dir(&tasks_root, &task.slug),
+            is_coordinator: true,
+        })
+        .chain(task.members.iter().map(|m| MemberEndpoint {
+            worktree_id: m.worktree_id.clone(),
+            repo: m.repo.clone(),
+            path: m.path.clone(),
+            is_coordinator: false,
+        }))
+        .collect();
 
         let bridge = match FileBridge::new(&a2a_dir) {
             Ok(b) => Arc::new(b),
@@ -55,7 +58,6 @@ impl HarnessWorkspace {
         let preferred_port = creds.port.unwrap_or(0);
         let handle = match start_broker_with_port_fallback(
             &task,
-            home,
             &members,
             &api_key,
             &a2a_dir,
@@ -77,7 +79,6 @@ impl HarnessWorkspace {
             log::warn!("a2a credentials save failed: {e}");
         }
 
-        let tasks_root = self.data_dir.join("tasks");
         if let Some(task) = self.task_store.get(task_id) {
             let _ = worktrees::write_task_agent_context_with_a2a(
                 task,
@@ -104,18 +105,38 @@ impl HarnessWorkspace {
     pub(crate) fn shutdown_task_broker(&mut self, task_id: &str) {
         if let Some(info) = self.task_brokers.remove(task_id) {
             info.handle.shutdown();
+            self.a2a_links.retain_tasks(|tid| tid != task_id);
             log::info!("a2a broker stopped for task {task_id}");
         }
     }
 
     /// Snapshot of A2A task states for the selected openOrchestra task (UI).
     pub(crate) fn a2a_delegation_summary(&self) -> Vec<(String, String, String)> {
-        let Some(r) = self.resolve() else {
-            return Vec::new();
-        };
-        let Some(tid) = &r.task_id else {
-            return Vec::new();
-        };
+        match self.resolve().and_then(|r| r.task_id) {
+            Some(tid) => self.a2a_rows_for(&tid),
+            None => Vec::new(),
+        }
+    }
+
+    /// Feed every running broker's snapshot to the connector-line tracker,
+    /// and forget tasks whose broker has stopped.
+    pub(crate) fn observe_a2a_links(&mut self) {
+        let snapshots: Vec<(String, Vec<crate::workspace::ui::sidebar::links::A2aRow>)> = self
+            .task_brokers
+            .keys()
+            .map(|tid| (tid.clone(), self.a2a_rows_for(tid)))
+            .collect();
+        let now = self.anim_secs();
+        let brokers = &self.task_brokers;
+        self.a2a_links.retain_tasks(|tid| brokers.contains_key(tid));
+        for (tid, rows) in snapshots {
+            self.a2a_links.observe(&tid, rows, now);
+        }
+    }
+
+    /// `(a2a_task_id, tenant, state)` for every A2A task in `tid`'s broker;
+    /// empty when it has none running.
+    pub(crate) fn a2a_rows_for(&self, tid: &str) -> Vec<(String, String, String)> {
         let Some(info) = self.task_brokers.get(tid) else {
             return Vec::new();
         };
@@ -184,8 +205,8 @@ impl HarnessWorkspace {
             None => None,
         };
         let line = format_a2a_inject(msg, a2a_dir.as_deref());
-        crate::tmux::send_keys(&session, &line);
-        log::info!("a2a inbox injected into session {session}");
+        crate::tmux::send_keys_async(&session, &line);
+        log::info!("a2a inbox queued for injection into session {session}");
         true
     }
 
@@ -231,7 +252,6 @@ impl HarnessWorkspace {
 #[allow(clippy::too_many_arguments)]
 fn start_broker_with_port_fallback(
     task: &worktrees::Task,
-    home: &worktrees::TaskMember,
     members: &[MemberEndpoint],
     api_key: &str,
     a2a_dir: &std::path::Path,
@@ -246,8 +266,7 @@ fn start_broker_with_port_fallback(
             oo_task_id: task.id.clone(),
             task_slug: task.slug.clone(),
             task_name: task.name.clone(),
-            home_worktree_id: home.worktree_id.clone(),
-            home_repo: home.repo.clone(),
+            coordinator_tenant: a2a_broker::COORDINATOR_TENANT.into(),
             members: members.to_vec(),
             api_key: api_key.to_string(),
             a2a_dir: a2a_dir.to_path_buf(),
@@ -284,7 +303,10 @@ fn format_a2a_inject(msg: &InboxMessage, a2a_dir: Option<&std::path::Path>) -> S
         .chars()
         .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
         .collect::<String>();
+    // A reply is a specialist's result coming back to the coordinator:
+    // there is nothing for the coordinator to complete.
     let complete_hint = a2a_dir
+        .filter(|_| !msg.reply)
         .map(|d| {
             format!(
                 " — when done: {} {} \"summary\"",
@@ -338,6 +360,24 @@ echo
     );
     write_script(&a2a_dir.join("complete.sh"), &complete);
 
+    let reject = format!(
+        r#"#!/bin/sh
+# Usage: ./reject.sh <a2a_task_id> [reason]
+set -e
+TASK_ID="${{1:?a2a_task_id}}"
+REASON="${{2:-rejected}}"
+curl -sS -X POST "{base}/v1/complete" \
+  -H "Authorization: Bearer {key}" \
+  --data-urlencode "a2a_task_id=$TASK_ID" \
+  --data-urlencode "rejected=1" \
+  --data-urlencode "reason=$REASON"
+echo
+"#,
+        base = base_url,
+        key = api_key,
+    );
+    write_script(&a2a_dir.join("reject.sh"), &reject);
+
     let status = format!(
         r#"#!/bin/sh
 # Usage: ./status.sh <a2a_task_id>
@@ -389,10 +429,22 @@ echo
                     },
                     "required": ["a2a_task_id"]
                 }
+            },
+            {
+                "name": "reject_delegation",
+                "description": "Reject an inbound A2A task you cannot or should not do, with a reason (specialists).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "a2a_task_id": { "type": "string" },
+                        "reason": { "type": "string" }
+                    },
+                    "required": ["a2a_task_id"]
+                }
             }
         ],
         "base_url": base_url,
-        "note": "Invoke via shell helpers in this directory (delegate.sh / status.sh / complete.sh) or HTTP JSON-RPC."
+        "note": "Invoke via shell helpers in this directory (delegate.sh / status.sh / complete.sh / reject.sh) or HTTP JSON-RPC."
     });
     let _ = std::fs::write(
         a2a_dir.join("mcp-tools.json"),
@@ -409,5 +461,61 @@ fn write_script(path: &std::path::Path, body: &str) {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msg(text: &str, reply: bool) -> InboxMessage {
+        InboxMessage {
+            a2a_task_id: "a2a-1".into(),
+            context_id: "t1".into(),
+            from_tenant: Some("wt-api".into()),
+            text: text.into(),
+            created_at: "2026-11-15T00:00:00Z".into(),
+            reply,
+        }
+    }
+
+    #[test]
+    fn reply_inject_has_no_complete_hint() {
+        let dir = std::path::Path::new("/tasks/ship-it/a2a");
+        let line = format_a2a_inject(&msg("completed by api: shipped", true), Some(dir));
+        assert_eq!(
+            line,
+            "[openOrchestra A2A] task_id=a2a-1 — completed by api: shipped"
+        );
+        assert!(!line.contains("complete.sh"));
+    }
+
+    #[test]
+    fn delegation_inject_keeps_the_complete_hint() {
+        let dir = std::path::Path::new("/tasks/ship-it/a2a");
+        let line = format_a2a_inject(&msg("add the endpoint", false), Some(dir));
+        assert_eq!(
+            line,
+            "[openOrchestra A2A] task_id=a2a-1 — add the endpoint — when done: \
+             /tasks/ship-it/a2a/complete.sh a2a-1 \"summary\""
+        );
+    }
+
+    #[test]
+    fn helpers_include_reject_script() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_a2a_helpers(tmp.path(), "http://127.0.0.1:9", "k3y");
+        let path = tmp.path().join("reject.sh");
+        let body = std::fs::read_to_string(&path).expect("reject.sh written");
+        assert!(body.contains("rejected=1"), "{body}");
+        assert!(body.contains("/v1/complete"), "{body}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_ne!(mode & 0o111, 0, "reject.sh must be executable");
+        }
+        let tools = std::fs::read_to_string(tmp.path().join("mcp-tools.json")).unwrap();
+        assert!(tools.contains("reject"), "{tools}");
     }
 }

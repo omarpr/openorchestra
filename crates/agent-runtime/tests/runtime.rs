@@ -373,3 +373,48 @@ fn unwatching_stops_signals_for_that_worktree() {
         "no signals after unwatch — a closed worktree must not keep pinging"
     );
 }
+
+// A restart after an agent went missing continues its conversation only where
+// the CLI scopes "most recent" to the launch directory.
+#[test]
+fn continue_args_only_for_directory_scoped_resume() {
+    use agent_runtime::{AgentKind, continue_args};
+    let base = vec!["--permission-mode".to_string(), "auto".to_string()];
+    assert_eq!(
+        continue_args(&AgentKind::ClaudeCode, &base),
+        Some(vec!["--permission-mode".into(), "auto".into(), "--continue".into()])
+    );
+    assert_eq!(continue_args(&AgentKind::Pi, &[]), Some(vec!["--continue".to_string()]));
+    // Codex: subcommand first, then the usual flags (resume accepts them).
+    assert_eq!(
+        continue_args(&AgentKind::Codex, &["--ask-for-approval".into(), "never".into()]),
+        Some(vec!["resume".into(), "--last".into(), "--ask-for-approval".into(), "never".into()])
+    );
+    assert_eq!(continue_args(&AgentKind::OpenCode, &[]), None);
+    assert_eq!(continue_args(&AgentKind::Kimi, &[]), None);
+    assert_eq!(continue_args(&AgentKind::Other("x".into()), &[]), None);
+}
+
+// Restart skips a continue that cannot succeed: Claude Code keeps a folder's
+// conversations under projects/<path with non-alphanumerics as '-'>.
+#[test]
+fn claude_conversation_lookup_matches_its_folder_naming() {
+    use agent_runtime::{AgentKind, claude_project_slug, has_conversation};
+    use std::path::Path;
+    assert_eq!(
+        claude_project_slug(Path::new("/Users/omar/.openorchestra/worktrees/lithepg/test12")),
+        "-Users-omar--openorchestra-worktrees-lithepg-test12"
+    );
+    let cfg = tempfile::tempdir().unwrap();
+    let work = Path::new("/w/repo.x/t1");
+    // SAFETY: only this test reads CLAUDE_CONFIG_DIR in this binary.
+    unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", cfg.path()) };
+    assert_eq!(has_conversation(&AgentKind::ClaudeCode, work), Some(false));
+    let proj = cfg.path().join("projects").join(claude_project_slug(work));
+    std::fs::create_dir_all(&proj).unwrap();
+    assert_eq!(has_conversation(&AgentKind::ClaudeCode, work), Some(false), "empty folder");
+    std::fs::write(proj.join("abc.jsonl"), "{}\n").unwrap();
+    assert_eq!(has_conversation(&AgentKind::ClaudeCode, work), Some(true));
+    // Unknown storage: the caller tries continuing.
+    assert_eq!(has_conversation(&AgentKind::Pi, work), None);
+}

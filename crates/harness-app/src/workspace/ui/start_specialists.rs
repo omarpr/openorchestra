@@ -51,7 +51,7 @@ impl HarnessWorkspace {
     }
 
     /// Persist the chosen agent on the task + member registry entries, then
-    /// open an Agent tab in every member (home last so focus lands there).
+    /// open an Agent tab in every member and finish on the coordinator.
     pub(crate) fn confirm_start_all_agents(
         &mut self,
         window: &mut Window,
@@ -76,27 +76,21 @@ impl HarnessWorkspace {
         self.prefs.last_task_agent = Some(kind.as_str().to_string());
         self.save_prefs(cx);
 
-        let (home_id, mut member_ids) = match self.task_store.get(&task_id) {
+        let (member_ids, coordinated) = match self.task_store.get(&task_id) {
             Some(task) => (
-                task.home_member().map(|m| m.worktree_id.clone()),
                 task.members
                     .iter()
                     .map(|m| m.worktree_id.clone())
                     .collect::<Vec<_>>(),
+                super::super::coordinator::has_coordinator(task),
             ),
             None => {
                 self.close_start_specialists(cx);
                 return;
             }
         };
-        // Open specialists first; home last so the selection stays on the
-        // orchestrator after the loop.
-        if let Some(hid) = home_id
-            && let Some(pos) = member_ids.iter().position(|id| id == &hid) {
-                let home = member_ids.remove(pos);
-                member_ids.push(home);
-            }
-
+        // Every repo is a specialist and none is special: open each one's
+        // agent, then land on the coordinator, which delegates to them.
         for mid in member_ids {
             self.select(
                 Selection::Task {
@@ -107,6 +101,36 @@ impl HarnessWorkspace {
                 cx,
             );
             self.open_tab(TabKind::Agent(kind.clone()), window, cx);
+        }
+        if coordinated {
+            self.select(
+                Selection::Task {
+                    task_id: task_id.clone(),
+                    member_id: None,
+                },
+                window,
+                cx,
+            );
+            // Task creation already selected the task, which opened the
+            // coordinator's agent with the kind the task had then (the
+            // default), before this pick. End with exactly one agent tab
+            // running the picked kind: two live agents would make A2A inbox
+            // injection ambiguous, and a stale kind ignores the user's pick.
+            // Open first so closing the last wrong tab never falls back to
+            // spawning a shell.
+            let tabs: Vec<(u64, Option<AgentKind>)> = self
+                .panes
+                .get(&a2a_broker::coordinator_pane_key(&task_id))
+                .map(|p| p.tabs.iter().map(|t| (t.id, t.agent.clone())).collect())
+                .unwrap_or_default();
+            let (open, close) = coordinator_agent_fixup(&tabs, &kind);
+            if open {
+                self.open_tab(TabKind::Agent(kind.clone()), window, cx);
+            }
+            // `close_tab` kills each tab's tmux session too.
+            for id in close {
+                self.close_tab(id, window, cx);
+            }
         }
         self.close_start_specialists(cx);
     }
@@ -185,13 +209,7 @@ impl HarnessWorkspace {
         let project_list = task
             .members
             .iter()
-            .map(|m| {
-                if m.repo == task.home_repo {
-                    format!("{} ★", m.repo)
-                } else {
-                    m.repo.clone()
-                }
-            })
+            .map(|m| m.repo.clone())
             .collect::<Vec<_>>()
             .join(", ");
 
@@ -223,7 +241,7 @@ impl HarnessWorkspace {
                     .text_sm()
                     .text_color(hx.tx2)
                     .child(format!(
-                        "Open an agent in each of these {n} projects? Each gets its own cwd; the home agent orchestrates.",
+                        "Open an agent in each of these {n} projects? Each gets its own cwd; the task's coordinator delegates to them.",
                     )),
             )
             .child(
@@ -431,5 +449,60 @@ impl HarnessWorkspace {
                             })),
                     ),
             )
+    }
+}
+
+/// What the coordinator pane needs so it ends with exactly one agent tab,
+/// running `picked`: whether to open a `picked` agent, and which agent tabs
+/// (by id) to close. `tabs` is the pane's tabs as `(id, agent kind)`.
+///
+/// Task creation selects the task, which opens the coordinator's agent with
+/// the task's kind at that moment (the default); the dialog's pick comes
+/// later, so a mismatched tab is replaced rather than kept beside the new one.
+fn coordinator_agent_fixup(
+    tabs: &[(u64, Option<AgentKind>)],
+    picked: &AgentKind,
+) -> (bool, Vec<u64>) {
+    let keep = tabs
+        .iter()
+        .find(|(_, k)| k.as_ref() == Some(picked))
+        .map(|(id, _)| *id);
+    let close = tabs
+        .iter()
+        .filter(|(id, k)| k.is_some() && Some(*id) != keep)
+        .map(|(id, _)| *id)
+        .collect();
+    (keep.is_none(), close)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matching_coordinator_agent_is_kept() {
+        let tabs = [(1, None), (2, Some(AgentKind::ClaudeCode))];
+        assert_eq!(coordinator_agent_fixup(&tabs, &AgentKind::ClaudeCode), (false, vec![]));
+    }
+
+    #[test]
+    fn wrong_kind_is_replaced() {
+        let tabs = [(1, None), (2, Some(AgentKind::ClaudeCode))];
+        assert_eq!(coordinator_agent_fixup(&tabs, &AgentKind::Codex), (true, vec![2]));
+    }
+
+    #[test]
+    fn no_agent_opens_one() {
+        assert_eq!(coordinator_agent_fixup(&[(1, None)], &AgentKind::Codex), (true, vec![]));
+    }
+
+    #[test]
+    fn extra_agents_are_closed_keeping_one_match() {
+        let tabs = [
+            (2, Some(AgentKind::ClaudeCode)),
+            (3, Some(AgentKind::Codex)),
+            (4, Some(AgentKind::Codex)),
+        ];
+        assert_eq!(coordinator_agent_fixup(&tabs, &AgentKind::Codex), (false, vec![2, 4]));
     }
 }

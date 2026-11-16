@@ -22,6 +22,11 @@ impl HarnessWorkspace {
                 self.new_task_home = name.to_string();
             }
         }
+        // Two or more: no Home radio is shown (the coordinator leads), so
+        // record the first checked repo rather than a stale pick.
+        if self.new_task_repos.len() >= 2 {
+            self.new_task_home = self.new_task_repos[0].clone();
+        }
         self.new_target_repo = self.new_task_home.clone();
         cx.notify();
     }
@@ -314,6 +319,9 @@ impl HarnessWorkspace {
         }
         // Prefer a plain shell tab so setup output isn't mixed into an agent.
         let pane_key = r.key.clone();
+        // Opening that shell makes it the active tab; remembered so an agent
+        // that was in front can be put back.
+        let active_before = self.panes.get(&pane_key).map(|p| p.active);
         if self
             .panes
             .get(&pane_key)
@@ -332,7 +340,19 @@ impl HarnessWorkspace {
         else {
             return;
         };
-        pane.active = tab;
+        // Keep the agent in front when the pane has one (a coordinator opens
+        // on its agent): setup output is a tab away, and the note says so.
+        // Only an agent-less pane switches to the setup shell.
+        let agent_before = active_before
+            .filter(|a| pane.tabs.iter().any(|t| t.id == *a && t.agent.is_some()));
+        let front = match agent_before {
+            Some(agent) => agent,
+            None if pane.tabs.iter().any(|t| t.agent.is_some()) => {
+                pane.tabs.iter().filter(|t| t.agent.is_some()).map(|t| t.id).min().unwrap_or(tab)
+            }
+            None => tab,
+        };
+        pane.active = front;
         self.save_panes();
         self.focus_active_pane(window, cx);
 
@@ -412,7 +432,7 @@ impl HarnessWorkspace {
                 .timer(std::time::Duration::from_millis(400))
                 .await;
 
-            crate::tmux::send_keys(&session, &invoke);
+            crate::tmux::send_keys_async(&session, &invoke);
 
             let _ = view.update(cx, |ws, cx| {
                 ws.set_note("setup finished (see shell)".into());

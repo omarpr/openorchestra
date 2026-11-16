@@ -230,6 +230,71 @@ pub fn default_invocation(kind: &AgentKind) -> (&str, &'static [&'static str]) {
     }
 }
 
+/// `args` rewritten to continue the agent's most recent conversation **in the
+/// directory it is launched in**, for a restart after the agent went missing
+/// (computer restart, agent quit). `None` when the kind has no
+/// directory-scoped continue: a resume that could land in another folder's
+/// conversation is worse than a fresh start, so those kinds restart fresh.
+///
+/// - Claude Code `--continue`: "most recent conversation in the current directory".
+/// - pi `--continue`: "most recent session for the current directory".
+/// - Codex `resume --last`: `resume` filters by cwd unless `--all` is given.
+/// - OpenCode `--continue` is "the last session" of a *project*, which sibling
+///   worktrees of one repo can share, so it is not used.
+pub fn continue_args(kind: &AgentKind, args: &[String]) -> Option<Vec<String>> {
+    let owned = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    match kind {
+        AgentKind::ClaudeCode | AgentKind::Pi => {
+            let mut out = args.to_vec();
+            out.push("--continue".into());
+            Some(out)
+        }
+        AgentKind::Codex => {
+            let mut out = owned(&["resume", "--last"]);
+            out.extend(args.iter().cloned());
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+/// Whether `dir` has a saved conversation for [`continue_args`] to pick up.
+/// `Some(false)` lets a restart start fresh straight away instead of
+/// launching a continue that fails ("No conversation found to continue")
+/// and leaves the agent stopped. `None` when the kind's storage is not known
+/// here: the caller tries continuing and falls back on the next click.
+///
+/// Claude Code keeps conversations as `*.jsonl` under
+/// `$CLAUDE_CONFIG_DIR` (default `~/.claude`) `/projects/<dir>`, with every
+/// non-alphanumeric character of the absolute path turned into `-`.
+pub fn has_conversation(kind: &AgentKind, dir: &Path) -> Option<bool> {
+    match kind {
+        AgentKind::ClaudeCode => {
+            let config = std::env::var_os("CLAUDE_CONFIG_DIR")
+                .map(PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude")))?;
+            let projects = config.join("projects").join(claude_project_slug(dir));
+            let found = std::fs::read_dir(&projects)
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .any(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+                })
+                .unwrap_or(false);
+            Some(found)
+        }
+        _ => None,
+    }
+}
+
+/// Claude Code's folder name for a working directory's conversations.
+pub fn claude_project_slug(dir: &Path) -> String {
+    dir.to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
 /// The default launch command for a kind, as one displayable line — e.g.
 /// `"claude --permission-mode auto"`.
 ///

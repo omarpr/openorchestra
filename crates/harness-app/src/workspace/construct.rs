@@ -58,7 +58,7 @@ impl HarnessWorkspace {
                 .collect();
             let n = crate::panes_state::migrate_task_pane_keys(&mut panes_state, &homes);
             if n > 0 {
-                crate::panes_state::save(&panes_path, &panes_state);
+                crate::panes_state::save(&panes_path, &mut panes_state);
                 log::info!("migrated {n} legacy task pane keys to per-member keys");
             }
         }
@@ -103,6 +103,15 @@ impl HarnessWorkspace {
                 for root in &repo_roots {
                     if let Err(err) = source.watch(root, AgentKind::default()) {
                         log::warn!("cannot watch main {}: {err}", root.display());
+                    }
+                }
+                // A multi-project task's coordinator runs in the task folder,
+                // not a worktree: watch it so its pill works from launch.
+                let tasks_root = data_dir.join("tasks");
+                for task in task_store.active().filter(|t| super::coordinator::has_coordinator(t)) {
+                    let dir = worktrees::task_coordinator_dir(&tasks_root, &task.slug);
+                    if let Err(err) = source.watch(&dir, task.agent_kind.clone()) {
+                        log::warn!("cannot watch coordinator {}: {err}", dir.display());
                     }
                 }
                 Some(source)
@@ -208,6 +217,10 @@ impl HarnessWorkspace {
             a2a_change_tx,
             a2a_inbox_tx,
             a2a_pending_inject: HashMap::new(),
+            missing_agents: Default::default(),
+            restart_tried: Default::default(),
+            continue_next_agent: false,
+            a2a_links: Default::default(),
             new_target_repo,
             menu: None,
             project_menu: None,
@@ -354,13 +367,20 @@ impl HarnessWorkspace {
         })
         .detach();
 
-        // A2A broker task-state changes (delegation chip in the chrome).
+        // A2A broker task-state changes: the delegation chip in the chrome
+        // and the sidebar's connector lines.
         cx.spawn(async move |view, cx| {
             loop {
                 match a2a_change_rx.try_recv() {
                     Ok(()) => {
                         while a2a_change_rx.try_recv().is_ok() {}
-                        if view.update(cx, |_, cx| cx.notify()).is_err() {
+                        if view
+                            .update(cx, |ws, cx| {
+                                ws.observe_a2a_links();
+                                cx.notify()
+                            })
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -529,6 +549,29 @@ impl HarnessWorkspace {
             }
         })
         .detach();
+
+        // Missing task agents. Which panes should run an agent is read on the
+        // UI thread (cheap); asking tmux what is running happens off it.
+        if has_tmux {
+            cx.spawn(async move |view, cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_secs(3)).await;
+                    let Ok(expected) = view.update(cx, |ws, _| ws.task_panes_expecting_agents()) else {
+                        break;
+                    };
+                    if expected.is_empty() {
+                        continue;
+                    }
+                    let panes = cx.background_spawn(async move { crate::tmux::pane_commands() }).await;
+                    let Some(panes) = panes else { continue };
+                    let missing = crate::tmux::missing_agent_keys(&expected, &panes);
+                    if view.update(cx, |ws, cx| ws.set_missing_agents(missing, cx)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
 
         // Unstick agent pills. A status file left on waiting/running by a
         // process that died without writing "idle" (killed mid-dialog, crashed)

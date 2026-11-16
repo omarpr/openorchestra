@@ -31,6 +31,9 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
+/// Tenant id of a task's coordinator agent.
+pub const COORDINATOR_TENANT: &str = "@coordinator";
+
 /// Configuration for one openOrchestra task's broker instance.
 #[derive(Debug, Clone)]
 pub struct BrokerConfig {
@@ -38,9 +41,8 @@ pub struct BrokerConfig {
     pub oo_task_id: String,
     pub task_slug: String,
     pub task_name: String,
-    /// Home member worktree id (orchestrator tenant).
-    pub home_worktree_id: String,
-    pub home_repo: String,
+    /// Tenant that receives un-addressed messages (the coordinator).
+    pub coordinator_tenant: String,
     pub members: Vec<MemberEndpoint>,
     /// Bearer token required on JSON-RPC and card endpoints.
     pub api_key: String,
@@ -55,7 +57,7 @@ pub struct MemberEndpoint {
     pub worktree_id: String,
     pub repo: String,
     pub path: PathBuf,
-    pub is_home: bool,
+    pub is_coordinator: bool,
 }
 
 /// Shared broker state behind the HTTP server.
@@ -145,6 +147,11 @@ pub fn task_member_pane_key(task_id: &str, worktree_id: &str) -> String {
     format!("task:{task_id}:member:{worktree_id}")
 }
 
+/// Pane key of a task's coordinator agent.
+pub fn coordinator_pane_key(task_id: &str) -> String {
+    task_member_pane_key(task_id, COORDINATOR_TENANT)
+}
+
 /// Parse `task:{id}:member:{worktree_id}` → (task_id, worktree_id).
 pub fn parse_task_member_pane_key(key: &str) -> Option<(&str, &str)> {
     let rest = key.strip_prefix("task:")?;
@@ -175,6 +182,14 @@ mod tests {
         assert_eq!(parse_task_member_pane_key(&k), Some(("auth", "jam/auth")));
         assert_eq!(parse_legacy_task_pane_key("task:auth"), Some("auth"));
         assert!(parse_legacy_task_pane_key("task:auth:member:x").is_none());
+    }
+
+    #[test]
+    fn coordinator_pane_key_round_trips() {
+        assert_eq!(
+            parse_task_member_pane_key(&coordinator_pane_key("auth")),
+            Some(("auth", "@coordinator"))
+        );
     }
 
     #[test]

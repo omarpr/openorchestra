@@ -87,6 +87,11 @@ impl HarnessWorkspace {
                 return Some(crate::tmux::session_prefix(&w.id));
             }
         }
+        if let Some(task) = self.coordinator_task_for_path(path) {
+            return Some(crate::tmux::session_prefix(
+                &a2a_broker::coordinator_pane_key(&task.id),
+            ));
+        }
         for task in self.task_store.active() {
             for m in &task.members {
                 if m.path == path {
@@ -131,6 +136,20 @@ impl HarnessWorkspace {
                     session_prefix: prefix,
                 });
             }
+        }
+        // Coordinators run in the task folder, not a worktree, so no repo
+        // above covers their sessions.
+        for task in self
+            .task_store
+            .active()
+            .filter(|t| super::super::coordinator::has_coordinator(t))
+        {
+            attributables.push(Attributable {
+                label: format!("{} · coordinator", task.name),
+                session_prefix: crate::tmux::session_prefix(&a2a_broker::coordinator_pane_key(
+                    &task.id,
+                )),
+            });
         }
         let snapshot = crate::resource_monitor::aggregate(
             &raw.procs,
@@ -284,6 +303,11 @@ impl HarnessWorkspace {
                 .and_then(|w| w.task_id.clone());
             match task_id {
                 Some(task_id) => Selection::Task { task_id, member_id: Some(target.to_string()) },
+                // A coordinator alert carries its task id: land on the task
+                // itself, which is the coordinator.
+                None if self.task_store.get(target).is_some() => {
+                    Selection::Task { task_id: target.to_string(), member_id: None }
+                }
                 None => Selection::Worktree(target.to_string()),
             }
         };
@@ -323,7 +347,19 @@ impl HarnessWorkspace {
         if let Some(r) = self.data.repos.iter().find(|r| r.repo_root == path) {
             return ("main".to_string(), r.name.clone(), format!("{MAIN_NAV_PREFIX}{}", r.name));
         }
+        if let Some(task) = self.coordinator_task_for_path(path) {
+            return (format!("{} · coordinator", task.name), String::new(), task.id.clone());
+        }
         (crate::notifier::label_for("", path), String::new(), String::new())
+    }
+
+    /// The active task whose coordinator runs in `path`, if any.
+    pub(crate) fn coordinator_task_for_path(&self, path: &Path) -> Option<&worktrees::Task> {
+        let tasks_root = self.data_dir.join("tasks");
+        self.task_store.active().find(|t| {
+            super::super::coordinator::has_coordinator(t)
+                && worktrees::task_coordinator_dir(&tasks_root, &t.slug) == path
+        })
     }
 
     /// Resolve a worktree path back to its registry id.

@@ -69,7 +69,6 @@ impl Render for HarnessWorkspace {
             .font_family(hx.font_ui)
             .text_color(hx.tx0)
             .child(self.render_top_bar(&hx, window, cx))
-            .children(self.render_task_strip(&hx, cx))
             .child(
                 div()
                     .flex()
@@ -149,7 +148,7 @@ impl Render for HarnessWorkspace {
                 let Some(active) = ws.panes.get(&r.key).map(|p| p.active) else {
                     return;
                 };
-                ws.close_tab(active, window, cx);
+                ws.request_close_tab(active, window, cx);
             }))
             .on_action(cx.listener(|ws, _: &crate::FirstTimeChecks, _, cx| {
                 // Always re-probe on open: the point of reaching for it is
@@ -384,6 +383,10 @@ impl HarnessWorkspace {
         let animating = |ws: &Self| {
             ws.agent_status.values().any(|s| matches!(s, AgentState::Running | AgentState::Waiting))
                 || !ws.ending.is_empty()
+                // The sidebar's A2A connectors: a message dot or flash in
+                // flight, or a delegation pulsing while it is worked on.
+                || ws.a2a_links.is_animating(ws.anim_secs())
+                || ws.a2a_links.any_active()
         };
         if self.indicator_ticking || !animating(self) {
             return;
@@ -489,6 +492,25 @@ pub(crate) fn agent_pill(hx: &HarnessTheme, state: AgentState, t: f32) -> AnyEle
         .child(indicator)
         .child(label)
         .into_any_element()
+}
+
+/// A task agent that should be running but is not. Same shape as
+/// [`agent_pill`], muted (it is a state to act on, not an alarm); the caller
+/// makes it clickable to restart.
+pub(crate) fn stopped_pill(hx: &HarnessTheme) -> gpui::Div {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_1()
+        .px_1p5()
+        .py_0p5()
+        .rounded_full()
+        .bg(tint(hx.tx2, 0.14))
+        .text_xs()
+        .text_color(hx.tx2)
+        .child(div().size(px(7.0)).rounded_full().border_1().border_color(hx.tx2))
+        .child("STOPPED")
 }
 
 /// The sidebar's row icons, as SVG asset paths. Real icons rather than text

@@ -35,13 +35,15 @@ use std::path::PathBuf;
 use agent_runtime::AgentCommand;
 
 use gpui::{
-    App, AppContext, Context, Entity, ExternalPaths, FocusHandle, Focusable, IntoElement, Render,
-    Styled, WeakEntity, Window, div, prelude::*, px,
+    App, AppContext, Context, Entity, ExternalPaths, FocusHandle, Focusable, IntoElement,
+    KeyDownEvent, Keystroke, MouseDownEvent, Render, ScrollEvent, Styled, WeakEntity, Window,
+    div, prelude::*, px,
 };
+use settings::Settings;
 use project::Project;
 use terminal::{
     Event as TerminalEvent, TerminalBuilder,
-    terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape},
+    terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape, TerminalSettings},
 };
 use terminal_view::TerminalView;
 use util::paths::PathStyle;
@@ -72,6 +74,17 @@ pub struct TerminalPane {
     respawn_pending: bool,
     tmux_backed: bool,
     focus_handle: FocusHandle,
+    /// tmux session this pane is a client of, for copy-mode handling.
+    tmux_session: Option<String>,
+    /// The pane is in tmux copy mode (entered by scrolling up or dragging a
+    /// selection), where typed keys drive copy-mode shortcuts instead of
+    /// reaching the agent. Polled from tmux after scroll/click; see
+    /// [`TerminalPane::watch_copy_mode`].
+    copy_mode: bool,
+    watching_copy_mode: bool,
+    /// Keys typed while copy mode is being cancelled, replayed in order after.
+    held_keys: Vec<Keystroke>,
+    cancelling_copy_mode: bool,
 }
 
 impl TerminalPane {
@@ -94,6 +107,11 @@ impl TerminalPane {
             respawn_pending: false,
             tmux_backed: session.is_some(),
             focus_handle: cx.focus_handle(),
+            tmux_session: session.as_ref().map(|s| s.name.clone()),
+            copy_mode: false,
+            watching_copy_mode: false,
+            held_keys: Vec::new(),
+            cancelling_copy_mode: false,
         };
         this.spawn(agent, session, window, cx);
         this
@@ -223,6 +241,78 @@ impl TerminalPane {
         .detach();
     }
 
+    /// After a scroll or click, follow tmux's copy-mode state until the pane
+    /// leaves it. Polling only runs while copy mode may be on, so an idle pane
+    /// costs nothing.
+    fn watch_copy_mode(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.tmux_session.clone() else { return };
+        if self.watching_copy_mode {
+            return;
+        }
+        self.watching_copy_mode = true;
+        cx.spawn(async move |pane, cx| {
+            loop {
+                cx.background_executor().timer(COPY_MODE_POLL).await;
+                let s = session.clone();
+                let in_mode = cx
+                    .background_executor()
+                    .spawn(async move { crate::tmux::pane_in_mode(&s) })
+                    .await;
+                let keep = pane
+                    .update(cx, |pane, cx| {
+                        if pane.copy_mode != in_mode {
+                            pane.copy_mode = in_mode;
+                            cx.notify();
+                        }
+                        in_mode
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    break;
+                }
+            }
+            let _ = pane.update(cx, |pane, _| pane.watching_copy_mode = false);
+        })
+        .detach();
+    }
+
+    /// A key typed in copy mode: leave copy mode, then deliver the key (and
+    /// any typed meanwhile) to the agent, so typing after scrolling up just
+    /// works instead of triggering copy-mode shortcuts like `t` (jump-to).
+    fn type_through_copy_mode(&mut self, keystroke: Keystroke, cx: &mut Context<Self>) {
+        self.held_keys.push(keystroke);
+        if self.cancelling_copy_mode {
+            return;
+        }
+        let Some(session) = self.tmux_session.clone() else { return };
+        self.cancelling_copy_mode = true;
+        cx.spawn(async move |pane, cx| {
+            cx.background_executor()
+                .spawn(async move { crate::tmux::cancel_copy_mode(&session) })
+                .await;
+            let _ = pane.update(cx, |pane, cx| {
+                pane.cancelling_copy_mode = false;
+                pane.copy_mode = false;
+                let keys = std::mem::take(&mut pane.held_keys);
+                if let Some(view) = pane.view.clone() {
+                    let terminal = view.read(cx).terminal().clone();
+                    terminal.update(cx, |term, cx| {
+                        let option_as_meta = TerminalSettings::get_global(cx).option_as_meta;
+                        for key in &keys {
+                            if !term.try_keystroke(key, option_as_meta)
+                                && let Some(text) = &key.key_char
+                            {
+                                term.input(text.clone().into_bytes());
+                            }
+                        }
+                    });
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Insert paths dropped from Finder into the running agent's prompt.
     fn drop_paths(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
         let Some(view) = self.view.clone() else { return };
@@ -288,7 +378,41 @@ impl Render for TerminalPane {
                     .on_drop(cx.listener(|pane, paths: &ExternalPaths, window, cx| {
                         pane.drop_paths(paths, window, cx);
                     }))
+                    // Scrolling up or drag-selecting can put the tmux pane in
+                    // copy mode; start following it.
+                    .on_scroll(cx.listener(|pane, _: &ScrollEvent, _, cx| {
+                        pane.watch_copy_mode(cx);
+                    }))
+                    .capture_any_mouse_down(cx.listener(|pane, _: &MouseDownEvent, _, cx| {
+                        pane.watch_copy_mode(cx);
+                    }))
+                    .capture_key_down(cx.listener(|pane, ev: &KeyDownEvent, _, cx| {
+                        if (pane.copy_mode || pane.cancelling_copy_mode)
+                            && is_typing_key(&ev.keystroke)
+                        {
+                            cx.stop_propagation();
+                            pane.type_through_copy_mode(ev.keystroke.clone(), cx);
+                        }
+                    }))
+                    .relative()
                     .child(view.clone())
+                    .when(self.copy_mode, |el| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .bottom_2()
+                                .right_3()
+                                .px_2()
+                                .py_0p5()
+                                .rounded_md()
+                                .bg(hx.bg2)
+                                .border_1()
+                                .border_color(hx.accent)
+                                .text_size(px(11.0))
+                                .text_color(hx.tx1)
+                                .child("scrollback · type or Esc to return"),
+                        )
+                    })
             }
             None => div()
                 .size_full()
@@ -302,6 +426,20 @@ impl Render for TerminalPane {
                 ),
         }
     }
+}
+
+/// How often copy-mode state is polled while it may be on.
+const COPY_MODE_POLL: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Keys that mean "I'm typing to the agent": text, Enter, Backspace, Tab.
+/// Navigation (arrows, page keys), Escape, and shortcuts with ⌘/⌃ keep their
+/// copy-mode meaning, so scrollback stays scrollable from the keyboard.
+fn is_typing_key(k: &Keystroke) -> bool {
+    if k.modifiers.platform || k.modifiers.control || k.modifiers.function {
+        return false;
+    }
+    matches!(k.key.as_str(), "enter" | "backspace" | "tab")
+        || k.key_char.as_deref().is_some_and(|c| !c.is_empty() && c.chars().all(|ch| !ch.is_control()))
 }
 
 /// Format dropped file paths for insertion into the running agent's prompt.
@@ -344,6 +482,30 @@ fn paths_to_prompt_text(paths: &[PathBuf]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ks(s: &'static str) -> Keystroke {
+        Keystroke::parse(s).unwrap()
+    }
+
+    #[test]
+    fn typing_keys_pass_through_copy_mode_navigation_does_not() {
+        for k in ["t", "f", "shift-a", "space", "enter", "backspace", "tab", "1"] {
+            let mut key = ks(k);
+            if key.key_char.is_none() && key.key.chars().count() == 1 {
+                key.key_char = Some(key.key.clone());
+            }
+            if k == "space" {
+                key.key_char = Some(" ".into());
+            }
+            if k == "shift-a" {
+                key.key_char = Some("A".into());
+            }
+            assert!(is_typing_key(&key), "{k} should type");
+        }
+        for k in ["escape", "up", "pageup", "cmd-c", "ctrl-c", "left"] {
+            assert!(!is_typing_key(&ks(k)), "{k} should stay in copy mode");
+        }
+    }
 
     #[test]
     fn single_clean_path_is_unquoted_and_padded() {

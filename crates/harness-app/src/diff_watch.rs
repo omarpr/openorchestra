@@ -6,7 +6,8 @@
 //! worktree/main root and signals the workspace to recompute, so the diff keeps
 //! up with the agent in near real time.
 //!
-//! Cost is bounded to the one diff on screen: only the selected root is watched,
+//! Cost is bounded to the one diff on screen: only the selected root (a task's
+//! member worktrees) is watched,
 //! and the watch is retargeted when the selection changes. Events are filtered
 //! here ([`is_relevant_change`]) and coalesced by the workspace's drain cadence —
 //! that cadence *is* the debounce, so a burst of writes in one agent turn
@@ -28,16 +29,18 @@ use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 pub struct DiffWatcher {
     /// `None` until the first `watch`, and while a watch cannot be established.
     watcher: Option<RecommendedWatcher>,
-    /// The canonical root currently watched. Shared with the notify callback so
-    /// it can drop events that arrive from a root we have since moved off, and
-    /// read on retarget to skip re-establishing an identical watch.
-    current: Arc<Mutex<Option<PathBuf>>>,
+    /// The canonical roots currently watched (one for a worktree or checkout;
+    /// every member worktree for a task, whose diff is unified). Shared with
+    /// the notify callback so it can drop events that arrive from a root we
+    /// have since moved off, and read on retarget to skip re-establishing an
+    /// identical watch.
+    current: Arc<Mutex<Vec<PathBuf>>>,
     tx: Sender<PathBuf>,
 }
 
 impl DiffWatcher {
     /// Create a watcher and the receiver its "something changed under the
-    /// watched root" signals are delivered on. The payload is the changed path;
+    /// watched roots" signals are delivered on. The payload is the changed path;
     /// the workspace only cares that *a* relevant change arrived and recomputes
     /// the current selection's diff.
     pub fn new() -> (Self, Receiver<PathBuf>) {
@@ -45,42 +48,49 @@ impl DiffWatcher {
         (
             Self {
                 watcher: None,
-                current: Arc::new(Mutex::new(None)),
+                current: Arc::new(Mutex::new(Vec::new())),
                 tx,
             },
             rx,
         )
     }
 
-    /// Point the watch at `root` (a worktree dir or the main checkout),
-    /// replacing any previous watch.
+    /// Point the watch at every root in `roots` at once (a worktree dir, the
+    /// main checkout, or every member worktree of a task, whose diff spans
+    /// them all), replacing any previous watch.
     ///
     /// Keys on the **canonical** path: macOS FSEvents reports `/private/var/...`
     /// while callers pass `/var/...`, and keying on the caller path silently
     /// drops every event — the exact bug that froze `status-watch` on the first
     /// real macOS run (architecture §9). Errors log and leave the watch absent
-    /// rather than panicking, matching `status-watch`.
-    pub fn watch(&mut self, root: &Path) {
-        let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-        if self.current.lock().unwrap().as_ref() == Some(&canonical) {
-            return; // already watching this root
+    /// (or partial) rather than panicking, matching `status-watch`.
+    pub fn watch_all(&mut self, roots: &[PathBuf]) {
+        let mut canonical: Vec<PathBuf> = roots
+            .iter()
+            .map(|r| std::fs::canonicalize(r).unwrap_or_else(|_| r.clone()))
+            .collect();
+        canonical.sort();
+        canonical.dedup();
+        if *self.current.lock().unwrap() == canonical {
+            return; // already watching these roots
         }
-        // Drop the old watcher first (stops its watch) and publish the new root
-        // before the fresh watcher can deliver anything.
+        // Drop the old watcher first (stops its watch) and publish the new
+        // roots before the fresh watcher can deliver anything.
         self.watcher = None;
-        *self.current.lock().unwrap() = Some(canonical.clone());
+        *self.current.lock().unwrap() = canonical.clone();
+        if canonical.is_empty() {
+            return;
+        }
 
         let tx = self.tx.clone();
         let current = Arc::clone(&self.current);
         let mut watcher = match notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
             let Ok(event) = res else { return }; // transient backend error; next event re-syncs
-            let Some(root) = current.lock().unwrap().clone() else {
-                return;
-            };
-            // Only relevant edits under the *current* root count — a stale
+            let roots = current.lock().unwrap().clone();
+            // Only relevant edits under a *current* root count — a stale
             // in-flight event from a root we just left is ignored.
             for path in &event.paths {
-                if path.starts_with(&root) && is_relevant_change(path) {
+                if roots.iter().any(|root| path.starts_with(root)) && is_relevant_change(path) {
                     let _ = tx.send(path.clone());
                     break;
                 }
@@ -92,11 +102,16 @@ impl DiffWatcher {
                 return;
             }
         };
-        if let Err(e) = watcher.watch(&canonical, RecursiveMode::Recursive) {
-            log::warn!("cannot watch {} for diffs: {e}", canonical.display());
-            return;
+        let mut any = false;
+        for root in &canonical {
+            match watcher.watch(root, RecursiveMode::Recursive) {
+                Ok(()) => any = true,
+                Err(e) => log::warn!("cannot watch {} for diffs: {e}", root.display()),
+            }
         }
-        self.watcher = Some(watcher);
+        if any {
+            self.watcher = Some(watcher);
+        }
     }
 }
 

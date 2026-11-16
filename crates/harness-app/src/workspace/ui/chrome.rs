@@ -23,6 +23,11 @@ impl HarnessWorkspace {
         let r = self.resolve();
         let branch = r.as_ref().map(|r| r.branch.clone()).unwrap_or_default();
         let (project, task) = self.location_names();
+        // The coordinator has no repo or branch of its own: the bar names
+        // the task and says who you are talking to.
+        let coordinator_of = self
+            .focused_coordinator_task()
+            .and_then(|tid| self.task_store.get(&tid).map(|t| t.name.clone()));
         // The left toggle shows/hides the whole left panel (stats + worktrees),
         // so it sits on the left and is named for the panel, not its list.
         let sidebar_toggle = div()
@@ -111,8 +116,25 @@ impl HarnessWorkspace {
                     // Where you are, most specific last: project › task, then
                     // the branch. The app's own name was here before, and
                     // the window title already says that.
-                    .child(div().flex_none().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx0).child(project))
-                    .when_some(task, |d, task| {
+                    .when_some(coordinator_of.clone(), |d, name| {
+                        d.child(
+                            div()
+                                .min_w_0()
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(hx.tx0)
+                                .child(name),
+                        )
+                        .child(div().flex_none().text_xs().text_color(hx.tx2).child("·"))
+                        .child(div().flex_none().text_xs().text_color(hx.accent).child("coordinator"))
+                    })
+                    .when(coordinator_of.is_none(), |d| {
+                        d.child(div().flex_none().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx0).child(project))
+                    })
+                    .when_some(task.filter(|_| coordinator_of.is_none()), |d, task| {
                         d.child(div().flex_none().text_sm().text_color(hx.tx2).child("›")).child(
                             div()
                                 .min_w_0()
@@ -124,122 +146,31 @@ impl HarnessWorkspace {
                                 .child(task),
                         )
                     })
-                    .child(div().flex_none().text_xs().text_color(hx.tx2).child("·"))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .text_xs()
-                            .font_family(hx.font_mono)
-                            .text_color(hx.tx1)
-                            .child(branch),
-                    )
+                    .when(coordinator_of.is_none(), |d| {
+                        d.child(div().flex_none().text_xs().text_color(hx.tx2).child("·")).child(
+                            div()
+                                .min_w_0()
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .text_xs()
+                                .font_family(hx.font_mono)
+                                .text_color(hx.tx1)
+                                .child(branch),
+                        )
+                    })
                     .children(self.render_a2a_delegation_chip(hx)),
             )
             .child(tools_toggle)
     }
 
-    /// The task chat strip: one chip per repo agent of the selected
-    /// multi-project task. HOME (the orchestrator, where the user talks about
-    /// the whole task) comes first; each specialist shows its agent state and
-    /// how many A2A delegations it is working on. Clicking a chip looks in on
-    /// that agent. `None` for anything that isn't a multi-project task.
-    pub(crate) fn render_task_strip(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let Selection::Task { task_id, .. } = &self.selection else {
-            return None;
-        };
-        let task = self.data.tasks.iter().find(|t| &t.id == task_id)?;
-        if task.members.len() < 2 {
-            return None;
-        }
-        let focused = self.resolve().map(|r| r.path);
-        let delegations = self.a2a_delegation_summary();
-        let t = self.anim_secs();
-
-        let mut members: Vec<_> = task.members.iter().collect();
-        members.sort_by_key(|m| !m.is_home);
-
-        let mut strip = div()
-            .id("task-strip")
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap_1()
-            .h(px(30.0))
-            .px_3()
-            .bg(hx.bg0)
-            .border_b_1()
-            .border_color(hx.border)
-            .overflow_x_scroll()
-            .child(
-                div()
-                    .flex_none()
-                    .mr_1()
-                    .text_size(px(10.0))
-                    .text_color(hx.tx2)
-                    .child("TASK AGENTS"),
-            );
-        for m in members {
-            let selected = focused.as_ref() == Some(&m.path);
-            let state = self.agent_status.get(&m.path).copied().unwrap_or(AgentState::Unknown);
-            let active = delegations
-                .iter()
-                .filter(|(_, tenant, s)| tenant == &m.worktree_id && (s == "working" || s == "submitted"))
-                .count();
-            let label = if m.is_home {
-                format!("★ {} · orchestrator", m.repo)
-            } else {
-                m.repo.clone()
-            };
-            let tooltip = if m.is_home {
-                "HOME: chat here about the whole task — it delegates to the other repos over A2A"
-            } else {
-                "Specialist: works only in this repo; look in on its agent"
-            };
-            let sel = Selection::Task {
-                task_id: task.id.clone(),
-                // HOME is the task itself, so it selects the task, not a member.
-                member_id: (!m.is_home).then(|| m.worktree_id.clone()),
-            };
-            strip = strip.child(
-                div()
-                    .id(gpui::SharedString::from(format!("task-strip-{}", m.worktree_id)))
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap_1p5()
-                    .pl_2()
-                    .pr_1()
-                    .py_0p5()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(if selected { hx.accent } else { hx.border })
-                    .when(selected, |d| d.bg(hx.surface))
-                    .cursor_pointer()
-                    .hover(|d| d.bg(hx.surface_hover))
-                    .tooltip(tip(tooltip))
-                    .on_click(cx.listener(move |ws, _, window, cx| ws.select(sel.clone(), window, cx)))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(if m.is_home { hx.accent } else if selected { hx.tx0 } else { hx.tx1 })
-                            .child(label),
-                    )
-                    .when(active > 0, |d| {
-                        d.child(
-                            div()
-                                .text_size(px(10.0))
-                                .font_family(hx.font_mono)
-                                .text_color(hx.amber)
-                                .child(format!("{active} A2A")),
-                        )
-                    })
-                    .child(agent_pill(hx, state, t)),
-            );
-        }
-        Some(strip.into_any_element())
+    /// The task whose coordinator agent is focused, if any: the same test
+    /// `ensure_pane` uses (the resolved pane is the coordinator's), so a stale
+    /// member id that fell back to the coordinator counts too.
+    pub(crate) fn focused_coordinator_task(&self) -> Option<String> {
+        let r = self.resolve()?;
+        let tid = r.task_id?;
+        (r.key == a2a_broker::coordinator_pane_key(&tid)).then_some(tid)
     }
 
     /// Compact A2A delegation status for the active multi-member task.

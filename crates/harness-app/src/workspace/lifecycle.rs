@@ -331,9 +331,22 @@ impl HarnessWorkspace {
                 let pane_key = a2a_broker::task_member_pane_key(tid, &m.worktree_id);
                 self.teardown_sessions(&pane_key);
                 self.panes.remove(&pane_key);
+                // Queued A2A lines for a pane that is gone would otherwise be
+                // injected into a re-created task's agent of the same key.
+                self.a2a_pending_inject.remove(&pane_key);
                 // Legacy keys from pre multi-context builds.
                 self.teardown_sessions(&m.worktree_id);
                 self.panes.remove(&m.worktree_id);
+            }
+            let coordinator = a2a_broker::coordinator_pane_key(tid);
+            self.teardown_sessions(&coordinator);
+            self.panes.remove(&coordinator);
+            self.a2a_pending_inject.remove(&coordinator);
+            // The coordinator's status lives in the task folder, which is
+            // kept; a re-created same-slug task must not inherit its pill.
+            if let Some(slug) = self.task_store.get(tid).map(|t| t.slug.clone()) {
+                let dir = clear_coordinator_status(&self.data_dir.join("tasks"), &slug);
+                self.agent_status.remove(&dir);
             }
             let legacy = format!("task:{tid}");
             self.teardown_sessions(&legacy);
@@ -427,9 +440,37 @@ impl HarnessWorkspace {
     }
 }
 
+/// Remove a task coordinator's `.harness/status.json` (never the task
+/// folder itself) and return the coordinator dir it belonged to.
+fn clear_coordinator_status(tasks_root: &std::path::Path, slug: &str) -> PathBuf {
+    let dir = worktrees::task_coordinator_dir(tasks_root, slug);
+    let status = dir.join(".harness").join("status.json");
+    if let Err(e) = std::fs::remove_file(&status)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!("could not clear {}: {e}", status.display());
+    }
+    dir
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ending_a_task_clears_the_coordinator_status_but_keeps_the_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("tasks");
+        let dir = worktrees::task_coordinator_dir(&root, "ship-it");
+        std::fs::create_dir_all(dir.join(".harness")).unwrap();
+        std::fs::write(dir.join(".harness/status.json"), "{}").unwrap();
+        std::fs::write(dir.join("brief.md"), "keep").unwrap();
+        assert_eq!(clear_coordinator_status(&root, "ship-it"), dir);
+        assert!(!dir.join(".harness/status.json").exists());
+        assert!(dir.join("brief.md").exists(), "task folder untouched");
+        // Already gone is fine.
+        clear_coordinator_status(&root, "ship-it");
+    }
 
     fn loss(dirty: usize, unpushed: usize) -> Loss {
         Loss { repo: "app".into(), branch: "feat/x".into(), dirty, unpushed }
