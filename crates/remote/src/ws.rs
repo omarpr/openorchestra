@@ -118,6 +118,10 @@ impl Term {
     }
 
     async fn serve(&mut self) -> End {
+        // Subscribe before authenticating: a revoke/unmark published while
+        // the hub opens must still be seen as a change.
+        let mut stop = self.s.shutdown.subscribe();
+        let mut file_rx = self.s.file.subscribe();
         // 1. Auth frame.
         let token = match tokio::time::timeout(AUTH_TIMEOUT, self.socket.recv()).await {
             Ok(Some(Ok(Message::Text(t)))) => match serde_json::from_str(t.as_str()) {
@@ -154,19 +158,16 @@ impl Term {
             return end;
         }
 
-        let mut stop = self.s.shutdown.subscribe();
-        let mut file_rx = self.s.file.subscribe();
         let mut fit: Option<FitGuard> = None;
         loop {
             tokio::select! {
                 biased;
                 _ = crate::server::stopped(&mut stop) => {
                     drop(fit.take());
-                    // Last viewer on shutdown: restore size and detach now,
-                    // before the runtime goes away.
-                    if Arc::strong_count(&hub) == 1 {
-                        hub.shutdown().await;
-                    }
+                    // Restore any fitted size and detach before the runtime
+                    // goes away.
+                    // Every viewer awaits it: a second call returns at once.
+                    hub.shutdown().await;
                     return End::Reason("disabled");
                 }
                 r = file_rx.changed() => {

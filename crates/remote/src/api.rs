@@ -203,12 +203,19 @@ async fn agents(State(s): AppState, headers: HeaderMap) -> Response {
 /// SSE: `event: agents` with the full list on connect and on every change.
 /// Ends with `event: closed` (`revoked` / `disabled`) when access ends.
 async fn events(State(s): AppState, headers: HeaderMap) -> Response {
+    // Subscribe before authenticating so a revoke racing the request is
+    // still seen as a change.
+    let rx = Receivers {
+        stop: s.shutdown.subscribe(),
+        file: s.file.subscribe(),
+        agents: s.agents.subscribe(),
+    };
     let (device, file) = match authed(&s, &headers) {
         Ok(v) => v,
         Err(r) => return r,
     };
     let first = s.agents_for(&file);
-    Sse::new(agent_events(s, device.id, first))
+    Sse::new(agent_events(s, rx, device.id, first))
         .keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE).text("keepalive"))
         .into_response()
 }
@@ -225,6 +232,12 @@ fn closed_event(reason: &str) -> Event {
         .data(json!({ "reason": reason }).to_string())
 }
 
+struct Receivers {
+    stop: tokio::sync::watch::Receiver<bool>,
+    file: tokio::sync::watch::Receiver<Arc<RemoteFile>>,
+    agents: tokio::sync::watch::Receiver<Arc<Vec<crate::server::AgentInfo>>>,
+}
+
 enum SseState {
     First(Vec<crate::server::AgentInfo>),
     Live,
@@ -233,6 +246,7 @@ enum SseState {
 
 fn agent_events(
     s: Arc<Shared>,
+    rx: Receivers,
     device_id: String,
     first: Vec<crate::server::AgentInfo>,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
@@ -245,12 +259,10 @@ fn agent_events(
         phase: SseState,
         _open: Arc<()>,
     }
-    let mut agents = s.agents.subscribe();
-    agents.mark_unchanged();
     let st = St {
-        stop: s.shutdown.subscribe(),
-        file: s.file.subscribe(),
-        agents,
+        stop: rx.stop,
+        file: rx.file,
+        agents: rx.agents,
         _open: s.open_streams.clone(),
         device_id,
         phase: SseState::First(first),

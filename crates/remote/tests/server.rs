@@ -690,11 +690,38 @@ async fn stop_sends_disabled_to_sse() {
     r.chunk().await.unwrap().unwrap();
     let srv = h.server.take().unwrap();
     std::thread::spawn(move || srv.stop());
-    let ended = tokio::time::timeout(Duration::from_secs(3), async {
-        while let Ok(Some(_)) = r.chunk().await {}
+    let tail = tokio::time::timeout(Duration::from_secs(3), async {
+        let mut acc = String::new();
+        while let Ok(Some(c)) = r.chunk().await {
+            acc.push_str(&String::from_utf8_lossy(&c));
+        }
+        acc
     })
-    .await;
-    assert!(ended.is_ok(), "SSE still open after stop");
+    .await
+    .expect("SSE still open after stop");
+    assert!(tail.contains("event: closed"), "{tail}");
+    assert!(tail.contains(r#"{"reason":"disabled"}"#), "{tail}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn revoke_sends_closed_revoked_on_sse() {
+    let h = Harness::start(Harness::unused_tmux());
+    let token = h.device(false);
+    let mut r = h.get("/api/events", Some(&token)).await;
+    r.chunk().await.unwrap().unwrap();
+    let other = Store::new(&h.dir);
+    let id = other.load().devices[0].id.clone();
+    auth::revoke(&other, &id).unwrap();
+    let tail = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut acc = String::new();
+        while let Ok(Some(c)) = r.chunk().await {
+            acc.push_str(&String::from_utf8_lossy(&c));
+        }
+        acc
+    })
+    .await
+    .expect("SSE still open after revoke");
+    assert!(tail.contains(r#"{"reason":"revoked"}"#), "{tail}");
 }
 
 // ---- live tmux (private socket) ----
@@ -799,4 +826,95 @@ async fn dead_session_listed_as_stopped() {
     };
     assert_eq!(status(&a).as_deref(), Some("running"));
     assert_eq!(status(&b).as_deref(), Some("stopped"));
+}
+
+type Ws =
+    tokio_tungstenite::WebSocketStream<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>;
+
+/// Open a terminal socket on `id`, authenticate, and consume init + repaint.
+async fn open_term(h: &Harness, id: &str, token: &str) -> Ws {
+    let mut ws = h.ws(id, &h.origin()).await.expect("upgrade");
+    ws.send(Message::text(
+        serde_json::json!({ "type": "auth", "token": token }).to_string(),
+    ))
+    .await
+    .unwrap();
+    let init = next_msg(&mut ws).await;
+    let v: serde_json::Value = serde_json::from_str(init.to_text().unwrap()).unwrap();
+    assert_eq!(v["type"], "init", "{v}");
+    assert!(matches!(next_msg(&mut ws).await, Message::Binary(_)));
+    ws
+}
+
+/// Skip binary output until the `closed` frame; return its reason.
+async fn closed_reason(ws: &mut Ws) -> String {
+    loop {
+        match next_msg(ws).await {
+            Message::Binary(_) => continue,
+            Message::Text(t) => {
+                let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+                assert_eq!(v["type"], "closed", "{v}");
+                return v["reason"].as_str().unwrap().to_string();
+            }
+            other => panic!("expected closed frame, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn ws_reauthorizes_on_file_change_and_stop() {
+    let tm = TmuxServer::new();
+    tm.new_session("s_live", "cat");
+    let mut h = Harness::start(tm.tmux());
+    let token = h.device(false);
+    let ro_token = h.device(true);
+    let store = h.store();
+    let a = store.mark("k", 1).unwrap();
+    h.set_agents(vec![agent(&a, "s_live", "A")]);
+    let other = Store::new(&h.dir);
+
+    // Unmark from another Store closes with `unmarked`.
+    let mut ws = open_term(&h, &a, &token).await;
+    other.unmark("k", Some(1)).unwrap();
+    let reason = tokio::time::timeout(Duration::from_secs(2), closed_reason(&mut ws))
+        .await
+        .expect("unmarked within 2s");
+    assert_eq!(reason, "unmarked");
+
+    // Re-mark (new id), then revoke closes with `revoked`.
+    let a = store.mark("k", 1).unwrap();
+    h.set_agents(vec![agent(&a, "s_live", "A")]);
+    let mut ws = open_term(&h, &a, &token).await;
+    let dev_id = other
+        .load()
+        .devices
+        .iter()
+        .find(|d| !d.read_only)
+        .unwrap()
+        .id
+        .clone();
+    auth::revoke(&other, &dev_id).unwrap();
+    let reason = tokio::time::timeout(Duration::from_secs(2), closed_reason(&mut ws))
+        .await
+        .expect("revoked within 2s");
+    assert_eq!(reason, "revoked");
+
+    // Read-only input never reaches the pane.
+    let mut ro = open_term(&h, &a, &ro_token).await;
+    ro.send(Message::text(
+        serde_json::json!({ "type": "input", "data": "SHOULD_NOT_APPEAR\r" }).to_string(),
+    ))
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!tm.capture("s_live").contains("SHOULD_NOT_APPEAR"));
+
+    // stop() sends `disabled`.
+    let srv = h.server.take().unwrap();
+    std::thread::spawn(move || srv.stop());
+    let reason = tokio::time::timeout(Duration::from_secs(4), closed_reason(&mut ro))
+        .await
+        .expect("disabled on stop");
+    assert_eq!(reason, "disabled");
 }
