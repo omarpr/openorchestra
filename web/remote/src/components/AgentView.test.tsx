@@ -73,7 +73,7 @@ const agent: Agent = {
   title: "Fix login bug",
   agent_kind: "claude",
   project: "p",
-  worktree: "w",
+  worktree: "w", branch: null, has_conversation: false,
   status: "running",
   status_since: null,
   tool: null,

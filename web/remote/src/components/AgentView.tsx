@@ -12,6 +12,9 @@ import { TerminalView, type TerminalHandle } from "@/components/TerminalView";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { AgentIcon } from "@/components/AgentIcon";
+import { ConversationView } from "@/components/ConversationView";
 
 const MIN_FONT = 9;
 const MAX_FONT = 18;
@@ -22,6 +25,17 @@ const CLOSED_COPY: Record<string, string> = {
   disabled: "Remote control is off on the Mac",
   revoked: "This device was removed. Pair again.",
 };
+
+const AGENT_NAMES: Record<string, string> = {
+  "claude-code": "Claude Code",
+  pi: "pi",
+  codex: "Codex",
+  kimi: "Kimi",
+  opencode: "OpenCode",
+};
+export const agentName = (kind: string | null) => (kind ? (AGENT_NAMES[kind] ?? kind) : "");
+
+type View = "conversation" | "terminal";
 
 function load(key: string): string | null {
   try {
@@ -53,6 +67,17 @@ export function AgentView({ id, agent }: { id: string; agent?: Agent }) {
   const [ctrl, setCtrl] = useState(false);
   const [closed, setClosed] = useState<string | null>(null);
   const [connected, setConnected] = useState(true);
+  const hasConv = agent?.has_conversation === true;
+  const [savedView, setSavedView] = useState<View | null>(() => {
+    const v = load(`oo.view.${id}`);
+    return v === "conversation" || v === "terminal" ? v : null;
+  });
+  const view: View = hasConv ? (savedView ?? "conversation") : "terminal";
+  const pickView = (v: View) => {
+    setSavedView(v);
+    save(`oo.view.${id}`, v);
+    setConnected(true);
+  };
 
   useEffect(() => {
     let live = true;
@@ -70,7 +95,7 @@ export function AgentView({ id, agent }: { id: string; agent?: Agent }) {
   // Controls stay hidden until /api/me confirms the device may type.
   const readOnly = meReadOnly !== false || initReadOnly;
   const canType = !readOnly && !stopped && !closed;
-  const title = agent?.title ?? id;
+  const where = agent ? (agent.branch ?? agent.worktree) : "";
 
   const setFitPersist = (on: boolean) => {
     setFit(on);
@@ -97,15 +122,42 @@ export function AgentView({ id, agent }: { id: string; agent?: Agent }) {
             <ChevronLeft />
           </Button>
         )}
-        <h2 className={`min-w-0 flex-1 truncate font-semibold ${isTablet ? "pl-4" : ""}`}>{title}</h2>
+        {agent && <AgentIcon kind={agent.agent_kind} className={isTablet ? "ml-4" : ""} />}
+        <h2
+          className={`flex min-w-0 flex-1 items-baseline font-semibold ${isTablet && !agent ? "pl-4" : "pl-1"}`}
+          title={agent?.title ?? id}
+        >
+          {agent ? (
+            <>
+              <span className="shrink-0 whitespace-pre">{agent.project}</span>
+              <span className="shrink-0 whitespace-pre text-muted-foreground"> · </span>
+              <span className="min-w-0 truncate">{where}</span>
+              <span className="shrink-0 whitespace-pre text-muted-foreground"> · </span>
+              <span className="shrink-0 whitespace-pre">{agentName(agent.agent_kind)}</span>
+            </>
+          ) : (
+            <span className="truncate">{id}</span>
+          )}
+        </h2>
         {agent && <StatusPill status={agent.status} />}
-        <label className="flex min-h-11 min-w-11 cursor-pointer items-center justify-center gap-2 pl-2 text-sm">
-          <span className="hidden sm:inline">Fit to phone</span>
-          <Switch aria-label="Fit to phone" checked={fit} onCheckedChange={setFitPersist} disabled={readOnly} />
-        </label>
+        {view === "terminal" && (
+          <label className="flex min-h-11 min-w-11 cursor-pointer items-center justify-center gap-2 pl-2 text-sm">
+            <span className="hidden sm:inline">Fit to phone</span>
+            <Switch aria-label="Fit to phone" checked={fit} onCheckedChange={setFitPersist} disabled={readOnly} />
+          </label>
+        )}
       </header>
 
-      <div className="flex h-11 shrink-0 items-center gap-1 border-b px-2 text-sm">
+      <div className="flex min-h-11 shrink-0 items-center gap-1 border-b px-2 text-sm">
+        {hasConv && (
+          <Tabs value={view} onValueChange={(v) => pickView(v as View)}>
+            <TabsList>
+              <TabsTrigger value="conversation">Conversation</TabsTrigger>
+              <TabsTrigger value="terminal">Terminal</TabsTrigger>
+            </TabsList>
+          </Tabs>
+        )}
+        {view === "terminal" && (<>
         <Button variant="ghost" size="icon" aria-label="Smaller text" disabled={fontSize <= MIN_FONT} onClick={() => step(-1)}>
           A−
         </Button>
@@ -115,6 +167,7 @@ export function AgentView({ id, agent }: { id: string; agent?: Agent }) {
         <Button variant="ghost" size="icon" aria-label="Larger text" disabled={fontSize >= MAX_FONT} onClick={() => step(1)}>
           A+
         </Button>
+        </>)}
         <div className="flex-1" />
         {meReadOnly !== null && readOnly && <Badge variant="secondary">Watch only</Badge>}
       </div>
@@ -132,24 +185,31 @@ export function AgentView({ id, agent }: { id: string; agent?: Agent }) {
       )}
 
       <div className="min-h-0 flex-1" style={{ paddingBottom: canType ? bottom : 0 }}>
-        <TerminalView
-          ref={term}
-          id={id}
-          fit={fit}
-          fontSize={fontSize}
-          ctrl={ctrl}
-          onCtrlUsed={() => setCtrl(false)}
-          onInit={setInitReadOnly}
-          onClosed={setClosed}
-          onConnection={setConnected}
-        />
+        {view === "conversation" ? (
+          <ConversationView id={id} onClosed={setClosed} onConnection={setConnected} />
+        ) : (
+          <TerminalView
+            ref={term}
+            id={id}
+            fit={fit}
+            fontSize={fontSize}
+            ctrl={ctrl}
+            onCtrlUsed={() => setCtrl(false)}
+            onInit={setInitReadOnly}
+            onClosed={setClosed}
+            onConnection={setConnected}
+          />
+        )}
       </div>
+
+      {/* Task 6: the conversation status bar plugs in here, between the list and the reply box. */}
 
       {canType && (
         <div className="shrink-0 border-t bg-background" style={{ transform: `translateY(${-bottom}px)` }}>
-          {!hideKeys && <KeyBar ctrl={ctrl} onToggleCtrl={() => setCtrl((c) => !c)} onKey={sendKey} />}
+          {view === "terminal" && !hideKeys && <KeyBar ctrl={ctrl} onToggleCtrl={() => setCtrl((c) => !c)} onKey={sendKey} />}
           <div className="flex items-center gap-2 px-2 pb-2">
             <QuickReply id={id} disabled={stopped} />
+            {view === "terminal" && (
             <Button
               variant="outline"
               size="icon"
@@ -159,6 +219,7 @@ export function AgentView({ id, agent }: { id: string; agent?: Agent }) {
             >
               <Keyboard />
             </Button>
+            )}
           </div>
         </div>
       )}

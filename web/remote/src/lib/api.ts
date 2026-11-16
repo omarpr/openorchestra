@@ -9,6 +9,8 @@ export interface Agent {
   agent_kind: string | null;
   project: string;
   worktree: string;
+  branch: string | null;
+  has_conversation: boolean;
   status: AgentStatus;
   status_since: string | null;
   tool: string | null;
@@ -92,4 +94,17 @@ export async function sendText(id: string, text: string): Promise<void> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text }),
   });
+}
+
+export interface ToolResult {
+  text: string;
+  is_error: boolean;
+  /** Output was cut at the server's cap; the UI shows the `…[truncated]` note. */
+  truncated: boolean;
+}
+
+export async function fetchToolResult(id: string, toolId: string): Promise<ToolResult> {
+  return (
+    await request(`/api/agents/${encodeURIComponent(id)}/conversation/tool/${encodeURIComponent(toolId)}`)
+  ).json();
 }

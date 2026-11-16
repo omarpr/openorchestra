@@ -21,7 +21,7 @@ const mk = (id: string, status: Agent["status"], title = id): Agent => ({
   title,
   agent_kind: "claude",
   project: "p",
-  worktree: "w",
+  worktree: "w", branch: null, has_conversation: false,
   status,
   status_since: null,
   tool: null,

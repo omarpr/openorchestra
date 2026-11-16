@@ -8,7 +8,7 @@ const agents: Agent[] = [
     title: "Fix login bug",
     agent_kind: "claude",
     project: "proj",
-    worktree: "main",
+    worktree: "main", branch: null, has_conversation: false,
     status: "running",
     status_since: null,
     tool: "Edit",
