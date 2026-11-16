@@ -65,6 +65,51 @@ impl HarnessWorkspace {
                     .child(div().flex_none().text_color(hx.tx2).child("Status"))
                     .child(div().flex_1().min_w_0().text_color(line_color).child(line)),
             );
+        // One row per address, so long ones don't run off the card, each with
+        // a Copy button (settings text isn't selectable).
+        for (i, url) in serving_urls(&r.serve, r.status.as_ref()).iter().enumerate() {
+            let copy = url.clone();
+            col = col.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .pb_1()
+                    .pl(px(46.0))
+                    .text_xs()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .font_family(hx.font_mono)
+                            .text_color(hx.tx0)
+                            .child(url.clone()),
+                    )
+                    .child(
+                        div()
+                            .id(("remote-url-copy", i))
+                            .flex_none()
+                            .px_2()
+                            .py_0p5()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(hx.border)
+                            .text_color(hx.tx1)
+                            .cursor_pointer()
+                            .hover(|d| d.bg(hx.surface_hover).text_color(hx.tx0))
+                            .child("Copy")
+                            .on_click(cx.listener(move |ws, _, _, cx| {
+                                cx.stop_propagation();
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone()));
+                                ws.set_note(format!("copied {copy}"));
+                                cx.notify();
+                            })),
+                    ),
+            );
+        }
         if r.serve == RemoteServe::OtherBuild {
             col = col.child(div().pb_1().text_xs().text_color(hx.tx2).child(
                 "The other openOrchestra build (Dev or release) is serving phones. Tabs you \
@@ -482,6 +527,14 @@ pub(crate) fn fingerprint_lines(fp: &str) -> Vec<String> {
     parts.chunks(16).map(|c| c.join(":")).collect()
 }
 
+/// The addresses listed (one per row, each copyable) under "Listening on".
+pub(crate) fn serving_urls<'a>(serve: &RemoteServe, status: Option<&'a ServerStatus>) -> &'a [String] {
+    match (serve, status) {
+        (RemoteServe::Serving, Some(st)) => &st.urls,
+        _ => &[],
+    }
+}
+
 /// The Status line under the On/Off chips.
 pub(crate) fn status_line(
     serve: &RemoteServe,
@@ -490,7 +543,7 @@ pub(crate) fn status_line(
 ) -> String {
     match serve {
         RemoteServe::Serving => match status {
-            Some(st) if !st.urls.is_empty() => format!("Listening on {}", st.urls.join(" · ")),
+            Some(st) if !st.urls.is_empty() => "Listening on".into(),
             _ => "Listening".into(),
         },
         RemoteServe::OtherBuild => "Served by the other openOrchestra build".into(),
@@ -571,10 +624,14 @@ mod tests {
             ca_fingerprint: "AB:CD".into(),
             ..ServerStatus::default()
         };
+        // The URLs themselves are listed one per row below, each copyable.
+        assert_eq!(status_line(&RemoteServe::Serving, Some(&st), false), "Listening on");
         assert_eq!(
-            status_line(&RemoteServe::Serving, Some(&st), false),
-            "Listening on https://mac.local:7443/ · https://192.168.1.20:7443/"
+            serving_urls(&RemoteServe::Serving, Some(&st)),
+            ["https://mac.local:7443/", "https://192.168.1.20:7443/"]
         );
+        assert!(serving_urls(&RemoteServe::OtherBuild, Some(&st)).is_empty());
+        assert!(serving_urls(&RemoteServe::Serving, None).is_empty());
         assert_eq!(status_line(&RemoteServe::Serving, None, false), "Listening");
         assert_eq!(
             status_line(&RemoteServe::OtherBuild, None, false),
