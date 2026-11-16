@@ -470,7 +470,7 @@ impl SessionHub {
     /// Resize the window to `cols`x`rows` until the returned guard (and every
     /// other outstanding guard) is dropped; then the original size returns.
     pub async fn fit(&self, cols: u16, rows: u16) -> io::Result<FitGuard> {
-        if cols == 0 || rows == 0 || cols > 10_000 || rows > 10_000 {
+        if !fit_size_ok(cols, rows) {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "bad size"));
         }
         let (done, rx) = oneshot::channel();
@@ -495,6 +495,16 @@ impl Drop for SessionHub {
     fn drop(&mut self) {
         let _ = self.cmds.send(Cmd::Shutdown { done: None });
     }
+}
+
+/// Largest window a phone may fit the pane to. A real phone or tablet is far
+/// below this; anything bigger is a bad client and would make tmux allocate
+/// a huge grid for every pane in the window.
+pub const MAX_FIT_COLS: u16 = 500;
+pub const MAX_FIT_ROWS: u16 = 300;
+
+fn fit_size_ok(cols: u16, rows: u16) -> bool {
+    (1..=MAX_FIT_COLS).contains(&cols) && (1..=MAX_FIT_ROWS).contains(&rows)
 }
 
 fn hub_gone() -> io::Error {
@@ -884,6 +894,17 @@ fn run_until(mut cmd: std::process::Command, deadline: Instant) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fit_size_bounds() {
+        assert!(fit_size_ok(1, 1));
+        assert!(fit_size_ok(MAX_FIT_COLS, MAX_FIT_ROWS));
+        assert!(!fit_size_ok(0, 40));
+        assert!(!fit_size_ok(80, 0));
+        assert!(!fit_size_ok(MAX_FIT_COLS + 1, 40));
+        assert!(!fit_size_ok(80, MAX_FIT_ROWS + 1));
+        assert!(!fit_size_ok(10_000, 10_000));
+    }
 
     #[test]
     fn restore_fits_blocking_without_fits_is_instant() {
