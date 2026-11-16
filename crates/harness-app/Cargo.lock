@@ -4237,6 +4237,8 @@ dependencies = [
  "terminal_view",
  "theme",
  "theme_settings",
+ "time",
+ "tokio",
  "tree-sitter-bash",
  "tree-sitter-css",
  "tree-sitter-go",

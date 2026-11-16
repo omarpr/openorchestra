@@ -94,6 +94,10 @@ a2a-broker = { path = "../a2a-broker" }
 pi-client = { path = "../pi-client" }
 # oo-remote: phone-reachable HTTP/SSE server + embedded PWA for remote agent control.
 oo-remote = { path = "../remote" }
+# Name the snapshot channel type and format `status_since` (RFC 3339); both
+# already in the graph through oo-remote.
+tokio = { version = "1", features = ["sync"] }
+time = { version = "0.3", features = ["formatting"] }
 
 # Proper terminal view (pty sizing, input, IME, scrollback, selection) replacing
 # the custom renderer. workspace + project are already compiled transitively by

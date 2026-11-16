@@ -589,6 +589,11 @@ pub struct HarnessWorkspace {
     note_at: Option<std::time::Instant>,
     forge_status: HashMap<String, BranchStatus>,
     agent_status: HashMap<PathBuf, AgentState>,
+    /// When each worktree's status last changed, and the tool its latest
+    /// signal reported — the phone's "waiting since" and tool chip.
+    agent_since: HashMap<PathBuf, (std::time::SystemTime, Option<String>)>,
+    /// oo-remote: marks cache, phone server lifecycle, keep-awake.
+    remote: remote::RemoteRuntime,
     /// Fidelity of the adapter behind each worktree's status, so the UI can be
     /// honest about how much the pill actually knows (R11).
     agent_fidelity: HashMap<PathBuf, WaitFidelity>,
@@ -710,6 +715,7 @@ pub(crate) mod lifecycle;
 mod a2a;
 mod agent_restart;
 mod coordinator;
+pub(crate) mod remote;
 mod state;
 mod ui;
 

@@ -235,6 +235,8 @@ impl HarnessWorkspace {
             note_at: None,
             forge_status: HashMap::new(),
             agent_status: HashMap::new(),
+            agent_since: HashMap::new(),
+            remote: super::remote::RemoteRuntime::new(&data_dir),
             agent_fidelity: HashMap::new(),
             _poller: Some(poller),
             status_source,
@@ -303,6 +305,8 @@ impl HarnessWorkspace {
             this.activate_hosted_tool_panel(this.prefs.tool_tab, window, cx);
         }
         this.recompute_diff(cx);
+        // Phone remote: watch remote.json and start serving if it's enabled.
+        this.remote_init(cx);
 
         // Route the window's close button (red X) through the same
         // keep-or-close-terminals prompt as ⌘Q. `request_quit` returns whether

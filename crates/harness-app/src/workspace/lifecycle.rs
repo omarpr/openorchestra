@@ -347,6 +347,7 @@ impl HarnessWorkspace {
             if let Some(slug) = self.task_store.get(tid).map(|t| t.slug.clone()) {
                 let dir = clear_coordinator_status(&self.data_dir.join("tasks"), &slug);
                 self.agent_status.remove(&dir);
+                self.agent_since.remove(&dir);
             }
             let legacy = format!("task:{tid}");
             self.teardown_sessions(&legacy);

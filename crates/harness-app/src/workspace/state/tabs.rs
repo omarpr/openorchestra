@@ -283,11 +283,14 @@ impl HarnessWorkspace {
             // Explicit close tears the session down (only app-exit detaches).
             crate::tmux::kill_session(&crate::tmux::session_name(&key, id));
         }
+        // A closed tab is never reachable from a phone again.
+        self.remote_unmark(&key, Some(id));
         if was_agent {
             // Unknown (renders as IDLE) rather than Idle: we killed the process,
             // we didn't observe a clean finish. A file event can't unstick this
             // because the dead agent will never touch status.json again.
             self.conductor.stopped(&r.path);
+            self.agent_since.insert(r.path.clone(), (std::time::SystemTime::now(), None));
             self.agent_status.insert(r.path.clone(), AgentState::Unknown);
         }
         let Some(pane) = self.panes.get_mut(&key) else { return };
@@ -394,6 +397,8 @@ impl HarnessWorkspace {
         }
         self.panes_state.remove(id);
         crate::panes_state::save(&self.panes_path, &mut self.panes_state);
+        // The worktree's tabs are gone: so are their remote marks.
+        self.remote_unmark(id, None);
     }
 
     /// Draw the next globally-unique, persisted tab id.
