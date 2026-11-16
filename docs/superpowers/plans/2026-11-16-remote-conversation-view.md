@@ -128,7 +128,7 @@ User-requested fixes to the existing PWA, done first.
 **Interfaces:**
 - Consumes: Tasks 1–2; existing auth/marks helpers in api.rs (`session_for`-style lookup, `current_file`, closed-reason handling used by `/api/events`).
 - Produces:
-  - `AgentInfo` gains `#[serde(skip)] pub transcript: Option<PathBuf>` and `pub has_conversation: bool` (server sets it: `transcript.is_some() && TranscriptKind::from_agent_kind(agent_kind).is_some()`; the app need not compute it).
+  - `AgentInfo` gains `pub branch: Option<String>` (sent to the phone; filled by the app in Task 4), `#[serde(skip)] pub transcript: Option<PathBuf>` and `pub has_conversation: bool` (server sets it: `transcript.is_some() && TranscriptKind::from_agent_kind(agent_kind).is_some()`; the app need not compute it).
   - `GET /api/agents/{id}/conversation` (SSE, bearer auth): on connect `event: entries` data `{"replace":true,"entries":[…]}`; then `{"replace":false,"entries":[…]}` for `Upsert`, `{"replace":true,…}` for `Replace`; a changed transcript path for the id (snapshot update) → a fresh `replace:true` from the new tail; `event: closed` data `unmarked|revoked|disabled` then end; `:keepalive` every 15 s. 404 for unknown/unmarked id or `has_conversation == false`.
   - `GET /api/agents/{id}/conversation/tool/{tool_id}` → 200 `{"text","is_error","truncated"}`; 404 unknown tool/id.
 - [ ] **Step 1: Failing tests** (temp transcript files; snapshot via the test `snapshot_channel`):
@@ -156,6 +156,7 @@ User-requested fixes to the existing PWA, done first.
   - `RemoteRuntime.session_files: HashMap<(PathBuf /*worktree root*/, String /*agent kind*/), PathBuf>` and `RemoteRuntime.latest_session: HashMap<PathBuf, PathBuf>` (most recent per root, any kind).
   - `fn record_session(&mut self, root: &Path, kind: &str, file: &Path)` — called from `apply_agent` when `signal.session_file` is Some (kind = `signal.kind.as_str()`).
   - `build_snapshot(file, sources, status, since, session_files, latest_session) -> Snapshot`: an `Agent(kind)` tab gets `session_files[(root, kind)]`; a Shell tab (kind None) gets `latest_session[root]`.
+  - `MarkSource` gains `branch: String` (main checkout → the repo's `head_branch`; worktree / task member → that worktree's `branch`; coordinator → empty) and `build_snapshot` copies it into `AgentInfo.branch` (`None` when empty). Test `snapshot_carries_branch`.
   - Seeding: in `remote_init`, for each registry entry with a `session_file`, `record_session(worktree path, entry.agent_kind.as_str(), file)`.
 - [ ] **Step 1: Failing tests:**
   - `agent_tab_gets_its_own_kind_transcript`: root R has claude-code → /c.jsonl and pi → /p.jsonl; a `claude-code` tab gets /c.jsonl, a `pi` tab /p.jsonl.
@@ -179,6 +180,7 @@ User-requested fixes to the existing PWA, done first.
   - `type ConvEntry` (mirrors `Entry`), `function mergeEntries(list: ConvEntry[], incoming: ConvEntry[], replace: boolean): ConvEntry[]` (replace → incoming; else known id replaced in place, unknown appended; result capped to the last 200).
   - `function useConversation(id: string): { entries: ConvEntry[]; connected: boolean; closed?: string }` (reconnect with backoff; `closed` handling like the terminal: `revoked` → clear token).
   - `fetchToolResult(id, toolId): Promise<{text: string; is_error: boolean; truncated: boolean}>`.
+- **Agent header (user request):** the agent screen header shows `[AgentIcon from Task 0] {project} · {branch ?? worktree} · {agent display name}` on one line, ellipsing the middle part on narrow screens; display names: `claude-code`→`Claude Code`, `pi`→`pi`, `codex`→`Codex`, `kimi`→`Kimi`, `opencode`→`OpenCode`, other → the slug. Test `agent header shows repo · branch · agent`.
 - Behaviour: user entries right-aligned bubbles; assistant entries left, Markdown rendered with a library that escapes raw HTML (no `dangerouslySetInnerHTML` of unsanitized input); tool entries one line `{icon} {summary}` with ✓/✗/spinner for ok/error/pending, tap → `ToolSheet` (bottom sheet, monospace, scrollable, `…[truncated]` note); thinking collapsed (`💭 Thinking…` + first line / `💭 Thought for {round(ms/1000)} s` / `💭 Thinking (not recorded)`), tap expands when text exists; notice entries centered muted text. Sticks to bottom unless scrolled up (> 80 px from bottom) → `New messages ↓` pill that scrolls down. Header switch `Conversation` | `Terminal` (shadcn Tabs, ≥ 44 px), default Conversation when `has_conversation`, else Terminal with the switch hidden; choice saved in `localStorage` `oo.view.<id>` (try/catch). The terminal socket only connects while the Terminal tab is shown.
 - [ ] **Step 1: Failing tests:**
   - `mergeEntries`: replace; upsert in place keeps order; unknown appended; cap 200.
