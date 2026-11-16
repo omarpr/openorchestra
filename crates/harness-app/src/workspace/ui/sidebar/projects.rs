@@ -474,7 +474,8 @@ impl HarnessWorkspace {
     }
 
     /// The project header's ⋯ / right-click menu.
-    /// "Reorder projects": every project with ▲ / ▼, applied as you click.
+    /// "Reorder projects": every project with a four-dot grip on the right;
+    /// drag a row by its grip onto another row to move it there.
     pub(crate) fn render_reorder_projects(
         &self,
         hx: &HarnessTheme,
@@ -482,42 +483,39 @@ impl HarnessWorkspace {
         y: Pixels,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let n = self.data.repos.len();
-        let arrow = |id: String, glyph: &'static str, enabled: bool, name: String, up: bool| {
-            let base = div()
-                .id(gpui::SharedString::from(id))
-                .size(px(22.0))
+        // Four dots in a 2×2 grid — the drag handle.
+        let grip = |color: gpui::Rgba| {
+            let dot = || div().size(px(3.0)).rounded_full().bg(color);
+            div()
                 .flex()
-                .flex_none()
-                .items_center()
-                .justify_center()
-                .rounded_md()
-                .text_xs()
-                .child(glyph);
-            if enabled {
-                base.text_color(hx.tx1)
-                    .cursor_pointer()
-                    .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
-                    .on_click(cx.listener(move |ws, _, _, cx| {
-                        cx.stop_propagation();
-                        ws.shift_repo(&name, up, cx);
-                    }))
-            } else {
-                base.text_color(tint(hx.tx2, 0.35))
-            }
+                .flex_col()
+                .gap(px(3.0))
+                .child(div().flex().gap(px(3.0)).child(dot()).child(dot()))
+                .child(div().flex().gap(px(3.0)).child(dot()).child(dot()))
         };
         let mut list = div().flex().flex_col().gap_0p5();
         for (i, repo) in self.data.repos.iter().enumerate() {
+            let drop_name = repo.name.clone();
+            let ghost_label = repo.name.clone();
+            let ghost_theme = hx.clone();
+            let drop_bg = tint(hx.accent, 0.16);
             list = list.child(
                 div()
+                    .id(("reorder-row", i))
                     .flex()
                     .items_center()
                     .gap_1()
                     .pl_2()
                     .pr_1()
-                    .py_0p5()
+                    .py_1()
                     .rounded_md()
                     .hover(|d| d.bg(hx.surface))
+                    // The row under the cursor while dragging is where the
+                    // dragged project will land.
+                    .drag_over::<DraggedProjectRow>(move |d, _, _, _| d.bg(drop_bg))
+                    .on_drop(cx.listener(move |ws, dragged: &DraggedProjectRow, _, cx| {
+                        ws.move_repo(&dragged.name, &drop_name, cx);
+                    }))
                     .child(
                         div()
                             .flex_1()
@@ -529,8 +527,25 @@ impl HarnessWorkspace {
                             .text_color(hx.tx0)
                             .child(repo.name.clone()),
                     )
-                    .child(arrow(format!("reorder-up-{i}"), "▲", i > 0, repo.name.clone(), true))
-                    .child(arrow(format!("reorder-down-{i}"), "▼", i + 1 < n, repo.name.clone(), false)),
+                    .child(
+                        div()
+                            .id(("reorder-grip", i))
+                            .size(px(22.0))
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .cursor(gpui::CursorStyle::OpenHand)
+                            .tooltip(tip("Drag to reorder"))
+                            .hover(|d| d.bg(hx.surface_hover))
+                            .child(grip(hx.tx2))
+                            .on_drag(DraggedProjectRow { name: repo.name.clone() }, move |_, _, _, cx| {
+                                let label = ghost_label.clone();
+                                let hx = ghost_theme.clone();
+                                cx.new(|_| crate::workspace::ui::center::DragGhost { label, hx })
+                            }),
+                    ),
             );
         }
         div()

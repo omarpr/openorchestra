@@ -178,6 +178,11 @@ fn reordered<T: PartialEq + Clone>(items: &[T], dragged: T, onto: T) -> Vec<T> {
     out
 }
 
+/// A project row being dragged in the "Reorder projects" panel, by name.
+pub(crate) struct DraggedProjectRow {
+    name: String,
+}
+
 /// `items` with `item` swapped with its neighbour above (`up`) or below.
 /// At the edge, or for an unknown item, the order is unchanged.
 fn shifted<T: PartialEq + Clone>(items: &[T], item: &T, up: bool) -> Vec<T> {

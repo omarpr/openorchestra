@@ -237,7 +237,16 @@ impl HarnessWorkspace {
         cx.notify();
     }
 
-    /// "Move up" / "Move down" from the project menu and the reorder panel.
+    /// Drop project `dragged` onto `onto`'s position (reorder panel).
+    pub(crate) fn move_repo(&mut self, dragged: &str, onto: &str, cx: &mut Context<Self>) {
+        let (Some(from), Some(to)) = (self.repo_root_for_name(dragged), self.repo_root_for_name(onto)) else {
+            return;
+        };
+        let order = reordered(&self.repo_roots, from, to);
+        self.apply_repo_order(order, cx);
+    }
+
+    /// "Move up" / "Move down" from the project menu.
     pub(crate) fn shift_repo(&mut self, name: &str, up: bool, cx: &mut Context<Self>) {
         let Some(root) = self.repo_root_for_name(name) else { return };
         let order = shifted(&self.repo_roots, &root, up);
