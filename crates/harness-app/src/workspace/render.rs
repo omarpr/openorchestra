@@ -272,6 +272,7 @@ impl Render for HarnessWorkspace {
                         (f32::from(win.width), f32::from(win.height)),
                         rows,
                         list_max_h,
+                        f32::from(window.rem_size()),
                     );
                     self.render_reorder_panel(&hx, list, px(x), px(y), px(list_max_h), cx)
                 });

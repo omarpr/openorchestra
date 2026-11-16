@@ -187,8 +187,9 @@ fn reorder_base<T: Clone>(disk: Vec<T>, current: &[T]) -> Vec<T> {
     if disk.is_empty() { current.to_vec() } else { disk }
 }
 
-/// Reorder panel geometry: its width, a row's height (text + padding +
-/// gap), and the title, Done button and padding around the list.
+/// Reorder panel geometry at the default 16 px rem: its width, a row's
+/// height (text + padding + gap; at least the 22 px grip box), and the
+/// title, Done button and padding around the list.
 const REORDER_PANEL_W: f32 = 240.0;
 const REORDER_ROW_H: f32 = 32.0;
 const REORDER_PANEL_CHROME_H: f32 = 80.0;
@@ -196,11 +197,20 @@ const REORDER_PANEL_MARGIN: f32 = 8.0;
 
 /// Where the reorder panel goes for a click-derived `origin` (x, y): moved
 /// so the whole panel — title, the list (capped at `list_max_h`) and Done —
-/// stays inside the window, at least a margin from each edge. A window too
-/// small for the panel pins it to the top-left margin.
-fn reorder_panel_origin(origin: (f32, f32), window: (f32, f32), rows: usize, list_max_h: f32) -> (f32, f32) {
+/// stays inside the window, at least a margin from each edge. Heights grow
+/// with the UI font size (`rem`, px); they never shrink below the 16 px
+/// sizes, since parts of a row are fixed px. A window too small for the
+/// panel pins it to the top-left margin.
+fn reorder_panel_origin(
+    origin: (f32, f32),
+    window: (f32, f32),
+    rows: usize,
+    list_max_h: f32,
+    rem: f32,
+) -> (f32, f32) {
     let m = REORDER_PANEL_MARGIN;
-    let panel_h = (rows as f32 * REORDER_ROW_H).min(list_max_h) + REORDER_PANEL_CHROME_H;
+    let scale = (rem / 16.0).max(1.0);
+    let panel_h = (rows as f32 * REORDER_ROW_H * scale).min(list_max_h) + REORDER_PANEL_CHROME_H * scale;
     let x = origin.0.min(window.0 - REORDER_PANEL_W - m).max(m);
     let y = origin.1.min(window.1 - panel_h - m).max(m);
     (x, y)
