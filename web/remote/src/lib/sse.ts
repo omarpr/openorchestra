@@ -7,14 +7,16 @@ export interface SseEvent {
 
 /** Incremental SSE parser. `carry` is the unfinished tail to pass with the next chunk. */
 export function parseSse(chunk: string, carry: string): { events: SseEvent[]; carry: string } {
-  const buf = (carry + chunk).replace(/\r\n?/g, "\n");
-  const frames = buf.split("\n\n");
-  const rest = frames.pop() ?? "";
+  let raw = carry + chunk;
+  // A lone trailing \r may be the first half of a CRLF split across chunks.
+  const heldCr = raw.endsWith("\r");
+  if (heldCr) raw = raw.slice(0, -1);
+  const frames = raw.replace(/\r\n?/g, "\n").split("\n\n");
+  const rest = (frames.pop() ?? "") + (heldCr ? "\r" : "");
   const events: SseEvent[] = [];
   for (const frame of frames) {
     let event = "message";
     const data: string[] = [];
-    let any = false;
     for (const line of frame.split("\n")) {
       if (line === "" || line.startsWith(":")) continue;
       const i = line.indexOf(":");
@@ -23,13 +25,11 @@ export function parseSse(chunk: string, carry: string): { events: SseEvent[]; ca
       if (value.startsWith(" ")) value = value.slice(1);
       if (field === "event") {
         event = value;
-        any = true;
       } else if (field === "data") {
         data.push(value);
-        any = true;
       }
     }
-    if (any) events.push({ event, data: data.join("\n") });
+    if (data.length > 0) events.push({ event, data: data.join("\n") });
   }
   return { events, carry: rest };
 }

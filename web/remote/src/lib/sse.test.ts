@@ -33,4 +33,16 @@ describe("parseSse", () => {
     const r = parseSse("data: hi\r\n\r\n", "");
     expect(r.events).toEqual([{ event: "message", data: "hi" }]);
   });
+
+  it("holds back a trailing lone CR so a split CRLF is one frame", () => {
+    const a = parseSse("event: a\r", "");
+    expect(a.events).toEqual([]);
+    const b = parseSse("\ndata: 1\r\n\r\n", a.carry);
+    expect(b.events).toEqual([{ event: "a", data: "1" }]);
+  });
+
+  it("does not dispatch frames without data", () => {
+    const r = parseSse("event: ping\n\nevent: a\ndata: 1\n\n", "");
+    expect(r.events).toEqual([{ event: "a", data: "1" }]);
+  });
 });
