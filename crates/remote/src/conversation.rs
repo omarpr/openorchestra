@@ -102,11 +102,12 @@ fn parse_lines(text: &str) -> Vec<Value> {
 }
 
 /// Records on the active branch, oldest first. `start_ok` picks branch tips;
-/// the last such record is the tip. Parents are followed through every record.
+/// the last such record is the tip. `parent_of` is followed through every
+/// record.
 fn active_branch<'a>(
     records: &'a [Value],
     id_key: &str,
-    parent_key: &str,
+    parent_of: impl Fn(&'a Value) -> Option<&'a str>,
     start_ok: impl Fn(&Value) -> bool,
 ) -> Vec<&'a Value> {
     let mut by_id: HashMap<&str, &Value> = HashMap::new();
@@ -121,7 +122,7 @@ fn active_branch<'a>(
     let mut out = vec![tip];
     let mut seen: HashSet<&str> = HashSet::new();
     let mut cur = tip;
-    while let Some(parent) = cur[parent_key].as_str() {
+    while let Some(parent) = parent_of(cur) {
         if !seen.insert(parent) {
             break;
         }
@@ -159,11 +160,11 @@ fn text_entry(id: String, kind: EntryKind, text: &str, at: Option<String>) -> Op
     })
 }
 
-fn notice_entry(id: String, at: Option<String>) -> Entry {
+fn notice_entry(id: String, text: &str, at: Option<String>) -> Entry {
     Entry {
         id,
         kind: EntryKind::Notice,
-        text: Some("[image]".to_string()),
+        text: Some(text.to_string()),
         tool: None,
         duration_ms: None,
         at,
@@ -218,6 +219,71 @@ fn claude_blocks(record: &Value) -> Vec<Value> {
     }
 }
 
+fn is_compact_boundary(r: &Value) -> bool {
+    r["type"] == "system" && r["subtype"] == "compact_boundary"
+}
+
+/// Tags Claude Code wraps around slash commands and `!` shell commands in
+/// user records, and (below) around their output.
+const MARKUP_TAGS: [&str; 5] = [
+    "command-name",
+    "command-message",
+    "command-args",
+    "local-command-caveat",
+    "bash-input",
+];
+const OUTPUT_TAGS: [&str; 4] = [
+    "local-command-stdout",
+    "local-command-stderr",
+    "bash-stdout",
+    "bash-stderr",
+];
+
+/// The text inside the first `<tag>…</tag>` in `s`.
+fn tag_text<'a>(s: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = s.find(&open)? + open.len();
+    let len = s[start..].find(&close)?;
+    Some(s[start..start + len].trim())
+}
+
+/// User text that is Claude Code command markup, not a prompt: `None` for a
+/// plain prompt, `Some(None)` to drop it, `Some(Some(notice))` to show it as
+/// a notice. Only text that starts with a known tag counts, so a prompt
+/// quoting a tag stays a prompt.
+fn command_markup(text: &str) -> Option<Option<String>> {
+    let t = text.trim_start();
+    let known = MARKUP_TAGS
+        .iter()
+        .chain(OUTPUT_TAGS.iter())
+        .any(|tag| t.starts_with(&format!("<{tag}>")));
+    if !known {
+        return None;
+    }
+    if let Some(name) = tag_text(t, "command-name") {
+        let args = tag_text(t, "command-args").unwrap_or_default();
+        let line = if args.is_empty() {
+            name.to_string()
+        } else {
+            format!("{name} {args}")
+        };
+        return Some(Some(clip(line.lines().next().unwrap_or_default())));
+    }
+    if let Some(cmd) = tag_text(t, "bash-input") {
+        return Some(Some(clip(&format!(
+            "! {}",
+            cmd.lines().next().unwrap_or_default()
+        ))));
+    }
+    let out = OUTPUT_TAGS
+        .iter()
+        .filter_map(|tag| tag_text(t, tag))
+        .find(|o| !o.is_empty())
+        .and_then(|o| o.lines().map(str::trim).find(|l| !l.is_empty()));
+    Some(out.map(clip))
+}
+
 fn claude_entries(records: &[Value], cwd: Option<&Path>) -> Vec<Entry> {
     let mut results: HashMap<String, bool> = HashMap::new();
     for r in records {
@@ -231,15 +297,36 @@ fn claude_entries(records: &[Value], cwd: Option<&Path>) -> Vec<Entry> {
             }
         }
     }
-    let branch = active_branch(records, "uuid", "parentUuid", |r| {
-        (r["type"] == "user" || r["type"] == "assistant") && r["isSidechain"] != true
-    });
+    let branch = active_branch(
+        records,
+        "uuid",
+        // A compaction boundary cuts `parentUuid`; `logicalParentUuid` keeps
+        // the history before it reachable.
+        |r| {
+            r["parentUuid"].as_str().or_else(|| {
+                is_compact_boundary(r)
+                    .then(|| r["logicalParentUuid"].as_str())
+                    .flatten()
+            })
+        },
+        |r| (r["type"] == "user" || r["type"] == "assistant") && r["isSidechain"] != true,
+    );
     let mut out = Vec::new();
     for r in branch {
         let role = r["type"].as_str().unwrap_or_default();
+        if is_compact_boundary(r) {
+            let id = format!("{}:compact", r["uuid"].as_str().unwrap_or_default());
+            let at = r["timestamp"].as_str().map(str::to_string);
+            out.push(notice_entry(id, "Conversation compacted", at));
+            continue;
+        }
+        // The post-compaction summary is written as a user record; it is for
+        // the model, not the reader (and names the transcript's path).
         if (role != "user" && role != "assistant")
             || r["isSidechain"] == true
             || r["isMeta"] == true
+            || r["isCompactSummary"] == true
+            || r["isVisibleInTranscriptOnly"] == true
         {
             continue;
         }
@@ -248,14 +335,20 @@ fn claude_entries(records: &[Value], cwd: Option<&Path>) -> Vec<Entry> {
         for (i, b) in claude_blocks(r).iter().enumerate() {
             let id = format!("{uuid}:{i}");
             let entry = match b["type"].as_str().unwrap_or_default() {
-                "text" => {
-                    let kind = if role == "user" {
-                        EntryKind::User
-                    } else {
-                        EntryKind::Assistant
-                    };
-                    text_entry(id, kind, b["text"].as_str().unwrap_or_default(), at.clone())
+                "text" if role == "user" => {
+                    let text = b["text"].as_str().unwrap_or_default();
+                    match command_markup(text) {
+                        Some(Some(notice)) => Some(notice_entry(id, &notice, at.clone())),
+                        Some(None) => None,
+                        None => text_entry(id, EntryKind::User, text, at.clone()),
+                    }
                 }
+                "text" => text_entry(
+                    id,
+                    EntryKind::Assistant,
+                    b["text"].as_str().unwrap_or_default(),
+                    at.clone(),
+                ),
                 "thinking" if role == "assistant" => Some(thinking_entry(
                     id,
                     b["thinking"].as_str().unwrap_or_default(),
@@ -279,7 +372,7 @@ fn claude_entries(records: &[Value], cwd: Option<&Path>) -> Vec<Entry> {
                         at.clone(),
                     ))
                 }
-                "image" => Some(notice_entry(id, at.clone())),
+                "image" => Some(notice_entry(id, "[image]", at.clone())),
                 _ => None,
             };
             out.extend(entry);
@@ -308,7 +401,12 @@ fn pi_entries(records: &[Value], cwd: Option<&Path>) -> Vec<Entry> {
             }
         }
     }
-    let branch = active_branch(records, "id", "parentId", |r| r["type"] == "message");
+    let branch = active_branch(
+        records,
+        "id",
+        |r| r["parentId"].as_str(),
+        |r| r["type"] == "message",
+    );
     let mut out = Vec::new();
     for r in branch {
         if r["type"] != "message" {
@@ -351,7 +449,7 @@ fn pi_entries(records: &[Value], cwd: Option<&Path>) -> Vec<Entry> {
                         at.clone(),
                     ))
                 }
-                "image" => Some(notice_entry(id, at.clone())),
+                "image" => Some(notice_entry(id, "[image]", at.clone())),
                 _ => None,
             };
             out.extend(entry);
@@ -460,17 +558,18 @@ pub fn tool_summary(name: &str, input: &Value, cwd: Option<&Path>) -> String {
         "task" | "agent" => s("description").map(clip),
         _ => None,
     };
-    if let Some(k) = known {
-        return k;
+    let summary = known.or_else(|| {
+        input.as_object().and_then(|obj| {
+            obj.values()
+                .find_map(Value::as_str)
+                .map(|t| clip(t.lines().next().unwrap_or_default()))
+        })
+    });
+    match summary {
+        Some(s) if !s.trim().is_empty() => s,
+        // No string input (TodoWrite's list) or a blank one: the tool's name.
+        _ => name.to_string(),
     }
-    if let Some(obj) = input.as_object() {
-        for v in obj.values() {
-            if let Some(t) = v.as_str() {
-                return clip(t.lines().next().unwrap_or_default());
-            }
-        }
-    }
-    String::new()
 }
 
 #[cfg(test)]
@@ -505,6 +604,91 @@ mod tests {
         assert_eq!(t.status, ToolStatus::Error);
         assert_eq!(e[4].kind, EntryKind::Assistant);
         assert_eq!(e[4].text.as_deref(), Some("Fixed."));
+    }
+
+    const COMPACT: &str = include_str!("../tests/fixtures/claude-compact.jsonl");
+
+    fn shown(e: &[Entry]) -> Vec<(EntryKind, String)> {
+        e.iter()
+            .map(|e| {
+                let t = e
+                    .text
+                    .clone()
+                    .or_else(|| e.tool.as_ref().map(|t| t.summary.clone()))
+                    .unwrap_or_default();
+                (e.kind, t)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn compaction_shows_a_notice_keeps_history_and_hides_the_summary() {
+        let e = parse_entries(TranscriptKind::ClaudeCode, COMPACT, None);
+        assert!(
+            e.iter()
+                .all(|e| !e.text.as_deref().unwrap_or_default().contains(".jsonl")),
+            "{e:?}"
+        );
+        let got = shown(&e);
+        let n = |s: &str| (EntryKind::Notice, s.to_string());
+        assert_eq!(
+            got,
+            [
+                (EntryKind::User, "rename the widget".to_string()),
+                (EntryKind::Assistant, "Renamed it.".to_string()),
+                n("/compact"),
+                n("Conversation compacted"),
+                n("Compacted. ctrl+o to see full summary"),
+                n("! git status"),
+                n("On branch main"),
+                (EntryKind::User, "now add a test".to_string()),
+                (EntryKind::Tool, "TodoWrite".to_string()),
+            ]
+        );
+        let ids: HashSet<_> = e.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids.len(), e.len(), "ids are unique");
+    }
+
+    #[test]
+    fn compaction_without_the_earlier_history_still_shows_the_notice() {
+        // The 8 MiB window may start after the boundary's logical parent.
+        let tail: String = COMPACT.lines().skip(3).collect::<Vec<_>>().join("\n");
+        let got = shown(&parse_entries(TranscriptKind::ClaudeCode, &tail, None));
+        assert_eq!(
+            got[0],
+            (EntryKind::Notice, "Conversation compacted".to_string())
+        );
+        assert_eq!(got.len(), 6);
+    }
+
+    #[test]
+    fn slash_command_markup_never_shows_raw_tags() {
+        let rec = |c: &str| {
+            json!({"type":"user","uuid":"u","parentUuid":null,"message":{"content":c}}).to_string()
+        };
+        let cases = [
+            (
+                "<command-message>review</command-message>\n<command-name>/review</command-name>\n<command-args>src/a.rs</command-args>",
+                Some("/review src/a.rs"),
+            ),
+            ("<local-command-stdout></local-command-stdout>", None),
+            ("<local-command-caveat>Caveat: ignore</local-command-caveat>", None),
+            ("<bash-stderr>boom\nmore</bash-stderr>", Some("boom")),
+        ];
+        for (content, want) in cases {
+            let e = parse_entries(TranscriptKind::ClaudeCode, &rec(content), None);
+            assert_eq!(
+                e.iter().filter_map(|e| e.text.as_deref()).next(),
+                want,
+                "{content}"
+            );
+            assert!(e.iter().all(|e| e.kind == EntryKind::Notice));
+        }
+        // A prompt that merely quotes a tag stays a prompt.
+        let quoted = "why does <bash-input> show up?";
+        let e = parse_entries(TranscriptKind::ClaudeCode, &rec(quoted), None);
+        assert_eq!(e[0].kind, EntryKind::User);
+        assert_eq!(e[0].text.as_deref(), Some(quoted));
     }
 
     #[test]
@@ -598,6 +782,16 @@ mod tests {
             "docs.rs"
         );
         assert_eq!(tool_summary("Mystery", &json!({"q": "abc"}), None), "abc");
+        // No string input (or a blank one): the tool's name, never a blank line.
+        assert_eq!(
+            tool_summary("TodoWrite", &json!({"todos": [{"content": "x"}]}), None),
+            "TodoWrite"
+        );
+        assert_eq!(
+            tool_summary("Bash", &json!({"command": "  "}), None),
+            "Bash"
+        );
+        assert_eq!(tool_summary("Mystery", &json!({}), None), "Mystery");
     }
 
     #[test]
