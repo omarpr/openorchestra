@@ -249,14 +249,44 @@ impl HarnessWorkspace {
 
     /// PROJECTS' trailing `+` — adds a git repository.
     fn projects_add_button(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
-        self.section_add_button(
+        let add = self.section_add_button(
             hx,
             "project-plus",
             "Add a git repository as a project",
             |ws, window, cx| ws.add_project(window, cx),
             cx,
         )
-        .into_any_element()
+        .into_any_element();
+        // Reorder sits left of `+`, only once there is something to reorder.
+        if self.data.repos.len() < 2 {
+            return add;
+        }
+        let reorder = div()
+            .id("project-reorder")
+            .size(px(20.0))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .rounded_md()
+            .text_xs()
+            .text_color(hx.tx1)
+            .cursor_pointer()
+            .tooltip(tip("Reorder projects"))
+            .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
+            .child("⇅")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|ws, ev: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    ws.project_menu = None;
+                    ws.reorder_projects = Some((ev.position.x - px(200.0), ev.position.y + px(10.0)));
+                    cx.notify();
+                }),
+            )
+            // The header strip toggles collapse on click; keep that click here.
+            .on_click(|_, _, cx| cx.stop_propagation());
+        div().flex().items_center().gap_1().child(reorder).child(add).into_any_element()
     }
 
     /// TASKS' trailing `+` — opens the inline new-task editor, expanding the

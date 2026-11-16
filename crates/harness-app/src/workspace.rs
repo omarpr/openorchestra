@@ -192,11 +192,6 @@ fn shifted<T: PartialEq + Clone>(items: &[T], item: &T, up: bool) -> Vec<T> {
     out
 }
 
-/// The project being dragged in the sidebar, by name.
-pub(crate) struct DraggedProject {
-    name: String,
-}
-
 pub(crate) struct Tab {
     /// When this tab hosts an agent CLI, its kind — the tab strip renders the
     /// agent's colored mark so five agent tabs stay tellable at a glance.
@@ -591,6 +586,8 @@ pub struct HarnessWorkspace {
     menu: Option<CardMenu>,
     /// The ⋯ menu on a project header: repo name and where it opened.
     project_menu: Option<(String, Pixels, Pixels)>,
+    /// The "Reorder projects" panel from PROJECTS' header, and where it opened.
+    reorder_projects: Option<(Pixels, Pixels)>,
     /// Open "new tab" menu, anchored under the `+` in the tab strip.
     tab_menu: Option<Pixels>,
     /// Right-click menu on a Shell/Agent tab: the tab id and where it opened.

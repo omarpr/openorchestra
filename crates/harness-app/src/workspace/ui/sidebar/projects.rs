@@ -111,22 +111,7 @@ impl HarnessWorkspace {
                     })
                 }),
             );
-        // Drag a project header onto another to reorder the PROJECTS list.
-        let ghost_label = repo.name.clone();
-        let ghost_theme = hx.clone();
-        let drop_name = repo.name.clone();
-        let drop_bg = hx.surface;
         let header = div()
-            .id(repo_element_id("repo-drag", &repo.name))
-            .on_drag(DraggedProject { name: repo.name.clone() }, move |_, _, _, cx| {
-                let label = ghost_label.clone();
-                let hx = ghost_theme.clone();
-                cx.new(|_| crate::workspace::ui::center::DragGhost { label, hx })
-            })
-            .drag_over::<DraggedProject>(move |d, _, _, _| d.bg(drop_bg))
-            .on_drop(cx.listener(move |ws, dragged: &DraggedProject, _, cx| {
-                ws.move_repo(&dragged.name, &drop_name, cx);
-            }))
             .on_mouse_down(MouseButton::Right, {
                 let menu_repo = repo.name.clone();
                 cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
@@ -489,6 +474,112 @@ impl HarnessWorkspace {
     }
 
     /// The project header's ⋯ / right-click menu.
+    /// "Reorder projects": every project with ▲ / ▼, applied as you click.
+    pub(crate) fn render_reorder_projects(
+        &self,
+        hx: &HarnessTheme,
+        x: Pixels,
+        y: Pixels,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let n = self.data.repos.len();
+        let arrow = |id: String, glyph: &'static str, enabled: bool, name: String, up: bool| {
+            let base = div()
+                .id(gpui::SharedString::from(id))
+                .size(px(22.0))
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .rounded_md()
+                .text_xs()
+                .child(glyph);
+            if enabled {
+                base.text_color(hx.tx1)
+                    .cursor_pointer()
+                    .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
+                    .on_click(cx.listener(move |ws, _, _, cx| {
+                        cx.stop_propagation();
+                        ws.shift_repo(&name, up, cx);
+                    }))
+            } else {
+                base.text_color(tint(hx.tx2, 0.35))
+            }
+        };
+        let mut list = div().flex().flex_col().gap_0p5();
+        for (i, repo) in self.data.repos.iter().enumerate() {
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .pl_2()
+                    .pr_1()
+                    .py_0p5()
+                    .rounded_md()
+                    .hover(|d| d.bg(hx.surface))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_sm()
+                            .text_color(hx.tx0)
+                            .child(repo.name.clone()),
+                    )
+                    .child(arrow(format!("reorder-up-{i}"), "▲", i > 0, repo.name.clone(), true))
+                    .child(arrow(format!("reorder-down-{i}"), "▼", i + 1 < n, repo.name.clone(), false)),
+            );
+        }
+        div()
+            .absolute()
+            .left(x.max(px(8.0)))
+            .top(y)
+            .w(px(240.0))
+            .p(px(6.0))
+            .rounded_md()
+            .bg(hx.surface2)
+            .border_1()
+            .border_color(hx.border2)
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .on_mouse_down(MouseButton::Left, cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()))
+            .child(
+                div()
+                    .px_2()
+                    .pt_1()
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(hx.tx2)
+                    .child("REORDER PROJECTS"),
+            )
+            .child(list)
+            .child(
+                div()
+                    .id("reorder-done")
+                    .mt_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_sm()
+                    .text_center()
+                    .text_color(hx.tx0)
+                    .bg(hx.surface)
+                    .cursor_pointer()
+                    .hover(|d| d.bg(hx.surface_hover))
+                    .child("Done")
+                    .on_click(cx.listener(|ws, _, _, cx| {
+                        cx.stop_propagation();
+                        ws.reorder_projects = None;
+                        cx.notify();
+                    })),
+            )
+    }
+
     pub(crate) fn render_project_menu(
         &self,
         hx: &HarnessTheme,

@@ -240,6 +240,27 @@ impl Render for HarnessWorkspace {
             root = root.child(self.render_context_menu(&hx, &menu, cx));
         }
 
+        if let Some((x, y)) = self.reorder_projects {
+            root = root
+                .child(
+                    div()
+                        .id("reorder-projects-backdrop")
+                        .occlude()
+                        .absolute()
+                        .top(px(0.0))
+                        .left(px(0.0))
+                        .size_full()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|ws, _, _, cx| {
+                                ws.reorder_projects = None;
+                                cx.notify();
+                            }),
+                        ),
+                )
+                .child(self.render_reorder_projects(&hx, x, y, cx));
+        }
+
         if let Some((repo, x, y)) = self.project_menu.clone() {
             root = root
                 .child(
