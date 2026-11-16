@@ -1111,3 +1111,24 @@ async fn silent_client_times_out_and_releases_fit() {
     }
     drop(silent);
 }
+
+/// A transient bad read of remote.json (unparseable mid-write, permission
+/// glitch) must not look like a mass revoke: requests keep using the last
+/// good copy, and the file is not rewritten.
+#[tokio::test(flavor = "multi_thread")]
+async fn unparseable_remote_json_keeps_last_good_copy() {
+    let h = Harness::start(Harness::unused_tmux());
+    let token = h.device(false);
+    assert_eq!(h.get("/api/me", Some(&token)).await.status(), 200);
+    // Let the watcher pick up the paired device as the last good copy.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let path = h.store().path().to_path_buf();
+    std::fs::write(&path, b"{ \"devices\": [ trunc").unwrap();
+    // Past the file loop's poll, so the watcher has seen the bad file too.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(h.get("/api/me", Some(&token)).await.status(), 200);
+    assert_eq!(h.get("/api/agents", Some(&token)).await.status(), 200);
+    assert_eq!(std::fs::read(&path).unwrap(), b"{ \"devices\": [ trunc");
+    // An unknown token is still refused.
+    assert_eq!(h.get("/api/me", Some("nope")).await.status(), 401);
+}

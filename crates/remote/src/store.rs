@@ -190,6 +190,17 @@ impl Store {
             .unwrap_or_default()
     }
 
+    /// Current contents, distinguishing a bad read: `Some(default)` when the
+    /// file doesn't exist, `None` when it can't be read or parsed (e.g. a
+    /// partial write seen mid-replace, a permission glitch). Never writes.
+    pub fn try_load(&self) -> Option<RemoteFile> {
+        match fs::read(&self.path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).ok(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Some(RemoteFile::default()),
+            Err(_) => None,
+        }
+    }
+
     /// Read-modify-write under an exclusive lock. A corrupt file is moved to
     /// `remote.json.bad` and the update starts from the default.
     pub fn update<R>(&self, f: impl FnOnce(&mut RemoteFile) -> R) -> io::Result<R> {

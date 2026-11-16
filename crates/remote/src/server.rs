@@ -11,7 +11,7 @@ use std::fmt;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener as StdListener};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -152,6 +152,8 @@ pub(crate) struct Shared {
     /// Terminal socket ping period / idle limit, in ms (shorter in tests).
     ws_ping_ms: AtomicU64,
     ws_idle_ms: AtomicU64,
+    /// A bad remote.json read was logged (once).
+    bad_file_logged: AtomicBool,
 }
 
 impl Shared {
@@ -168,8 +170,19 @@ impl Shared {
     }
 
     /// The file as it is on disk now (request paths never trust a cache).
+    /// An unreadable or unparseable file keeps the last good copy: a
+    /// transient bad read must not look like "every device revoked" (phones
+    /// would get 401 / `revoked` and drop their token).
     pub fn current_file(&self) -> RemoteFile {
-        self.store().load()
+        match self.store().try_load() {
+            Some(f) => f,
+            None => {
+                if !self.bad_file_logged.swap(true, Ordering::SeqCst) {
+                    eprintln!("oo-remote: remote.json unreadable; keeping the last good copy");
+                }
+                (**self.file.borrow()).clone()
+            }
+        }
     }
 
     /// Phone-visible agents given `file`'s marks.
@@ -394,6 +407,7 @@ impl RemoteServer {
             test_send_delay_ms: AtomicU64::new(0),
             ws_ping_ms: AtomicU64::new(WS_PING.as_millis() as u64),
             ws_idle_ms: AtomicU64::new(WS_IDLE.as_millis() as u64),
+            bad_file_logged: AtomicBool::new(false),
         });
         shared.status.write().unwrap().ca_fingerprint = shared.ca.fingerprint.clone();
 
