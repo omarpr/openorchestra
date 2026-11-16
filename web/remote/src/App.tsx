@@ -13,6 +13,7 @@ import { InstallFirst } from "@/components/InstallFirst";
 import { isIOS, isStandalone } from "@/lib/standalone";
 import { Button } from "@/components/ui/button";
 import { Toaster } from "@/components/ui/sonner";
+import { ViewportDebug } from "@/components/ViewportDebug";
 
 function Brand() {
   return (
@@ -97,6 +98,7 @@ function Main() {
     <div ref={shell} className="oo-shell flex flex-col pt-[env(safe-area-inset-top)] pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]">
       <ConnectionBanner connected={connected} disabled={disabled} />
       {body}
+      <ViewportDebug />
     </div>
   );
 }
