@@ -53,8 +53,8 @@ pub struct WorktreePanes {
     pub tabs: Vec<TabRecord>,
     /// The agent this pane is meant to be running, kept even when its tab
     /// came back as a plain shell (the agent died with tmux on a computer
-    /// restart). A task pane with this set and no live agent shows STOPPED
-    /// with a Restart. Cleared only when the user closes the agent tab.
+    /// restart, or its tab was closed). A task pane with this set and no live
+    /// agent shows STOPPED with a Restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentKind>,
 }

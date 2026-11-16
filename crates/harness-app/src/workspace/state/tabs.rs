@@ -223,7 +223,7 @@ impl HarnessWorkspace {
         };
         let message = format!("Stop the {who} agent for {task_name}?");
         let detail = format!(
-            "This ends the {label} session. Delegations to it stop until you start an agent here again."
+            "This ends the {label} session. Its row shows STOPPED; click that to restart it where it left off."
         );
         let answer = window.prompt(
             gpui::PromptLevel::Warning,
@@ -293,16 +293,9 @@ impl HarnessWorkspace {
         let Some(pane) = self.panes.get_mut(&key) else { return };
         let Some(ix) = pane.tabs.iter().position(|t| t.id == id) else { return };
         pane.tabs.remove(ix);
-        // Closing the last agent tab is the user stopping the pane's agent on
-        // purpose: forget it, so the pane does not show STOPPED/Restart.
-        let no_agent_left = !pane.tabs.iter().any(|t| t.agent.is_some());
-        if was_agent && no_agent_left {
-            if let Some(rec) = self.panes_state.worktrees.get_mut(&key) {
-                rec.agent = None;
-            }
-            self.missing_agents.remove(&key);
-        }
-        let Some(pane) = self.panes.get_mut(&key) else { return };
+        // The pane keeps its agent on record even when its last agent tab is
+        // closed on purpose: a task needs every agent, so a closed one shows
+        // STOPPED with a Restart like one lost to a computer restart.
         if pane.active == id {
             // Prefer the tab to the left, which is where the eye already is.
             pane.active = pane

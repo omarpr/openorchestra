@@ -23,7 +23,7 @@ with its conversation intact.
   context, **continuing its most recent conversation** where the CLI supports it.
 - After the coordinator restarts, it re-checks its delegations, so results that
   arrived while it was gone are not lost.
-- Closing a task agent's tab asks first.
+- Closing a task agent's tab asks first, and the agent stays restartable.
 
 ## Non-goals
 
@@ -97,7 +97,10 @@ finished while you were away.` Members get no such line, because their work
 items are re-sent by the coordinator if needed.
 
 **Close confirmation:** closing the agent tab of a task pane with a live
-agent asks "Stop the <repo> agent for <task>?". Stop or Cancel.
+agent asks "Stop the <repo> agent for <task>?". Stop or Cancel. A stopped agent
+is not forgotten: its row shows `STOPPED` like any other missing agent, so it
+can be restarted where it left off. (Revised 2026-11-15 after trying it: the
+first version forgot a deliberately closed agent, and its row went quiet.)
 
 ## Testing
 

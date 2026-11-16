@@ -319,6 +319,9 @@ impl HarnessWorkspace {
         }
         // Prefer a plain shell tab so setup output isn't mixed into an agent.
         let pane_key = r.key.clone();
+        // Opening that shell makes it the active tab; remembered so an agent
+        // that was in front can be put back.
+        let active_before = self.panes.get(&pane_key).map(|p| p.active);
         if self
             .panes
             .get(&pane_key)
@@ -337,7 +340,19 @@ impl HarnessWorkspace {
         else {
             return;
         };
-        pane.active = tab;
+        // Keep the agent in front when the pane has one (a coordinator opens
+        // on its agent): setup output is a tab away, and the note says so.
+        // Only an agent-less pane switches to the setup shell.
+        let agent_before = active_before
+            .filter(|a| pane.tabs.iter().any(|t| t.id == *a && t.agent.is_some()));
+        let front = match agent_before {
+            Some(agent) => agent,
+            None if pane.tabs.iter().any(|t| t.agent.is_some()) => {
+                pane.tabs.iter().filter(|t| t.agent.is_some()).map(|t| t.id).min().unwrap_or(tab)
+            }
+            None => tab,
+        };
+        pane.active = front;
         self.save_panes();
         self.focus_active_pane(window, cx);
 
