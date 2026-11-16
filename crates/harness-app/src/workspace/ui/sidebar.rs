@@ -2,6 +2,7 @@
 //! `impl HarnessWorkspace` methods for this feature area.
 
 use super::super::*;
+use crate::workspace::remote::worktree_pane_key;
 
 mod projects;
 pub(crate) mod links;
@@ -383,6 +384,25 @@ impl HarnessWorkspace {
             .when(!self.archived_repos.is_empty(), |d| d.child(self.render_archived(hx, cx)))
     }
 
+    /// The small accent dot on a sidebar row whose worktree (pane `key`) has
+    /// at least one tab marked for remote control.
+    pub(crate) fn remote_dot(
+        &self,
+        hx: &HarnessTheme,
+        id: String,
+        key: &str,
+    ) -> Option<gpui::Stateful<gpui::Div>> {
+        crate::workspace::remote::worktree_has_marks(&self.remote.file, key).then(|| {
+            div()
+                .id(gpui::SharedString::from(id))
+                .flex_none()
+                .size(px(6.0))
+                .rounded_full()
+                .bg(hx.accent)
+                .tooltip(tip("Remote control on"))
+        })
+    }
+
     fn render_task_row(
         &self,
         hx: &HarnessTheme,
@@ -555,6 +575,18 @@ impl HarnessWorkspace {
                                 )
                             }),
                     )
+                    .children({
+                        let coord_key = a2a_broker::coordinator_pane_key(&task.id);
+                        multi
+                            .then(|| {
+                                self.remote_dot(
+                                    hx,
+                                    format!("remote-dot-coord-{}", task.id),
+                                    &coord_key,
+                                )
+                            })
+                            .flatten()
+                    })
                     // Trailing items in one strip the avatar's height, so they
                     // centre on the name line (the row is top-aligned for the
                     // two-line name/branch). Same 10px mono and the same order
@@ -734,6 +766,11 @@ impl HarnessWorkspace {
                                 .child(branch.to_string()),
                         )
                     })
+                    .children(self.remote_dot(
+                        hx,
+                        format!("remote-dot-member-{}-{}", task.id, m.worktree_id),
+                        &worktree_pane_key(Some(&task.id), &m.worktree_id),
+                    ))
                     .child(badges)
                     .child(match task_ending {
                         Some(kind) => busy_pill(hx, kind.doing_label(), now).into_any_element(),

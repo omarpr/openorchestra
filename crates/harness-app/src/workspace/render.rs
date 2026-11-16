@@ -309,6 +309,13 @@ impl Render for HarnessWorkspace {
                 });
         }
 
+        // A menu whose tab closed (or whose worktree is no longer selected)
+        // has nothing to show: drop it rather than float an empty box.
+        if let Some((tab_id, _)) = self.tab_context_menu
+            && self.tab_context_item(tab_id).is_none()
+        {
+            self.tab_context_menu = None;
+        }
         if let Some((tab_id, x)) = self.tab_context_menu {
             root = root
                 .child(

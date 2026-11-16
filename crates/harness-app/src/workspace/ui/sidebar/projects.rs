@@ -2,7 +2,7 @@
 //! rows, and the ARCHIVED list.
 
 use super::*;
-use crate::workspace::remote::{worktree_has_marks, worktree_pane_key};
+use crate::workspace::remote::worktree_pane_key;
 
 /// What a project-menu item does when picked.
 type MenuAction = dyn Fn(&mut HarnessWorkspace, &mut Window, &mut Context<HarnessWorkspace>);
@@ -266,17 +266,11 @@ impl HarnessWorkspace {
                             .children(counts),
                     ),
             )
-            .when(worktree_has_marks(&self.remote.file, &worktree_pane_key(wt.task_id.as_deref(), &wt.id)), |d| {
-                d.child(
-                    div()
-                        .id(gpui::SharedString::from(format!("remote-dot-wt-{}", wt.id)))
-                        .flex_none()
-                        .size(px(6.0))
-                        .rounded_full()
-                        .bg(hx.accent)
-                        .tooltip(tip("Remote control on")),
-                )
-            })
+                        .children(self.remote_dot(
+                hx,
+                format!("remote-dot-wt-{}", wt.id),
+                &worktree_pane_key(wt.task_id.as_deref(), &wt.id),
+            ))
             .child(match ending {
                 Some(kind) => busy_pill(hx, kind.doing_label(), self.anim_secs()).into_any_element(),
                 None => agent_pill(hx, agent, self.anim_secs()).into_any_element(),
@@ -471,17 +465,11 @@ impl HarnessWorkspace {
                     )
                     .child(subtitle),
             )
-            .when(worktree_has_marks(&self.remote.file, &format!("main:{}", repo.name)), |d| {
-                d.child(
-                    div()
-                        .id(gpui::SharedString::from(format!("remote-dot-main-{}", repo.name)))
-                        .flex_none()
-                        .size(px(6.0))
-                        .rounded_full()
-                        .bg(hx.accent)
-                        .tooltip(tip("Remote control on")),
-                )
-            })
+                        .children(self.remote_dot(
+                hx,
+                format!("remote-dot-main-{}", repo.name),
+                &format!("main:{}", repo.name),
+            ))
             .child(agent_pill(hx, agent, self.anim_secs()))
     }
 

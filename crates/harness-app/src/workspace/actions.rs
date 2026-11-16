@@ -14,6 +14,7 @@ impl HarnessWorkspace {
         self.exit_hooks_edit(window, cx);
         self.selection = sel;
         self.menu = None;
+        self.tab_context_menu = None;
         self.edit = None;
         if let Selection::Task { task_id, .. } = &self.selection {
             let tid = task_id.clone();

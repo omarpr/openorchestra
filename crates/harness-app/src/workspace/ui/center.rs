@@ -610,6 +610,23 @@ impl HarnessWorkspace {
         }
     }
 
+    /// The remote item for a tab in the current worktree; `None` when the tab
+    /// is gone (closed, or another worktree is selected) or has no item.
+    pub(crate) fn tab_context_item(
+        &self,
+        tab_id: u64,
+    ) -> Option<(&'static str, Option<&'static str>)> {
+        let key = self.resolve()?.key;
+        let kind = self
+            .panes
+            .get(&key)?
+            .tabs
+            .iter()
+            .find(|t| t.id == tab_id)
+            .and_then(Self::remote_tab_kind)?;
+        remote_menu_item(&kind, self.remote_is_marked(&key, tab_id))
+    }
+
     /// Right-click menu on a Shell/Agent tab: allow / stop remote control.
     pub(crate) fn render_tab_context_menu(
         &self,
@@ -618,13 +635,7 @@ impl HarnessWorkspace {
         x: Pixels,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let key = self.resolve().map(|r| r.key).unwrap_or_default();
-        let kind = self
-            .panes
-            .get(&key)
-            .and_then(|p| p.tabs.iter().find(|t| t.id == tab_id))
-            .and_then(Self::remote_tab_kind);
-        let marked = self.remote_is_marked(&key, tab_id);
+        let item = self.tab_context_item(tab_id);
         // Same container + mouse-down swallow as `render_tab_menu`: the
         // backdrop dismisses on mouse-down, which would eat the item's click.
         let mut menu = div()
@@ -644,7 +655,7 @@ impl HarnessWorkspace {
                 MouseButton::Left,
                 cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
             );
-        if let Some((label, warning)) = kind.and_then(|k| remote_menu_item(&k, marked)) {
+        if let Some((label, warning)) = item {
             menu = menu.child(
                 div()
                     .id("tabctx-remote")

@@ -241,6 +241,7 @@ impl HarnessWorkspace {
     }
 
     pub(crate) fn close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.tab_context_menu = None;
         let Some(r) = self.resolve() else { return };
         let key = r.key.clone();
         let file_item = self.panes.get(&key).and_then(|p| {
