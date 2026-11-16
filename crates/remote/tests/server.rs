@@ -658,18 +658,20 @@ async fn setup_port_only_when_open() {
 #[tokio::test(flavor = "multi_thread")]
 async fn port_in_use() {
     let tmp = TempDir::new().unwrap();
-    let port = free_port();
     let (_tx, rx) = snapshot_channel();
     let a = RemoteServer::start(
         config(
             &tmp.path().join("a"),
-            port,
+            0,
             free_port(),
             Harness::unused_tmux(),
         ),
         rx.clone(),
     )
     .expect("first server");
+    // Port 0 lets the OS pick a port that is held by `a` from the start; a
+    // free_port() probe is released and can be taken by a parallel test.
+    let port = a.port();
     let b = RemoteServer::start(
         config(
             &tmp.path().join("b"),
