@@ -26,6 +26,7 @@ interface Props {
 }
 
 const MAX_ZOOM = 4;
+const BASE_FONT = 12;
 
 function theme() {
   const dark = window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? true;
@@ -77,18 +78,18 @@ export const TerminalView = forwardRef<TerminalHandle, Props>(function TerminalV
 
     let disposed = false;
     let finished = false;
+    let pendingFit = false;
     let attempt = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let fitTimer: ReturnType<typeof setTimeout> | undefined;
 
+    // Fit to the container. Skips (retried on the next ResizeObserver tick) when it is not laid out yet.
     const sendFit = () => {
       if (!sock.current || readOnly.current) return;
-      try {
-        fa.fit();
-      } catch {
-        /* container not laid out */
-      }
-      if (t.cols > 0 && t.rows > 0) sock.current.fit(true, t.cols, t.rows);
+      const dims = fa.proposeDimensions();
+      if (!dims || !Number.isFinite(dims.cols) || !Number.isFinite(dims.rows) || dims.cols < 2 || dims.rows < 1) return;
+      if (dims.cols !== t.cols || dims.rows !== t.rows) t.resize(dims.cols, dims.rows);
+      sock.current.fit(true, dims.cols, dims.rows);
     };
 
     const measure = () => {
@@ -102,7 +103,8 @@ export const TerminalView = forwardRef<TerminalHandle, Props>(function TerminalV
       const w = screen.offsetWidth;
       const h = screen.offsetHeight;
       if (!w || !o.clientWidth) return;
-      setBox({ w, h, s: (o.clientWidth / w) * zoomRef.current });
+      // Scale from font size too: width grows with the font, so without the factor A-/A+ would cancel out.
+      setBox({ w, h, s: (o.clientWidth / w) * (p.current.fontSize / BASE_FONT) * zoomRef.current });
     };
     measureRef.current = measure;
     fitNowRef.current = () => {
@@ -137,14 +139,21 @@ export const TerminalView = forwardRef<TerminalHandle, Props>(function TerminalV
           t.options.disableStdin = ro;
           desktop.current = { cols, rows };
           attempt = 0;
-          if (p.current.fit && !ro) sendFit();
-          else t.resize(cols, rows);
+          // Keep the init size so the repaint (drawn at that size) lands intact; fit goes after it is written.
+          t.resize(cols, rows);
+          pendingFit = p.current.fit && !ro;
           p.current.onConnection(true);
           p.current.onInit(ro);
           requestAnimationFrame(measure);
         },
         onData(u8) {
-          if (!disposed && sock.current === s) t.write(u8);
+          if (disposed || sock.current !== s) return;
+          if (pendingFit) {
+            pendingFit = false;
+            t.write(u8, () => {
+              if (!disposed && sock.current === s && p.current.fit) sendFit();
+            });
+          } else t.write(u8);
         },
         onClosed(reason) {
           if (disposed || sock.current !== s) return;

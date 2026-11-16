@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Agent } from "@/lib/api";
 
 const calls: string[] = [];
+const proposed: { value: { cols: number; rows: number } | undefined } = { value: { cols: 40, rows: 20 } };
 vi.mock("@xterm/xterm", () => ({
   Terminal: class {
     cols = 80;
@@ -11,7 +12,11 @@ vi.mock("@xterm/xterm", () => ({
     options: Record<string, unknown> = {};
     element = document.createElement("div");
     loadAddon() {}
-    open() {}
+    open(host: HTMLElement) {
+      const s = document.createElement("div");
+      s.className = "xterm-screen";
+      host.appendChild(s);
+    }
     onData() {
       return { dispose() {} };
     }
@@ -21,8 +26,9 @@ vi.mock("@xterm/xterm", () => ({
     resize() {
       calls.push("resize");
     }
-    write() {
+    write(_d?: unknown, cb?: () => void) {
       calls.push("write");
+      cb?.();
     }
     dispose() {}
   },
@@ -31,7 +37,7 @@ vi.mock("@xterm/addon-fit", () => ({
   FitAddon: class {
     fit() {}
     proposeDimensions() {
-      return { cols: 40, rows: 20 };
+      return proposed.value;
     }
   },
 }));
@@ -39,7 +45,7 @@ vi.mock("@xterm/addon-fit", () => ({
 const sockets: { url: string; h: any; fit: any; input: any; close: any }[] = [];
 vi.mock("@/lib/termSocket", () => ({
   TermSocket: class {
-    fit = vi.fn();
+    fit = vi.fn(() => calls.push("fitframe"));
     input = vi.fn();
     close = vi.fn();
     constructor(
@@ -89,6 +95,7 @@ function mockMedia(matches: boolean) {
 describe("AgentView", () => {
   beforeEach(() => {
     calls.length = 0;
+    proposed.value = { cols: 40, rows: 20 };
     sockets.length = 0;
     meMock.mockReset();
     sendTextMock.mockReset();
@@ -146,5 +153,47 @@ describe("AgentView", () => {
     render(<AgentView id="a1" agent={agent} />);
     act(() => sockets[0].h.onClosed("unmarked"));
     expect(screen.getByText("Remote control was turned off for this agent")).toBeInTheDocument();
+  });
+
+  it("fit on: init repaint is written at the init size before resize and fit frame", async () => {
+    localStorage.setItem("oo.fit.a1", "1");
+    meMock.mockResolvedValue({ name: "p", read_only: false });
+    render(<AgentView id="a1" agent={agent} />);
+    await screen.findByRole("button", { name: "Esc" });
+    calls.length = 0;
+    act(() => sockets[0].h.onInit(100, 30, false));
+    expect(sockets[0].fit).not.toHaveBeenCalled();
+    act(() => sockets[0].h.onData(new Uint8Array([65])));
+    expect(calls).toEqual(["reset", "resize", "write", "resize", "fitframe"]);
+    expect(sockets[0].fit).toHaveBeenCalledWith(true, 40, 20);
+  });
+
+  it("fit on: no fit frame when dimensions cannot be measured", async () => {
+    localStorage.setItem("oo.fit.a1", "1");
+    proposed.value = undefined;
+    meMock.mockResolvedValue({ name: "p", read_only: false });
+    render(<AgentView id="a1" agent={agent} />);
+    await screen.findByRole("button", { name: "Esc" });
+    act(() => sockets[0].h.onInit(100, 30, false));
+    act(() => sockets[0].h.onData(new Uint8Array([65])));
+    expect(sockets[0].fit).not.toHaveBeenCalled();
+  });
+
+  it("fit off: the font stepper changes the rendered scale", async () => {
+    meMock.mockResolvedValue({ name: "p", read_only: false });
+    const w = vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(800);
+    const c = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(400);
+    try {
+      render(<AgentView id="a1" agent={agent} />);
+      await screen.findByRole("button", { name: "Esc" });
+      act(() => sockets[0].h.onInit(100, 30, false));
+      const scale = () => Number(/scale\(([\d.]+)\)/.exec(screen.getByTestId("terminal").style.transform)?.[1]);
+      await waitFor(() => expect(scale()).toBeCloseTo(0.5));
+      await userEvent.click(screen.getByRole("button", { name: "Larger text" }));
+      await waitFor(() => expect(scale()).toBeCloseTo((0.5 * 13) / 12));
+    } finally {
+      w.mockRestore();
+      c.mockRestore();
+    }
   });
 });
