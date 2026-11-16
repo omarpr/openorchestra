@@ -102,6 +102,7 @@ describe("AgentView", () => {
     localStorage.clear();
     localStorage.setItem("oo.token", "tok");
     mockMedia(false);
+    Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
   });
 
   it("reconnects_and_resets_terminal", async () => {
@@ -166,6 +167,51 @@ describe("AgentView", () => {
     act(() => sockets[0].h.onData(new Uint8Array([65])));
     expect(calls).toEqual(["reset", "resize", "write", "resize", "fitframe"]);
     expect(sockets[0].fit).toHaveBeenCalledWith(true, 40, 20);
+  });
+
+  it("fit on: hidden and pagehide send fit-off; visible again re-fits after the new init", async () => {
+    localStorage.setItem("oo.fit.a1", "1");
+    meMock.mockResolvedValue({ name: "p", read_only: false });
+    render(<AgentView id="a1" agent={agent} />);
+    await screen.findByRole("button", { name: "Esc" });
+    act(() => sockets[0].h.onInit(100, 30, false));
+    act(() => sockets[0].h.onData(new Uint8Array([65])));
+    expect(sockets[0].fit).toHaveBeenLastCalledWith(true, 40, 20);
+
+    act(() => {
+      Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(sockets[0].fit).toHaveBeenLastCalledWith(false, 0, 0);
+    expect(sockets).toHaveLength(1);
+
+    sockets[0].fit.mockClear();
+    act(() => {
+      window.dispatchEvent(new Event("pagehide"));
+    });
+    expect(sockets[0].fit).toHaveBeenCalledWith(false, 0, 0);
+
+    act(() => {
+      Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(sockets).toHaveLength(2);
+    act(() => sockets[1].h.onInit(100, 30, false));
+    act(() => sockets[1].h.onData(new Uint8Array([66])));
+    expect(sockets[1].fit).toHaveBeenCalledWith(true, 40, 20);
+  });
+
+  it("fit off: hidden sends no fit frame", async () => {
+    meMock.mockResolvedValue({ name: "p", read_only: false });
+    render(<AgentView id="a1" agent={agent} />);
+    await screen.findByRole("button", { name: "Esc" });
+    act(() => sockets[0].h.onInit(100, 30, false));
+    sockets[0].fit.mockClear();
+    act(() => {
+      Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(sockets[0].fit).not.toHaveBeenCalled();
   });
 
   it("fit on: no fit frame when dimensions cannot be measured", async () => {

@@ -176,7 +176,17 @@ export const TerminalView = forwardRef<TerminalHandle, Props>(function TerminalV
       sock.current = s;
     };
 
+    // Backgrounded or locked: give the desktop its window size back now (the server would only notice a silent
+    // phone after its idle limit). The switch stays on; coming back reconnects, and the new init re-fits.
+    const releaseFit = () => {
+      if (disposed || !p.current.fit || readOnly.current) return;
+      sock.current?.fit(false, 0, 0);
+    };
     const onVisible = () => {
+      if (document.visibilityState === "hidden") {
+        releaseFit();
+        return;
+      }
       if (document.visibilityState !== "visible" || disposed || finished) return;
       attempt = 0;
       clearTimeout(timer);
@@ -185,6 +195,7 @@ export const TerminalView = forwardRef<TerminalHandle, Props>(function TerminalV
       connect();
     };
     document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("pagehide", releaseFit);
 
     const ro = new ResizeObserver(() => {
       clearTimeout(fitTimer);
@@ -202,6 +213,7 @@ export const TerminalView = forwardRef<TerminalHandle, Props>(function TerminalV
       clearTimeout(timer);
       clearTimeout(fitTimer);
       document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("pagehide", releaseFit);
       ro.disconnect();
       dataSub.dispose();
       sock.current?.close();
