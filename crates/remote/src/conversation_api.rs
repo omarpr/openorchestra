@@ -186,7 +186,13 @@ fn events(st: St) -> impl Stream<Item = Result<Event, Infallible>> {
                         // Status-only change.
                         continue;
                     }
-                    st.tail = st.s.transcripts.get(target.0.clone(), target.1).await;
+                    let tail = st.s.transcripts.get(target.0.clone(), target.1).await;
+                    // The first read can be slow: re-check before sending.
+                    // A change that broke it wakes this loop again.
+                    if st.s.transcript_for(&st.s.current_file(), &st.id).as_ref() != Some(&target) {
+                        continue;
+                    }
+                    st.tail = tail;
                     st.target = target;
                     let ev = st.resubscribe();
                     return Some((Ok(ev), st));
