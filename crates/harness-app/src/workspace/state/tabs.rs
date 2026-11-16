@@ -102,6 +102,10 @@ impl HarnessWorkspace {
         pane.tabs.push(Tab { id: tab_id, title, content, agent: agent_of_kind });
         pane.active = tab_id;
         let opened_agent_key = matches!(kind, TabKind::Agent(_)).then(|| r.key.clone());
+        if let TabKind::Agent(a) = &kind {
+            // The transcript on record is an earlier session's, not this tab's.
+            self.remote.forget_session(&r.path, a.as_str());
+        }
         self.focus_active_pane(window, cx);
         self.save_panes();
         if let Some(key) = opened_agent_key {
@@ -275,17 +279,22 @@ impl HarnessWorkspace {
         // Is the tab being closed an agent tab? If so, killing its session ends
         // that agent, and a dead agent never writes the resolving "idle" — so its
         // pill would stay stuck on WAITING/RUNNING forever. Clear it here.
-        let was_agent = self
+        let closed_agent = self
             .panes
             .get(&key)
             .and_then(|p| p.tabs.iter().find(|t| t.id == id))
-            .is_some_and(|t| t.agent.is_some());
+            .and_then(|t| t.agent.clone());
+        let was_agent = closed_agent.is_some();
         if self.has_tmux {
             // Explicit close tears the session down (only app-exit detaches).
             crate::tmux::kill_session(&crate::tmux::session_name(&key, id));
         }
         // A closed tab is never reachable from a phone again.
         self.remote_unmark(&key, Some(id));
+        if let Some(a) = &closed_agent {
+            // Its transcript must not resurface in the next tab of this kind.
+            self.remote.forget_session(&r.path, a.as_str());
+        }
         if was_agent {
             // Unknown (renders as IDLE) rather than Idle: we killed the process,
             // we didn't observe a clean finish. A file event can't unstick this
