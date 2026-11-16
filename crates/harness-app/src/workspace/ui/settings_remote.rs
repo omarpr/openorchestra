@@ -65,6 +65,12 @@ impl HarnessWorkspace {
                     .child(div().flex_none().text_color(hx.tx2).child("Status"))
                     .child(div().flex_1().min_w_0().text_color(line_color).child(line)),
             );
+        if r.serve == RemoteServe::OtherBuild {
+            col = col.child(div().pb_1().text_xs().text_color(hx.tx2).child(
+                "The other openOrchestra build (Dev or release) is serving phones. Tabs you \
+                 mark here reach them through it; this build takes over when it quits.",
+            ));
+        }
 
         // ---- Port ----------------------------------------------------------
         let port = r.file.port;
@@ -107,6 +113,13 @@ impl HarnessWorkspace {
                 .child("Click to change. Enter applies it by restarting the server."),
         );
         col = col.child(section_title("Port", hx)).child(port_row);
+        col = col.child(
+            div()
+                .pb_1()
+                .text_xs()
+                .text_color(hx.tx2)
+                .child("Changing the port means re-adding the app on paired phones."),
+        );
         if let Some(e) = &r.ui.port_error {
             col = col.child(div().pb_1().text_xs().text_color(hx.red).child(e.clone()));
         }

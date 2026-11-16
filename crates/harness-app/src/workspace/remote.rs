@@ -109,6 +109,9 @@ pub(crate) struct RemoteRuntime {
     state_dir: PathBuf,
     server: Option<RemoteServer>,
     snapshot_tx: tokio::sync::watch::Sender<Snapshot>,
+    /// Read-only copy of `panes.json` (with its mtime) for marks made in the
+    /// other build; re-read only while such marks exist and the file changed.
+    disk_panes: Option<(SystemTime, crate::panes_state::PanesState)>,
     keep_awake: Option<KeepAwake>,
     /// The store's file watcher (type-erased: two `notify` versions are in
     /// the graph) and its change events, taken by the poll loop.
@@ -140,6 +143,7 @@ impl RemoteRuntime {
             state_dir: state_dir.to_path_buf(),
             server: None,
             snapshot_tx,
+            disk_panes: None,
             keep_awake: None,
             _watcher: watcher,
             changes,
@@ -234,10 +238,20 @@ pub(crate) fn worktree_pane_key(task_id: Option<&str>, id: &str) -> String {
 }
 
 /// Status message after a toggle: marking while remote is off is accepted but
-/// unreachable until the user turns it on.
-pub(crate) fn mark_note(enabled: bool, now_marked: bool) -> Option<&'static str> {
-    (!enabled && now_marked)
-        .then_some("Marked \u{2014} turn on Remote control in Settings to reach it")
+/// unreachable until the user turns it on; while the other build serves,
+/// phones reach the tab through that build.
+pub(crate) fn mark_note(
+    enabled: bool,
+    other_build: bool,
+    now_marked: bool,
+) -> Option<&'static str> {
+    if !now_marked {
+        return None;
+    }
+    if !enabled {
+        return Some("Marked \u{2014} turn on Remote control in Settings to reach it");
+    }
+    other_build.then_some("Marked \u{2014} phones reach it through the other openOrchestra build")
 }
 
 /// One worktree's terminal tabs, as the snapshot builder sees them.
@@ -290,6 +304,51 @@ pub(crate) fn build_snapshot(
         }
     }
     Snapshot { agents }
+}
+
+/// Whether some mark of a worktree in `sources` names a tab none of them has
+/// (e.g. a tab the other build opened in a worktree that is also live here).
+pub(crate) fn has_unresolved_marks(file: &RemoteFile, sources: &[MarkSource]) -> bool {
+    file.marked.iter().any(|m| {
+        sources
+            .iter()
+            .find(|s| s.key == m.worktree_key)
+            .is_some_and(|s| !s.tabs.iter().any(|(id, _, _)| *id == m.tab_id))
+    })
+}
+
+/// Add, per mark, the terminal tab the panes file on disk has for it when
+/// `sources` lacks it. Dev and release share `~/.openorchestra`; only one
+/// serves, and a tab the other opened is in neither our panes nor our
+/// in-memory state. Pure: only Shell/Agent records, only for worktrees we
+/// already enumerate; `disk` is read-only and never merged into our state.
+pub(crate) fn fill_from_disk(
+    sources: &mut [MarkSource],
+    file: &RemoteFile,
+    disk: &crate::panes_state::PanesState,
+) {
+    use crate::panes_state::TabRecordKind as K;
+    for m in &file.marked {
+        let Some(src) = sources.iter_mut().find(|s| s.key == m.worktree_key) else {
+            continue;
+        };
+        if src.tabs.iter().any(|(id, _, _)| *id == m.tab_id) {
+            continue;
+        }
+        let Some(rec) = disk
+            .worktrees
+            .get(&m.worktree_key)
+            .and_then(|wp| wp.tabs.iter().find(|t| t.id == m.tab_id))
+        else {
+            continue;
+        };
+        let kind = match &rec.kind {
+            K::Shell => None,
+            K::Agent(a) => Some(a.as_str().to_string()),
+            _ => continue,
+        };
+        src.tabs.push((rec.id, rec.title.clone(), kind));
+    }
 }
 
 fn rfc3339(t: SystemTime) -> String {
@@ -435,10 +494,20 @@ impl HarnessWorkspace {
     }
 
     /// `remote_refresh` without a context (for call sites that have none).
+    /// Runs on the refresh tick and after changes, not per frame.
     fn remote_publish(&mut self) {
+        let mut sources = self.remote_sources();
+        if has_unresolved_marks(&self.remote.file, &sources) {
+            self.remote_refresh_disk_panes();
+            if let Some((_, disk)) = &self.remote.disk_panes {
+                fill_from_disk(&mut sources, &self.remote.file, disk);
+            }
+        } else {
+            self.remote.disk_panes = None;
+        }
         let snap = build_snapshot(
             &self.remote.file,
-            &self.remote_sources(),
+            &sources,
             &self.agent_status,
             &self.agent_since,
         );
@@ -449,6 +518,25 @@ impl HarnessWorkspace {
             *cur = snap;
             true
         });
+    }
+
+    /// Re-read `panes.json` (read-only) if its mtime moved since the cached
+    /// copy. One stat per refresh while unresolved marks exist.
+    fn remote_refresh_disk_panes(&mut self) {
+        let Ok(mtime) = std::fs::metadata(&self.panes_path).and_then(|m| m.modified()) else {
+            self.remote.disk_panes = None;
+            return;
+        };
+        if self
+            .remote
+            .disk_panes
+            .as_ref()
+            .is_some_and(|(at, _)| *at == mtime)
+        {
+            return;
+        }
+        let disk = crate::panes_state::load(&self.panes_path);
+        self.remote.disk_panes = Some((mtime, disk));
     }
 
     pub(crate) fn remote_set_enabled(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -979,12 +1067,84 @@ mod tests {
     #[test]
     fn disabled_note_only_when_newly_marked_while_off() {
         assert_eq!(
-            mark_note(false, true),
+            mark_note(false, false, true),
             Some("Marked \u{2014} turn on Remote control in Settings to reach it")
         );
-        assert_eq!(mark_note(true, true), None);
-        assert_eq!(mark_note(false, false), None);
-        assert_eq!(mark_note(true, false), None);
+        assert_eq!(mark_note(true, false, true), None);
+        assert_eq!(mark_note(false, false, false), None);
+        assert_eq!(mark_note(true, false, false), None);
+    }
+
+    #[test]
+    fn other_build_note_when_marked_while_it_serves() {
+        assert_eq!(
+            mark_note(true, true, true),
+            Some("Marked \u{2014} phones reach it through the other openOrchestra build")
+        );
+        assert_eq!(mark_note(true, true, false), None);
+        // Off wins: turning it on is the first thing to do.
+        assert_eq!(
+            mark_note(false, true, true),
+            Some("Marked \u{2014} turn on Remote control in Settings to reach it")
+        );
+    }
+
+    fn disk_state(json: &str) -> crate::panes_state::PanesState {
+        serde_json::from_str(json).unwrap()
+    }
+
+    /// A tab the other build opened in a worktree that is live here too:
+    /// only its mark's record comes from disk, per tab, never other kinds,
+    /// never worktrees this build doesn't enumerate.
+    #[test]
+    fn unresolved_marks_fall_back_to_panes_on_disk() {
+        let f = file(vec![
+            mark("wt-1", 3, "r_live"),
+            mark("wt-1", 9, "r_dev"),
+            mark("wt-1", 10, "r_editor"),
+            mark("wt-unknown", 1, "r_elsewhere"),
+            mark("wt-2", 5, "r_gone"),
+        ]);
+        let mut sources = vec![
+            source("wt-1", "/w/1", &[(3, "claude", Some("claude"))]),
+            source("wt-2", "/w/2", &[]),
+        ];
+        assert!(has_unresolved_marks(&f, &sources));
+        let disk = disk_state(
+            r#"{
+              "next_tab_id": 20,
+              "worktrees": {
+                "wt-1": { "tabs": [
+                  { "id": 3, "kind": "Shell", "title": "stale title" },
+                  { "id": 9, "kind": { "Agent": "claude" }, "title": "dev claude" },
+                  { "id": 10, "kind": "Editor", "title": "main.rs" },
+                  { "id": 11, "kind": "Shell", "title": "unmarked" }
+                ] },
+                "wt-unknown": { "tabs": [ { "id": 1, "kind": "Shell", "title": "x" } ] }
+              }
+            }"#,
+        );
+        fill_from_disk(&mut sources, &f, &disk);
+        assert_eq!(
+            sources[0].tabs,
+            vec![
+                (3, "claude".to_string(), Some("claude".to_string())),
+                (9, "dev claude".to_string(), Some("claude".to_string())),
+            ]
+        );
+        assert!(sources[1].tabs.is_empty());
+        let snap = build_snapshot(&f, &sources, &HashMap::new(), &HashMap::new());
+        let ids: Vec<_> = snap.agents.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["r_live", "r_dev"]);
+        assert_eq!(snap.agents[1].session, crate::tmux::session_name("wt-1", 9));
+    }
+
+    #[test]
+    fn all_marks_resolved_needs_no_disk_read() {
+        let f = file(vec![mark("wt-1", 3, "r_a"), mark("wt-x", 1, "r_b")]);
+        let sources = [source("wt-1", "/w/1", &[(3, "t", None)])];
+        // wt-x isn't enumerated here: nothing on disk could place it.
+        assert!(!has_unresolved_marks(&f, &sources));
     }
 
     #[test]

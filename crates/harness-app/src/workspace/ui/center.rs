@@ -676,7 +676,9 @@ impl HarnessWorkspace {
                         let key = ws.resolve().map(|r| r.key).unwrap_or_default();
                         ws.remote_toggle_mark(&key, tab_id, cx);
                         let now = ws.remote_is_marked(&key, tab_id);
-                        if let Some(n) = mark_note(ws.remote.file.enabled, now) {
+                        let other =
+                            ws.remote.serve == crate::workspace::remote::RemoteServe::OtherBuild;
+                        if let Some(n) = mark_note(ws.remote.file.enabled, other, now) {
                             ws.set_note(n.to_string());
                         }
                         cx.notify();
