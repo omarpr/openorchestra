@@ -15,7 +15,7 @@ use crate::certs::{self, Ca, ServerCert};
 use crate::server::{stopped, Shared};
 
 /// How often the cert SAN set is recomputed (LAN address changes).
-const CERT_CHECK: Duration = Duration::from_secs(60);
+pub(crate) const CERT_CHECK: Duration = Duration::from_secs(60);
 
 /// rustls config for `cert`, always with the `ring` provider (never the
 /// process default: the app links both ring and aws-lc).
@@ -48,10 +48,15 @@ pub(crate) async fn cert_loop(
     let mut stop = s.shutdown.subscribe();
     let mut file = s.file.subscribe();
     let mut ips = cur.ips.clone();
+    // One interval for the loop's lifetime: file-change wakeups must not
+    // restart the 60s timer (touch_last_seen writes about once a minute).
+    let mut tick = tokio::time::interval(s.cert_check);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tick.tick().await; // the first tick is immediate; start just checked
     loop {
         tokio::select! {
             _ = stopped(&mut stop) => return,
-            _ = tokio::time::sleep(CERT_CHECK) => {}
+            _ = tick.tick() => {}
             _ = s.cert_wake.notified() => {}
             _ = file.changed() => {
                 // Only the stale-IP device list depends on the file.

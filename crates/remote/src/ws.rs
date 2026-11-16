@@ -152,6 +152,11 @@ impl Term {
             Err(_) => return End::Code(CLOSE_INTERNAL, "unavailable"),
         };
 
+        // Opening can take seconds: re-check the mapping before streaming.
+        if let Err(end) = self.recheck(&device.id, &session) {
+            return end;
+        }
+
         // 3. Subscribe before capturing so nothing is missed.
         let mut events = hub.subscribe();
         if let Err(end) = self.send_init(&hub, read_only).await {
@@ -161,6 +166,9 @@ impl Term {
         let mut fit: Option<FitGuard> = None;
         loop {
             tokio::select! {
+                // Order: stop, access changes, then client frames before
+                // hub output so a flood of output never starves input
+                // (e.g. Ctrl-C to a runaway loop).
                 biased;
                 _ = crate::server::stopped(&mut stop) => {
                     drop(fit.take());
@@ -188,6 +196,55 @@ impl Term {
                         }
                     }
                 }
+                msg = self.socket.recv() => {
+                    let text = match msg {
+                        Some(Ok(Message::Text(t))) => t,
+                        Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return End::Gone,
+                        Some(Ok(_)) => continue,
+                    };
+                    match serde_json::from_str::<ClientMsg>(text.as_str()) {
+                        Ok(ClientMsg::Input { data }) => {
+                            if data.len() > MAX_INPUT {
+                                return End::Code(CLOSE_TOO_BIG, "input too large");
+                            }
+                            if !read_only {
+                                match self.recheck(&device.id, &session) {
+                                    Err(end) => return end,
+                                    Ok(false) => {
+                                        read_only = true;
+                                        fit = None;
+                                        continue;
+                                    }
+                                    Ok(true) => {}
+                                }
+                                if let Err(e) = hub.send_input(data.as_bytes()).await {
+                                    eprintln!("oo-remote: input failed: {e}");
+                                }
+                            }
+                        }
+                        Ok(ClientMsg::Fit { on, cols, rows }) if !read_only => {
+                            if on {
+                                match self.recheck(&device.id, &session) {
+                                    Err(end) => return end,
+                                    Ok(false) => {
+                                        read_only = true;
+                                        fit = None;
+                                        continue;
+                                    }
+                                    Ok(true) => {}
+                                }
+                                // Take the new size before releasing the old.
+                                match hub.fit(cols, rows).await {
+                                    Ok(g) => fit = Some(g),
+                                    Err(e) => eprintln!("oo-remote: fit failed: {e}"),
+                                }
+                            } else {
+                                fit = None;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 ev = events.recv() => match ev {
                     Ok(HubEvent::Data(bytes)) => {
                         if self.socket.send(Message::Binary(bytes)).await.is_err() {
@@ -204,39 +261,22 @@ impl Term {
                         }
                     }
                 },
-                msg = self.socket.recv() => {
-                    let text = match msg {
-                        Some(Ok(Message::Text(t))) => t,
-                        Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return End::Gone,
-                        Some(Ok(_)) => continue,
-                    };
-                    match serde_json::from_str::<ClientMsg>(text.as_str()) {
-                        Ok(ClientMsg::Input { data }) => {
-                            if data.len() > MAX_INPUT {
-                                return End::Code(CLOSE_TOO_BIG, "input too large");
-                            }
-                            if !read_only {
-                                if let Err(e) = hub.send_input(data.as_bytes()).await {
-                                    eprintln!("oo-remote: input failed: {e}");
-                                }
-                            }
-                        }
-                        Ok(ClientMsg::Fit { on, cols, rows }) if !read_only => {
-                            if on {
-                                // Take the new size before releasing the old.
-                                match hub.fit(cols, rows).await {
-                                    Ok(g) => fit = Some(g),
-                                    Err(e) => eprintln!("oo-remote: fit failed: {e}"),
-                                }
-                            } else {
-                                fit = None;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
             }
         }
+    }
+
+    /// Fresh read of remote.json before input/fit takes effect, so the
+    /// watcher's latency never lets keystrokes through after an unmark or
+    /// revoke. `Ok(false)`: the device became read-only (ignore the frame).
+    fn recheck(&self, device_id: &str, session: &str) -> Result<bool, End> {
+        let file = self.s.current_file();
+        let Some(d) = file.devices.iter().find(|d| d.id == device_id) else {
+            return Err(End::Reason("revoked"));
+        };
+        if self.s.session_for(&file, &self.id).as_deref() != Some(session) {
+            return Err(End::Reason("unmarked"));
+        }
+        Ok(!d.read_only)
     }
 
     /// `init` JSON then the repaint (prefixed with an SGR reset).

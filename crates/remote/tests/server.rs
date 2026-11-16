@@ -148,12 +148,17 @@ struct Harness {
 
 impl Harness {
     fn start(tmux: Tmux) -> Harness {
+        Harness::start_with(tmux, Duration::from_secs(60))
+    }
+
+    fn start_with(tmux: Tmux, cert_check: Duration) -> Harness {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().join("state");
         let setup_port = free_port();
         let (snap, rx) = snapshot_channel();
-        let server = RemoteServer::start(config(&dir, 0, setup_port, tmux), rx)
-            .unwrap_or_else(|e| panic!("start: {e:?}"));
+        let server =
+            RemoteServer::start_with_cert_check(config(&dir, 0, setup_port, tmux), rx, cert_check)
+                .unwrap_or_else(|e| panic!("start: {e:?}"));
         let port = server.port();
         assert_ne!(port, 0);
         let client = reqwest::Client::builder()
@@ -917,4 +922,113 @@ async fn ws_reauthorizes_on_file_change_and_stop() {
         .await
         .expect("disabled on stop");
     assert_eq!(reason, "disabled");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cert_check_runs_despite_file_churn() {
+    let h = Harness::start_with(Harness::unused_tmux(), Duration::from_millis(300));
+    // remote.json changes every 100ms, faster than the check period.
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let churn = {
+        let (dir, stop) = (h.dir.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let store = Store::new(&dir);
+            let mut n = 0u16;
+            while !stop.load(Ordering::SeqCst) {
+                n = n.wrapping_add(1);
+                store.update(|f| f.port = 7000 + (n % 100)).unwrap();
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let new_ip: IpAddr = "10.77.0.1".parse().unwrap();
+    // No wake-up: only the periodic check can pick this up.
+    h.server().test_set_hosts_quiet(
+        vec!["localhost".to_string()],
+        vec![IpAddr::V4(Ipv4Addr::LOCALHOST), new_ip],
+    );
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    let mut seen = Vec::new();
+    while Instant::now() < deadline {
+        seen = presented_ips(&h).await;
+        if seen.contains(&new_ip) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    stop.store(true, Ordering::SeqCst);
+    churn.join().unwrap();
+    assert!(
+        seen.contains(&new_ip),
+        "cert never rechecked under churn: {seen:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn ws_input_not_starved_by_output() {
+    let tm = TmuxServer::new();
+    tm.new_session("s_live", "sh");
+    let h = Harness::start(tm.tmux());
+    let token = h.device(false);
+    let a = h.store().mark("k", 1).unwrap();
+    h.set_agents(vec![agent(&a, "s_live", "A")]);
+    let mut ws = open_term(&h, &a, &token).await;
+    let input =
+        |d: &str| Message::text(serde_json::json!({ "type": "input", "data": d }).to_string());
+    ws.send(input("while :; do cat /usr/share/dict/words; done\r"))
+        .await
+        .unwrap();
+    // Wait until the flood is on.
+    let mut acc = Vec::new();
+    while acc.len() < 2_000_000 {
+        if let Message::Binary(b) = next_msg(&mut ws).await {
+            acc.extend_from_slice(&b);
+        }
+    }
+    let t0 = Instant::now();
+    ws.send(input("\x03")).await.unwrap();
+    ws.send(input("echo DONE_$((40+2))\r")).await.unwrap();
+    let mut tail: Vec<u8> = Vec::new();
+    while !String::from_utf8_lossy(&tail).contains("DONE_42") {
+        assert!(
+            t0.elapsed() < Duration::from_secs(3),
+            "Ctrl-C did not stop the output loop within 3s"
+        );
+        match tokio::time::timeout(Duration::from_secs(3), ws.next()).await {
+            Ok(Some(Ok(Message::Binary(b)))) => {
+                tail.extend_from_slice(&b);
+                if tail.len() > 1 << 16 {
+                    tail.drain(..tail.len() - 4096);
+                }
+            }
+            Ok(Some(Ok(_))) => {}
+            other => panic!("socket ended: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn send_after_unmark_during_open_is_404() {
+    let tm = TmuxServer::new();
+    tm.new_session("s_live", "cat");
+    let h = Harness::start(tm.tmux());
+    let token = h.device(false);
+    let store = h.store();
+    let a = store.mark("k", 1).unwrap();
+    h.set_agents(vec![agent(&a, "s_live", "A")]);
+    // Widen the window between opening the session and typing.
+    h.server()
+        .test_delay_send_after_open(Duration::from_millis(800));
+    let send = h.send_text(&a, &token, "LEAKED_TEXT");
+    let unmark = async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        Store::new(&h.dir).unmark("k", Some(1)).unwrap();
+    };
+    let (status, ()) = tokio::join!(send, unmark);
+    assert_eq!(status, 404);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!tm.capture("s_live").contains("LEAKED_TEXT"));
 }

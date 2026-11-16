@@ -11,6 +11,7 @@ use std::fmt;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener as StdListener};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -136,6 +137,10 @@ pub(crate) struct Shared {
     pair_attempts: Mutex<HashMap<IpAddr, VecDeque<Instant>>>,
     hosts_override: Mutex<Option<(Vec<String>, Vec<IpAddr>)>>,
     pub(crate) cert_wake: Notify,
+    /// Cert recheck period (60s; shorter in tests).
+    pub(crate) cert_check: Duration,
+    /// Test hook: pause between opening the hub and typing in `send`.
+    pub(crate) test_send_delay_ms: AtomicU64,
 }
 
 impl Shared {
@@ -296,6 +301,16 @@ impl RemoteServer {
         cfg: ServerConfig,
         snapshot: watch::Receiver<Snapshot>,
     ) -> Result<RemoteServer, StartError> {
+        Self::start_with_cert_check(cfg, snapshot, crate::tls::CERT_CHECK)
+    }
+
+    /// `start` with a custom cert recheck period (tests).
+    #[doc(hidden)]
+    pub fn start_with_cert_check(
+        cfg: ServerConfig,
+        snapshot: watch::Receiver<Snapshot>,
+        cert_check: Duration,
+    ) -> Result<RemoteServer, StartError> {
         let listener = StdListener::bind((cfg.bind_ip, cfg.port)).map_err(|e| {
             if e.kind() == io::ErrorKind::AddrInUse {
                 StartError::PortInUse(cfg.port)
@@ -332,6 +347,8 @@ impl RemoteServer {
             pair_attempts: Mutex::new(HashMap::new()),
             hosts_override: Mutex::new(cfg.hosts_override.clone()),
             cert_wake: Notify::new(),
+            cert_check,
+            test_send_delay_ms: AtomicU64::new(0),
         });
         shared.status.write().unwrap().ca_fingerprint = shared.ca.fingerprint.clone();
 
@@ -493,6 +510,25 @@ impl RemoteServer {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some((hosts, ips));
         self.shared.cert_wake.notify_one();
+    }
+
+    /// Replace the cert SAN set without waking the cert loop: it is picked
+    /// up on the next periodic check (tests).
+    #[doc(hidden)]
+    pub fn test_set_hosts_quiet(&self, hosts: Vec<String>, ips: Vec<IpAddr>) {
+        *self
+            .shared
+            .hosts_override
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some((hosts, ips));
+    }
+
+    /// Pause `send` between opening the session and typing (tests).
+    #[doc(hidden)]
+    pub fn test_delay_send_after_open(&self, delay: Duration) {
+        self.shared
+            .test_send_delay_ms
+            .store(delay.as_millis() as u64, Ordering::SeqCst);
     }
 
     /// Send `disabled` to every socket, close everything and free the ports.

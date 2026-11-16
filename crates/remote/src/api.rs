@@ -316,6 +316,16 @@ fn agent_events(
     })
 }
 
+/// Fresh re-check: `id` still maps to `session` and the device is still
+/// paired and writable.
+pub(crate) fn still_allowed(s: &Shared, device_id: &str, id: &str, session: &str) -> bool {
+    let file = s.current_file();
+    file.devices
+        .iter()
+        .any(|d| d.id == device_id && !d.read_only)
+        && s.session_for(&file, id).as_deref() == Some(session)
+}
+
 #[derive(Deserialize)]
 struct SendReq {
     text: String,
@@ -367,6 +377,17 @@ async fn send(
         }
         Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
     };
+    let delay = s
+        .test_send_delay_ms
+        .load(std::sync::atomic::Ordering::SeqCst);
+    if delay > 0 {
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+    }
+    // Opening the hub can take seconds: the mark must still map to this
+    // session (and the device still be allowed) right before typing.
+    if !still_allowed(&s, &device.id, &id, &session) {
+        return error(StatusCode::NOT_FOUND, "not_found");
+    }
     let mut bytes = flatten_newlines(&req.text).into_bytes();
     bytes.push(b'\r');
     match hub.send_input(&bytes).await {
