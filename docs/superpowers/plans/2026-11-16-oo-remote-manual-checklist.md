@@ -3,7 +3,7 @@
 Things automated tests could not check. Use a scratch build and a scratch HOME
 (never your running app). Have a phone in hand. Each section says where to look.
 
-Run the whole "Phone" section once per device: iPhone, iPad, Android phone,
+Run sections C–E once per device: iPhone, iPad, Android phone,
 Android tablet (Chrome). Note the device at the top of each pass.
 
 Device: ______________  Date: __________
@@ -20,8 +20,9 @@ Device: ______________  Date: __________
 ## B. On the Mac: Settings → Remote
 
 - [ ] "Remote" sits between Notifications and Shortcuts in the Settings list.
-- [ ] Click On: "Starting..." then "Listening on https://<name>.local:7443/ and https://<ip>:7443/". Click Off: "Off".
-- [ ] Port: type 80 then Enter shows red "Use a port from 1024 to 65535". Type 7080 shows "Port 7080 is used to set up phones". Type 9443: status passes through Starting... and lists :9443 URLs; the window doesn't freeze. `lsof -i :7443` is empty and `lsof -i :9443` is listening.
+- [ ] Click On: "Starting…" then "Listening on https://<name>.local:7443/ and https://<ip>:7443/". Click Off: "Off".
+- [ ] Under the Port field: "Changing the port means re-adding the app on paired phones."
+- [ ] Port: type 80 then Enter shows red "Use a port from 1024 to 65535". Type 7080 shows "Port 7080 is used to set up phones". Type 9443: status passes through "Starting…" and lists :9443 URLs; the window doesn't freeze. `lsof -i :7443` is empty and `lsof -i :9443` is listening.
 - [ ] Opening Settings with Cmd+, from an editor tab and typing goes into the Port field.
 - [ ] Add a phone: the QR is black on white with a white margin in both light and dark themes. A phone camera opens `http://<ip>:7080/setup`.
 - [ ] The CA fingerprint lines are readable and match what the phone's setup page shows.
@@ -34,6 +35,8 @@ Device: ______________  Date: __________
 - [ ] The Android tip is always visible. The stale-IP notice shows after the Mac's IP changes with an Android device paired by IP.
 - [ ] Keep awake On: `pgrep caffeinate` finds a process while serving. Off or stopped: it's gone.
 - [ ] Quit the app while a phone is connected: the app exits promptly (a couple of seconds), with no hang.
+- [ ] Quit openOrchestra while a phone has Fit to phone on: after reopening (or in another tmux client), the desktop window is back to its own size, not phone size.
+- [ ] On a Mac with a VM or VPN interface (Parallels, VMware, a VPN with a private address): the Add a phone QR and the Android link use the Wi-Fi/Ethernet address, not the VM/VPN one.
 
 ## C. Phone, first time
 
@@ -55,6 +58,7 @@ Device: ______________  Date: __________
 - [ ] Open an agent: the terminal fills in and shows live output as the agent works.
 - [ ] Type with the key bar (Esc, Tab, Ctrl, arrows, Enter, etc.) and the text arrives in the agent.
 - [ ] Quick reply sends text and presses Enter in the agent.
+- [ ] Quick reply into a real agent (for example Claude Code) submits the message, not just types it into the prompt.
 - [ ] Fit to phone on: the text re-flows to the phone width and the Mac's pane isn't broken. Fit off: it returns to the original size and redraws cleanly. Also check the font-size stepper and pinch zoom.
 - [ ] The on-screen keyboard coming up doesn't hide the key bar or the cursor line.
 - [ ] Prefix keys typed from the phone (for example Ctrl+B then a digit or n/p) don't switch sessions on the Mac.
@@ -63,10 +67,12 @@ Device: ______________  Date: __________
 - [ ] iPad / Android tablet: use split view or a narrow window; the layout switches between phone and tablet at 768px.
 - [ ] Light and dark mode follow the system setting. Touch targets are comfortable.
 - [ ] Lock the phone for 2 minutes and unlock: the app reconnects and the terminal redraws with current content.
+- [ ] With Fit to phone on, lock the phone or switch to another app: the desktop window returns to its own size. Come back: it fits to the phone again.
 - [ ] Turn Wi-Fi off and on: the connection indicator shows offline, then recovers.
 
 ## E. Changes on the Mac while a phone is connected
 
+- [ ] With a tmux config that has `set -g detach-on-destroy off`, kill the agent the phone is watching (for example `tmux kill-session`): the phone shows "Agent stopped".
 - [ ] Unmark the tab the phone is viewing: a banner appears on the phone and the agent leaves the list.
 - [ ] Turn Remote Off: the phone shows "Remote control is off on the Mac". Turn it On: the phone recovers.
 - [ ] Set the device to Watch only: typing is refused. Set it back: typing works.
@@ -76,6 +82,7 @@ Device: ______________  Date: __________
 
 ## F. Dev and release builds together
 
-- [ ] Run a Dev build and a release build at the same time, both with Remote On. One serves; the other shows "Served by the other openOrchestra build" in amber.
+- [ ] Run a Dev build and a release build at the same time, both with Remote On. One serves; the other shows "Served by the other openOrchestra build" in amber, with a line saying tabs marked there reach phones through the other build.
+- [ ] In the non-serving build, mark a tab: the note says phones reach it through the other openOrchestra build, and the agent appears on the phone within a few seconds.
 - [ ] Revoke a device from either build: the phone is cut off within about 1 second.
 - [ ] Quit the serving build: the other can start serving when you turn Remote Off and On.
