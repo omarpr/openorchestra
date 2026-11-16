@@ -1,9 +1,10 @@
 # openOrchestra developer entry points.
 #
 #   make setup   — install/verify build + runtime tools (idempotent)
-#   make run     — verify prerequisites, then build & run the GPUI app (as a
+#   make run     — verify prerequisites, build the web client, then build & run the GPUI app (as a
 #                  dev .app bundle, so native notifications work)
-#   make build   — verify prerequisites, then build the GPUI app
+#   make build   — verify prerequisites, build the web client, then build the GPUI app
+#   (build, run and check depend on `web`; app/dmg/release get it via package-mac.sh)
 #   make app     — build openOrchestra.app (macOS bundle → dist/)
 #   make dmg     — universal (arm64+x86_64) bundle + .dmg → dist/  (two compiles)
 #   make dmg-notarized — ...and Developer ID signed + notarized by Apple
@@ -11,22 +12,23 @@
 #   make doctor  — report which build/runtime tools are present
 #   make icon    — regenerate the app icon from script/gen-icon.py
 #   make dmg-background — regenerate the installer DMG's background art
+#   make web     — build the oo-remote PWA (web/remote/dist, embedded by crates/remote)
 #   make test    — headless workspace tests (harness-app excluded by design)
 
 APP_DIR := crates/harness-app
 
-.PHONY: setup run build check test app dmg dmg-notarized release icon dmg-background doctor
+.PHONY: setup run build check test app dmg dmg-notarized release icon dmg-background doctor web
 
 setup:
 	bash ./script/setup-macos.sh
 
-run: setup
+run: setup web
 	bash ./script/run-dev.sh
 
-build: setup
+build: setup web
 	cd $(APP_DIR) && cargo build
 
-check:
+check: web
 	cd $(APP_DIR) && cargo check
 
 test:
@@ -55,3 +57,7 @@ dmg-background:
 
 doctor:
 	bash ./script/doctor.sh
+
+web:
+	pnpm -C web/remote install --frozen-lockfile
+	pnpm -C web/remote build

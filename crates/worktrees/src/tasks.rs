@@ -178,6 +178,23 @@ impl TaskStore {
         Some(self.tasks.remove(idx))
     }
 
+    /// Move task `dragged` to `onto`'s position (sidebar reordering).
+    /// Returns whether the order changed; same or unknown ids change nothing.
+    pub fn move_task(&mut self, dragged: &str, onto: &str) -> bool {
+        if dragged == onto {
+            return false;
+        }
+        let (Some(from), Some(to)) = (
+            self.tasks.iter().position(|t| t.id == dragged),
+            self.tasks.iter().position(|t| t.id == onto),
+        ) else {
+            return false;
+        };
+        let task = self.tasks.remove(from);
+        self.tasks.insert(to, task);
+        true
+    }
+
     pub fn mark_archived(&mut self, id: &str) -> Result<(), TaskError> {
         self.get_mut(id)
             .ok_or_else(|| TaskError::NotFound(id.to_string()))?
@@ -570,6 +587,36 @@ pub fn ensure_task_agent_context(task: &Task, tasks_root: &Path) -> Result<Optio
 mod tests {
     use super::*;
     use crate::registry::Avatar;
+
+    fn bare_task(id: &str) -> Task {
+        Task {
+            id: id.into(),
+            name: id.into(),
+            slug: id.into(),
+            home_repo: "app".into(),
+            members: Vec::new(),
+            agent_kind: AgentKind::default(),
+            created_at: "2026-11-16T00:00:00Z".into(),
+            archived: false,
+        }
+    }
+
+    #[test]
+    fn move_task_puts_dragged_at_target_position() {
+        let mut store = TaskStore::new_at("/tmp/unused-tasks.json");
+        for id in ["a", "b", "c"] {
+            store.add(bare_task(id)).unwrap();
+        }
+        let ids = |s: &TaskStore| s.tasks().iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        assert!(store.move_task("a", "c"));
+        assert_eq!(ids(&store), ["b", "c", "a"]);
+        assert!(store.move_task("a", "b"));
+        assert_eq!(ids(&store), ["a", "b", "c"]);
+        // Same task, or an unknown id: unchanged.
+        assert!(!store.move_task("b", "b"));
+        assert!(!store.move_task("x", "a"));
+        assert_eq!(ids(&store), ["a", "b", "c"]);
+    }
 
     fn entry(repo: &str, slug: &str) -> WorktreeEntry {
         WorktreeEntry {

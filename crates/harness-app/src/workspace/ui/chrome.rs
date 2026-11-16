@@ -159,9 +159,98 @@ impl HarnessWorkspace {
                                 .child(branch),
                         )
                     })
-                    .children(self.render_a2a_delegation_chip(hx)),
+                    .children(self.render_a2a_delegation_chip(hx))
+                    .children(self.render_remote_chip(hx, cx)),
             )
             .child(tools_toggle)
+    }
+
+    /// Remote control for the current tab: a chip that shows whether paired
+    /// phones can reach it and toggles that. Terminal tabs only.
+    fn render_remote_chip(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use crate::workspace::remote::{mark_note, remote_chip, RemoteChip, RemoteServe};
+        let key = self.resolve()?.key;
+        let tab = self.panes.get(&key)?.active_tab()?;
+        let tab_id = tab.id;
+        let is_shell = matches!(Self::remote_tab_kind(tab), Some(TabKind::Shell));
+        let marked = self.remote_is_marked(&key, tab_id);
+        let state = remote_chip(Self::remote_tab_kind(tab).is_some(), marked, self.remote_live())?;
+        let (fg, bg, border, tooltip) = match state {
+            RemoteChip::Off => (
+                hx.tx2,
+                None,
+                hx.border,
+                "Let paired phones see and type into this tab",
+            ),
+            RemoteChip::OnLive => (
+                hx.accent,
+                Some(tint(hx.accent, 0.16)),
+                tint(hx.accent, 0.16),
+                "Paired phones can see and type into this tab \u{2014} click to stop",
+            ),
+            RemoteChip::OnUnreachable => (
+                hx.amber,
+                Some(tint(hx.amber, 0.16)),
+                tint(hx.amber, 0.16),
+                "Turn on Remote control in Settings \u{2192} Remote",
+            ),
+        };
+        let label = match state {
+            RemoteChip::Off => "\u{1F4F1} Remote off",
+            RemoteChip::OnLive => "On phone",
+            RemoteChip::OnUnreachable => "On phone \u{00B7} remote off",
+        };
+        let dot_alpha = self.remote_dot_opacity();
+        Some(
+            div()
+                .id("top-remote-chip")
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap_1()
+                .h(px(20.0))
+                .px_1p5()
+                .rounded_md()
+                .border_1()
+                .border_color(border)
+                .when_some(bg, |d, bg| d.bg(bg))
+                .text_xs()
+                .text_color(fg)
+                .cursor_pointer()
+                .tooltip(tip(tooltip))
+                .hover(|d| d.bg(hx.surface_hover))
+                .when(state == RemoteChip::OnLive, |d| {
+                    d.child(
+                        div()
+                            .flex_none()
+                            .size(px(6.0))
+                            .rounded_full()
+                            .bg(hx.accent)
+                            .opacity(dot_alpha),
+                    )
+                })
+                .child(label)
+                // Stop here so the title bar's drag / double-click zoom
+                // doesn't fire from the chip.
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
+                )
+                .on_click(cx.listener(move |ws, _, _, cx| {
+                    cx.stop_propagation();
+                    let key = ws.resolve().map(|r| r.key).unwrap_or_default();
+                    ws.remote_toggle_mark(&key, tab_id, cx);
+                    let now = ws.remote_is_marked(&key, tab_id);
+                    let other = ws.remote.serve == RemoteServe::OtherBuild;
+                    if let Some(n) = mark_note(ws.remote.file.enabled, other, now) {
+                        ws.set_note(n.to_string());
+                    } else if now && is_shell {
+                        ws.set_note("Remote on \u{2014} a paired phone can use this shell".to_string());
+                    }
+                    cx.notify();
+                }))
+                .into_any_element(),
+        )
     }
 
     /// The task whose coordinator agent is focused, if any: the same test

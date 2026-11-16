@@ -382,7 +382,8 @@ pub(crate) const INLINE_BODY_MAX_H: f32 = 420.0;
 #[cfg(test)]
 mod diff_render_tests {
     use super::{
-        load_prefs, max_diff_width, readable_diff_lines, reordered, save_prefs_to, split_rows,
+        load_prefs, max_diff_width, move_task_on_disk, readable_diff_lines, reorder_base, reorder_panel_origin,
+        reordered, same_members, save_prefs_to, shifted, split_rows,
         split_dock_width, target_line_for_row, use_split, use_two_pane, DiffLineKind, DiffLocation, DiffView,
         Prefs, SplitRow, ToolTab, DIFF_TWO_PANE_MIN, MAX_PANEL_W, MIN_CENTER_W, SPLIT_MIN_W,
     };
@@ -720,6 +721,101 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
         assert_eq!(reordered(&[1, 2, 3, 4], 1, 3), vec![2, 3, 1, 4]);
         // Backward: 4 dropped onto 2 lands where 2 was.
         assert_eq!(reordered(&[1, 2, 3, 4], 4, 2), vec![1, 4, 2, 3]);
+    }
+
+    #[test]
+    fn dragging_a_project_onto_another_puts_it_at_that_position() {
+        let p = |s: &str| std::path::PathBuf::from(s);
+        let roots = [p("/a"), p("/b"), p("/c")];
+        assert_eq!(reordered(&roots, p("/a"), p("/c")), vec![p("/b"), p("/c"), p("/a")]);
+        assert_eq!(reordered(&roots, p("/c"), p("/a")), vec![p("/c"), p("/a"), p("/b")]);
+        assert_eq!(reordered(&roots, p("/x"), p("/a")), roots.to_vec());
+    }
+
+    #[test]
+    fn moving_a_project_up_or_down_swaps_it_with_its_neighbour() {
+        assert_eq!(shifted(&[1, 2, 3], &2, true), vec![2, 1, 3]);
+        assert_eq!(shifted(&[1, 2, 3], &2, false), vec![1, 3, 2]);
+        // Already at the edge, or unknown: unchanged.
+        assert_eq!(shifted(&[1, 2, 3], &1, true), vec![1, 2, 3]);
+        assert_eq!(shifted(&[1, 2, 3], &3, false), vec![1, 2, 3]);
+        assert_eq!(shifted(&[1, 2, 3], &9, true), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn a_project_reorder_keeps_projects_the_other_build_added() {
+        let p = |s: &str| std::path::PathBuf::from(s);
+        // This build loaded a, b, c; the other build has since added x.
+        let current = [p("/a"), p("/b"), p("/c")];
+        let disk = vec![p("/a"), p("/x"), p("/b"), p("/c")];
+        let base = reorder_base(disk, &current);
+        assert_eq!(reordered(&base, p("/a"), p("/c")), vec![p("/x"), p("/b"), p("/c"), p("/a")]);
+        assert_eq!(shifted(&base, &p("/c"), true), vec![p("/a"), p("/x"), p("/c"), p("/b")]);
+        // A missing or unreadable repos.json never empties the list.
+        assert_eq!(reorder_base(Vec::new(), &current), current.to_vec());
+        assert!(same_members(&[1, 2, 3], &[3, 1, 2]));
+        assert!(!same_members(&[1, 2, 3], &[1, 2, 3, 4]));
+        assert!(!same_members(&[1, 2], &[1, 3]));
+    }
+
+    #[test]
+    fn a_task_reorder_keeps_tasks_the_other_build_added() {
+        let task = |id: &str| {
+            format!(r#"{{"id":"{id}","name":"{id}","slug":"{id}","home_repo":"app","members":[],"created_at":"2026-11-16T00:00:00Z"}}"#)
+        };
+        let file = |ids: &[&str]| {
+            let tasks: Vec<String> = ids.iter().map(|i| task(i)).collect();
+            format!(r#"{{"tasks":[{}]}}"#, tasks.join(","))
+        };
+        let ids = |s: &worktrees::TaskStore| s.tasks().iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.json");
+
+        // This build loaded a, b; the other build has since added x.
+        std::fs::write(&path, file(&["a", "b"])).unwrap();
+        let current = worktrees::TaskStore::load(&path).unwrap();
+        std::fs::write(&path, file(&["a", "b", "x"])).unwrap();
+        let moved = move_task_on_disk(&current, "a", "b").unwrap().expect("order changed");
+        assert_eq!(ids(&moved), ["b", "a", "x"]);
+        assert_eq!(ids(&worktrees::TaskStore::load(&path).unwrap()), ["b", "a", "x"]);
+
+        // Unknown or same ids change nothing on disk.
+        assert!(move_task_on_disk(&moved, "a", "a").unwrap().is_none());
+        assert!(move_task_on_disk(&moved, "zz", "a").unwrap().is_none());
+
+        // A missing file falls back to this build's list.
+        std::fs::remove_file(&path).unwrap();
+        let moved = move_task_on_disk(&current, "b", "a").unwrap().expect("order changed");
+        assert_eq!(ids(&moved), ["b", "a"]);
+
+        // An unreadable file is reported and left alone.
+        std::fs::write(&path, "{not json").unwrap();
+        assert!(move_task_on_disk(&current, "b", "a").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{not json");
+    }
+
+    #[test]
+    fn the_reorder_panel_stays_inside_the_window() {
+        let win = (1200.0, 800.0);
+        let at = |origin, rows| reorder_panel_origin(origin, win, rows, 420.0, 16.0);
+        // Room below the click: placed as asked.
+        assert_eq!(at((100.0, 120.0), 3), (100.0, 120.0));
+        // Near the bottom: lifted so title + 3 rows + Done fit above the edge.
+        assert_eq!(at((100.0, 760.0), 3), (100.0, 800.0 - (96.0 + 80.0) - 8.0));
+        // A long list counts only its capped height.
+        assert_eq!(at((100.0, 760.0), 50), (100.0, 800.0 - (420.0 + 80.0) - 8.0));
+        // Off the left or right edge: pulled in by the margin.
+        assert_eq!(at((-150.0, 120.0), 3).0, 8.0);
+        assert_eq!(at((1100.0, 120.0), 3).0, 1200.0 - 240.0 - 8.0);
+        // A window smaller than the panel: top-left margin, never negative.
+        assert_eq!(reorder_panel_origin((100.0, 100.0), (200.0, 150.0), 50, 90.0, 16.0), (8.0, 8.0));
+        // A larger UI font makes rows and chrome taller; a smaller one never
+        // counts them shorter than at 16 px.
+        assert_eq!(
+            reorder_panel_origin((100.0, 760.0), win, 3, 420.0, 24.0).1,
+            800.0 - (144.0 + 120.0) - 8.0
+        );
+        assert_eq!(reorder_panel_origin((100.0, 760.0), win, 3, 420.0, 12.0), at((100.0, 760.0), 3));
     }
 
     #[test]

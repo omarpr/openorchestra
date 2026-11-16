@@ -27,6 +27,53 @@ For development iterations, `make run` builds and launches the debug app in a
 separate `.app` bundle. This lets the development build use native macOS
 notifications; logs remain attached to the terminal.
 
+## Remote control from your phone
+
+You can follow and type into your agents from a phone or tablet on the same
+home network. Only tabs you mark are reachable; everything else on the Mac
+stays invisible.
+
+1. Right-click a terminal or agent tab and choose **Allow remote control**.
+2. Open **Settings → Remote** and turn it **On** (HTTPS on port 7443).
+3. Click **Add a phone** and scan the QR code. It opens a short setup page that
+   installs and trusts the app's own certificate authority (an iOS profile, or
+   a CA certificate on Android). Check that the fingerprint on the phone
+   matches the one in Settings.
+4. On the phone, open `https://<your-mac-name>.local:7443` (iPhone/iPad), or
+   `https://<Mac IP address>:7443` (Android), and add it to the home screen.
+5. Enter the 8-character pairing code shown in Settings. It works once and
+   expires after 10 minutes.
+
+Android tip: `.local` names often don't resolve on Android, so use the Mac's IP
+address. If the Mac's IP changes, Settings shows a notice and the phone's saved
+address needs updating. Changing the port also means re-adding the app on each
+phone.
+
+The phone app is called openOrchestra. On an iPhone or iPad opened in Safari it
+first asks you to add it to your Home Screen, so you pair once in the installed
+app (a "Pair in this browser instead" link skips that). The agent list shows
+each agent's icon and a status pill (RUNNING, WAITING, STOPPED).
+
+Opening an agent shows a **Conversation | Terminal** switch. For Claude Code and
+pi agents the Conversation view is the default: your messages and the agent's
+replies verbatim (with Markdown), one-line tool calls with a check or cross
+(tap one to see its output, capped at 64 KB), collapsed thinking, and a status
+bar ("Working…" with the current tool, "Needs your input", "Agent stopped").
+Images in replies are not shown. The switch appears once the agent has a transcript (a brand-new Claude Code or
+pi agent shows the Terminal until its first message), and your last choice per
+agent is remembered. Other agents (for example Codex) show the Terminal only.
+
+On the Mac, a chip in the top bar shows whether the current terminal or agent
+tab is reachable from a phone, and **Settings → Remote → Agents on phone**
+turns each tab on or off.
+
+In Settings you can set a device to **Watch only** or **Revoke** it, and keep
+the Mac awake while serving. Phones on the local network only (private
+addresses) are accepted. A manual test list is in
+[`docs/superpowers/plans/2026-11-16-oo-remote-manual-checklist.md`](docs/superpowers/plans/2026-11-16-oo-remote-manual-checklist.md).
+The PWA source is in `web/remote` (`make web` builds it); the server is the
+`crates/oo-remote` crate.
+
 ## Contributors
 
 <table>

@@ -14,6 +14,7 @@ impl HarnessWorkspace {
         self.exit_hooks_edit(window, cx);
         self.selection = sel;
         self.menu = None;
+        self.tab_context_menu = None;
         self.edit = None;
         if let Selection::Task { task_id, .. } = &self.selection {
             let tid = task_id.clone();
@@ -215,6 +216,19 @@ impl HarnessWorkspace {
         }
     }
 
+    /// After a refresh that followed the other build's changes: if the
+    /// selected project or task is gone, select as after a removal.
+    fn reselect_if_gone(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let gone = match &self.selection {
+            Selection::Main(name) => !self.data.repos.iter().any(|r| &r.name == name),
+            Selection::Task { task_id, .. } => !self.data.tasks.iter().any(|t| &t.id == task_id),
+            Selection::Worktree(_) => false,
+        };
+        if gone {
+            self.reselect_after_removal(window, cx);
+        }
+    }
+
     /// Archive a whole project: move its root to the restorable archived list.
     /// Non-destructive — worktrees and files stay on disk; the group just leaves
     /// the active sidebar until restored (from the Archived section, or by
@@ -234,6 +248,89 @@ impl HarnessWorkspace {
     pub(crate) fn request_removal(&mut self, removal: super::Removal, cx: &mut Context<Self>) {
         self.confirm_removal = Some(removal);
         cx.notify();
+    }
+
+    /// Drop project `dragged` onto `onto`'s position (reorder panel).
+    pub(crate) fn move_repo(&mut self, dragged: &str, onto: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(from), Some(to)) = (self.repo_root_for_name(dragged), self.repo_root_for_name(onto)) else {
+            return;
+        };
+        self.apply_repo_order(|roots| reordered(roots, from.clone(), to.clone()), window, cx);
+    }
+
+    /// Drop task `dragged` onto `onto`'s position (reorder panel). The move
+    /// is applied to tasks.json as it is on disk now, so tasks the other
+    /// build (Dev / installed release) added meanwhile are kept, and shown.
+    pub(crate) fn move_task(&mut self, dragged: &str, onto: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match move_task_on_disk(&self.task_store, dragged, onto) {
+            Ok(Some(store)) => self.task_store = store,
+            Ok(None) => return,
+            Err(e) => {
+                self.set_note(format!("couldn't save the task order: {e}"));
+                cx.notify();
+                return;
+            }
+        }
+        let active: Vec<&str> = self.task_store.active().map(|t| t.id.as_str()).collect();
+        let shown: Vec<&str> = self.data.tasks.iter().map(|t| t.id.as_str()).collect();
+        if !same_members(&active, &shown) {
+            // The other build added or removed tasks: rebuild the views.
+            self.refresh(window, cx);
+            self.reselect_if_gone(window, cx);
+            return;
+        }
+        let order: Vec<String> = self.task_store.tasks().iter().map(|t| t.id.clone()).collect();
+        self.data
+            .tasks
+            .sort_by_key(|t| order.iter().position(|id| *id == t.id).unwrap_or(usize::MAX));
+        cx.notify();
+    }
+
+    /// "Move up" / "Move down" from the project menu.
+    pub(crate) fn shift_repo(&mut self, name: &str, up: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.repo_root_for_name(name) else { return };
+        self.apply_repo_order(|roots| shifted(roots, &root, up), window, cx);
+    }
+
+    /// Apply `reorder` to the project list as it is on disk now (the other
+    /// build may have added or removed projects; see `reorder_base`),
+    /// persist it, and re-sort the loaded views to match — without a full
+    /// refresh (which would re-run git for every repo) unless the set of
+    /// projects changed.
+    fn apply_repo_order(
+        &mut self,
+        reorder: impl FnOnce(&[PathBuf]) -> Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let base = reorder_base(load_repos(&self.repos_path), &self.repo_roots);
+        let order = reorder(&base);
+        if order == base {
+            return;
+        }
+        save_repos(&self.repos_path, &order);
+        let same = same_members(&order, &self.repo_roots);
+        self.repo_roots = order;
+        if !same {
+            // Projects the other build added, archived or removed: follow its
+            // archive list too, so a later save here can't drop an entry it
+            // archived; then rebuild the views.
+            self.archived_repos = load_repos(&self.archived_path);
+            self.refresh(window, cx);
+            self.reselect_if_gone(window, cx);
+            return;
+        }
+        let roots = &self.repo_roots;
+        self.data
+            .repos
+            .sort_by_key(|r| roots.iter().position(|p| *p == r.repo_root).unwrap_or(usize::MAX));
+        cx.notify();
+    }
+
+    /// Whether project `name` can move up / down (it isn't already at that edge).
+    pub(crate) fn repo_can_shift(&self, name: &str, up: bool) -> bool {
+        let Some(i) = self.data.repos.iter().position(|r| r.name == name) else { return false };
+        if up { i > 0 } else { i + 1 < self.data.repos.len() }
     }
 
     /// Remove a project from openOrchestra entirely, once the dialog confirms.
@@ -399,6 +496,13 @@ impl HarnessWorkspace {
                     } else {
                         format!("'{slug}' is not a valid new agent name")
                     });
+                }
+                cx.notify();
+            }
+            EditKind::RemotePort => {
+                match super::ui::settings_remote::parse_port(&text) {
+                    Ok(port) => self.remote_set_port(port, cx),
+                    Err(e) => self.remote.ui.port_error = Some(e),
                 }
                 cx.notify();
             }

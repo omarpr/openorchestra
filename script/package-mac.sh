@@ -109,6 +109,12 @@ fi
 
 say "version $VERSION (build $BUILD)"
 
+# The remote web client (web/remote/dist) is embedded into the binary at compile
+# time by crates/remote/build.rs; without it the app ships a 503 placeholder.
+say "building the remote web client"
+make -C "$ROOT" web
+[ -f "$ROOT/web/remote/dist/index.html" ] || die "web/remote/dist missing — make web failed"
+
 # ---------------------------------------------------------------------------
 # Build. The native slice is built WITHOUT --target on purpose: cargo keys its
 # output directory on the flag rather than the resolved triple, so passing

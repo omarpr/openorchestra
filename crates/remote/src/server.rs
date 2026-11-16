@@ -1,0 +1,811 @@
+//! HTTPS server lifecycle: binding, TLS (rustls with the `ring` provider),
+//! certificate hot-reload, the shared state every route reads, and the
+//! background loops (remote.json watcher, tmux liveness poll, agents view).
+//!
+//! The server owns its own multi-thread tokio runtime. `start` does blocking
+//! work (scutil, key generation, file I/O), so callers keep it off the GPUI
+//! main thread.
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt;
+use std::io;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener as StdListener};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant, SystemTime};
+
+use axum_server::tls_rustls::RustlsConfig;
+use notify::RecommendedWatcher;
+use serde::Serialize;
+use tokio::sync::{watch, Notify};
+
+use crate::certs;
+use crate::conversation::TranscriptKind;
+use crate::tmux_bridge::{live_sessions, Hubs, Tmux};
+use crate::transcript::Transcripts;
+use crate::{auth, RemoteFile, Store};
+
+/// tmux liveness poll for `stopped`.
+const LIVE_POLL: Duration = Duration::from_secs(2);
+/// Backstop reload of remote.json in case a watcher event is missed.
+const FILE_POLL: Duration = Duration::from_millis(500);
+/// How long `stop` waits for sockets to send `disabled` and close.
+const STOP_FLUSH: Duration = Duration::from_secs(3);
+/// Terminal sockets: server ping period, and how long without any frame
+/// from the phone (pongs included) before the socket is dropped. A phone
+/// that left Wi-Fi must not hold "Fit to phone" forever.
+const WS_PING: Duration = Duration::from_secs(20);
+const WS_IDLE: Duration = Duration::from_secs(45);
+/// Pair attempts allowed per peer IP per minute.
+const PAIR_PER_MINUTE: usize = 5;
+
+/// One marked agent tab as the phone sees it. `session` never leaves the
+/// server.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct AgentInfo {
+    pub id: String,
+    pub title: String,
+    pub agent_kind: Option<String>,
+    pub project: String,
+    pub worktree: String,
+    /// `running|waiting|idle|unknown|stopped`.
+    pub status: String,
+    pub status_since: Option<String>,
+    pub tool: Option<String>,
+    /// Git branch of the tab's worktree (filled by the app).
+    pub branch: Option<String>,
+    /// Whether `/api/agents/{id}/conversation` serves this agent. Computed
+    /// by the server from `transcript` and `agent_kind`.
+    pub has_conversation: bool,
+    #[serde(skip)]
+    pub session: String,
+    /// The agent's transcript file. Never leaves the server.
+    #[serde(skip)]
+    pub transcript: Option<PathBuf>,
+}
+
+/// What the app publishes: its marked tabs with their current status.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Snapshot {
+    pub agents: Vec<AgentInfo>,
+}
+
+/// The channel the app sends snapshots through.
+pub fn snapshot_channel() -> (watch::Sender<Snapshot>, watch::Receiver<Snapshot>) {
+    watch::channel(Snapshot::default())
+}
+
+#[derive(Clone, Debug)]
+pub struct ServerConfig {
+    /// `~/.openorchestra` (remote.json lives here, certs in `remote/`).
+    pub state_dir: PathBuf,
+    /// HTTPS port (7443); 0 picks a free port (tests).
+    pub port: u16,
+    /// Plain-HTTP setup port (7080), listening only while setup is open.
+    pub setup_port: u16,
+    pub tmux: Tmux,
+    /// 0.0.0.0 in the app; tests use 127.0.0.1.
+    pub bind_ip: IpAddr,
+    /// Fixed cert SANs (tests) instead of LocalHostName + private IPv4s.
+    pub hosts_override: Option<(Vec<String>, Vec<IpAddr>)>,
+}
+
+#[derive(Debug)]
+pub enum StartError {
+    PortInUse(u16),
+    Other(String),
+}
+
+impl fmt::Display for StartError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StartError::PortInUse(p) => write!(f, "port {p} is already in use"),
+            StartError::Other(e) => f.write_str(e),
+        }
+    }
+}
+
+impl std::error::Error for StartError {}
+
+fn other(e: impl fmt::Display) -> StartError {
+    StartError::Other(e.to_string())
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ServerStatus {
+    /// Phone-usable URLs (`https://<name>.local:<port>/`, `https://<ip>:<port>/`).
+    pub urls: Vec<String>,
+    pub ca_fingerprint: String,
+    /// Devices paired on an IP this Mac no longer has.
+    pub stale_ip_devices: Vec<String>,
+    /// The LAN address to hand phones (setup QR, Android link): the
+    /// default-route interface's private IPv4, when the cert covers it.
+    pub primary_ip: Option<IpAddr>,
+    /// Why the setup port ("Add a phone") could not be opened, for the UI.
+    /// Cleared when the port opens or is closed.
+    pub setup_error: Option<String>,
+}
+
+/// CA artifacts served on the setup port.
+pub(crate) struct CaInfo {
+    pub pem: String,
+    pub fingerprint: String,
+    pub mobileconfig: String,
+}
+
+/// State shared by every route and background loop.
+pub(crate) struct Shared {
+    pub state_dir: PathBuf,
+    pub tmux: Tmux,
+    pub hubs: Hubs,
+    /// Transcript tailers shared by conversation viewers.
+    pub transcripts: Transcripts,
+    pub port: u16,
+    pub snapshot: watch::Receiver<Snapshot>,
+    /// Latest remote.json (pushed to open sockets on change).
+    pub file: watch::Sender<Arc<RemoteFile>>,
+    /// Session names alive on the tmux server.
+    pub live: watch::Sender<Arc<HashSet<String>>>,
+    /// The deduped list SSE clients receive.
+    pub agents: watch::Sender<Arc<Vec<AgentInfo>>>,
+    /// `true` once `stop` was called.
+    pub shutdown: watch::Sender<bool>,
+    /// SAN hosts/IPs of the certificate currently served.
+    pub sans: RwLock<(Vec<String>, Vec<IpAddr>)>,
+    pub ca: CaInfo,
+    pub status: RwLock<ServerStatus>,
+    /// One clone per open WebSocket/SSE stream (for `stop`'s flush wait).
+    pub open_streams: Arc<()>,
+    pair_attempts: Mutex<HashMap<IpAddr, VecDeque<Instant>>>,
+    hosts_override: Mutex<Option<(Vec<String>, Vec<IpAddr>)>>,
+    pub(crate) cert_wake: Notify,
+    /// Cert recheck period (60s; shorter in tests).
+    pub(crate) cert_check: Duration,
+    /// Test hook: pause between opening the hub and typing in `send`.
+    pub(crate) test_send_delay_ms: AtomicU64,
+    /// Terminal socket ping period / idle limit, in ms (shorter in tests).
+    ws_ping_ms: AtomicU64,
+    ws_idle_ms: AtomicU64,
+    /// A bad remote.json read was logged (once).
+    bad_file_logged: AtomicBool,
+}
+
+impl Shared {
+    /// (ping period, idle limit) for terminal sockets.
+    pub(crate) fn ws_keepalive(&self) -> (Duration, Duration) {
+        (
+            Duration::from_millis(self.ws_ping_ms.load(Ordering::SeqCst)),
+            Duration::from_millis(self.ws_idle_ms.load(Ordering::SeqCst)),
+        )
+    }
+
+    pub fn store(&self) -> Store {
+        Store::new(&self.state_dir)
+    }
+
+    /// The file as it is on disk now (request paths never trust a cache).
+    /// An unreadable or unparseable file keeps the last good copy: a
+    /// transient bad read must not look like "every device revoked" (phones
+    /// would get 401 / `revoked` and drop their token).
+    pub fn current_file(&self) -> RemoteFile {
+        match self.store().try_load() {
+            Some(f) => f,
+            None => {
+                if !self.bad_file_logged.swap(true, Ordering::SeqCst) {
+                    eprintln!("oo-remote: remote.json unreadable; keeping the last good copy");
+                }
+                (**self.file.borrow()).clone()
+            }
+        }
+    }
+
+    /// Phone-visible agents given `file`'s marks.
+    pub fn agents_for(&self, file: &RemoteFile) -> Vec<AgentInfo> {
+        compute_agents(&self.snapshot.borrow(), file, &self.live.borrow())
+    }
+
+    /// Session behind `id`, only if `id` is currently marked in `file` and
+    /// published by the app.
+    pub fn session_for(&self, file: &RemoteFile, id: &str) -> Option<String> {
+        file.mark_by_id(id)?;
+        self.snapshot
+            .borrow()
+            .agents
+            .iter()
+            .find(|a| a.id == id)
+            .map(|a| a.session.clone())
+    }
+
+    /// Transcript behind `id`, only if `id` is currently marked in `file`
+    /// and the app published a supported transcript for it. The path never
+    /// leaves the server.
+    pub fn transcript_for(&self, file: &RemoteFile, id: &str) -> Option<(PathBuf, TranscriptKind)> {
+        file.mark_by_id(id)?;
+        let snap = self.snapshot.borrow();
+        let a = snap.agents.iter().find(|a| a.id == id)?;
+        let kind = TranscriptKind::from_agent_kind(a.agent_kind.as_deref()?)?;
+        Some((a.transcript.clone()?, kind))
+    }
+
+    /// Whether `origin` is exactly `https://<SAN>:<port>` for the cert in use.
+    pub fn origin_allowed(&self, origin: &str) -> bool {
+        let sans = self.sans.read().unwrap_or_else(|e| e.into_inner());
+        let port = self.port;
+        let mut ips = sans.1.clone();
+        ips.push(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        sans.0
+            .iter()
+            .map(|h| format!("https://{}:{port}", h.to_ascii_lowercase()))
+            .chain(ips.iter().map(|ip| match ip {
+                IpAddr::V4(v4) => format!("https://{v4}:{port}"),
+                IpAddr::V6(v6) => format!("https://[{v6}]:{port}"),
+            }))
+            .any(|o| o.eq_ignore_ascii_case(origin))
+    }
+
+    /// Count a pairing attempt from `ip`; false beyond 5 per minute.
+    pub fn pair_attempt_allowed(&self, ip: IpAddr, now: Instant) -> bool {
+        let mut map = self.pair_attempts.lock().unwrap_or_else(|e| e.into_inner());
+        map.retain(|_, q| {
+            q.retain(|t| now.duration_since(*t) < Duration::from_secs(60));
+            !q.is_empty()
+        });
+        let q = map.entry(ip.to_canonical()).or_default();
+        if q.len() >= PAIR_PER_MINUTE {
+            return false;
+        }
+        q.push_back(now);
+        true
+    }
+
+    fn reload_file(&self) {
+        let fresh = self.current_file();
+        self.file.send_if_modified(|cur| {
+            if **cur == fresh {
+                false
+            } else {
+                *cur = Arc::new(fresh);
+                true
+            }
+        });
+    }
+
+    fn refresh_agents(&self) {
+        let list = self.agents_for(&self.file.borrow());
+        self.agents.send_if_modified(|cur| {
+            if **cur == list {
+                false
+            } else {
+                *cur = Arc::new(list);
+                true
+            }
+        });
+    }
+
+    pub(crate) fn refresh_status(&self, current_ips: &[IpAddr]) {
+        let (hosts, ips) = self.sans.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let port = self.port;
+        let mut urls: Vec<String> = hosts
+            .iter()
+            .filter(|h| !h.eq_ignore_ascii_case("localhost"))
+            .map(|h| format!("https://{h}:{port}/"))
+            .collect();
+        urls.extend(
+            ips.iter()
+                .filter(|ip| !ip.is_loopback())
+                .map(|ip| match ip {
+                    IpAddr::V4(v4) => format!("https://{v4}:{port}/"),
+                    IpAddr::V6(v6) => format!("https://[{v6}]:{port}/"),
+                }),
+        );
+        let stale = auth::devices_on_stale_ip(&self.file.borrow(), current_ips);
+        let mut st = self.status.write().unwrap_or_else(|e| e.into_inner());
+        st.urls = urls;
+        st.stale_ip_devices = stale;
+    }
+
+    /// The address for the setup QR / Android link among `ips` (the SAN
+    /// IPs). Blocking (`route`): call off the UI thread.
+    pub(crate) fn desired_primary(&self, ips: &[IpAddr]) -> Option<IpAddr> {
+        let first = || ips.iter().copied().find(|ip| !ip.is_loopback());
+        let overridden = self
+            .hosts_override
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
+        if overridden {
+            return first();
+        }
+        certs::primary_ipv4()
+            .filter(|p| ips.contains(p))
+            .or_else(first)
+    }
+
+    pub(crate) fn set_primary(&self, primary: Option<IpAddr>) {
+        self.status
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .primary_ip = primary;
+    }
+
+    pub(crate) fn desired_sans(&self) -> (Vec<String>, Vec<IpAddr>) {
+        if let Some(o) = self
+            .hosts_override
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            return o;
+        }
+        (
+            certs::san_hosts(certs::local_host_name().as_deref()),
+            certs::private_ipv4s(),
+        )
+    }
+}
+
+/// Marked agents from the snapshot (first occurrence of each id), with
+/// `stopped` forced for sessions that aren't alive.
+pub fn compute_agents(
+    snap: &Snapshot,
+    file: &RemoteFile,
+    live: &HashSet<String>,
+) -> Vec<AgentInfo> {
+    let mut seen = HashSet::new();
+    snap.agents
+        .iter()
+        .filter(|a| file.mark_by_id(&a.id).is_some() && seen.insert(a.id.clone()))
+        .map(|a| {
+            let mut a = a.clone();
+            a.has_conversation = a.transcript.is_some()
+                && a.agent_kind
+                    .as_deref()
+                    .and_then(TranscriptKind::from_agent_kind)
+                    .is_some();
+            if !live.contains(&a.session) {
+                a.status = "stopped".into();
+                a.tool = None;
+            }
+            a
+        })
+        .collect()
+}
+
+pub struct RemoteServer {
+    shared: Arc<Shared>,
+    rt: Option<tokio::runtime::Runtime>,
+    https: axum_server::Handle<SocketAddr>,
+    https_done: Option<std::sync::mpsc::Receiver<()>>,
+    setup: Mutex<Option<axum_server::Handle<SocketAddr>>>,
+    bind_ip: IpAddr,
+    setup_port: u16,
+    _watcher: Option<RecommendedWatcher>,
+}
+
+impl RemoteServer {
+    pub fn start(
+        cfg: ServerConfig,
+        snapshot: watch::Receiver<Snapshot>,
+    ) -> Result<RemoteServer, StartError> {
+        Self::start_with_cert_check(cfg, snapshot, crate::tls::CERT_CHECK)
+    }
+
+    /// `start` with a custom cert recheck period (tests).
+    #[doc(hidden)]
+    pub fn start_with_cert_check(
+        cfg: ServerConfig,
+        snapshot: watch::Receiver<Snapshot>,
+        cert_check: Duration,
+    ) -> Result<RemoteServer, StartError> {
+        let listener = StdListener::bind((cfg.bind_ip, cfg.port)).map_err(|e| {
+            if e.kind() == io::ErrorKind::AddrInUse {
+                StartError::PortInUse(cfg.port)
+            } else {
+                other(e)
+            }
+        })?;
+        let port = listener.local_addr().map_err(other)?.port();
+
+        let cert_dir = cfg.state_dir.join("remote");
+        let ca =
+            Arc::new(certs::load_or_create_ca(&cert_dir, &certs::computer_name()).map_err(other)?);
+        let store = Store::new(&cfg.state_dir);
+        let file0 = store.load();
+
+        let shared = Arc::new(Shared {
+            state_dir: cfg.state_dir.clone(),
+            tmux: cfg.tmux.clone(),
+            hubs: Hubs::new(cfg.tmux.clone()),
+            transcripts: Transcripts::new(),
+            port,
+            snapshot,
+            file: watch::channel(Arc::new(file0)).0,
+            live: watch::channel(Arc::new(HashSet::new())).0,
+            agents: watch::channel(Arc::new(Vec::new())).0,
+            shutdown: watch::channel(false).0,
+            sans: RwLock::new((Vec::new(), Vec::new())),
+            ca: CaInfo {
+                pem: ca.cert_pem.clone(),
+                fingerprint: certs::fingerprint_sha256(&ca.cert_der),
+                mobileconfig: certs::mobileconfig(&ca),
+            },
+            status: RwLock::new(ServerStatus::default()),
+            open_streams: Arc::new(()),
+            pair_attempts: Mutex::new(HashMap::new()),
+            hosts_override: Mutex::new(cfg.hosts_override.clone()),
+            cert_wake: Notify::new(),
+            cert_check,
+            test_send_delay_ms: AtomicU64::new(0),
+            ws_ping_ms: AtomicU64::new(WS_PING.as_millis() as u64),
+            ws_idle_ms: AtomicU64::new(WS_IDLE.as_millis() as u64),
+            bad_file_logged: AtomicBool::new(false),
+        });
+        shared.status.write().unwrap().ca_fingerprint = shared.ca.fingerprint.clone();
+
+        let (hosts, ips) = shared.desired_sans();
+        let cert =
+            certs::load_or_issue_server_cert(&cert_dir, &ca, &hosts, &ips, SystemTime::now())
+                .map_err(other)?;
+        let tls =
+            RustlsConfig::from_config(Arc::new(crate::tls::tls_config(&cert).map_err(other)?));
+        *shared.sans.write().unwrap() = (cert.hosts.clone(), cert.ips.clone());
+        shared.set_primary(shared.desired_primary(&cert.ips));
+        shared.refresh_status(&ips);
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("oo-remote")
+            .enable_all()
+            .build()
+            .map_err(other)?;
+
+        // First liveness poll before serving, so a fresh server never lists
+        // live agents as stopped.
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        {
+            let s = shared.clone();
+            rt.spawn(async move {
+                let live = live_sessions(&s.tmux).await;
+                s.live.send_replace(Arc::new(live));
+                s.refresh_agents();
+                let _ = ready_tx.send(());
+            });
+        }
+        let _ = ready_rx.recv_timeout(Duration::from_secs(5));
+
+        let (watcher, file_events) = match store.watch() {
+            Ok((w, rx)) => (Some(w), Some(rx)),
+            Err(e) => {
+                eprintln!("oo-remote: watching remote.json failed ({e}); polling only");
+                (None, None)
+            }
+        };
+        let file_wake = Arc::new(Notify::new());
+        if let Some(rx) = file_events {
+            let wake = file_wake.clone();
+            // Exits when the watcher (and with it the sender) is dropped.
+            std::thread::Builder::new()
+                .name("oo-remote-watch".into())
+                .spawn(move || {
+                    while rx.recv().is_ok() {
+                        wake.notify_one();
+                    }
+                })
+                .map_err(other)?;
+        }
+
+        rt.spawn(file_loop(shared.clone(), file_wake));
+        rt.spawn(live_loop(shared.clone()));
+        rt.spawn(agents_loop(shared.clone()));
+        rt.spawn(crate::tls::cert_loop(
+            shared.clone(),
+            ca,
+            cert,
+            tls.clone(),
+            cert_dir,
+        ));
+
+        let https = axum_server::Handle::new();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        {
+            let app = crate::api::router(shared.clone());
+            let handle = https.clone();
+            rt.spawn(async move {
+                let result = match axum_server::tls_rustls::from_tcp_rustls(listener, tls) {
+                    Ok(server) => {
+                        server
+                            .handle(handle)
+                            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+                            .await
+                    }
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = result {
+                    eprintln!("oo-remote: https server ended: {e}");
+                }
+                let _ = done_tx.send(());
+            });
+        }
+
+        Ok(RemoteServer {
+            shared,
+            rt: Some(rt),
+            https,
+            https_done: Some(done_rx),
+            setup: Mutex::new(None),
+            bind_ip: cfg.bind_ip,
+            setup_port: cfg.setup_port,
+            _watcher: watcher,
+        })
+    }
+
+    pub fn port(&self) -> u16 {
+        self.shared.port
+    }
+
+    pub fn status(&self) -> ServerStatus {
+        self.shared
+            .status
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Open or close the plain-HTTP setup port. Opening binds before it
+    /// returns; a bind failure leaves it closed and is reported in
+    /// [`ServerStatus::setup_error`] until the next open or close.
+    pub fn set_setup_open(&self, open: bool) {
+        let mut slot = self.setup.lock().unwrap_or_else(|e| e.into_inner());
+        if !open {
+            if let Some(h) = slot.take() {
+                h.shutdown();
+            }
+            self.set_setup_error(None);
+            return;
+        }
+        if slot.is_some() {
+            return;
+        }
+        let Some(rt) = &self.rt else { return };
+        let listener = match StdListener::bind((self.bind_ip, self.setup_port)) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("oo-remote: setup port {}: {e}", self.setup_port);
+                self.set_setup_error(Some(format!(
+                    "Couldn't open port {} for phone setup \u{2014} is another app using it?",
+                    self.setup_port
+                )));
+                return;
+            }
+        };
+        self.set_setup_error(None);
+        let handle = axum_server::Handle::new();
+        let app = crate::setup::router(self.shared.clone());
+        let h = handle.clone();
+        rt.spawn(async move {
+            let result = match axum_server::from_tcp(listener) {
+                Ok(server) => {
+                    server
+                        .handle(h)
+                        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+                        .await
+                }
+                Err(e) => Err(e),
+            };
+            if let Err(e) = result {
+                eprintln!("oo-remote: setup server ended: {e}");
+            }
+        });
+        *slot = Some(handle);
+    }
+
+    fn set_setup_error(&self, error: Option<String>) {
+        self.shared
+            .status
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .setup_error = error;
+    }
+
+    /// Replace the cert SAN set and re-check the cert now (tests).
+    #[doc(hidden)]
+    pub fn test_set_hosts(&self, hosts: Vec<String>, ips: Vec<IpAddr>) {
+        *self
+            .shared
+            .hosts_override
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some((hosts, ips));
+        self.shared.cert_wake.notify_one();
+    }
+
+    /// Replace the cert SAN set without waking the cert loop: it is picked
+    /// up on the next periodic check (tests).
+    #[doc(hidden)]
+    pub fn test_set_hosts_quiet(&self, hosts: Vec<String>, ips: Vec<IpAddr>) {
+        *self
+            .shared
+            .hosts_override
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some((hosts, ips));
+    }
+
+    /// Pause `send` between opening the session and typing (tests).
+    #[doc(hidden)]
+    pub fn test_delay_send_after_open(&self, delay: Duration) {
+        self.shared
+            .test_send_delay_ms
+            .store(delay.as_millis() as u64, Ordering::SeqCst);
+    }
+
+    /// Terminal socket ping period and idle limit for sockets opened from now
+    /// on (tests).
+    #[doc(hidden)]
+    pub fn test_set_ws_keepalive(&self, ping: Duration, idle: Duration) {
+        self.shared
+            .ws_ping_ms
+            .store(ping.as_millis() as u64, Ordering::SeqCst);
+        self.shared
+            .ws_idle_ms
+            .store(idle.as_millis() as u64, Ordering::SeqCst);
+    }
+
+    /// Quit path: stop accepting fits and put every fitted window back to
+    /// its saved size now, blocking for at most `budget` (spawns nothing
+    /// when no fit is active). tmux sessions outlive the app, so a window
+    /// left at phone size by a stop thread the exiting process cut short
+    /// would stay that way. Callable from any non-tokio thread.
+    pub fn restore_fits_now(&self, budget: Duration) {
+        self.shared.shutdown.send_replace(true);
+        self.shared.hubs.restore_fits_blocking(budget);
+    }
+
+    /// Send `disabled` to every socket, close everything and free the ports.
+    pub fn stop(mut self) {
+        self.shutdown_now();
+    }
+
+    fn shutdown_now(&mut self) {
+        let Some(rt) = self.rt.take() else { return };
+        self.shared.shutdown.send_replace(true);
+        let deadline = Instant::now() + STOP_FLUSH;
+        while Arc::strong_count(&self.shared.open_streams) > 1 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if let Some(h) = self.setup.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            h.shutdown();
+        }
+        self.https
+            .graceful_shutdown(Some(Duration::from_millis(500)));
+        if let Some(done) = self.https_done.take() {
+            let _ = done.recv_timeout(Duration::from_secs(2));
+        }
+        // Never blocks (safe from inside another runtime).
+        rt.shutdown_background();
+    }
+}
+
+impl Drop for RemoteServer {
+    fn drop(&mut self) {
+        self.shutdown_now();
+    }
+}
+
+/// Resolves once `stop` was requested (never holds the watch guard).
+pub(crate) async fn stopped(rx: &mut watch::Receiver<bool>) {
+    let _ = rx.wait_for(|v| *v).await;
+}
+
+async fn file_loop(s: Arc<Shared>, wake: Arc<Notify>) {
+    let mut stop = s.shutdown.subscribe();
+    loop {
+        tokio::select! {
+            _ = stopped(&mut stop) => return,
+            _ = wake.notified() => {}
+            _ = tokio::time::sleep(FILE_POLL) => {}
+        }
+        let s2 = s.clone();
+        let _ = tokio::task::spawn_blocking(move || s2.reload_file()).await;
+    }
+}
+
+async fn live_loop(s: Arc<Shared>) {
+    let mut stop = s.shutdown.subscribe();
+    loop {
+        tokio::select! {
+            _ = stopped(&mut stop) => return,
+            _ = tokio::time::sleep(LIVE_POLL) => {}
+        }
+        let live = live_sessions(&s.tmux).await;
+        s.live.send_if_modified(|cur| {
+            if **cur == live {
+                false
+            } else {
+                *cur = Arc::new(live);
+                true
+            }
+        });
+    }
+}
+
+/// Recompute the SSE agents list whenever its inputs change.
+async fn agents_loop(s: Arc<Shared>) {
+    let mut stop = s.shutdown.subscribe();
+    let mut snap = s.snapshot.clone();
+    let mut file = s.file.subscribe();
+    let mut live = s.live.subscribe();
+    let mut snap_open = true;
+    loop {
+        tokio::select! {
+            _ = stopped(&mut stop) => return,
+            r = snap.changed(), if snap_open => {
+                // The app dropped its sender: keep serving the last snapshot.
+                snap_open = r.is_ok();
+            }
+            _ = file.changed() => {}
+            _ = live.changed() => {}
+        }
+        s.refresh_agents();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Mark;
+
+    fn info(id: &str, session: &str) -> AgentInfo {
+        AgentInfo {
+            id: id.into(),
+            title: id.into(),
+            agent_kind: None,
+            project: "p".into(),
+            worktree: "w".into(),
+            status: "waiting".into(),
+            status_since: Some("2026-01-01T00:00:00Z".into()),
+            tool: Some("Bash".into()),
+            branch: None,
+            has_conversation: false,
+            session: session.into(),
+            transcript: None,
+        }
+    }
+
+    #[test]
+    fn agents_only_marked_deduped_and_stopped_when_dead() {
+        let file = RemoteFile {
+            marked: vec![
+                Mark {
+                    worktree_key: "k".into(),
+                    tab_id: 1,
+                    id: "a".into(),
+                },
+                Mark {
+                    worktree_key: "k".into(),
+                    tab_id: 2,
+                    id: "b".into(),
+                },
+            ],
+            ..RemoteFile::default()
+        };
+        let snap = Snapshot {
+            agents: vec![
+                info("a", "sa"),
+                info("b", "sb"),
+                info("c", "sc"),
+                info("a", "sx"),
+            ],
+        };
+        let live: HashSet<String> = ["sa".to_string()].into();
+        let out = compute_agents(&snap, &file, &live);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].id, "a");
+        assert_eq!(out[0].status, "waiting");
+        assert_eq!(out[0].tool.as_deref(), Some("Bash"));
+        assert_eq!(out[1].id, "b");
+        assert_eq!(out[1].status, "stopped");
+        assert_eq!(out[1].tool, None);
+        let json = serde_json::to_value(&out[0]).unwrap();
+        assert!(json.get("session").is_none());
+    }
+}

@@ -2,9 +2,70 @@
 //! rows, and the ARCHIVED list.
 
 use super::*;
+use crate::workspace::remote::worktree_pane_key;
 
 /// What a project-menu item does when picked.
 type MenuAction = dyn Fn(&mut HarnessWorkspace, &mut Window, &mut Context<HarnessWorkspace>);
+
+/// Width of a row in a reorder panel (panel 240 − 2 × 6 padding),
+/// shared with the drag ghost so the ghost is the row's exact size.
+const REORDER_ROW_W: f32 = 228.0;
+
+/// A reorder row's inside: the name, then the four-dot grip on the right.
+fn reorder_row_content(hx: &HarnessTheme, name: &str, grip: gpui::Div) -> gpui::Div {
+    div()
+        .flex()
+        .flex_1()
+        .min_w_0()
+        .items_center()
+        .gap_1()
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .whitespace_nowrap()
+                .overflow_hidden()
+                .text_ellipsis()
+                .text_sm()
+                .text_color(hx.tx0)
+                .child(name.to_string()),
+        )
+        .child(div().size(px(22.0)).flex().flex_none().items_center().justify_center().child(grip))
+}
+
+/// The row that follows the cursor while dragging in a reorder panel: the
+/// same row, lifted (raised surface, accent border, shadow).
+struct ReorderRowGhost {
+    name: String,
+    hx: HarnessTheme,
+}
+
+impl Render for ReorderRowGhost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let hx = &self.hx;
+        let dot = || div().size(px(3.0)).rounded_full().bg(hx.tx1);
+        let grip = div()
+            .flex()
+            .flex_col()
+            .gap(px(3.0))
+            .child(div().flex().gap(px(3.0)).child(dot()).child(dot()))
+            .child(div().flex().gap(px(3.0)).child(dot()).child(dot()));
+        div()
+            .w(px(REORDER_ROW_W))
+            .flex()
+            .items_center()
+            .pl_2()
+            .pr_1()
+            .py_1()
+            .rounded_md()
+            .bg(hx.surface2)
+            .border_1()
+            .border_color(hx.accent)
+            .shadow_lg()
+            .cursor(gpui::CursorStyle::ClosedHand)
+            .child(reorder_row_content(hx, &self.name, grip))
+    }
+}
 
 impl HarnessWorkspace {
     pub(crate) fn render_repo_group(
@@ -265,6 +326,11 @@ impl HarnessWorkspace {
                             .children(counts),
                     ),
             )
+            .children(self.remote_dot(
+                hx,
+                format!("remote-dot-wt-{}", wt.id),
+                &worktree_pane_key(wt.task_id.as_deref(), &wt.id),
+            ))
             .child(match ending {
                 Some(kind) => busy_pill(hx, kind.doing_label(), self.anim_secs()).into_any_element(),
                 None => agent_pill(hx, agent, self.anim_secs()).into_any_element(),
@@ -459,7 +525,141 @@ impl HarnessWorkspace {
                     )
                     .child(subtitle),
             )
+            .children(self.remote_dot(
+                hx,
+                format!("remote-dot-main-{}", repo.name),
+                &format!("main:{}", repo.name),
+            ))
             .child(agent_pill(hx, agent, self.anim_secs()))
+    }
+
+    /// The "Reorder projects" / "Reorder tasks" panel: every row with a
+    /// four-dot grip on the right; drag a whole row onto another row to move
+    /// it there.
+    pub(crate) fn render_reorder_panel(
+        &self,
+        hx: &HarnessTheme,
+        list_kind: ReorderList,
+        x: Pixels,
+        y: Pixels,
+        list_max_h: Pixels,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        // Four dots in a 2×2 grid — the drag handle.
+        let grip = |color: gpui::Rgba| {
+            let dot = || div().size(px(3.0)).rounded_full().bg(color);
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .child(div().flex().gap(px(3.0)).child(dot()).child(dot()))
+                .child(div().flex().gap(px(3.0)).child(dot()).child(dot()))
+        };
+        // (key used to move it, label shown)
+        let rows: Vec<(String, String)> = match list_kind {
+            ReorderList::Projects => self.data.repos.iter().map(|r| (r.name.clone(), r.name.clone())).collect(),
+            ReorderList::Tasks => self.data.tasks.iter().map(|t| (t.id.clone(), t.name.clone())).collect(),
+        };
+        let title = match list_kind {
+            ReorderList::Projects => "REORDER PROJECTS",
+            ReorderList::Tasks => "REORDER TASKS",
+        };
+        let mut list = div()
+            .id("reorder-list")
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .min_h_0()
+            .max_h(list_max_h)
+            .overflow_y_scroll();
+        for (i, (key, label)) in rows.into_iter().enumerate() {
+            let drop_key = key.clone();
+            let ghost_label = label.clone();
+            let ghost_theme = hx.clone();
+            let drop_bg = tint(hx.accent, 0.16);
+            list = list.child(
+                div()
+                    .id(("reorder-row", i))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .pl_2()
+                    .pr_1()
+                    .py_1()
+                    .rounded_md()
+                    // The whole row is the drag handle; the grip just says so.
+                    .cursor(gpui::CursorStyle::OpenHand)
+                    .hover(|d| d.bg(hx.surface))
+                    .tooltip(tip("Drag to reorder"))
+                    // What follows the cursor is the row itself, at its own
+                    // width, so it reads as moving the row — not a label.
+                    .on_drag(DraggedReorderRow { list: list_kind, key }, move |_, _, _, cx| {
+                        let name = ghost_label.clone();
+                        let hx = ghost_theme.clone();
+                        cx.new(|_| ReorderRowGhost { name, hx })
+                    })
+                    // The row under the cursor while dragging is where the
+                    // dragged row will land (same list only).
+                    .drag_over::<DraggedReorderRow>(move |d, dragged, _, _| {
+                        if dragged.list == list_kind { d.bg(drop_bg) } else { d }
+                    })
+                    .on_drop(cx.listener(move |ws, dragged: &DraggedReorderRow, window, cx| {
+                        if dragged.list != list_kind {
+                            return;
+                        }
+                        match list_kind {
+                            ReorderList::Projects => ws.move_repo(&dragged.key, &drop_key, window, cx),
+                            ReorderList::Tasks => ws.move_task(&dragged.key, &drop_key, window, cx),
+                        }
+                    }))
+                    .child(reorder_row_content(hx, &label, grip(hx.tx2))),
+            );
+        }
+        div()
+            .absolute()
+            .left(x)
+            .top(y)
+            .w(px(REORDER_PANEL_W))
+            .p(px(6.0))
+            .rounded_md()
+            .bg(hx.surface2)
+            .border_1()
+            .border_color(hx.border2)
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .on_mouse_down(MouseButton::Left, cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()))
+            .child(
+                div()
+                    .px_2()
+                    .pt_1()
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(hx.tx2)
+                    .child(title),
+            )
+            .child(list)
+            .child(
+                div()
+                    .id("reorder-done")
+                    .mt_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_sm()
+                    .text_center()
+                    .text_color(hx.tx0)
+                    .bg(hx.surface)
+                    .cursor_pointer()
+                    .hover(|d| d.bg(hx.surface_hover))
+                    .child("Done")
+                    .on_click(cx.listener(|ws, _, _, cx| {
+                        cx.stop_propagation();
+                        ws.reorder_panel = None;
+                        cx.notify();
+                    })),
+            )
     }
 
     /// The project header's ⋯ / right-click menu.
@@ -479,6 +679,8 @@ impl HarnessWorkspace {
             }))
         };
         let (r1, r2, r3, r4) = (repo.to_string(), repo.to_string(), repo.to_string(), repo.to_string());
+        let (up, down) = (self.repo_can_shift(repo, true), self.repo_can_shift(repo, false));
+        let (r5, r6) = (repo.to_string(), repo.to_string());
         div()
             .absolute()
             .left(x)
@@ -500,6 +702,8 @@ impl HarnessWorkspace {
                 false,
                 Box::new(move |ws, w, cx| ws.open_project_hooks(&r2, HookScriptPhase::Setup, HookLayer::Repo, w, cx)),
             ))
+            .when(up, |d| d.child(item("Move up", false, Box::new(move |ws, w, cx| ws.shift_repo(&r5, true, w, cx)))))
+            .when(down, |d| d.child(item("Move down", false, Box::new(move |ws, w, cx| ws.shift_repo(&r6, false, w, cx)))))
             .child(div().h(px(1.0)).mx_1().bg(hx.border))
             .child(item("Archive project", false, Box::new(move |ws, w, cx| ws.archive_repo(r3.clone(), w, cx))))
             .child(item(

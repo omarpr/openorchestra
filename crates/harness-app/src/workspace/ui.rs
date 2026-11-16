@@ -12,6 +12,9 @@ mod new_task;
 mod preflight;
 mod project_search;
 mod settings;
+/// `pub(crate)` for `qr_cells` / `parse_port`, which `remote.rs` and the
+/// port field's commit use.
+pub(crate) mod settings_remote;
 mod start_specialists;
 mod tool_panel;
 /// `pub(crate)` for `SidebarSection` alone — its variant labels are the keys

@@ -37,6 +37,14 @@ All Zed git dependencies in `Cargo.toml` must stay on the same pinned revision.
 When upgrading Zed, update them together and review Zed's
 `[patch.crates-io]` entries, which do not propagate from its workspace.
 
+## Module map
+
+- `src/workspace/remote.rs` — bridge between the workspace and the `oo-remote`
+  crate: owns the remote server's lifecycle (start/stop off the main thread),
+  the marked-tab list in `~/.openorchestra/remote.json`, live agent snapshots
+  for the phone, and the Settings → Remote state (port, pairing codes, Add a
+  phone panel, paired devices, keep-awake).
+
 ## Historical implementation notes
 
 [`SPIKE_NOTES.md`](SPIKE_NOTES.md) records the early feasibility spikes. It is

@@ -51,16 +51,18 @@ pub(crate) enum SettingsSection {
     Diff,
     Agents,
     Notifications,
+    Remote,
     Shortcuts,
 }
 
 impl SettingsSection {
-    pub(crate) const ALL: [SettingsSection; 6] = [
+    pub(crate) const ALL: [SettingsSection; 7] = [
         SettingsSection::Appearance,
         SettingsSection::Editor,
         SettingsSection::Diff,
         SettingsSection::Agents,
         SettingsSection::Notifications,
+        SettingsSection::Remote,
         SettingsSection::Shortcuts,
     ];
 
@@ -71,6 +73,7 @@ impl SettingsSection {
             SettingsSection::Diff => "Diff",
             SettingsSection::Agents => "Agents",
             SettingsSection::Notifications => "Notifications",
+            SettingsSection::Remote => "Remote",
             SettingsSection::Shortcuts => "Shortcuts",
         }
     }
@@ -157,10 +160,10 @@ pub(crate) struct DraggedTab {
     id: u64,
 }
 
-/// `ids` with `dragged` moved to `onto`'s position. Unknown or identical ids
-/// leave the order untouched.
-fn reordered(ids: &[u64], dragged: u64, onto: u64) -> Vec<u64> {
-    let mut out = ids.to_vec();
+/// `items` with `dragged` moved to `onto`'s position. Unknown or identical
+/// items leave the order untouched. Used for tabs (ids) and projects (roots).
+fn reordered<T: PartialEq + Clone>(items: &[T], dragged: T, onto: T) -> Vec<T> {
+    let mut out = items.to_vec();
     if dragged == onto {
         return out;
     }
@@ -170,8 +173,95 @@ fn reordered(ids: &[u64], dragged: u64, onto: u64) -> Vec<u64> {
     ) else {
         return out;
     };
-    let id = out.remove(from);
-    out.insert(to, id);
+    let item = out.remove(from);
+    out.insert(to, item);
+    out
+}
+
+/// The list a reorder applies to: the copy on disk now, since the other
+/// build (Dev and the installed release share ~/.openorchestra) may have
+/// added or removed entries since this one loaded. An empty disk copy
+/// (missing or unreadable file) while this build has entries falls back to
+/// this build's list, so a reorder never empties it.
+fn reorder_base<T: Clone>(disk: Vec<T>, current: &[T]) -> Vec<T> {
+    if disk.is_empty() { current.to_vec() } else { disk }
+}
+
+/// Reorder panel geometry at the default 16 px rem: its width, a row's
+/// height (text + padding + gap; at least the 22 px grip box), and the
+/// title, Done button and padding around the list.
+const REORDER_PANEL_W: f32 = 240.0;
+const REORDER_ROW_H: f32 = 32.0;
+const REORDER_PANEL_CHROME_H: f32 = 80.0;
+const REORDER_PANEL_MARGIN: f32 = 8.0;
+
+/// Where the reorder panel goes for a click-derived `origin` (x, y): moved
+/// so the whole panel — title, the list (capped at `list_max_h`) and Done —
+/// stays inside the window, at least a margin from each edge. Heights grow
+/// with the UI font size (`rem`, px); they never shrink below the 16 px
+/// sizes, since parts of a row are fixed px. A window too small for the
+/// panel pins it to the top-left margin.
+fn reorder_panel_origin(
+    origin: (f32, f32),
+    window: (f32, f32),
+    rows: usize,
+    list_max_h: f32,
+    rem: f32,
+) -> (f32, f32) {
+    let m = REORDER_PANEL_MARGIN;
+    let scale = (rem / 16.0).max(1.0);
+    let panel_h = (rows as f32 * REORDER_ROW_H * scale).min(list_max_h) + REORDER_PANEL_CHROME_H * scale;
+    let x = origin.0.min(window.0 - REORDER_PANEL_W - m).max(m);
+    let y = origin.1.min(window.1 - panel_h - m).max(m);
+    (x, y)
+}
+
+/// Whether `a` and `b` hold the same items, ignoring order.
+fn same_members<T: PartialEq>(a: &[T], b: &[T]) -> bool {
+    a.len() == b.len() && a.iter().all(|x| b.contains(x))
+}
+
+/// Move task `dragged` to `onto`'s position in the task list on disk (see
+/// [`reorder_base`]), save it, and return the store as saved. `Ok(None)` when
+/// nothing changed (same or unknown ids). An unreadable file is an error and
+/// is left untouched rather than overwritten.
+fn move_task_on_disk(current: &TaskStore, dragged: &str, onto: &str) -> std::io::Result<Option<TaskStore>> {
+    let mut fresh = TaskStore::load(current.path())?;
+    if fresh.tasks().is_empty() {
+        fresh = current.clone();
+    }
+    if !fresh.move_task(dragged, onto) {
+        return Ok(None);
+    }
+    fresh.save()?;
+    Ok(Some(fresh))
+}
+
+/// Which sidebar list a reorder panel (and a row dragged in it) belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReorderList {
+    Projects,
+    Tasks,
+}
+
+/// A row being dragged in a reorder panel: its list, and the project name or
+/// task id that identifies it.
+pub(crate) struct DraggedReorderRow {
+    list: ReorderList,
+    key: String,
+}
+
+/// `items` with `item` swapped with its neighbour above (`up`) or below.
+/// At the edge, or for an unknown item, the order is unchanged.
+fn shifted<T: PartialEq + Clone>(items: &[T], item: &T, up: bool) -> Vec<T> {
+    let mut out = items.to_vec();
+    let Some(i) = out.iter().position(|x| x == item) else {
+        return out;
+    };
+    let j = if up { i.checked_sub(1) } else { Some(i + 1).filter(|j| *j < out.len()) };
+    if let Some(j) = j {
+        out.swap(i, j);
+    }
     out
 }
 
@@ -238,6 +328,8 @@ pub(crate) enum EditKind {
     /// Name a new custom agent in settings. Commit inserts a custom
     /// `AgentPref` keyed by the entered slug.
     NewAgent,
+    /// Settings → Remote's HTTPS port.
+    RemotePort,
 }
 
 /// An inline edit in progress: what it targets, and the single-line `Editor`
@@ -567,8 +659,12 @@ pub struct HarnessWorkspace {
     menu: Option<CardMenu>,
     /// The ⋯ menu on a project header: repo name and where it opened.
     project_menu: Option<(String, Pixels, Pixels)>,
+    /// The open reorder panel (PROJECTS or TASKS header ⇅), and where it opened.
+    reorder_panel: Option<(ReorderList, Pixels, Pixels)>,
     /// Open "new tab" menu, anchored under the `+` in the tab strip.
     tab_menu: Option<Pixels>,
+    /// Right-click menu on a Shell/Agent tab: the tab id and where it opened.
+    tab_context_menu: Option<(u64, Pixels)>,
     /// Open diff-base menu, anchored under its button in the diff header.
     diff_base_menu: Option<gpui::Point<Pixels>>,
     /// The quit confirmation is open (keep vs. close terminals). Present only
@@ -589,6 +685,11 @@ pub struct HarnessWorkspace {
     note_at: Option<std::time::Instant>,
     forge_status: HashMap<String, BranchStatus>,
     agent_status: HashMap<PathBuf, AgentState>,
+    /// When each worktree's status last changed, and the tool its latest
+    /// signal reported — the phone's "waiting since" and tool chip.
+    agent_since: HashMap<PathBuf, (std::time::SystemTime, Option<String>)>,
+    /// oo-remote: marks cache, phone server lifecycle, keep-awake.
+    remote: remote::RemoteRuntime,
     /// Fidelity of the adapter behind each worktree's status, so the UI can be
     /// honest about how much the pill actually knows (R11).
     agent_fidelity: HashMap<PathBuf, WaitFidelity>,
@@ -710,6 +811,7 @@ pub(crate) mod lifecycle;
 mod a2a;
 mod agent_restart;
 mod coordinator;
+pub(crate) mod remote;
 mod state;
 mod ui;
 

@@ -2,6 +2,7 @@
 //! `impl HarnessWorkspace` methods for this feature area.
 
 use super::super::*;
+use crate::workspace::remote::worktree_pane_key;
 
 mod projects;
 pub(crate) mod links;
@@ -248,26 +249,74 @@ impl HarnessWorkspace {
 
     /// PROJECTS' trailing `+` — adds a git repository.
     fn projects_add_button(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
-        self.section_add_button(
+        let add = self.section_add_button(
             hx,
             "project-plus",
             "Add a git repository as a project",
             |ws, window, cx| ws.add_project(window, cx),
             cx,
         )
-        .into_any_element()
+        .into_any_element();
+        self.with_reorder_button(hx, ReorderList::Projects, self.data.repos.len(), add, cx)
+    }
+
+    /// `⇅` left of a section's `+`, opening that list's reorder panel — only
+    /// once there is something to reorder (2+ rows).
+    fn with_reorder_button(
+        &self,
+        hx: &HarnessTheme,
+        list: ReorderList,
+        rows: usize,
+        add: AnyElement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if rows < 2 {
+            return add;
+        }
+        let (id, tip_text) = match list {
+            ReorderList::Projects => ("project-reorder", "Reorder projects"),
+            ReorderList::Tasks => ("task-reorder", "Reorder tasks"),
+        };
+        let reorder = div()
+            .id(id)
+            .size(px(20.0))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .rounded_md()
+            .text_xs()
+            .text_color(hx.tx1)
+            .cursor_pointer()
+            .tooltip(tip(tip_text))
+            .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
+            .child("⇅")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    ws.project_menu = None;
+                    ws.reorder_panel = Some((list, ev.position.x - px(200.0), ev.position.y + px(10.0)));
+                    cx.notify();
+                }),
+            )
+            // The header strip toggles collapse on click; keep that click here.
+            .on_click(|_, _, cx| cx.stop_propagation());
+        div().flex().items_center().gap_1().child(reorder).child(add).into_any_element()
     }
 
     /// TASKS' trailing `+` — opens the inline new-task editor, expanding the
     /// section first so the editor it reveals is actually on screen.
     fn tasks_add_button(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
-        self.section_add_button(hx, "task-plus", "New task", |ws, window, cx| {
-            if ws.prefs.collapsed_sections.remove(SidebarSection::Tasks.label()) {
-                ws.save_prefs(cx);
-            }
-            ws.open_new_task(window, cx);
-        }, cx)
-        .into_any_element()
+        let add = self
+            .section_add_button(hx, "task-plus", "New task", |ws, window, cx| {
+                if ws.prefs.collapsed_sections.remove(SidebarSection::Tasks.label()) {
+                    ws.save_prefs(cx);
+                }
+                ws.open_new_task(window, cx);
+            }, cx)
+            .into_any_element();
+        self.with_reorder_button(hx, ReorderList::Tasks, self.data.tasks.len(), add, cx)
     }
 
     pub(crate) fn render_sidebar(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -381,6 +430,26 @@ impl HarnessWorkspace {
             .child(tasks_col)
             .child(projects)
             .when(!self.archived_repos.is_empty(), |d| d.child(self.render_archived(hx, cx)))
+    }
+
+    /// The small accent dot on a sidebar row whose worktree (pane `key`) has
+    /// at least one tab marked for remote control.
+    pub(crate) fn remote_dot(
+        &self,
+        hx: &HarnessTheme,
+        id: String,
+        key: &str,
+    ) -> Option<gpui::Stateful<gpui::Div>> {
+        crate::workspace::remote::worktree_has_marks(&self.remote.file, key).then(|| {
+            div()
+                .id(gpui::SharedString::from(id))
+                .flex_none()
+                .size(px(6.0))
+                .rounded_full()
+                .bg(hx.accent)
+                .opacity(self.remote_dot_opacity())
+                .tooltip(tip("Remote control on"))
+        })
     }
 
     fn render_task_row(
@@ -555,6 +624,18 @@ impl HarnessWorkspace {
                                 )
                             }),
                     )
+                    .children({
+                        let coord_key = a2a_broker::coordinator_pane_key(&task.id);
+                        multi
+                            .then(|| {
+                                self.remote_dot(
+                                    hx,
+                                    format!("remote-dot-coord-{}", task.id),
+                                    &coord_key,
+                                )
+                            })
+                            .flatten()
+                    })
                     // Trailing items in one strip the avatar's height, so they
                     // centre on the name line (the row is top-aligned for the
                     // two-line name/branch). Same 10px mono and the same order
@@ -734,6 +815,11 @@ impl HarnessWorkspace {
                                 .child(branch.to_string()),
                         )
                     })
+                    .children(self.remote_dot(
+                        hx,
+                        format!("remote-dot-member-{}-{}", task.id, m.worktree_id),
+                        &worktree_pane_key(Some(&task.id), &m.worktree_id),
+                    ))
                     .child(badges)
                     .child(match task_ending {
                         Some(kind) => busy_pill(hx, kind.doing_label(), now).into_any_element(),

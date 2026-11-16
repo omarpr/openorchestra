@@ -29,7 +29,10 @@ impl Render for HarnessWorkspace {
         // off the editor. Re-assert only for this exact case, and only once
         // focus has actually escaped, so it converges instead of thrashing.
         if self.settings_open
-            && matches!(self.edit_kind(), Some(EditKind::AgentCmd(_)))
+            && matches!(
+                self.edit_kind(),
+                Some(EditKind::AgentCmd(_) | EditKind::RemotePort)
+            )
             && let Some(editor) = self.edit_editor()
         {
             let handle = editor.focus_handle(cx);
@@ -165,6 +168,9 @@ impl Render for HarnessWorkspace {
                     return;
                 }
                 ws.settings_open = !ws.settings_open;
+                if !ws.settings_open {
+                    ws.remote_close_setup();
+                }
                 cx.notify();
             }))
             .on_action(cx.listener(|ws, _: &crate::ActivateTab1, w, cx| ws.activate_tab_at(Some(0), w, cx)))
@@ -232,6 +238,44 @@ impl Render for HarnessWorkspace {
                     ),
             );
             root = root.child(self.render_context_menu(&hx, &menu, cx));
+        }
+
+        if let Some((list, x, y)) = self.reorder_panel {
+            root = root
+                .child(
+                    div()
+                        .id("reorder-projects-backdrop")
+                        .occlude()
+                        .absolute()
+                        .top(px(0.0))
+                        .left(px(0.0))
+                        .size_full()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|ws, _, _, cx| {
+                                ws.reorder_panel = None;
+                                cx.notify();
+                            }),
+                        ),
+                )
+                .child({
+                    // A long list scrolls inside the panel instead of running
+                    // off the window, and the whole panel stays on screen.
+                    let win = window.viewport_size();
+                    let list_max_h = (f32::from(win.height) * 0.6).min(420.0);
+                    let rows = match list {
+                        ReorderList::Projects => self.data.repos.len(),
+                        ReorderList::Tasks => self.data.tasks.len(),
+                    };
+                    let (x, y) = reorder_panel_origin(
+                        (f32::from(x), f32::from(y)),
+                        (f32::from(win.width), f32::from(win.height)),
+                        rows,
+                        list_max_h,
+                        f32::from(window.rem_size()),
+                    );
+                    self.render_reorder_panel(&hx, list, px(x), px(y), px(list_max_h), cx)
+                });
         }
 
         if let Some((repo, x, y)) = self.project_menu.clone() {
@@ -306,6 +350,39 @@ impl Render for HarnessWorkspace {
                     let max_left = f32::from(window.viewport_size().width) - MENU_W - 8.0;
                     let x = px(f32::from(x).min(max_left).max(8.0));
                     self.render_tab_menu(&hx, x, cx)
+                });
+        }
+
+        // A menu whose tab closed (or whose worktree is no longer selected)
+        // has nothing to show: drop it rather than float an empty box.
+        if let Some((tab_id, _)) = self.tab_context_menu
+            && self.tab_context_item(tab_id).is_none()
+        {
+            self.tab_context_menu = None;
+        }
+        if let Some((tab_id, x)) = self.tab_context_menu {
+            root = root
+                .child(
+                    div()
+                        .id("tab-context-menu-backdrop")
+                        .occlude()
+                        .absolute()
+                        .top(px(0.0))
+                        .left(px(0.0))
+                        .size_full()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|ws, _, _, cx| {
+                                ws.tab_context_menu = None;
+                                cx.notify();
+                            }),
+                        ),
+                )
+                .child({
+                    const MENU_W: f32 = 220.0;
+                    let max_left = f32::from(window.viewport_size().width) - MENU_W - 8.0;
+                    let x = px(f32::from(x).min(max_left).max(8.0));
+                    self.render_tab_context_menu(&hx, tab_id, x, cx)
                 });
         }
 

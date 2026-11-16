@@ -47,6 +47,15 @@ else
   warn "pi         npm install -g @mariozechner/pi-coding-agent@$PI_PIN"
 fi
 
+sec "Remote web client — needed to build the oo-remote PWA (make web)"
+if have node; then
+  node_major="$(node --version 2>/dev/null | sed 's/^v\([0-9]*\).*/\1/')"
+  if [[ "${node_major:-0}" -ge 20 ]]; then ok "node       $(node --version 2>/dev/null) (>= 20)"; else bad "node       $(node --version 2>/dev/null) is too old, need >= 20:  brew upgrade node"; missing_required=1; fi
+else
+  bad "node       need >= 20:  brew install node"; missing_required=1
+fi
+if have pnpm; then ok "pnpm       $(pnpm --version 2>/dev/null)"; else bad "pnpm       brew install pnpm  (or: corepack enable)"; missing_required=1; fi
+
 sec "Forge — PR + CI badges (optional; badges hide when absent)"
 if have gh; then
   ok "gh         $(gh --version 2>/dev/null | head -1)"

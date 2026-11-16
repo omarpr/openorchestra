@@ -2,11 +2,12 @@
 //! `impl HarnessWorkspace` methods for this feature area.
 
 use super::super::*;
+use crate::workspace::remote::{mark_note, remote_menu_item};
 
-/// The label that follows the cursor while a tab is being dragged.
+/// The label that follows the cursor while a tab (or project) is being dragged.
 pub(crate) struct DragGhost {
-    label: String,
-    hx: HarnessTheme,
+    pub(crate) label: String,
+    pub(crate) hx: HarnessTheme,
 }
 
 impl Render for DragGhost {
@@ -326,6 +327,9 @@ impl HarnessWorkspace {
         let id = tab.id;
         let close_id = tab.id;
         let key = self.resolve().map(|r| r.key).unwrap_or_default();
+        let remote_on = self.remote_is_marked(&key, tab.id);
+        let remote_dot_alpha = self.remote_dot_opacity();
+        let remote_menu = Self::remote_tab_kind(tab).is_some();
         let drag_key = key.clone();
         let drop_key = key;
         let onto = tab.id;
@@ -367,6 +371,16 @@ impl HarnessWorkspace {
             .when_some(tab.agent.clone(), |d, kind| {
                 d.child(div().mr_1().size(px(14.0)).child(agent_icon(&kind, 13.0)))
             })
+            .when(remote_menu, |d| {
+                d.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        ws.tab_context_menu = Some((id, ev.position.x));
+                        cx.notify();
+                    }),
+                )
+            })
             .cursor_pointer()
             .hover(|d| d.text_color(hx.tx1))
             .on_click(cx.listener(move |ws, ev: &gpui::ClickEvent, window, cx| {
@@ -393,6 +407,19 @@ impl HarnessWorkspace {
                 ws.move_tab(&drop_key, dragged.id, onto);
                 cx.notify();
             }))
+            .when(remote_on, |d| {
+                d.child(
+                    div()
+                        .id(("tab-remote", tab.id as usize))
+                        .flex_none()
+                        .size(px(6.0))
+                        .mr_1()
+                        .rounded_full()
+                        .bg(hx.accent)
+                        .opacity(remote_dot_alpha)
+                        .tooltip(tip("Remote control on")),
+                )
+            })
             .child(tab.title.clone())
             .child(
                 div()
@@ -574,6 +601,93 @@ impl HarnessWorkspace {
                             .child(div().text_color(hx.accent).child("⏎ save")),
                     ),
             )
+    }
+
+    /// The remote-controllable kind of a tab: terminals only.
+    pub(crate) fn remote_tab_kind(tab: &Tab) -> Option<TabKind> {
+        match (&tab.content, &tab.agent) {
+            (TabContent::Terminal(_), Some(a)) => Some(TabKind::Agent(a.clone())),
+            (TabContent::Terminal(_), None) => Some(TabKind::Shell),
+            _ => None,
+        }
+    }
+
+    /// The remote item for a tab in the current worktree; `None` when the tab
+    /// is gone (closed, or another worktree is selected) or has no item.
+    pub(crate) fn tab_context_item(
+        &self,
+        tab_id: u64,
+    ) -> Option<(&'static str, Option<&'static str>)> {
+        let key = self.resolve()?.key;
+        let kind = self
+            .panes
+            .get(&key)?
+            .tabs
+            .iter()
+            .find(|t| t.id == tab_id)
+            .and_then(Self::remote_tab_kind)?;
+        remote_menu_item(&kind, self.remote_is_marked(&key, tab_id))
+    }
+
+    /// Right-click menu on a Shell/Agent tab: allow / stop remote control.
+    pub(crate) fn render_tab_context_menu(
+        &self,
+        hx: &HarnessTheme,
+        tab_id: u64,
+        x: Pixels,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let item = self.tab_context_item(tab_id);
+        // Same container + mouse-down swallow as `render_tab_menu`: the
+        // backdrop dismisses on mouse-down, which would eat the item's click.
+        let mut menu = div()
+            .absolute()
+            .left(x)
+            .top(px(72.0))
+            .w(px(220.0))
+            .p(px(4.0))
+            .rounded_md()
+            .bg(hx.surface2)
+            .border_1()
+            .border_color(hx.border2)
+            .flex()
+            .flex_col()
+            .gap_1()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
+            );
+        if let Some((label, warning)) = item {
+            menu = menu.child(
+                div()
+                    .id("tabctx-remote")
+                    .flex()
+                    .flex_col()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_xs()
+                    .text_color(hx.tx1)
+                    .cursor_pointer()
+                    .hover(|d| d.bg(hx.surface_hover).text_color(hx.tx0))
+                    .child(label)
+                    .children(warning.map(|w| div().text_color(hx.tx2).child(w)))
+                    .on_click(cx.listener(move |ws, _, _, cx| {
+                        cx.stop_propagation();
+                        ws.tab_context_menu = None;
+                        let key = ws.resolve().map(|r| r.key).unwrap_or_default();
+                        ws.remote_toggle_mark(&key, tab_id, cx);
+                        let now = ws.remote_is_marked(&key, tab_id);
+                        let other =
+                            ws.remote.serve == crate::workspace::remote::RemoteServe::OtherBuild;
+                        if let Some(n) = mark_note(ws.remote.file.enabled, other, now) {
+                            ws.set_note(n.to_string());
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        menu
     }
 
     /// The popup listing what can be opened in this worktree.

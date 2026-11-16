@@ -58,11 +58,13 @@ impl HarnessWorkspace {
                     // ran, and that one is newer evidence than our snapshot.
                     if matches!(ws.agent_status.get(&root), Some(AgentState::Running | AgentState::Waiting)) {
                         ws.conductor.stopped(&root);
+                        ws.agent_since.insert(root.clone(), (std::time::SystemTime::now(), None));
                         ws.agent_status.insert(root, AgentState::Unknown);
                         changed = true;
                     }
                 }
                 if changed {
+                    ws.remote_refresh(cx);
                     cx.notify();
                 }
             });
@@ -164,6 +166,22 @@ impl HarnessWorkspace {
 
     pub(crate) fn apply_agent(&mut self, signal: AgentSignal, cx: &mut Context<Self>) {
         let previous = self.agent_status.insert(signal.worktree_root.clone(), signal.state);
+        let tool = signal.tool.as_ref().map(|t| t.name.clone());
+        match self.agent_since.get_mut(&signal.worktree_root) {
+            // Same state: keep its start time, follow the tool.
+            Some(since) if previous == Some(signal.state) => since.1 = tool,
+            _ => {
+                self.agent_since.insert(
+                    signal.worktree_root.clone(),
+                    (std::time::SystemTime::now(), tool),
+                );
+            }
+        }
+
+        if let Some(session) = &signal.session_file {
+            self.remote
+                .record_session(&signal.worktree_root, signal.kind.as_str(), session);
+        }
 
         // Record the session file the moment an adapter reports one: it is the
         // harvesting hook M7 reads, and pi only learns it after startup.
@@ -234,6 +252,7 @@ impl HarnessWorkspace {
         if signal.should_notify_finished(previous, fidelity) {
             self.notify_finished(&signal);
         }
+        self.remote_refresh(cx);
         cx.notify();
     }
 
