@@ -604,7 +604,7 @@ impl HarnessWorkspace {
     }
 
     /// The remote-controllable kind of a tab: terminals only.
-    fn remote_tab_kind(tab: &Tab) -> Option<TabKind> {
+    pub(crate) fn remote_tab_kind(tab: &Tab) -> Option<TabKind> {
         match (&tab.content, &tab.agent) {
             (TabContent::Terminal(_), Some(a)) => Some(TabKind::Agent(a.clone())),
             (TabContent::Terminal(_), None) => Some(TabKind::Shell),

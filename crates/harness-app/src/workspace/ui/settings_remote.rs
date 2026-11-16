@@ -193,6 +193,91 @@ impl HarnessWorkspace {
             }));
         }
 
+        // ---- Agents on phone -------------------------------------------------
+        col = col.child(section_title("Agents on phone", hx));
+        let rows = crate::workspace::remote::remote_agent_rows(&self.remote_sources(), &r.file);
+        if rows.is_empty() {
+            col = col.child(
+                div()
+                    .pb_1()
+                    .text_xs()
+                    .text_color(hx.tx2)
+                    .child("No open terminal or agent tabs"),
+            );
+        }
+        for (i, row) in rows.into_iter().enumerate() {
+            let icon = match &row.kind {
+                Some(k) => crate::workspace::agents::agent_icon(&AgentKind::from(k.as_str()), 14.0),
+                None => div()
+                    .size(px(14.0))
+                    .text_xs()
+                    .text_color(hx.tx2)
+                    .child("\u{276F}_")
+                    .into_any_element(),
+            };
+            let shell = row.kind.is_none();
+            let mut toggles = div().flex().flex_none().gap_1p5();
+            for (label, on) in [("On", true), ("Off", false)] {
+                let key = row.key.clone();
+                let tab_id = row.tab_id;
+                toggles = toggles.child(
+                    div()
+                        .id(gpui::SharedString::from(format!("remote-agent-{i}-{label}")))
+                        .child(chip(label.to_string(), row.marked == on, hx))
+                        .on_click(cx.listener(move |ws, _, _, cx| {
+                            cx.stop_propagation();
+                            if ws.remote_is_marked(&key, tab_id) != on {
+                                ws.remote_toggle_mark(&key, tab_id, cx);
+                            }
+                        })),
+                );
+            }
+            col = col.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .pb_1()
+                    .child(div().flex_none().w(px(14.0)).child(icon))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .text_xs()
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_1p5()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .whitespace_nowrap()
+                                            .text_color(hx.tx0)
+                                            .child(row.title.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(hx.tx2)
+                                            .child(format!("{} \u{00B7} {}", row.project, row.worktree)),
+                                    ),
+                            )
+                            .when(shell, |d| {
+                                d.child(
+                                    div()
+                                        .text_color(hx.tx2)
+                                        .child("Gives a paired phone this shell"),
+                                )
+                            }),
+                    )
+                    .child(toggles),
+            );
+        }
+
         // ---- Paired devices ------------------------------------------------
         col = col.child(section_title("Paired devices", hx));
         let mut devices = div().flex().flex_col().gap_1().pb_1();

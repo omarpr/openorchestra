@@ -294,6 +294,56 @@ pub(crate) fn mark_note(
     other_build.then_some("Marked \u{2014} phones reach it through the other openOrchestra build")
 }
 
+/// The top-bar chip's state for the current tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RemoteChip {
+    Off,
+    OnLive,
+    OnUnreachable,
+}
+
+/// `None` when the tab isn't a terminal (nothing to mark).
+pub(crate) fn remote_chip(is_terminal: bool, marked: bool, live: bool) -> Option<RemoteChip> {
+    if !is_terminal {
+        return None;
+    }
+    Some(match (marked, live) {
+        (false, _) => RemoteChip::Off,
+        (true, true) => RemoteChip::OnLive,
+        (true, false) => RemoteChip::OnUnreachable,
+    })
+}
+
+/// One terminal tab in Settings → Remote's "Agents on phone" list.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RemoteAgentRow {
+    pub key: String,
+    pub tab_id: u64,
+    pub project: String,
+    pub worktree: String,
+    pub title: String,
+    pub kind: Option<String>,
+    pub marked: bool,
+}
+
+/// Every terminal tab in `sources`, in source order, with its mark.
+pub(crate) fn remote_agent_rows(sources: &[MarkSource], file: &RemoteFile) -> Vec<RemoteAgentRow> {
+    sources
+        .iter()
+        .flat_map(|s| {
+            s.tabs.iter().map(move |(id, title, kind)| RemoteAgentRow {
+                key: s.key.clone(),
+                tab_id: *id,
+                project: s.project.clone(),
+                worktree: s.worktree.clone(),
+                title: title.clone(),
+                kind: kind.clone(),
+                marked: file.mark_for(&s.key, *id).is_some(),
+            })
+        })
+        .collect()
+}
+
 /// One worktree's terminal tabs, as the snapshot builder sees them.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct MarkSource {
@@ -1050,6 +1100,39 @@ mod tests {
             marked: marks,
             ..RemoteFile::default()
         }
+    }
+
+    #[test]
+    fn remote_chip_states() {
+        for marked in [false, true] {
+            for live in [false, true] {
+                assert_eq!(remote_chip(false, marked, live), None);
+            }
+        }
+        assert_eq!(remote_chip(true, false, false), Some(RemoteChip::Off));
+        assert_eq!(remote_chip(true, false, true), Some(RemoteChip::Off));
+        assert_eq!(remote_chip(true, true, true), Some(RemoteChip::OnLive));
+        assert_eq!(remote_chip(true, true, false), Some(RemoteChip::OnUnreachable));
+    }
+
+    #[test]
+    fn remote_agent_rows_lists_every_terminal_tab_with_marks() {
+        let mut main = source(
+            "main:proj",
+            "/r/proj",
+            &[(1, "claude", Some("claude-code")), (2, "shell", None)],
+        );
+        main.worktree = "main".into();
+        let wt = source("wt1", "/r/wt1", &[(3, "pi", Some("pi"))]);
+        let f = file(vec![mark("wt1", 3, "r_x")]);
+        let rows = remote_agent_rows(&[main, wt], &f);
+        let got: Vec<_> = rows.iter().map(|r| (r.key.as_str(), r.tab_id, r.marked)).collect();
+        assert_eq!(got, [("main:proj", 1, false), ("main:proj", 2, false), ("wt1", 3, true)]);
+        assert_eq!(rows[0].kind.as_deref(), Some("claude-code"));
+        assert_eq!(rows[1].kind, None);
+        assert_eq!(rows[0].project, "proj");
+        assert_eq!(rows[0].worktree, "main");
+        assert_eq!(rows[2].title, "pi");
     }
 
     /// Dropping the runtime (quit, window close, teardown) must not run the
