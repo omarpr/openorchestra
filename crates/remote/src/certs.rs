@@ -1,6 +1,7 @@
 //! Local CA + server certificate + phone setup artifacts.
 //!
-//! Phones trust a CA this app generates once (ECDSA P-256, 10 years). The
+//! Phones trust a CA this app generates once (ECDSA P-256, 10 years),
+//! name-constrained to `.local`/`localhost` and private/loopback IPv4. The
 //! HTTPS server uses a short-lived leaf (<= 397 days, the iOS limit) issued
 //! by that CA and reissued when the SAN set changes or < 30 days remain.
 
@@ -15,8 +16,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use rcgen::string::Ia5String;
 use rcgen::{
-    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
-    Issuer, KeyPair, KeyUsagePurpose, SanType,
+    BasicConstraints, CertificateParams, CidrSubnet, DistinguishedName, DnType,
+    ExtendedKeyUsagePurpose, GeneralSubtree, IsCa, Issuer, KeyPair, KeyUsagePurpose,
+    NameConstraints, SanType,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -68,9 +70,40 @@ fn issuer_for(ca: &Ca) -> io::Result<Issuer<'static, KeyPair>> {
     Issuer::from_ca_cert_pem(&ca.cert_pem, key).map_err(invalid)
 }
 
+/// What a phone's trust in this CA is limited to: `.local` / `localhost`
+/// names and private, link-local and loopback IPv4. A phone trusting the CA
+/// (and anything that reads `ca.key`, which any process of this user can)
+/// then can't vouch for any public site. rcgen marks the extension critical.
+fn ca_name_constraints() -> NameConstraints {
+    let net = |a: [u8; 4], prefix: u8| {
+        GeneralSubtree::IpAddress(CidrSubnet::from_addr_prefix(IpAddr::V4(a.into()), prefix))
+    };
+    NameConstraints {
+        permitted_subtrees: vec![
+            GeneralSubtree::DnsName("local".into()),
+            GeneralSubtree::DnsName("localhost".into()),
+            net([10, 0, 0, 0], 8),
+            net([172, 16, 0, 0], 12),
+            net([192, 168, 0, 0], 16),
+            net([169, 254, 0, 0], 16),
+            net([127, 0, 0, 0], 8),
+        ],
+        excluded_subtrees: Vec::new(),
+    }
+}
+
+/// Whether the CA certificate carries a name-constraints extension.
+fn has_name_constraints(der: &[u8]) -> io::Result<bool> {
+    let (_, cert) = x509_parser::parse_x509_certificate(der).map_err(invalid)?;
+    Ok(cert.name_constraints().map_err(invalid)?.is_some())
+}
+
 /// Load `ca.crt`/`ca.key` from `dir`, generating them on first use. Existing
 /// but unreadable files are an error (never silently replaced: phones already
-/// trust the old CA).
+/// trust the old CA). The one exception: a readable CA from before name
+/// constraints (an unreleased build; no phone trusts it yet) is replaced
+/// once, logged, by a constrained one; the server cert follows (it records
+/// the CA fingerprint it was issued under).
 pub fn load_or_create_ca(dir: &Path, computer_name: &str) -> io::Result<Ca> {
     let crt = dir.join("ca.crt");
     let key = dir.join("ca.key");
@@ -78,11 +111,18 @@ pub fn load_or_create_ca(dir: &Path, computer_name: &str) -> io::Result<Ca> {
         (Ok(cert_pem), Ok(key_pem)) => {
             let cert_der = pem_to_der(&cert_pem)?;
             KeyPair::from_pem(&key_pem).map_err(invalid)?;
-            return Ok(Ca {
-                cert_pem,
-                cert_der,
-                key_pem,
-            });
+            if has_name_constraints(&cert_der)? {
+                return Ok(Ca {
+                    cert_pem,
+                    cert_der,
+                    key_pem,
+                });
+            }
+            eprintln!(
+                "oo-remote: replacing the remote CA in {} with one limited to local names \
+                 (re-add the app on any phone that trusted the old one)",
+                dir.display()
+            );
         }
         (Err(a), Err(b))
             if a.kind() == io::ErrorKind::NotFound && b.kind() == io::ErrorKind::NotFound => {}
@@ -98,6 +138,7 @@ pub fn load_or_create_ca(dir: &Path, computer_name: &str) -> io::Result<Ca> {
     params.distinguished_name = dn;
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    params.name_constraints = Some(ca_name_constraints());
     params.not_before = odt(now - Duration::from_secs(DAY));
     params.not_after = odt(now + Duration::from_secs(CA_VALID_DAYS * DAY));
     let kp = KeyPair::generate().map_err(err)?;
@@ -454,6 +495,122 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600);
         let dmode = std::fs::metadata(&dir).unwrap().permissions().mode();
         assert_eq!(dmode & 0o777, 0o700);
+    }
+
+    /// rustls/webpki verification of `leaf` for `name` under `ca` alone.
+    fn verify(ca: &Ca, leaf_pem: &str, name: &str) -> Result<(), rustls::Error> {
+        use rustls::client::danger::ServerCertVerifier;
+        use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(CertificateDer::from(ca.cert_der.clone()))
+            .unwrap();
+        let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
+            std::sync::Arc::new(roots),
+            std::sync::Arc::new(rustls::crypto::ring::default_provider()),
+        )
+        .build()
+        .unwrap();
+        let leaf = CertificateDer::from(super::pem_to_der(leaf_pem).unwrap());
+        verifier
+            .verify_server_cert(
+                &leaf,
+                &[],
+                &ServerName::try_from(name.to_string()).unwrap(),
+                &[],
+                UnixTime::now(),
+            )
+            .map(|_| ())
+    }
+
+    #[test]
+    fn ca_is_name_constrained_and_still_validates_local_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = load_or_create_ca(dir.path(), "Test Mac").unwrap();
+        let (_, cert) = X509Certificate::from_der(&ca.cert_der).unwrap();
+        let ext = cert
+            .extensions()
+            .iter()
+            .find(|e| matches!(e.parsed_extension(), ParsedExtension::NameConstraints(_)))
+            .expect("name constraints");
+        assert!(ext.critical);
+        let ParsedExtension::NameConstraints(nc) = ext.parsed_extension() else {
+            unreachable!()
+        };
+        assert!(nc.excluded_subtrees.is_none());
+        let mut dns = Vec::new();
+        let mut nets = Vec::new();
+        for st in nc.permitted_subtrees.as_ref().unwrap() {
+            match &st.base {
+                GeneralName::DNSName(d) => dns.push(d.to_string()),
+                GeneralName::IPAddress(b) => nets.push(b.to_vec()),
+                other => panic!("unexpected subtree {other:?}"),
+            }
+        }
+        assert_eq!(dns, ["local", "localhost"]);
+        assert_eq!(
+            nets,
+            [
+                vec![10, 0, 0, 0, 255, 0, 0, 0],
+                vec![172, 16, 0, 0, 255, 240, 0, 0],
+                vec![192, 168, 0, 0, 255, 255, 0, 0],
+                vec![169, 254, 0, 0, 255, 255, 0, 0],
+                vec![127, 0, 0, 0, 255, 0, 0, 0],
+            ]
+        );
+
+        // The server cert still validates for each of its names.
+        let sc = issue_server_cert(&ca, &hosts(), &[ip("192.168.1.20"), ip("10.211.55.2")]);
+        for name in [
+            "mac.local",
+            "localhost",
+            "192.168.1.20",
+            "10.211.55.2",
+            "127.0.0.1",
+        ] {
+            verify(&ca, &sc.cert_pem, name).unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+        // Enforcement: the CA can't vouch for a public name or address.
+        let evil = issue_server_cert(&ca, &["example.com".to_string()], &[ip("8.8.8.8")]);
+        assert!(verify(&ca, &evil.cert_pem, "example.com").is_err());
+        assert!(verify(&ca, &evil.cert_pem, "8.8.8.8").is_err());
+    }
+
+    #[test]
+    fn unconstrained_ca_on_disk_is_replaced_once() {
+        let dir = tempfile::tempdir().unwrap();
+        // An old-style CA: same shape, no name constraints.
+        let mut params = CertificateParams::default();
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, "openOrchestra Remote CA (Old)");
+        params.distinguished_name = dn;
+        params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let kp = KeyPair::generate().unwrap();
+        let old = params.self_signed(&kp).unwrap();
+        std::fs::create_dir_all(dir.path()).unwrap();
+        std::fs::write(dir.path().join("ca.key"), kp.serialize_pem()).unwrap();
+        std::fs::write(dir.path().join("ca.crt"), old.pem()).unwrap();
+        let old_ca = Ca {
+            cert_pem: old.pem(),
+            cert_der: old.der().to_vec(),
+            key_pem: kp.serialize_pem(),
+        };
+        // A server cert issued under the old CA.
+        let ips = [ip("192.168.1.20")];
+        let now = SystemTime::now();
+        let old_sc = load_or_issue_server_cert(dir.path(), &old_ca, &hosts(), &ips, now).unwrap();
+
+        let ca = load_or_create_ca(dir.path(), "Test Mac").unwrap();
+        assert_ne!(ca.cert_der, old.der().to_vec());
+        assert!(has_name_constraints(&ca.cert_der).unwrap());
+        // Persisted: the next load keeps the new one.
+        let again = load_or_create_ca(dir.path(), "Test Mac").unwrap();
+        assert_eq!(again.cert_der, ca.cert_der);
+        // The server cert is reissued under the new CA.
+        let sc = load_or_issue_server_cert(dir.path(), &ca, &hosts(), &ips, now).unwrap();
+        assert_ne!(sc.cert_pem, old_sc.cert_pem);
+        verify(&ca, &sc.cert_pem, "mac.local").unwrap();
     }
 
     #[test]
