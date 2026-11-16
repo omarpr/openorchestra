@@ -67,6 +67,18 @@ pub(crate) struct RemoteUi {
     pub revoke_armed: Option<(String, Instant)>,
     /// Why the last Port entry was refused.
     pub port_error: Option<String>,
+    /// Device ids already paired when "Add a phone" opened: a device that
+    /// appears beyond these means a phone just paired, so the panel closes.
+    pub setup_known: Vec<String>,
+}
+
+/// The first device in `devices` that isn't in `known` — a phone that paired
+/// while "Add a phone" was open.
+pub(crate) fn newly_paired<'a>(
+    known: &[String],
+    devices: &'a [oo_remote::Device],
+) -> Option<&'a oo_remote::Device> {
+    devices.iter().find(|d| !known.contains(&d.id))
 }
 
 /// What `remote_reconcile` should do with the server.
@@ -498,6 +510,7 @@ impl HarnessWorkspace {
                 let alive = view.update(cx, |ws, cx| {
                     if changed {
                         ws.remote.reload();
+                        ws.remote_close_setup_if_paired(cx);
                         ws.remote_reconcile(cx);
                     }
                     if retry {
@@ -790,8 +803,25 @@ impl HarnessWorkspace {
             .map(super::ui::settings_remote::qr_cells)
             .unwrap_or_default();
         self.remote.ui.setup_url = url;
+        self.remote.ui.setup_known = self.remote.file.devices.iter().map(|d| d.id.clone()).collect();
         self.remote_new_code(cx);
         self.remote_set_setup_open(true);
+        cx.notify();
+    }
+
+    /// A phone paired while "Add a phone" was open: close the panel (and the
+    /// setup port) and say which device it was — no Done click needed.
+    fn remote_close_setup_if_paired(&mut self, cx: &mut Context<Self>) {
+        if !self.remote.ui.setup_open {
+            return;
+        }
+        let Some(name) = newly_paired(&self.remote.ui.setup_known, &self.remote.file.devices)
+            .map(|d| d.name.clone())
+        else {
+            return;
+        };
+        self.remote_close_setup();
+        self.set_note(format!("Paired \u{2018}{name}\u{2019}"));
         cx.notify();
     }
 
@@ -807,6 +837,7 @@ impl HarnessWorkspace {
         ui.setup_qr = Vec::new();
         ui.code = None;
         ui.code_error = None;
+        ui.setup_known = Vec::new();
     }
 
     /// Issue a fresh pairing code for the open panel.
@@ -1063,6 +1094,29 @@ impl HarnessWorkspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn device(id: &str, name: &str) -> oo_remote::Device {
+        oo_remote::Device {
+            id: id.into(),
+            name: name.into(),
+            token_sha256: String::new(),
+            created: String::new(),
+            last_seen: None,
+            read_only: false,
+            origin_host: String::new(),
+        }
+    }
+
+    #[test]
+    fn newly_paired_finds_a_device_added_since_the_panel_opened() {
+        let known = vec!["d_1".to_string()];
+        let before = [device("d_1", "iPad")];
+        assert!(newly_paired(&known, &before).is_none());
+        let after = [device("d_1", "iPad"), device("d_2", "iPhone")];
+        assert_eq!(newly_paired(&known, &after).map(|d| d.name.as_str()), Some("iPhone"));
+        // A revoke while the panel is open is not a pairing.
+        assert!(newly_paired(&known, &[]).is_none());
+    }
     use oo_remote::Mark;
     use std::time::{Duration, UNIX_EPOCH};
 
