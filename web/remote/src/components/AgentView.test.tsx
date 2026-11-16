@@ -185,6 +185,12 @@ describe("AgentView", () => {
     expect(sockets[0].fit).toHaveBeenLastCalledWith(false, 0, 0);
     expect(sockets).toHaveLength(1);
 
+    // While hidden nothing turns Fit back on: not a fresh init on this socket, nor the resize timer.
+    sockets[0].fit.mockClear();
+    act(() => sockets[0].h.onInit(100, 30, false));
+    act(() => sockets[0].h.onData(new Uint8Array([67])));
+    expect(sockets[0].fit).not.toHaveBeenCalledWith(true, expect.anything(), expect.anything());
+
     sockets[0].fit.mockClear();
     act(() => {
       window.dispatchEvent(new Event("pagehide"));

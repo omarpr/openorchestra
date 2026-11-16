@@ -85,7 +85,9 @@ export const TerminalView = forwardRef<TerminalHandle, Props>(function TerminalV
 
     // Fit to the container. Skips (retried on the next ResizeObserver tick) when it is not laid out yet.
     const sendFit = () => {
-      if (!sock.current || readOnly.current) return;
+      // Never re-fit a hidden page (a pending resize timer, a reconnect's init, or the fit/font effects): the
+      // desktop got its size back on hide, and the socket may stay up answering pings.
+      if (!sock.current || readOnly.current || document.visibilityState === "hidden") return;
       const dims = fa.proposeDimensions();
       if (!dims || !Number.isFinite(dims.cols) || !Number.isFinite(dims.rows) || dims.cols < 2 || dims.rows < 1) return;
       if (dims.cols !== t.cols || dims.rows !== t.rows) t.resize(dims.cols, dims.rows);
