@@ -26,9 +26,9 @@ A change that breaks one of these will not merge:
   existing surface rather than reinventing it — see the pane-toolbar notes in
   `crates/harness-app/src/workspace_host.rs` for what "hosting" actually entails.
 - **Backend crates stay UI-free.** `worktrees`, `forge`, `status-watch`,
-  `agent-runtime`, `agent-schema`, `training` and `pi-client` are headless and
-  fully tested without a window. The app crate renders; it does not own protocol
-  or git logic.
+  `agent-runtime`, `agent-schema`, `training`, `pi-client` and `a2a-broker` are
+  headless and fully tested without a window. The app crate renders; it does
+  not own protocol or git logic.
 - **Agent-agnostic.** pi, Claude Code, Codex, OpenCode and Kimi are peers. Don't
   privilege one in shared paths; agent-specific behavior belongs behind
   `AgentKind` or in that agent's own module.

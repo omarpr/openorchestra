@@ -3,7 +3,9 @@
 A macOS harness for orchestrating coding agents — pi, Claude Code, Codex,
 OpenCode, and Kimi — across git worktrees, with a real embedded zed editor,
 per-worktree terminals, diff review, and native notifications when an agent
-needs you.
+needs you. Tasks that span several repos get one specialist agent per repo,
+coordinated through a localhost [A2A](docs/architecture.md) broker
+(`crates/a2a-broker`).
 
 ## Run it (macOS)
 
@@ -12,7 +14,8 @@ make setup && make app && open dist/openOrchestra.app
 ```
 
 - `make setup` installs/verifies the build and runtime tools (idempotent).
-- `make app` builds the release bundle into `dist/openOrchestra.app`.
+- `make app` builds a release bundle for the host architecture into
+  `dist/openOrchestra.app`.
 - `make dmg` builds a universal (Apple Silicon + Intel) bundle and a `.dmg`
   beside it. `make dmg-notarized` additionally signs it with Developer ID and
   notarizes it with Apple, so the download opens on a plain double-click;
