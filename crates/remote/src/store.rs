@@ -229,7 +229,7 @@ impl Store {
     pub fn unmark(&self, key: &str, tab_id: Option<u64>) -> io::Result<()> {
         self.update(|f| {
             f.marked
-                .retain(|m| !(m.worktree_key == key && tab_id.map_or(true, |t| m.tab_id == t)));
+                .retain(|m| !(m.worktree_key == key && tab_id.is_none_or(|t| m.tab_id == t)));
         })
     }
 
