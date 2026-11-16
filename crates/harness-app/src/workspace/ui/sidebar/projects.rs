@@ -617,9 +617,9 @@ impl HarnessWorkspace {
         }
         div()
             .absolute()
-            .left(x.max(px(8.0)))
+            .left(x)
             .top(y)
-            .w(px(240.0))
+            .w(px(REORDER_PANEL_W))
             .p(px(6.0))
             .rounded_md()
             .bg(hx.surface2)

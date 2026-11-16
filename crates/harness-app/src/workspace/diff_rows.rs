@@ -382,7 +382,7 @@ pub(crate) const INLINE_BODY_MAX_H: f32 = 420.0;
 #[cfg(test)]
 mod diff_render_tests {
     use super::{
-        load_prefs, max_diff_width, move_task_on_disk, readable_diff_lines, reorder_base, reordered, same_members,
+        load_prefs, max_diff_width, move_task_on_disk, readable_diff_lines, reorder_base, reorder_panel_origin, reordered, same_members,
         save_prefs_to, shifted, split_rows,
         split_dock_width, target_line_for_row, use_split, use_two_pane, DiffLineKind, DiffLocation, DiffView,
         Prefs, SplitRow, ToolTab, DIFF_TWO_PANE_MIN, MAX_PANEL_W, MIN_CENTER_W, SPLIT_MIN_W,
@@ -789,6 +789,22 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
         std::fs::write(&path, "{not json").unwrap();
         assert!(move_task_on_disk(&current, "b", "a").is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{not json");
+    }
+
+    #[test]
+    fn the_reorder_panel_stays_inside_the_window() {
+        let win = (1200.0, 800.0);
+        // Room below the click: placed as asked.
+        assert_eq!(reorder_panel_origin((100.0, 120.0), win, 3, 420.0), (100.0, 120.0));
+        // Near the bottom: lifted so title + 3 rows + Done fit above the edge.
+        assert_eq!(reorder_panel_origin((100.0, 760.0), win, 3, 420.0), (100.0, 800.0 - (96.0 + 80.0) - 8.0));
+        // A long list counts only its capped height.
+        assert_eq!(reorder_panel_origin((100.0, 760.0), win, 50, 420.0), (100.0, 800.0 - (420.0 + 80.0) - 8.0));
+        // Off the left or right edge: pulled in by the margin.
+        assert_eq!(reorder_panel_origin((-150.0, 120.0), win, 3, 420.0).0, 8.0);
+        assert_eq!(reorder_panel_origin((1100.0, 120.0), win, 3, 420.0).0, 1200.0 - 240.0 - 8.0);
+        // A window smaller than the panel: top-left margin, never negative.
+        assert_eq!(reorder_panel_origin((100.0, 100.0), (200.0, 150.0), 50, 90.0), (8.0, 8.0));
     }
 
     #[test]

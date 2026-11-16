@@ -260,9 +260,20 @@ impl Render for HarnessWorkspace {
                 )
                 .child({
                     // A long list scrolls inside the panel instead of running
-                    // off the window.
-                    let list_max_h = (f32::from(window.viewport_size().height) * 0.6).min(420.0);
-                    self.render_reorder_panel(&hx, list, x, y, px(list_max_h), cx)
+                    // off the window, and the whole panel stays on screen.
+                    let win = window.viewport_size();
+                    let list_max_h = (f32::from(win.height) * 0.6).min(420.0);
+                    let rows = match list {
+                        ReorderList::Projects => self.data.repos.len(),
+                        ReorderList::Tasks => self.data.tasks.len(),
+                    };
+                    let (x, y) = reorder_panel_origin(
+                        (f32::from(x), f32::from(y)),
+                        (f32::from(win.width), f32::from(win.height)),
+                        rows,
+                        list_max_h,
+                    );
+                    self.render_reorder_panel(&hx, list, px(x), px(y), px(list_max_h), cx)
                 });
         }
 
