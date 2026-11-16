@@ -16,7 +16,7 @@ use std::io;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -45,6 +45,15 @@ impl Tmux {
     /// A `tmux` command, with `-L <socket>` when set.
     pub fn command(&self) -> Command {
         let mut c = Command::new("tmux");
+        if let Some(s) = &self.socket {
+            c.arg("-L").arg(s);
+        }
+        c
+    }
+
+    /// A blocking `std` `tmux` command, with `-L <socket>` when set.
+    fn std_command(&self) -> std::process::Command {
+        let mut c = std::process::Command::new("tmux");
         if let Some(s) = &self.socket {
             c.arg("-L").arg(s);
         }
@@ -240,6 +249,11 @@ pub enum HubEvent {
 
 type Pending = Arc<StdMutex<VecDeque<oneshot::Sender<bool>>>>;
 
+/// Pane id -> window size saved before the first fit, for every pane whose
+/// fit is active. Lets quit restore sizes synchronously without the actors
+/// (see [`Hubs::restore_fits_blocking`]).
+type FitRegistry = Arc<StdMutex<HashMap<String, (u16, u16)>>>;
+
 enum Cmd {
     Send {
         lines: Vec<String>,
@@ -280,6 +294,14 @@ impl SessionHub {
     /// Attach a control-mode client to exactly `session` and start streaming
     /// its active pane.
     pub async fn open(t: Tmux, session: String) -> io::Result<Arc<SessionHub>> {
+        Self::open_in(t, session, FitRegistry::default()).await
+    }
+
+    async fn open_in(
+        t: Tmux,
+        session: String,
+        registry: FitRegistry,
+    ) -> io::Result<Arc<SessionHub>> {
         if !valid_session_name(&session) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -353,6 +375,7 @@ impl SessionHub {
                 cmds: cmds.downgrade(),
                 fits: 0,
                 saved: None,
+                registry,
             }
             .run(cmd_rx),
         );
@@ -573,6 +596,7 @@ struct Actor {
     cmds: mpsc::WeakUnboundedSender<Cmd>,
     fits: usize,
     saved: Option<(u16, u16)>,
+    registry: FitRegistry,
 }
 
 impl Actor {
@@ -647,6 +671,10 @@ impl Actor {
         match self.exec(&[resize_line(&self.pane, cols, rows)]).await {
             Ok(()) => {
                 self.fits += 1;
+                if let Some(size) = self.saved {
+                    let mut reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+                    reg.insert(self.pane.clone(), size);
+                }
                 Ok(())
             }
             Err(e) => {
@@ -669,6 +697,10 @@ impl Actor {
         let Some((w, h)) = self.saved.take() else {
             return;
         };
+        self.registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.pane);
         let lines = [resize_line(&self.pane, w, h), unset_size_line(&self.pane)];
         if self.exec(&lines).await.is_ok() {
             return;
@@ -747,6 +779,7 @@ impl Actor {
 pub struct Hubs {
     tmux: Tmux,
     map: tokio::sync::Mutex<HashMap<String, Weak<SessionHub>>>,
+    fits: FitRegistry,
 }
 
 impl Hubs {
@@ -754,6 +787,37 @@ impl Hubs {
         Hubs {
             tmux: t,
             map: tokio::sync::Mutex::new(HashMap::new()),
+            fits: FitRegistry::default(),
+        }
+    }
+
+    /// Put every fitted window back to its saved size now, blocking, with
+    /// argv `tmux resize-window` + `set-option -wu`, all within `budget`.
+    /// For quit: tmux sessions outlive the app, so a size left behind by an
+    /// actor that never got to run would stick. Spawns nothing when no fit
+    /// is active. Must not be called from inside the tokio runtime.
+    pub fn restore_fits_blocking(&self, budget: Duration) {
+        let fits: Vec<(String, (u16, u16))> = self
+            .fits
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain()
+            .collect();
+        if fits.is_empty() {
+            return;
+        }
+        let deadline = Instant::now() + budget;
+        for (pane, (w, h)) in fits {
+            if !valid_pane_id(&pane) {
+                continue;
+            }
+            let (w, h) = (w.to_string(), h.to_string());
+            let mut resize = self.tmux.std_command();
+            resize.args(["resize-window", "-t", &pane, "-x", &w, "-y", &h]);
+            run_until(resize, deadline);
+            let mut unset = self.tmux.std_command();
+            unset.args(["set-option", "-wu", "-t", &pane, "window-size"]);
+            run_until(unset, deadline);
         }
     }
 
@@ -767,7 +831,8 @@ impl Hubs {
             }
         }
         map.retain(|_, w| w.strong_count() > 0);
-        let hub = SessionHub::open(self.tmux.clone(), session.to_string()).await?;
+        let hub =
+            SessionHub::open_in(self.tmux.clone(), session.to_string(), self.fits.clone()).await?;
         map.insert(session.to_string(), Arc::downgrade(&hub));
         Ok(hub)
     }
@@ -786,9 +851,46 @@ impl Hubs {
     }
 }
 
+/// Run `cmd` to completion or until `deadline` (then kill it); true on
+/// success. Blocking.
+fn run_until(mut cmd: std::process::Command, deadline: Instant) -> bool {
+    let child = cmd
+        .env_remove("TMUX")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    let Ok(mut child) = child else {
+        return false;
+    };
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {}
+            Err(_) => return false,
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restore_fits_blocking_without_fits_is_instant() {
+        let hubs = Hubs::new(Tmux {
+            socket: Some(format!("oo-remote-unused-{}", std::process::id())),
+        });
+        let t = Instant::now();
+        hubs.restore_fits_blocking(Duration::from_secs(1));
+        assert!(t.elapsed() < Duration::from_millis(20));
+    }
 
     #[test]
     fn decode_octal_escapes() {

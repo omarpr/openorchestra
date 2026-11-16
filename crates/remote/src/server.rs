@@ -561,6 +561,16 @@ impl RemoteServer {
             .store(idle.as_millis() as u64, Ordering::SeqCst);
     }
 
+    /// Quit path: stop accepting fits and put every fitted window back to
+    /// its saved size now, blocking for at most `budget` (spawns nothing
+    /// when no fit is active). tmux sessions outlive the app, so a window
+    /// left at phone size by a stop thread the exiting process cut short
+    /// would stay that way. Callable from any non-tokio thread.
+    pub fn restore_fits_now(&self, budget: Duration) {
+        self.shared.shutdown.send_replace(true);
+        self.shared.hubs.restore_fits_blocking(budget);
+    }
+
     /// Send `disabled` to every socket, close everything and free the ports.
     pub fn stop(mut self) {
         self.shutdown_now();

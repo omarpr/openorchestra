@@ -6,7 +6,11 @@
 //! so they run on the background executor and hand results back through the
 //! entity. The GPUI thread only builds snapshots (cheap), reads/writes
 //! `remote.json` through the store (one small file), and spawns/kills the
-//! `caffeinate` child.
+//! `caffeinate` child. One bounded exception, at quit/teardown only: while a
+//! phone has "Fit to phone" on, `shutdown_detached` restores those window
+//! sizes synchronously (argv tmux, at most `QUIT_RESTORE`), because the
+//! process may exit before the stop thread gets to it and tmux sessions
+//! outlive the app. With no active fit it spawns nothing.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
@@ -29,6 +33,8 @@ const TICK: Duration = Duration::from_millis(250);
 const REFRESH_TICKS: u32 = 4;
 /// While another build holds the port, retry every this many ticks (30 s).
 const RETRY_TICKS: u32 = 120;
+/// Upper bound on the synchronous fit restore at quit (see module docs).
+const QUIT_RESTORE: Duration = Duration::from_secs(1);
 /// How long a device's "Confirm revoke" stays armed.
 pub(crate) const REVOKE_CONFIRM: Duration = Duration::from_secs(4);
 
@@ -143,13 +149,17 @@ impl RemoteRuntime {
     }
 
     /// Stop the server (if any) on a detached std thread and drop
-    /// keep-awake. Never blocks the caller: `RemoteServer::stop` (and its
-    /// `Drop`) wait up to ~5 s for sockets to flush. If the process exits
-    /// while that thread runs, the OS closes the sockets.
+    /// keep-awake. `RemoteServer::stop` (and its `Drop`) wait up to ~5 s for
+    /// sockets to flush, so that never blocks the caller; if the process
+    /// exits while that thread runs, the OS closes the sockets. Windows a
+    /// phone fitted are restored first, synchronously but bounded by
+    /// `QUIT_RESTORE` (instant when nothing is fitted): the quit paths call
+    /// `cx.quit()` right after this.
     pub(crate) fn shutdown_detached(&mut self) {
         self.keep_awake = None;
         self.status = None;
         if let Some(server) = self.server.take() {
+            server.restore_fits_now(QUIT_RESTORE);
             let spawned = std::thread::Builder::new()
                 .name("oo-remote-stop".into())
                 .spawn(move || server.stop());

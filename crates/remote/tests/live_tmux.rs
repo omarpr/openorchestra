@@ -343,6 +343,36 @@ async fn send_line_writes_text_then_enter_separately() {
     assert!(out.contains("Rb'hello'"), "{out:?}");
 }
 
+/// Quit: active fits are undone synchronously (argv tmux, bounded), even
+/// while the guard is still held and the actor never runs again.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn restore_fits_blocking_undoes_active_fits() {
+    let srv = Server::new();
+    srv.new_session("s", "cat");
+    let orig = srv.window_size("s");
+    let hubs = Arc::new(Hubs::new(srv.tmux()));
+    let hub = hubs.get("s").await.expect("hub");
+    let guard = hub.fit(40, 12).await.expect("fit");
+    assert_eq!(srv.window_size("s"), "40x12");
+    let h2 = hubs.clone();
+    let took = tokio::task::spawn_blocking(move || {
+        let t = Instant::now();
+        h2.restore_fits_blocking(Duration::from_secs(1));
+        t.elapsed()
+    })
+    .await
+    .unwrap();
+    assert!(took <= Duration::from_millis(1100), "took {took:?}");
+    // No polling: restored by the time the call returned.
+    assert_eq!(srv.window_size("s"), orig);
+    // Nothing left to restore a second time.
+    let t = Instant::now();
+    hubs.restore_fits_blocking(Duration::from_secs(1));
+    assert!(t.elapsed() < Duration::from_millis(20));
+    drop(guard);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn init_frame_matches_pane() {
