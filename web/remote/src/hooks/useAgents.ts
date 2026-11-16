@@ -16,6 +16,8 @@ export const backoffMs = (attempt: number) => Math.min(1000 * 2 ** attempt, 1500
 export interface AgentsState {
   agents: Agent[];
   connected: boolean;
+  /** At least one `agents` snapshot has arrived on this connection lifetime. */
+  loaded: boolean;
   /** Token was rejected (401 or `closed: revoked`); token already cleared. */
   unauthorized: boolean;
   /** Server said remote control is off (`closed: disabled`). */
@@ -27,6 +29,7 @@ export function useAgents(): AgentsState {
   const [state, setState] = useState<AgentsState>({
     agents: [],
     connected: false,
+    loaded: false,
     unauthorized: false,
     disabled: false,
   });
@@ -47,7 +50,7 @@ export function useAgents(): AgentsState {
       ctrl?.abort();
       clearTimeout(timer);
       clearToken();
-      setState({ agents: [], connected: false, unauthorized: true, disabled: false });
+      setState({ agents: [], connected: false, loaded: false, unauthorized: true, disabled: false });
     };
 
     const run = async () => {
@@ -66,7 +69,7 @@ export function useAgents(): AgentsState {
               try {
                 const list = JSON.parse(e.data) as Agent[];
                 attempt = 0;
-                setState((s) => ({ ...s, agents: sortAgents(list), connected: true, disabled: false }));
+                setState((s) => ({ ...s, agents: sortAgents(list), connected: true, loaded: true, disabled: false }));
               } catch {
                 /* malformed frame */
               }

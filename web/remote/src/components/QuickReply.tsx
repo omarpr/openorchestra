@@ -5,7 +5,7 @@ import { ApiError, sendText } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
-export function QuickReply({ id, disabled }: { id: string; disabled: boolean }) {
+export function QuickReply({ id, disabled, inputRef }: { id: string; disabled: boolean; inputRef?: React.Ref<HTMLInputElement> }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -33,6 +33,7 @@ export function QuickReply({ id, disabled }: { id: string; disabled: boolean }) 
   return (
     <form onSubmit={submit} className="flex min-w-0 flex-1 gap-2">
       <Input
+        ref={inputRef}
         value={text}
         onChange={(e) => setText(e.target.value)}
         disabled={disabled}

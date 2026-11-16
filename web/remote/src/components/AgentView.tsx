@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { AgentIcon } from "@/components/AgentIcon";
+import { StatusBar } from "@/components/StatusBar";
 import { ConversationView } from "@/components/ConversationView";
 
 const MIN_FONT = 9;
@@ -53,10 +54,12 @@ function save(key: string, v: string) {
   }
 }
 
-export function AgentView({ id, agent }: { id: string; agent?: Agent }) {
+export function AgentView({ id, agent, agentsLoaded = false }: { id: string; agent?: Agent; agentsLoaded?: boolean }) {
   const isTablet = useIsTablet();
   const { bottom } = useVisualViewport();
   const term = useRef<TerminalHandle>(null);
+  const replyInput = useRef<HTMLInputElement>(null);
+  const focusedWaiting = useRef(false);
   const [meReadOnly, setMeReadOnly] = useState<boolean | null>(null);
   const [initReadOnly, setInitReadOnly] = useState(false);
   const [fit, setFit] = useState(() => load(`oo.fit.${id}`) === "1");
@@ -73,7 +76,8 @@ export function AgentView({ id, agent }: { id: string; agent?: Agent }) {
     const v = load(`oo.view.${id}`);
     return v === "conversation" || v === "terminal" ? v : null;
   });
-  const loading = !agent && savedView !== "terminal";
+  const notFound = !agent && agentsLoaded;
+  const loading = !agent && !notFound && savedView !== "terminal";
   const view: View = hasConv ? (savedView ?? "conversation") : "terminal";
   const pickView = (v: View) => {
     setSavedView(v);
@@ -100,8 +104,21 @@ export function AgentView({ id, agent }: { id: string; agent?: Agent }) {
   const stopped = closed === "stopped" || agent?.status === "stopped";
   // Controls stay hidden until /api/me confirms the device may type.
   const readOnly = meReadOnly !== false || initReadOnly;
-  const canType = !readOnly && !stopped && !closed;
+  const canType = !readOnly && !stopped && !closed && !loading && !notFound;
   const where = agent ? (agent.branch ?? agent.worktree) : "";
+
+  // Focus the reply box once each time the agent transitions into waiting.
+  const status = agent?.status;
+  useEffect(() => {
+    if (status !== "waiting") {
+      focusedWaiting.current = false;
+      return;
+    }
+    if (!focusedWaiting.current && view === "conversation" && replyInput.current) {
+      replyInput.current.focus();
+      focusedWaiting.current = true;
+    }
+  }, [status, view, canType]);
 
   const setFitPersist = (on: boolean) => {
     setFit(on);
@@ -191,7 +208,16 @@ export function AgentView({ id, agent }: { id: string; agent?: Agent }) {
       )}
 
       <div className="min-h-0 flex-1" style={{ paddingBottom: canType ? bottom : 0 }}>
-        {loading ? null : view === "conversation" ? (
+        {notFound ? (
+          <div className="flex h-full flex-col items-center justify-center gap-3 text-muted-foreground">
+            <p>Agent not found</p>
+            {!isTablet && (
+              <Button variant="outline" onClick={() => navigate("#/")}>
+                All agents
+              </Button>
+            )}
+          </div>
+        ) : loading ? null : view === "conversation" ? (
           <ConversationView id={id} onClosed={(r) => setClosedBy((c) => ({ ...c, [view]: r }))} onConnection={setConnected} />
         ) : (
           <TerminalView
@@ -208,13 +234,13 @@ export function AgentView({ id, agent }: { id: string; agent?: Agent }) {
         )}
       </div>
 
-      {/* Task 6: the conversation status bar plugs in here, between the list and the reply box. */}
+      {agent && view === "conversation" && !closed && <StatusBar status={agent.status} tool={agent.tool} />}
 
       {canType && (
         <div className="shrink-0 border-t bg-background" style={{ transform: `translateY(${-bottom}px)` }}>
           {view === "terminal" && !hideKeys && <KeyBar ctrl={ctrl} onToggleCtrl={() => setCtrl((c) => !c)} onKey={sendKey} />}
           <div className="flex items-center gap-2 px-2 pb-2">
-            <QuickReply id={id} disabled={stopped} />
+            <QuickReply id={id} disabled={stopped} inputRef={replyInput} />
             {view === "terminal" && (
             <Button
               variant="outline"

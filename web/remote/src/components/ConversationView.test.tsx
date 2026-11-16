@@ -283,4 +283,41 @@ describe("AgentView conversation switch", () => {
     expect(sockets).toHaveLength(1);
     expect(stream.urls).toHaveLength(0);
   });
+
+  it("waiting focuses the reply input once per transition", async () => {
+    const { rerender } = render(<AgentView id="a1" agent={agent({ status: "running" })} />);
+    const input = () => screen.getByLabelText("Message the agent");
+    await screen.findByLabelText("Message the agent");
+    expect(input()).not.toHaveFocus();
+    rerender(<AgentView id="a1" agent={agent({ status: "waiting" })} />);
+    expect(input()).toHaveFocus();
+    input().blur();
+    rerender(<AgentView id="a1" agent={agent({ status: "waiting", tool: "x" })} />);
+    expect(input()).not.toHaveFocus();
+    rerender(<AgentView id="a1" agent={agent({ status: "running" })} />);
+    rerender(<AgentView id="a1" agent={agent({ status: "waiting" })} />);
+    expect(input()).toHaveFocus();
+  });
+
+  it("shows the status bar between the list and the reply box", () => {
+    render(<AgentView id="a1" agent={agent({ status: "running", tool: "Bash: ls" })} />);
+    expect(screen.getByText("Working…")).toBeInTheDocument();
+    expect(screen.getByText("Bash: ls")).toBeInTheDocument();
+  });
+
+  it("while the agent list is loading, the reply box is hidden", () => {
+    render(<AgentView id="a1" />);
+    expect(screen.queryByLabelText("Message the agent")).not.toBeInTheDocument();
+    expect(screen.queryByText("Agent not found")).not.toBeInTheDocument();
+  });
+
+  it("once the list loaded and the id is missing: Agent not found with a way back", async () => {
+    render(<AgentView id="a1" agentsLoaded />);
+    expect(screen.getByText("Agent not found")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Message the agent")).not.toBeInTheDocument();
+    expect(stream.urls).toHaveLength(0);
+    expect(sockets).toHaveLength(0);
+    await userEvent.click(screen.getByRole("button", { name: "All agents" }));
+    expect(window.location.hash).toBe("#/");
+  });
 });

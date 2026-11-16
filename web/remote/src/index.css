@@ -133,9 +133,25 @@
 .oo-breathe {
   animation: oo-breathe 1.2s ease-in-out infinite;
 }
+@keyframes oo-bounce {
+  0%,
+  60%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.5;
+  }
+  30% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
+}
+.oo-bounce {
+  animation: oo-bounce 1.2s ease-in-out infinite;
+}
 @media (prefers-reduced-motion: reduce) {
   .oo-spin,
-  .oo-breathe {
+  .oo-breathe,
+  .oo-bounce {
     animation: none;
   }
 }

@@ -23,7 +23,7 @@ function Brand() {
 }
 
 function Main() {
-  const { agents, connected, disabled } = useAgents();
+  const { agents, connected, disabled, loaded } = useAgents();
   const isTablet = useIsTablet();
   const route = useRoute();
   const [collapsed, setCollapsed] = useState(false);
@@ -65,7 +65,7 @@ function Main() {
           )}
           <div className="min-h-0 flex-1">
             {selectedId ? (
-              <AgentView key={selectedId} id={selectedId} agent={selectedAgent} />
+              <AgentView key={selectedId} id={selectedId} agent={selectedAgent} agentsLoaded={loaded} />
             ) : (
               <div className="flex h-full items-center justify-center text-muted-foreground">Select an agent</div>
             )}
@@ -76,7 +76,7 @@ function Main() {
   } else if (selectedId) {
     body = (
       <div className="min-h-0 flex-1">
-        <AgentView key={selectedId} id={selectedId} agent={selectedAgent} />
+        <AgentView key={selectedId} id={selectedId} agent={selectedAgent} agentsLoaded={loaded} />
       </div>
     );
   } else {
