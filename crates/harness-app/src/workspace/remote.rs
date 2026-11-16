@@ -137,6 +137,11 @@ pub(crate) struct RemoteRuntime {
     /// other build; re-read only while such marks exist and the file changed.
     disk_panes: Option<(SystemTime, crate::panes_state::PanesState)>,
     keep_awake: Option<KeepAwake>,
+    /// Newest transcript per (worktree root, agent kind), from adapter signals
+    /// and the registry at startup.
+    pub(crate) session_files: HashMap<(PathBuf, String), PathBuf>,
+    /// Newest transcript per worktree root, whatever the kind (for shells).
+    pub(crate) latest_session: HashMap<PathBuf, PathBuf>,
     /// The store's file watcher (type-erased: two `notify` versions are in
     /// the graph) and its change events, taken by the poll loop.
     _watcher: Option<Box<dyn std::any::Any>>,
@@ -170,6 +175,8 @@ impl RemoteRuntime {
             snapshot_tx,
             disk_panes: None,
             keep_awake: None,
+            session_files: HashMap::new(),
+            latest_session: HashMap::new(),
             _watcher: watcher,
             changes,
             starting: false,
@@ -202,6 +209,14 @@ impl RemoteRuntime {
     /// A start or stop is in flight.
     pub(crate) fn busy(&self) -> bool {
         self.starting || self.stopping
+    }
+
+    /// Remember the transcript an adapter reported for `root`.
+    pub(crate) fn record_session(&mut self, root: &Path, kind: &str, file: &Path) {
+        self.session_files
+            .insert((root.to_path_buf(), kind.to_string()), file.to_path_buf());
+        self.latest_session
+            .insert(root.to_path_buf(), file.to_path_buf());
     }
 
     fn reload(&mut self) {
@@ -288,6 +303,8 @@ pub(crate) struct MarkSource {
     pub root: PathBuf,
     pub project: String,
     pub worktree: String,
+    /// Git branch of this worktree; empty for a coordinator.
+    pub branch: String,
     /// `(tab id, title, agent kind)`, terminal tabs only.
     pub tabs: Vec<(u64, String, Option<String>)>,
 }
@@ -300,6 +317,8 @@ pub(crate) fn build_snapshot(
     sources: &[MarkSource],
     status: &HashMap<PathBuf, AgentState>,
     since: &HashMap<PathBuf, (SystemTime, Option<String>)>,
+    session_files: &HashMap<(PathBuf, String), PathBuf>,
+    latest_session: &HashMap<PathBuf, PathBuf>,
 ) -> Snapshot {
     let mut agents = Vec::new();
     for src in sources {
@@ -315,6 +334,11 @@ pub(crate) fn build_snapshot(
             let Some(mark) = file.mark_for(&src.key, *tab_id) else {
                 continue;
             };
+            let transcript = match kind {
+                Some(k) => session_files.get(&(src.root.clone(), k.clone())),
+                None => latest_session.get(&src.root),
+            }
+            .cloned();
             agents.push(AgentInfo {
                 id: mark.id.clone(),
                 title: title.clone(),
@@ -324,10 +348,10 @@ pub(crate) fn build_snapshot(
                 status: status.clone(),
                 status_since: status_since.clone(),
                 tool: tool.clone(),
-                branch: None,
+                branch: (!src.branch.is_empty()).then(|| src.branch.clone()),
                 has_conversation: false,
                 session: crate::tmux::session_name(&src.key, *tab_id),
-                transcript: None,
+                transcript,
             });
         }
     }
@@ -433,6 +457,13 @@ impl HarnessWorkspace {
             async {}
         })
         .detach();
+        // Seed transcripts from the registry (already in memory): sessions
+        // started before this launch.
+        for e in self.manager.registry.active() {
+            if let Some(file) = &e.session_file {
+                self.remote.record_session(&e.path, e.agent_kind.as_str(), file);
+            }
+        }
         self.remote_refresh(cx);
         self.remote_reconcile(cx);
     }
@@ -449,6 +480,7 @@ impl HarnessWorkspace {
                 repo.repo_root.clone(),
                 repo.name.clone(),
                 "main".to_string(),
+                repo.head_branch.clone(),
             ));
             for w in &repo.worktrees {
                 let key = worktree_pane_key(w.task_id.as_deref(), &w.id);
@@ -457,6 +489,7 @@ impl HarnessWorkspace {
                     w.path.clone(),
                     repo.name.clone(),
                     w.name.clone(),
+                    w.branch.clone(),
                 ));
             }
         }
@@ -471,6 +504,7 @@ impl HarnessWorkspace {
                 worktrees::task_coordinator_dir(&tasks_root, &task.slug),
                 task.name.clone(),
                 "coordinator".to_string(),
+                String::new(),
             ));
         }
         out
@@ -482,6 +516,7 @@ impl HarnessWorkspace {
         root: PathBuf,
         project: String,
         worktree: String,
+        branch: String,
     ) -> MarkSource {
         use crate::panes_state::TabRecordKind as K;
         let tabs = if let Some(pane) = self.panes.get(&key) {
@@ -514,6 +549,7 @@ impl HarnessWorkspace {
             root,
             project,
             worktree,
+            branch,
             tabs,
         }
     }
@@ -585,6 +621,8 @@ impl HarnessWorkspace {
             &sources,
             &self.agent_status,
             &self.agent_since,
+            &self.remote.session_files,
+            &self.remote.latest_session,
         );
         self.remote.snapshot_tx.send_if_modified(|cur| {
             if *cur == snap {
@@ -999,6 +1037,7 @@ mod tests {
             root: PathBuf::from(root),
             project: "proj".into(),
             worktree: "wt".into(),
+            branch: String::new(),
             tabs: tabs
                 .iter()
                 .map(|(id, t, k)| (*id, t.to_string(), k.map(str::to_string)))
@@ -1067,7 +1106,7 @@ mod tests {
         let at = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         let since = HashMap::from([(PathBuf::from("/r/proj"), (at, Some("Bash".to_string())))]);
 
-        let snap = build_snapshot(&f, &sources, &status, &since);
+        let snap = build_snapshot(&f, &sources, &status, &since, &HashMap::new(), &HashMap::new());
 
         assert_eq!(snap.agents.len(), 1);
         let a = &snap.agents[0];
@@ -1089,7 +1128,7 @@ mod tests {
             mark("wt-x", 1, "r_other"),
         ]);
         let sources = [source("main:proj", "/r/proj", &[(7, "shell", None)])];
-        let snap = build_snapshot(&f, &sources, &HashMap::new(), &HashMap::new());
+        let snap = build_snapshot(&f, &sources, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new());
         assert!(snap.agents.is_empty(), "{:?}", snap.agents);
     }
 
@@ -1102,7 +1141,7 @@ mod tests {
             &[(3, "claude", Some("claude")), (4, "shell", None)],
         )];
         let status = HashMap::from([(PathBuf::from("/w/1"), AgentState::Running)]);
-        let snap = build_snapshot(&f, &sources, &status, &HashMap::new());
+        let snap = build_snapshot(&f, &sources, &status, &HashMap::new(), &HashMap::new(), &HashMap::new());
         let ids: Vec<_> = snap.agents.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, ["r_a", "r_b"]);
         assert!(snap.agents.iter().all(|a| a.status == "running"));
@@ -1117,7 +1156,7 @@ mod tests {
             source("b", "/b", &[(2, "t", None)]),
         ];
         let status = HashMap::from([(PathBuf::from("/a"), AgentState::Unknown)]);
-        let snap = build_snapshot(&f, &sources, &status, &HashMap::new());
+        let snap = build_snapshot(&f, &sources, &status, &HashMap::new(), &HashMap::new(), &HashMap::new());
         assert_eq!(snap.agents.len(), 2);
         assert!(snap.agents.iter().all(|a| a.status == "unknown"));
         assert!(
@@ -1125,6 +1164,74 @@ mod tests {
                 .iter()
                 .all(|a| a.status_since.is_none() && a.tool.is_none())
         );
+    }
+
+    fn sessions(
+        entries: &[(&str, &str, &str)],
+    ) -> (
+        HashMap<(PathBuf, String), PathBuf>,
+        HashMap<PathBuf, PathBuf>,
+    ) {
+        let mut rt = RemoteRuntime::new(tempfile::tempdir().unwrap().path());
+        for (root, kind, f) in entries {
+            rt.record_session(Path::new(root), kind, Path::new(f));
+        }
+        (rt.session_files.clone(), rt.latest_session.clone())
+    }
+
+    fn transcripts(
+        tabs: &[(u64, &str, Option<&str>)],
+        entries: &[(&str, &str, &str)],
+    ) -> Vec<Option<PathBuf>> {
+        let f = file(tabs.iter().map(|(id, _, _)| mark("k", *id, &format!("r{id}"))).collect());
+        let sources = [source("k", "/R", tabs)];
+        let (sf, ls) = sessions(entries);
+        let snap = build_snapshot(&f, &sources, &HashMap::new(), &HashMap::new(), &sf, &ls);
+        snap.agents.into_iter().map(|a| a.transcript).collect()
+    }
+
+    #[test]
+    fn agent_tab_gets_its_own_kind_transcript() {
+        let got = transcripts(
+            &[(1, "c", Some("claude-code")), (2, "p", Some("pi"))],
+            &[("/R", "claude-code", "/c.jsonl"), ("/R", "pi", "/p.jsonl")],
+        );
+        assert_eq!(
+            got,
+            [Some(PathBuf::from("/c.jsonl")), Some(PathBuf::from("/p.jsonl"))]
+        );
+    }
+
+    #[test]
+    fn shell_tab_gets_latest_transcript() {
+        let got = transcripts(
+            &[(1, "sh", None)],
+            &[("/R", "claude-code", "/c.jsonl"), ("/R", "pi", "/p.jsonl")],
+        );
+        assert_eq!(got, [Some(PathBuf::from("/p.jsonl"))]);
+    }
+
+    #[test]
+    fn no_transcript_when_unknown() {
+        let got = transcripts(
+            &[(1, "x", Some("codex")), (2, "sh", None)],
+            &[("/R", "claude-code", "/c.jsonl")],
+        );
+        assert_eq!(got[0], None);
+        let got = transcripts(&[(1, "sh", None)], &[]);
+        assert_eq!(got, [None]);
+    }
+
+    #[test]
+    fn snapshot_carries_branch() {
+        let f = file(vec![mark("k", 1, "r1")]);
+        let mut src = source("k", "/R", &[(1, "sh", None)]);
+        src.branch = "feat/x".into();
+        let snap = build_snapshot(&f, &[src.clone()], &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new());
+        assert_eq!(snap.agents[0].branch.as_deref(), Some("feat/x"));
+        src.branch = String::new();
+        let snap = build_snapshot(&f, &[src], &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new());
+        assert_eq!(snap.agents[0].branch, None);
     }
 
     #[test]
@@ -1231,7 +1338,7 @@ mod tests {
             ]
         );
         assert!(sources[1].tabs.is_empty());
-        let snap = build_snapshot(&f, &sources, &HashMap::new(), &HashMap::new());
+        let snap = build_snapshot(&f, &sources, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new());
         let ids: Vec<_> = snap.agents.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, ["r_live", "r_dev"]);
         assert_eq!(snap.agents[1].session, crate::tmux::session_name("wt-1", 9));

@@ -178,6 +178,11 @@ impl HarnessWorkspace {
             }
         }
 
+        if let Some(session) = &signal.session_file {
+            self.remote
+                .record_session(&signal.worktree_root, signal.kind.as_str(), session);
+        }
+
         // Record the session file the moment an adapter reports one: it is the
         // harvesting hook M7 reads, and pi only learns it after startup.
         if let (Some(session), Some(id)) = (
