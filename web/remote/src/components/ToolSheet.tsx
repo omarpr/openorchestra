@@ -8,14 +8,25 @@ export interface ToolRef {
   summary: string;
 }
 
-/** Bottom sheet showing one tool call's output, fetched on open. */
-export function ToolSheet({ agentId, tool, onClose }: { agentId: string; tool: ToolRef | null; onClose(): void }) {
+/** Bottom sheet showing one tool call's output, fetched on open (or once a running tool finishes). */
+export function ToolSheet({
+  agentId,
+  tool,
+  pending = false,
+  onClose,
+}: {
+  agentId: string;
+  tool: ToolRef | null;
+  /** The tool is still running: there is no output to fetch yet. */
+  pending?: boolean;
+  onClose(): void;
+}) {
   const [res, setRes] = useState<ToolResult | null>(null);
   const [failed, setFailed] = useState(false);
   const toolId = tool?.id;
 
   useEffect(() => {
-    if (!toolId) return;
+    if (!toolId || pending) return;
     let live = true;
     setRes(null);
     setFailed(false);
@@ -25,7 +36,7 @@ export function ToolSheet({ agentId, tool, onClose }: { agentId: string; tool: T
     return () => {
       live = false;
     };
-  }, [agentId, toolId]);
+  }, [agentId, toolId, pending]);
 
   return (
     <Sheet open={!!tool} onOpenChange={(o) => !o && onClose()}>
@@ -35,7 +46,9 @@ export function ToolSheet({ agentId, tool, onClose }: { agentId: string; tool: T
           <SheetDescription className="truncate font-mono">{tool?.summary}</SheetDescription>
         </SheetHeader>
         <div className="mt-3 min-h-0 flex-1 overflow-auto rounded-md bg-muted p-3">
-          {failed ? (
+          {pending ? (
+            <p className="text-sm text-muted-foreground">Still running</p>
+          ) : failed ? (
             <p className="text-sm text-muted-foreground">Output isn't available</p>
           ) : res === null ? (
             <p className="text-sm text-muted-foreground">Loading…</p>

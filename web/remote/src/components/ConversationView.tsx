@@ -42,6 +42,17 @@ export function ConversationView({ id, onClosed, onConnection }: Props) {
     }
   }, [entries]);
 
+  // The scroller itself resizes (keyboard opens, status bar appears): keep the bottom in view while stuck.
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => {
+      if (stuck.current) el.scrollTop = el.scrollHeight;
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   const onScroll = () => {
     const el = scroller.current;
     if (!el) return;
@@ -55,6 +66,9 @@ export function ConversationView({ id, onClosed, onConnection }: Props) {
     stuck.current = true;
     setUnseen(false);
   };
+
+  // Live status of the open tool: a sheet opened while it ran fetches once it finishes.
+  const toolPending = !!tool && entries.find((e) => e.tool?.id === tool.id)?.tool?.status === "pending";
 
   return (
     <div className="relative flex h-full min-h-0 flex-col">
@@ -77,7 +91,7 @@ export function ConversationView({ id, onClosed, onConnection }: Props) {
           New messages ↓
         </button>
       )}
-      <ToolSheet agentId={id} tool={tool} onClose={() => setTool(null)} />
+      <ToolSheet agentId={id} tool={tool} pending={toolPending} onClose={() => setTool(null)} />
     </div>
   );
 }

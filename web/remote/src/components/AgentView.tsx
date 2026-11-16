@@ -38,6 +38,8 @@ export const agentName = (kind: string | null) => (kind ? (AGENT_NAMES[kind] ?? 
 
 type View = "conversation" | "terminal";
 
+const GLOBAL = ["unmarked", "revoked", "disabled"];
+
 function load(key: string): string | null {
   try {
     return localStorage.getItem(key);
@@ -83,6 +85,26 @@ export function AgentView({ id, agent, agentsLoaded = false }: { id: string; age
     setConnected(true);
   };
 
+  // Terminal shown because there was no conversation yet: remember it, so a conversation appearing
+  // later doesn't pull the user off the terminal they are using.
+  const noConvYet = !!agent && !hasConv && savedView === null;
+  useEffect(() => {
+    if (!noConvYet) return;
+    setSavedView("terminal");
+    save(`oo.view.${id}`, "terminal");
+  }, [noConvYet, id]);
+
+  // A view that (re)mounts starts fresh: drop the closure it reported last time, unless it was a
+  // remote-wide one that applies to both views.
+  useEffect(() => {
+    setClosedBy((c) => {
+      const r = c[view];
+      if (!r || GLOBAL.includes(r)) return c;
+      const { [view]: _gone, ...rest } = c;
+      return rest;
+    });
+  }, [view]);
+
   useEffect(() => {
     let live = true;
     me()
@@ -96,7 +118,6 @@ export function AgentView({ id, agent, agentsLoaded = false }: { id: string; age
   }, []);
 
   // Real remote-wide closures apply to both views; the rest belong to the view that reported them.
-  const GLOBAL = ["unmarked", "revoked", "disabled"];
   const other = view === "terminal" ? closedBy.conversation : closedBy.terminal;
   const closed = closedBy[view] ?? (other && GLOBAL.includes(other) ? other : null);
   const stopped = closed === "stopped" || agent?.status === "stopped";

@@ -122,14 +122,105 @@ describe("ConversationView", () => {
     expect(strong.tagName).toBe("STRONG");
     expect(document.querySelector("script")).toBeNull();
     expect(screen.getByText(/<script>alert\(1\)<\/script>/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /✓ cargo test/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /✗ cargo build/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "✓ Bash cargo test" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "✗ Bash cargo build" })).toBeInTheDocument();
     expect(screen.getByText(/💭 Thinking…/)).toBeInTheDocument();
     expect(screen.getByText(/line one/)).toBeInTheDocument();
     expect(screen.queryByText(/line two/)).not.toBeInTheDocument();
     expect(screen.getByText("💭 Thought for 12 s")).toBeInTheDocument();
     expect(screen.getByText("💭 Thinking (not recorded)")).toBeInTheDocument();
     expect(screen.getByText("Can't read the conversation right now")).toBeInTheDocument();
+  });
+
+  it("tool lines show a per-tool glyph before the summary, the name otherwise", () => {
+    render(<ConversationView id="a1" />);
+    const t = (id: string, name: string, summary: string) =>
+      ({ id, kind: "tool", tool: { id, name, summary, status: "ok" } }) as ConvEntry;
+    push([
+      t("1", "Edit", "src/a.rs"),
+      t("2", "Read", "src/b.rs"),
+      t("3", "Bash", "cargo test"),
+      t("4", "Grep", '"needle"'),
+      t("5", "WebFetch", "docs.rs"),
+      t("6", "Task", "explore"),
+      t("7", "TodoWrite", "TodoWrite"),
+      t("8", "bash", "ls"),
+      t("9", "mcp__x__go", "now"),
+      t("10", "Mystery", ""),
+      t("11", "mcp__y__z", "mcp__y__z"),
+    ]);
+    const row = (name: string) => screen.getByRole("button", { name }).textContent;
+    expect(row("✓ Edit src/a.rs")).toBe("✎src/a.rs");
+    expect(row("✓ Read src/b.rs")).toBe("📄src/b.rs");
+    expect(row("✓ Bash cargo test")).toBe("$cargo test");
+    expect(row('✓ Grep "needle"')).toBe('🔍"needle"');
+    expect(row("✓ WebFetch docs.rs")).toBe("🌐docs.rs");
+    expect(row("✓ Task explore")).toBe("🤖explore");
+    expect(row("✓ TodoWrite")).toBe("☑TodoWrite");
+    expect(row("✓ bash ls")).toBe("$ls");
+    expect(row("✓ mcp__x__go now")).toBe("mcp__x__gonow");
+    // Blank summary, or one that is just the name: the name once, never a blank line.
+    expect(row("✓ Mystery")).toBe("Mystery");
+    expect(row("✓ mcp__y__z")).toBe("mcp__y__z");
+  });
+
+  it("thought for under half a second reads 1 s, not 0 s", () => {
+    render(<ConversationView id="a1" />);
+    push([
+      { id: "1", kind: "thinking", duration_ms: 300 },
+      { id: "2", kind: "thinking", duration_ms: 0 },
+    ]);
+    expect(screen.getAllByText("💭 Thought for 1 s")).toHaveLength(2);
+  });
+
+  it("a pending tool's sheet says Still running and fetches once it finishes", async () => {
+    fetchToolMock.mockResolvedValue({ text: "done", is_error: false, truncated: false });
+    render(<ConversationView id="a1" />);
+    push([{ id: "3", kind: "tool", tool: { id: "t1", name: "Bash", summary: "sleep 9", status: "pending" } }]);
+    await userEvent.click(screen.getByRole("button", { name: /sleep 9/ }));
+    expect(await screen.findByText("Still running")).toBeInTheDocument();
+    expect(fetchToolMock).not.toHaveBeenCalled();
+    expect(screen.queryByText("Output isn't available")).not.toBeInTheDocument();
+    push([{ id: "3", kind: "tool", tool: { id: "t1", name: "Bash", summary: "sleep 9", status: "ok" } }]);
+    expect(await screen.findByText("done")).toBeInTheDocument();
+    expect(fetchToolMock).toHaveBeenCalledWith("a1", "t1");
+  });
+
+  it("stays at the bottom when the list area resizes while stuck", () => {
+    const observers: { cb: ResizeObserverCallback; els: Element[] }[] = [];
+    const Orig = globalThis.ResizeObserver;
+    (globalThis as any).ResizeObserver = class {
+      els: Element[] = [];
+      constructor(cb: ResizeObserverCallback) {
+        observers.push((this as any).rec = { cb, els: this.els });
+      }
+      observe(el: Element) {
+        this.els.push(el);
+      }
+      unobserve() {}
+      disconnect() {}
+    };
+    try {
+      render(<ConversationView id="a1" />);
+      push([{ id: "1", kind: "user", text: "one" }]);
+      const sc = screen.getByTestId("conversation-scroll");
+      Object.defineProperty(sc, "scrollHeight", { value: 1000, configurable: true });
+      Object.defineProperty(sc, "clientHeight", { value: 500, configurable: true });
+      sc.scrollTop = 500;
+      fireEvent.scroll(sc);
+      const fire = () => act(() => observers.filter((o) => o.els.includes(sc)).forEach((o) => o.cb([], {} as ResizeObserver)));
+      // The keyboard opens: the scroller shrinks and the browser leaves scrollTop alone.
+      Object.defineProperty(sc, "clientHeight", { value: 200, configurable: true });
+      fire();
+      expect(sc.scrollTop).toBe(1000);
+      // Scrolled up: a resize leaves the reader where they are.
+      sc.scrollTop = 100;
+      fireEvent.scroll(sc);
+      fire();
+      expect(sc.scrollTop).toBe(100);
+    } finally {
+      (globalThis as any).ResizeObserver = Orig;
+    }
   });
 
   it("tap tool opens sheet with fetched output", async () => {
@@ -275,6 +366,35 @@ describe("AgentView conversation switch", () => {
     await userEvent.click(screen.getByRole("tab", { name: "Terminal" }));
     expect(screen.queryByText(/conversation isn't available/)).not.toBeInTheDocument();
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("returning to a view clears its own closure but not a global one", async () => {
+    render(<AgentView id="a1" agent={agent()} />);
+    stream.reject?.(new Error("HTTP 404"));
+    await screen.findByText(/conversation isn't available/);
+    await userEvent.click(screen.getByRole("tab", { name: "Terminal" }));
+    await userEvent.click(screen.getByRole("tab", { name: "Conversation" }));
+    expect(screen.queryByText(/conversation isn't available/)).not.toBeInTheDocument();
+    expect(stream.urls).toHaveLength(2);
+    act(() => stream.onEvent?.({ event: "closed", data: JSON.stringify({ reason: "unmarked" }) }));
+    await userEvent.click(screen.getByRole("tab", { name: "Terminal" }));
+    await userEvent.click(screen.getByRole("tab", { name: "Conversation" }));
+    expect(screen.getByRole("status")).toHaveTextContent(/Remote control was turned off/);
+  });
+
+  it("a conversation appearing while on Terminal does not switch away from it", () => {
+    const { rerender } = render(<AgentView id="a1" agent={agent({ has_conversation: false })} />);
+    expect(sockets).toHaveLength(1);
+    expect(localStorage.getItem("oo.view.a1")).toBe("terminal");
+    rerender(<AgentView id="a1" agent={agent({ has_conversation: true })} />);
+    expect(screen.getByRole("tab", { name: "Terminal" })).toHaveAttribute("aria-selected", "true");
+    expect(sockets).toHaveLength(1);
+    expect(stream.urls).toHaveLength(0);
+  });
+
+  it("nothing is saved while the agent list is still loading", () => {
+    render(<AgentView id="a1" />);
+    expect(localStorage.getItem("oo.view.a1")).toBeNull();
   });
 
   it("no conversation: Terminal and no switch", () => {
