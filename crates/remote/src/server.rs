@@ -30,6 +30,11 @@ const LIVE_POLL: Duration = Duration::from_secs(2);
 const FILE_POLL: Duration = Duration::from_millis(500);
 /// How long `stop` waits for sockets to send `disabled` and close.
 const STOP_FLUSH: Duration = Duration::from_secs(3);
+/// Terminal sockets: server ping period, and how long without any frame
+/// from the phone (pongs included) before the socket is dropped. A phone
+/// that left Wi-Fi must not hold "Fit to phone" forever.
+const WS_PING: Duration = Duration::from_secs(20);
+const WS_IDLE: Duration = Duration::from_secs(45);
 /// Pair attempts allowed per peer IP per minute.
 const PAIR_PER_MINUTE: usize = 5;
 
@@ -141,9 +146,20 @@ pub(crate) struct Shared {
     pub(crate) cert_check: Duration,
     /// Test hook: pause between opening the hub and typing in `send`.
     pub(crate) test_send_delay_ms: AtomicU64,
+    /// Terminal socket ping period / idle limit, in ms (shorter in tests).
+    ws_ping_ms: AtomicU64,
+    ws_idle_ms: AtomicU64,
 }
 
 impl Shared {
+    /// (ping period, idle limit) for terminal sockets.
+    pub(crate) fn ws_keepalive(&self) -> (Duration, Duration) {
+        (
+            Duration::from_millis(self.ws_ping_ms.load(Ordering::SeqCst)),
+            Duration::from_millis(self.ws_idle_ms.load(Ordering::SeqCst)),
+        )
+    }
+
     pub fn store(&self) -> Store {
         Store::new(&self.state_dir)
     }
@@ -349,6 +365,8 @@ impl RemoteServer {
             cert_wake: Notify::new(),
             cert_check,
             test_send_delay_ms: AtomicU64::new(0),
+            ws_ping_ms: AtomicU64::new(WS_PING.as_millis() as u64),
+            ws_idle_ms: AtomicU64::new(WS_IDLE.as_millis() as u64),
         });
         shared.status.write().unwrap().ca_fingerprint = shared.ca.fingerprint.clone();
 
@@ -529,6 +547,18 @@ impl RemoteServer {
         self.shared
             .test_send_delay_ms
             .store(delay.as_millis() as u64, Ordering::SeqCst);
+    }
+
+    /// Terminal socket ping period and idle limit for sockets opened from now
+    /// on (tests).
+    #[doc(hidden)]
+    pub fn test_set_ws_keepalive(&self, ping: Duration, idle: Duration) {
+        self.shared
+            .ws_ping_ms
+            .store(ping.as_millis() as u64, Ordering::SeqCst);
+        self.shared
+            .ws_idle_ms
+            .store(idle.as_millis() as u64, Ordering::SeqCst);
     }
 
     /// Send `disabled` to every socket, close everything and free the ports.

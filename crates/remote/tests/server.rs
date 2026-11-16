@@ -1034,3 +1034,80 @@ async fn send_after_unmark_during_open_is_404() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!tm.capture("s_live").contains("LEAKED_TEXT"));
 }
+
+fn window_size(tm: &TmuxServer, session: &str) -> String {
+    let out = tm.cmd(&[
+        "display-message",
+        "-p",
+        "-t",
+        &format!("={session}:"),
+        "#{window_width}x#{window_height}",
+    ]);
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+async fn wait_size(tm: &TmuxServer, session: &str, want: &str, secs: u64) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    while Instant::now() < deadline {
+        if window_size(tm, session) == want {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
+/// A phone that stops answering (left Wi-Fi with "Fit to phone" on) must not
+/// hold the desktop window at phone size: the idle limit drops its socket and
+/// with it the fit. A client that keeps reading (and so answers pings) stays.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn silent_client_times_out_and_releases_fit() {
+    let tm = TmuxServer::new();
+    tm.new_session("s_live", "cat");
+    let h = Harness::start(tm.tmux());
+    h.server()
+        .test_set_ws_keepalive(Duration::from_millis(100), Duration::from_millis(600));
+    let token = h.device(false);
+    let a = h.store().mark("k", 1).unwrap();
+    h.set_agents(vec![agent(&a, "s_live", "A")]);
+
+    let mut live = open_term(&h, &a, &token).await;
+    let mut silent = open_term(&h, &a, &token).await;
+    silent
+        .send(Message::text(
+            serde_json::json!({ "type": "fit", "on": true, "cols": 40, "rows": 12 }).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        wait_size(&tm, "s_live", "40x12", 3).await,
+        "fit not applied"
+    );
+
+    // `silent` is never read again (no pongs); `live` keeps reading.
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    while Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(100), live.next()).await {
+            Err(_) => {}
+            Ok(Some(Ok(Message::Ping(_) | Message::Binary(_)))) => {}
+            other => panic!("live client closed: {other:?}"),
+        }
+    }
+    assert_eq!(window_size(&tm, "s_live"), "100x30", "fit not released");
+    // The reading client is still served.
+    live.send(Message::text(
+        serde_json::json!({ "type": "input", "data": "still here\r" }).to_string(),
+    ))
+    .await
+    .unwrap();
+    let mut acc = Vec::new();
+    while !String::from_utf8_lossy(&acc).contains("still here") {
+        match next_msg(&mut live).await {
+            Message::Binary(b) => acc.extend_from_slice(&b),
+            Message::Ping(_) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    drop(silent);
+}

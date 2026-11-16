@@ -9,6 +9,9 @@
 //!   frames of live output. `init` + repaint repeat if the client lagged.
 //! - Client: `{"type":"input","data":"…"}` and
 //!   `{"type":"fit","on":bool,"cols","rows"}` (ignored for read-only).
+//! - Server pings every 20s; a socket with no frame from the client
+//!   (pongs count) for 45s is dropped, releasing its fit. Sends that can't
+//!   complete within that limit drop the socket too.
 //! - Server ends with `{"type":"closed","reason":"stopped"|"unmarked"|
 //!   "revoked"|"disabled"}` then a close frame (1000).
 
@@ -22,6 +25,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::broadcast::error::RecvError;
+use tokio::time::Instant;
 
 use crate::api::{error, AppState, HUB_OPEN_TIMEOUT};
 use crate::server::Shared;
@@ -85,6 +89,9 @@ struct Term {
     socket: WebSocket,
 }
 
+/// Bound on the goodbye frames to a client that may be gone.
+const FAREWELL: Duration = Duration::from_secs(2);
+
 enum End {
     /// Send `{"type":"closed","reason"}` then close 1000.
     Reason(&'static str),
@@ -99,7 +106,7 @@ impl Term {
         match end {
             End::Reason(reason) => {
                 let msg = json!({ "type": "closed", "reason": reason }).to_string();
-                let _ = self.socket.send(Message::text(msg)).await;
+                let _ = tokio::time::timeout(FAREWELL, self.socket.send(Message::text(msg))).await;
                 self.close(CLOSE_NORMAL, reason).await;
             }
             End::Code(code, reason) => self.close(code, reason).await,
@@ -108,13 +115,22 @@ impl Term {
     }
 
     async fn close(&mut self, code: u16, reason: &'static str) {
-        let _ = self
-            .socket
-            .send(Message::Close(Some(CloseFrame {
-                code,
-                reason: reason.into(),
-            })))
-            .await;
+        let frame = Message::Close(Some(CloseFrame {
+            code,
+            reason: reason.into(),
+        }));
+        let _ = tokio::time::timeout(FAREWELL, self.socket.send(frame)).await;
+    }
+
+    /// Send, giving up (client gone) if it can't complete within the idle
+    /// limit: with a vanished peer and steady output the kernel buffer fills
+    /// and a plain send would block the loop, and the idle check, forever.
+    async fn send(&mut self, msg: Message) -> Result<(), End> {
+        let (_, idle) = self.s.ws_keepalive();
+        match tokio::time::timeout(idle, self.socket.send(msg)).await {
+            Ok(Ok(())) => Ok(()),
+            _ => Err(End::Gone),
+        }
     }
 
     async fn serve(&mut self) -> End {
@@ -164,10 +180,13 @@ impl Term {
         }
 
         let mut fit: Option<FitGuard> = None;
+        let (ping_every, idle) = self.s.ws_keepalive();
+        let mut ping = tokio::time::interval_at(Instant::now() + ping_every, ping_every);
+        let mut last_rx = Instant::now();
         loop {
             tokio::select! {
-                // Order: stop, access changes, then client frames before
-                // hub output so a flood of output never starves input
+                // Order: stop, liveness, access changes, then client frames
+                // before hub output so a flood of output never starves input
                 // (e.g. Ctrl-C to a runaway loop).
                 biased;
                 _ = crate::server::stopped(&mut stop) => {
@@ -177,6 +196,14 @@ impl Term {
                     // Every viewer awaits it: a second call returns at once.
                     hub.shutdown().await;
                     return End::Reason("disabled");
+                }
+                // Nothing from the phone (not even a pong) for `idle`: it is
+                // gone. Returning drops `fit`, which restores the window.
+                _ = tokio::time::sleep_until(last_rx + idle) => return End::Gone,
+                _ = ping.tick() => {
+                    if let Err(end) = self.send(Message::Ping(Default::default())).await {
+                        return end;
+                    }
                 }
                 r = file_rx.changed() => {
                     if r.is_err() {
@@ -197,6 +224,9 @@ impl Term {
                     }
                 }
                 msg = self.socket.recv() => {
+                    if matches!(msg, Some(Ok(_))) {
+                        last_rx = Instant::now();
+                    }
                     let text = match msg {
                         Some(Ok(Message::Text(t))) => t,
                         Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return End::Gone,
@@ -247,8 +277,8 @@ impl Term {
                 }
                 ev = events.recv() => match ev {
                     Ok(HubEvent::Data(bytes)) => {
-                        if self.socket.send(Message::Binary(bytes)).await.is_err() {
-                            return End::Gone;
+                        if let Err(end) = self.send(Message::Binary(bytes)).await {
+                            return end;
                         }
                     }
                     Ok(HubEvent::Closed(_)) | Err(RecvError::Closed) => {
@@ -293,19 +323,7 @@ impl Term {
         });
         let mut bytes = b"\x1b[0m".to_vec();
         bytes.extend_from_slice(&init.bytes);
-        if self
-            .socket
-            .send(Message::text(head.to_string()))
-            .await
-            .is_err()
-            || self
-                .socket
-                .send(Message::Binary(bytes.into()))
-                .await
-                .is_err()
-        {
-            return Err(End::Gone);
-        }
-        Ok(())
+        self.send(Message::text(head.to_string())).await?;
+        self.send(Message::Binary(bytes.into())).await
     }
 }
