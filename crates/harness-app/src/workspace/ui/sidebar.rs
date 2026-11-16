@@ -257,12 +257,28 @@ impl HarnessWorkspace {
             cx,
         )
         .into_any_element();
-        // Reorder sits left of `+`, only once there is something to reorder.
-        if self.data.repos.len() < 2 {
+        self.with_reorder_button(hx, ReorderList::Projects, self.data.repos.len(), add, cx)
+    }
+
+    /// `⇅` left of a section's `+`, opening that list's reorder panel — only
+    /// once there is something to reorder (2+ rows).
+    fn with_reorder_button(
+        &self,
+        hx: &HarnessTheme,
+        list: ReorderList,
+        rows: usize,
+        add: AnyElement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if rows < 2 {
             return add;
         }
+        let (id, tip_text) = match list {
+            ReorderList::Projects => ("project-reorder", "Reorder projects"),
+            ReorderList::Tasks => ("task-reorder", "Reorder tasks"),
+        };
         let reorder = div()
-            .id("project-reorder")
+            .id(id)
             .size(px(20.0))
             .flex()
             .flex_none()
@@ -272,15 +288,15 @@ impl HarnessWorkspace {
             .text_xs()
             .text_color(hx.tx1)
             .cursor_pointer()
-            .tooltip(tip("Reorder projects"))
+            .tooltip(tip(tip_text))
             .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
             .child("⇅")
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|ws, ev: &MouseDownEvent, _, cx| {
+                cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
                     cx.stop_propagation();
                     ws.project_menu = None;
-                    ws.reorder_projects = Some((ev.position.x - px(200.0), ev.position.y + px(10.0)));
+                    ws.reorder_panel = Some((list, ev.position.x - px(200.0), ev.position.y + px(10.0)));
                     cx.notify();
                 }),
             )
@@ -292,13 +308,15 @@ impl HarnessWorkspace {
     /// TASKS' trailing `+` — opens the inline new-task editor, expanding the
     /// section first so the editor it reveals is actually on screen.
     fn tasks_add_button(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
-        self.section_add_button(hx, "task-plus", "New task", |ws, window, cx| {
-            if ws.prefs.collapsed_sections.remove(SidebarSection::Tasks.label()) {
-                ws.save_prefs(cx);
-            }
-            ws.open_new_task(window, cx);
-        }, cx)
-        .into_any_element()
+        let add = self
+            .section_add_button(hx, "task-plus", "New task", |ws, window, cx| {
+                if ws.prefs.collapsed_sections.remove(SidebarSection::Tasks.label()) {
+                    ws.save_prefs(cx);
+                }
+                ws.open_new_task(window, cx);
+            }, cx)
+            .into_any_element();
+        self.with_reorder_button(hx, ReorderList::Tasks, self.data.tasks.len(), add, cx)
     }
 
     pub(crate) fn render_sidebar(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {

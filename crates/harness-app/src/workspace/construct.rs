@@ -224,7 +224,7 @@ impl HarnessWorkspace {
             new_target_repo,
             menu: None,
             project_menu: None,
-            reorder_projects: None,
+            reorder_panel: None,
             tab_menu: None,
             tab_context_menu: None,
             diff_base_menu: None,

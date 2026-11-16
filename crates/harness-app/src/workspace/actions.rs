@@ -246,6 +246,22 @@ impl HarnessWorkspace {
         self.apply_repo_order(order, cx);
     }
 
+    /// Drop task `dragged` onto `onto`'s position (reorder panel), persist
+    /// the order, and re-sort the loaded task views to match.
+    pub(crate) fn move_task(&mut self, dragged: &str, onto: &str, cx: &mut Context<Self>) {
+        if !self.task_store.move_task(dragged, onto) {
+            return;
+        }
+        if let Err(e) = self.task_store.save() {
+            self.set_note(format!("couldn't save the task order: {e}"));
+        }
+        let order: Vec<String> = self.task_store.tasks().iter().map(|t| t.id.clone()).collect();
+        self.data
+            .tasks
+            .sort_by_key(|t| order.iter().position(|id| *id == t.id).unwrap_or(usize::MAX));
+        cx.notify();
+    }
+
     /// "Move up" / "Move down" from the project menu.
     pub(crate) fn shift_repo(&mut self, name: &str, up: bool, cx: &mut Context<Self>) {
         let Some(root) = self.repo_root_for_name(name) else { return };

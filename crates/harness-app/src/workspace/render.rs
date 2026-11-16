@@ -240,7 +240,7 @@ impl Render for HarnessWorkspace {
             root = root.child(self.render_context_menu(&hx, &menu, cx));
         }
 
-        if let Some((x, y)) = self.reorder_projects {
+        if let Some((list, x, y)) = self.reorder_panel {
             root = root
                 .child(
                     div()
@@ -253,12 +253,12 @@ impl Render for HarnessWorkspace {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|ws, _, _, cx| {
-                                ws.reorder_projects = None;
+                                ws.reorder_panel = None;
                                 cx.notify();
                             }),
                         ),
                 )
-                .child(self.render_reorder_projects(&hx, x, y, cx));
+                .child(self.render_reorder_panel(&hx, list, x, y, cx));
         }
 
         if let Some((repo, x, y)) = self.project_menu.clone() {

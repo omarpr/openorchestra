@@ -178,9 +178,18 @@ fn reordered<T: PartialEq + Clone>(items: &[T], dragged: T, onto: T) -> Vec<T> {
     out
 }
 
-/// A project row being dragged in the "Reorder projects" panel, by name.
-pub(crate) struct DraggedProjectRow {
-    name: String,
+/// Which sidebar list a reorder panel (and a row dragged in it) belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReorderList {
+    Projects,
+    Tasks,
+}
+
+/// A row being dragged in a reorder panel: its list, and the project name or
+/// task id that identifies it.
+pub(crate) struct DraggedReorderRow {
+    list: ReorderList,
+    key: String,
 }
 
 /// `items` with `item` swapped with its neighbour above (`up`) or below.
@@ -591,8 +600,8 @@ pub struct HarnessWorkspace {
     menu: Option<CardMenu>,
     /// The ⋯ menu on a project header: repo name and where it opened.
     project_menu: Option<(String, Pixels, Pixels)>,
-    /// The "Reorder projects" panel from PROJECTS' header, and where it opened.
-    reorder_projects: Option<(Pixels, Pixels)>,
+    /// The open reorder panel (PROJECTS or TASKS header ⇅), and where it opened.
+    reorder_panel: Option<(ReorderList, Pixels, Pixels)>,
     /// Open "new tab" menu, anchored under the `+` in the tab strip.
     tab_menu: Option<Pixels>,
     /// Right-click menu on a Shell/Agent tab: the tab id and where it opened.
