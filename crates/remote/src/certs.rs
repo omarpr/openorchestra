@@ -15,8 +15,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use rcgen::string::Ia5String;
 use rcgen::{
-    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
-    KeyPair, KeyUsagePurpose, SanType,
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
+    Issuer, KeyPair, KeyUsagePurpose, SanType,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -78,15 +78,23 @@ pub fn load_or_create_ca(dir: &Path, computer_name: &str) -> io::Result<Ca> {
         (Ok(cert_pem), Ok(key_pem)) => {
             let cert_der = pem_to_der(&cert_pem)?;
             KeyPair::from_pem(&key_pem).map_err(invalid)?;
-            return Ok(Ca { cert_pem, cert_der, key_pem });
+            return Ok(Ca {
+                cert_pem,
+                cert_der,
+                key_pem,
+            });
         }
-        (Err(a), Err(b)) if a.kind() == io::ErrorKind::NotFound && b.kind() == io::ErrorKind::NotFound => {}
+        (Err(a), Err(b))
+            if a.kind() == io::ErrorKind::NotFound && b.kind() == io::ErrorKind::NotFound => {}
         (Err(e), _) | (_, Err(e)) => return Err(e),
     }
     let now = SystemTime::now();
     let mut params = CertificateParams::default();
     let mut dn = DistinguishedName::new();
-    dn.push(DnType::CommonName, format!("openOrchestra Remote CA ({computer_name})"));
+    dn.push(
+        DnType::CommonName,
+        format!("openOrchestra Remote CA ({computer_name})"),
+    );
     params.distinguished_name = dn;
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
@@ -94,7 +102,11 @@ pub fn load_or_create_ca(dir: &Path, computer_name: &str) -> io::Result<Ca> {
     params.not_after = odt(now + Duration::from_secs(CA_VALID_DAYS * DAY));
     let kp = KeyPair::generate().map_err(err)?;
     let cert = params.self_signed(&kp).map_err(err)?;
-    let ca = Ca { cert_pem: cert.pem(), cert_der: cert.der().to_vec(), key_pem: kp.serialize_pem() };
+    let ca = Ca {
+        cert_pem: cert.pem(),
+        cert_der: cert.der().to_vec(),
+        key_pem: kp.serialize_pem(),
+    };
     // Key first: a crash between writes never leaves a cert without its key.
     write_atomic_private(&key, ca.key_pem.as_bytes())?;
     write_atomic_private(&crt, ca.cert_pem.as_bytes())?;
@@ -114,7 +126,9 @@ fn issue_at(ca: &Ca, hosts: &[String], ips: &[IpAddr], now: SystemTime) -> io::R
     }
     let mut sans = Vec::new();
     for h in hosts {
-        sans.push(SanType::DnsName(Ia5String::try_from(h.as_str()).map_err(invalid)?));
+        sans.push(SanType::DnsName(
+            Ia5String::try_from(h.as_str()).map_err(invalid)?,
+        ));
     }
     sans.extend(all_ips.iter().map(|ip| SanType::IpAddress(*ip)));
 
@@ -152,7 +166,9 @@ struct ServerMeta {
 }
 
 fn secs(t: SystemTime) -> u64 {
-    t.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    t.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn load_server_cert(dir: &Path, ca: &Ca) -> Option<ServerCert> {
@@ -197,14 +213,20 @@ pub fn load_or_issue_server_cert(
     };
     write_atomic_private(&dir.join("server.key"), sc.key_pem.as_bytes())?;
     write_atomic_private(&dir.join("server.crt"), sc.cert_pem.as_bytes())?;
-    write_atomic_private(&dir.join("server.json"), &serde_json::to_vec_pretty(&meta).map_err(err)?)?;
+    write_atomic_private(
+        &dir.join("server.json"),
+        &serde_json::to_vec_pretty(&meta).map_err(err)?,
+    )?;
     Ok(sc)
 }
 
 fn san_set(hosts: &[String], ips: &[IpAddr]) -> (BTreeSet<String>, BTreeSet<IpAddr>) {
     let mut ip_set: BTreeSet<IpAddr> = ips.iter().copied().collect();
     ip_set.insert(IpAddr::V4(Ipv4Addr::LOCALHOST));
-    (hosts.iter().map(|h| h.to_ascii_lowercase()).collect(), ip_set)
+    (
+        hosts.iter().map(|h| h.to_ascii_lowercase()).collect(),
+        ip_set,
+    )
 }
 
 /// True when the SAN set differs from `hosts`/`ips` or < 30 days remain.
@@ -221,7 +243,11 @@ pub fn needs_reissue(cur: &ServerCert, hosts: &[String], ips: &[IpAddr], now: Sy
 /// Uppercase hex pairs joined by `:`.
 pub fn fingerprint_sha256(der: &[u8]) -> String {
     let digest = Sha256::digest(der);
-    digest.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(":")
+    digest
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 fn new_uuid() -> String {
@@ -230,7 +256,14 @@ fn new_uuid() -> String {
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
     let h: String = b.iter().map(|x| format!("{x:02X}")).collect();
-    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[0..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..32]
+    )
 }
 
 /// Unsigned iOS configuration profile installing `ca` as a root certificate.
@@ -299,7 +332,10 @@ pub fn computer_name() -> String {
 }
 
 fn filter_private(addrs: impl IntoIterator<Item = Ipv4Addr>) -> Vec<IpAddr> {
-    let mut v: Vec<Ipv4Addr> = addrs.into_iter().filter(|a| !a.is_loopback() && a.is_private()).collect();
+    let mut v: Vec<Ipv4Addr> = addrs
+        .into_iter()
+        .filter(|a| !a.is_loopback() && a.is_private())
+        .collect();
     v.sort();
     v.dedup();
     v.into_iter().map(IpAddr::V4).collect()
@@ -352,13 +388,19 @@ mod tests {
         let b = load_or_create_ca(&dir, "Test Mac").unwrap();
         assert_eq!(a.cert_der, b.cert_der);
         let (_, cert) = X509Certificate::from_der(&a.cert_der).unwrap();
-        assert!(cert.subject().to_string().contains("openOrchestra Remote CA (Test Mac)"));
+        assert!(cert
+            .subject()
+            .to_string()
+            .contains("openOrchestra Remote CA (Test Mac)"));
         let bc = cert.basic_constraints().unwrap().unwrap().value;
         assert!(bc.ca);
         let v = cert.validity();
         let secs = v.not_after.timestamp() - v.not_before.timestamp();
         assert!(secs >= 3650 * DAY as i64);
-        let mode = std::fs::metadata(dir.join("ca.key")).unwrap().permissions().mode();
+        let mode = std::fs::metadata(dir.join("ca.key"))
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600);
         let dmode = std::fs::metadata(&dir).unwrap().permissions().mode();
         assert_eq!(dmode & 0o777, 0o700);
@@ -369,7 +411,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ca = load_or_create_ca(dir.path(), "Test Mac").unwrap();
         let sc = issue_server_cert(&ca, &hosts(), &[ip("192.168.1.20")]);
-        let der = x509_parser::pem::parse_x509_pem(sc.cert_pem.as_bytes()).unwrap().1;
+        let der = x509_parser::pem::parse_x509_pem(sc.cert_pem.as_bytes())
+            .unwrap()
+            .1;
         let (_, cert) = X509Certificate::from_der(&der.contents).unwrap();
         let mut sans = BTreeSet::new();
         let mut eku_server = false;
@@ -397,20 +441,31 @@ mod tests {
                 _ => {}
             }
         }
-        let want: BTreeSet<String> =
-            ["DNS:mac.local", "DNS:localhost", "IP:127.0.0.1", "IP:192.168.1.20"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
+        let want: BTreeSet<String> = [
+            "DNS:mac.local",
+            "DNS:localhost",
+            "IP:127.0.0.1",
+            "IP:192.168.1.20",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         assert_eq!(sans, want);
         assert!(eku_server);
         let v = cert.validity();
         let secs = v.not_after.timestamp() - v.not_before.timestamp();
         assert!(secs <= 397 * DAY as i64, "validity {secs}s");
-        let ca_der = x509_parser::pem::parse_x509_pem(ca.cert_pem.as_bytes()).unwrap().1;
+        let ca_der = x509_parser::pem::parse_x509_pem(ca.cert_pem.as_bytes())
+            .unwrap()
+            .1;
         let (_, ca_cert) = X509Certificate::from_der(&ca_der.contents).unwrap();
         assert_eq!(cert.issuer().to_string(), ca_cert.subject().to_string());
-        assert!(!cert.basic_constraints().ok().flatten().map(|b| b.value.ca).unwrap_or(false));
+        assert!(!cert
+            .basic_constraints()
+            .ok()
+            .flatten()
+            .map(|b| b.value.ca)
+            .unwrap_or(false));
         cert.verify_signature(Some(ca_cert.public_key())).unwrap();
     }
 
@@ -424,7 +479,12 @@ mod tests {
         assert!(!needs_reissue(&sc, &hosts(), &ips, now));
         let more = [ip("192.168.1.20"), ip("192.168.1.21")];
         assert!(needs_reissue(&sc, &hosts(), &more, now));
-        assert!(needs_reissue(&sc, &hosts(), &ips, now + Duration::from_secs(370 * DAY)));
+        assert!(needs_reissue(
+            &sc,
+            &hosts(),
+            &ips,
+            now + Duration::from_secs(370 * DAY)
+        ));
         // Reloaded from disk it is the same cert; a changed set reissues.
         let again = load_or_issue_server_cert(dir.path(), &ca, &hosts(), &ips, now).unwrap();
         assert_eq!(again.cert_pem, sc.cert_pem);
@@ -437,7 +497,9 @@ mod tests {
         let fp = fingerprint_sha256(b"hello");
         let ok = fp.len() == 95
             && fp.split(':').count() == 32
-            && fp.split(':').all(|p| p.len() == 2 && p.chars().all(|c| matches!(c, '0'..='9' | 'A'..='F')));
+            && fp
+                .split(':')
+                .all(|p| p.len() == 2 && p.chars().all(|c| matches!(c, '0'..='9' | 'A'..='F')));
         assert!(ok, "{fp}");
     }
 
@@ -451,7 +513,10 @@ mod tests {
         assert!(xml.contains(&base64::engine::general_purpose::STANDARD.encode(&ca.cert_der)));
         let v = plist::Value::from_reader_xml(xml.as_bytes()).unwrap();
         let d = v.as_dictionary().unwrap();
-        assert_eq!(d.get("PayloadType").unwrap().as_string(), Some("Configuration"));
+        assert_eq!(
+            d.get("PayloadType").unwrap().as_string(),
+            Some("Configuration")
+        );
     }
 
     #[test]
@@ -471,6 +536,9 @@ mod tests {
             Ipv4Addr::new(169, 254, 1, 1),
             Ipv4Addr::new(172, 16, 0, 1),
         ]);
-        assert_eq!(got, vec![ip("10.0.0.2"), ip("172.16.0.1"), ip("192.168.1.20")]);
+        assert_eq!(
+            got,
+            vec![ip("10.0.0.2"), ip("172.16.0.1"), ip("192.168.1.20")]
+        );
     }
 }

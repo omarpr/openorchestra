@@ -125,7 +125,10 @@ impl Drop for LockGuard {
 
 fn ensure_private_dir(dir: &Path) -> io::Result<()> {
     if !dir.exists() {
-        fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
     }
     Ok(())
 }
@@ -321,7 +324,10 @@ mod tests {
         s.mark("k", 1).unwrap();
         let mode = fs::metadata(s.path()).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
-        let dmode = fs::metadata(tmp.path().join("state")).unwrap().permissions().mode();
+        let dmode = fs::metadata(tmp.path().join("state"))
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(dmode & 0o777, 0o700);
     }
 

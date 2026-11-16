@@ -43,7 +43,9 @@ fn fmt_time(t: SystemTime) -> String {
 }
 
 fn parse_time(s: &str) -> Option<SystemTime> {
-    OffsetDateTime::parse(s, &Rfc3339).ok().map(SystemTime::from)
+    OffsetDateTime::parse(s, &Rfc3339)
+        .ok()
+        .map(SystemTime::from)
 }
 
 /// 32 random bytes, base64url without padding.
@@ -195,6 +197,10 @@ pub fn touch_last_seen(store: &Store, device_id: &str, now: SystemTime) -> io::R
     if fresh(&store.load()) {
         return Ok(());
     }
+    // Unknown or revoked device: nothing to record, so don't rewrite the file.
+    if !store.load().devices.iter().any(|d| d.id == device_id) {
+        return Ok(());
+    }
     store.update(|f| {
         if fresh(f) {
             return;
@@ -217,20 +223,26 @@ pub fn set_read_only(store: &Store, device_id: &str, read_only: bool) -> io::Res
     })
 }
 
+/// Bare IP from an origin host that may carry a port, brackets or a zone.
+fn host_ip(host: &str) -> Option<IpAddr> {
+    let h = host.trim();
+    let h = match h.strip_prefix('[') {
+        Some(rest) => rest.split(']').next()?,
+        None if h.matches(':').count() == 1 => h.split(':').next()?,
+        None => h,
+    };
+    h.split('%').next()?.parse().ok()
+}
+
 /// Names of devices whose `origin_host` is an IP that is no longer one of
 /// this machine's addresses (their pinned URL is stale).
 pub fn devices_on_stale_ip(file: &RemoteFile, current_ips: &[IpAddr]) -> Vec<String> {
     file.devices
         .iter()
-        .filter(|d| {
-            d.origin_host
-                .parse::<IpAddr>()
-                .is_ok_and(|ip| !current_ips.contains(&ip))
-        })
+        .filter(|d| host_ip(&d.origin_host).is_some_and(|ip| !current_ips.contains(&ip)))
         .map(|d| d.name.clone())
         .collect()
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -299,7 +311,10 @@ mod tests {
         let now = SystemTime::now();
         let c = issue_code(&s, now).unwrap();
         for _ in 0..5 {
-            assert!(redeem_code(&s, "AAAA-AAAA", "x", "h", now).is_err());
+            assert!(matches!(
+                redeem_code(&s, "AAAA-AAAA", "x", "h", now),
+                Err(PairError::Invalid)
+            ));
         }
         assert!(matches!(
             redeem_code(&s, &c, "x", "h", now),
@@ -309,6 +324,28 @@ mod tests {
         let c2 = issue_code(&s, now).unwrap();
         assert_eq!(s.load().failed_pair_attempts, 0);
         assert!(redeem_code(&s, &c2, "x", "h", now).is_ok());
+    }
+
+    #[test]
+    fn code_valid_just_before_expiry() {
+        let (_t, s) = setup();
+        let now = SystemTime::now();
+        let c = issue_code(&s, now).unwrap();
+        let t = now + Duration::from_secs(9 * 60 + 59);
+        assert!(redeem_code(&s, &c, "x", "h", t).is_ok());
+    }
+
+    #[test]
+    fn touch_unknown_device_does_not_write() {
+        let (_t, s) = setup();
+        let now = SystemTime::now();
+        let c = issue_code(&s, now).unwrap();
+        redeem_code(&s, &c, "p", "h", now).unwrap();
+        let before = std::fs::read(s.path()).unwrap();
+        let m0 = std::fs::metadata(s.path()).unwrap().modified().unwrap();
+        touch_last_seen(&s, "d_missing", now).unwrap();
+        assert_eq!(std::fs::read(s.path()).unwrap(), before);
+        assert_eq!(std::fs::metadata(s.path()).unwrap().modified().unwrap(), m0);
     }
 
     #[test]
@@ -344,16 +381,31 @@ mod tests {
         touch_last_seen(&s, &dev.id, now).unwrap();
         let first = s.load().devices[0].last_seen.clone().unwrap();
         touch_last_seen(&s, &dev.id, now + Duration::from_secs(30)).unwrap();
-        assert_eq!(s.load().devices[0].last_seen.as_deref(), Some(first.as_str()));
+        assert_eq!(
+            s.load().devices[0].last_seen.as_deref(),
+            Some(first.as_str())
+        );
         touch_last_seen(&s, &dev.id, now + Duration::from_secs(61)).unwrap();
-        assert_ne!(s.load().devices[0].last_seen.as_deref(), Some(first.as_str()));
+        assert_ne!(
+            s.load().devices[0].last_seen.as_deref(),
+            Some(first.as_str())
+        );
     }
 
     #[test]
     fn devices_on_stale_ip_lists_changed() {
         let (_t, s) = setup();
         s.update(|f| {
-            for (n, h) in [("a", "mac.local"), ("b", "192.168.1.20"), ("c", "192.168.1.30")] {
+            for (n, h) in [
+                ("a", "mac.local"),
+                ("b", "192.168.1.20"),
+                ("c", "192.168.1.30"),
+                ("d", "192.168.1.30:8443"),
+                ("e", "[fe80::1]"),
+                ("f", "fe80::1%en0"),
+                ("g", "[fe80::2]:7443"),
+                ("h", "192.168.1.20:7443"),
+            ] {
                 f.devices.push(Device {
                     id: format!("d_{n}"),
                     name: n.into(),
@@ -367,6 +419,15 @@ mod tests {
         })
         .unwrap();
         let ips: Vec<IpAddr> = vec!["192.168.1.20".parse().unwrap()];
-        assert_eq!(devices_on_stale_ip(&s.load(), &ips), vec!["c".to_string()]);
+        assert_eq!(
+            devices_on_stale_ip(&s.load(), &ips),
+            vec![
+                "c".to_string(),
+                "d".to_string(),
+                "e".to_string(),
+                "f".to_string(),
+                "g".to_string()
+            ]
+        );
     }
 }
