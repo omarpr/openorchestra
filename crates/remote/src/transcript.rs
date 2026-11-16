@@ -19,6 +19,9 @@ pub const WINDOW: usize = 200;
 /// At most this many trailing bytes of a transcript are ever read.
 pub const READ_CAP: u64 = 8 * 1024 * 1024;
 const POLL: Duration = Duration::from_secs(1);
+/// After a file-change wake, wait this long so a burst of writes collapses
+/// into one re-read.
+const COALESCE: Duration = Duration::from_millis(150);
 const CHANNEL_CAP: usize = 64;
 const CWD_SCAN_LINES: usize = 20;
 const UNREADABLE: &str = "Can't read the conversation right now";
@@ -59,13 +62,20 @@ pub fn diff(prev: &[Entry], next: &[Entry]) -> Option<Update> {
             && kept.len() <= next.len()
             && kept.iter().zip(&next).all(|(p, n)| p.id == n.id);
         if prefix_ok {
-            let changed = next
+            // Front entries slid off a window that wasn't full: viewers
+            // can't drop them via Upsert, so reset.
+            if prev.len() < WINDOW && kept.len() < prev.len() {
+                return Some(Update::Replace(next));
+            }
+            let changed: Vec<Entry> = next
                 .iter()
                 .enumerate()
                 .filter(|(i, n)| kept.get(*i).is_none_or(|p| *p != *n))
                 .map(|(_, n)| n.clone())
                 .collect();
-            return Some(Update::Upsert(changed));
+            if !changed.is_empty() {
+                return Some(Update::Upsert(changed));
+            }
         }
     }
     Some(Update::Replace(next))
@@ -141,10 +151,15 @@ struct Inner {
     kind: TranscriptKind,
     state: Mutex<State>,
     tx: broadcast::Sender<Update>,
+    #[cfg(test)]
+    refreshes: std::sync::atomic::AtomicUsize,
 }
 
 impl Inner {
     async fn refresh(&self) {
+        #[cfg(test)]
+        self.refreshes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let (last, cwd) = {
             let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             (st.sig, st.cwd.clone())
@@ -256,6 +271,8 @@ impl Transcripts {
                 cwd: None,
             }),
             tx,
+            #[cfg(test)]
+            refreshes: std::sync::atomic::AtomicUsize::new(0),
         });
         inner.refresh().await;
         let wake = Arc::new(Notify::new());
@@ -291,7 +308,7 @@ fn watch(path: &Path, wake: Arc<Notify>) -> Option<notify::RecommendedWatcher> {
 async fn run(inner: Weak<Inner>, wake: Arc<Notify>, _watcher: Option<notify::RecommendedWatcher>) {
     loop {
         tokio::select! {
-            _ = wake.notified() => {}
+            _ = wake.notified() => tokio::time::sleep(COALESCE).await,
             _ = tokio::time::sleep(POLL) => {}
         }
         let Some(inner) = inner.upgrade() else {
@@ -436,6 +453,43 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn short_window_front_drop_is_replace() {
+        let prev = vec![msg("A"), msg("B"), msg("C")];
+        let next = vec![msg("B"), msg("C")];
+        assert_eq!(diff(&prev, &next), Some(Update::Replace(next.clone())));
+    }
+
+    #[tokio::test]
+    async fn burst_of_appends_coalesces_refreshes() {
+        let d = TempDir::new().unwrap();
+        let p = d.path().join("t.jsonl");
+        append(&p, &user("u0", None, "m0"));
+        let tail = Transcripts::new()
+            .get(p.clone(), TranscriptKind::ClaudeCode)
+            .await;
+        let (_, mut rx) = tail.subscribe();
+        let mut parent = "u0".to_string();
+        for i in 1..=20 {
+            let id = format!("u{i}");
+            append(&p, &user(&id, Some(&parent), &format!("m{i}")));
+            parent = id;
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        let mut seen_last = false;
+        while !seen_last {
+            let es = match next_update(&mut rx).await {
+                Update::Replace(es) | Update::Upsert(es) => es,
+            };
+            seen_last = es.iter().any(|e| e.text.as_deref() == Some("m20"));
+        }
+        let n = tail
+            .inner
+            .refreshes
+            .load(std::sync::atomic::Ordering::SeqCst);
+        assert!(n <= 6, "{n} refreshes for one burst");
     }
 
     #[tokio::test]
