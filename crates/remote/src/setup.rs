@@ -61,17 +61,26 @@ fn escape(s: &str) -> String {
 }
 
 /// Apple: `https://<LocalHostName>.local:<port>/`; Android:
-/// `https://<first private IP>:<port>/`. Falls back to whatever the cert has.
+/// `https://<primary IP>:<port>/` (the default-route interface's address, see
+/// `certs::primary_ipv4`), else the first non-loopback SAN IP. Falls back to
+/// whatever the cert has.
 fn links(s: &Shared) -> (String, String) {
     let (hosts, ips) = s.sans.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let primary = s
+        .status
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .primary_ip
+        .filter(|p| ips.contains(p));
     let port = s.port;
     let ip_url = |ip: &IpAddr| match ip {
         IpAddr::V4(v4) => format!("https://{v4}:{port}/"),
         IpAddr::V6(v6) => format!("https://[{v6}]:{port}/"),
     };
-    let lan_ip = ips
+    let lan_ip = primary
         .iter()
-        .find(|ip| !ip.is_loopback())
+        .chain(ips.iter().filter(|ip| !ip.is_loopback()))
+        .next()
         .or(ips.first())
         .map(ip_url)
         .unwrap_or_else(|| format!("https://127.0.0.1:{port}/"));

@@ -109,6 +109,9 @@ pub struct ServerStatus {
     pub ca_fingerprint: String,
     /// Devices paired on an IP this Mac no longer has.
     pub stale_ip_devices: Vec<String>,
+    /// The LAN address to hand phones (setup QR, Android link): the
+    /// default-route interface's private IPv4, when the cert covers it.
+    pub primary_ip: Option<IpAddr>,
 }
 
 /// CA artifacts served on the setup port.
@@ -263,6 +266,30 @@ impl Shared {
         st.stale_ip_devices = stale;
     }
 
+    /// The address for the setup QR / Android link among `ips` (the SAN
+    /// IPs). Blocking (`route`): call off the UI thread.
+    pub(crate) fn desired_primary(&self, ips: &[IpAddr]) -> Option<IpAddr> {
+        let first = || ips.iter().copied().find(|ip| !ip.is_loopback());
+        let overridden = self
+            .hosts_override
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
+        if overridden {
+            return first();
+        }
+        certs::primary_ipv4()
+            .filter(|p| ips.contains(p))
+            .or_else(first)
+    }
+
+    pub(crate) fn set_primary(&self, primary: Option<IpAddr>) {
+        self.status
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .primary_ip = primary;
+    }
+
     pub(crate) fn desired_sans(&self) -> (Vec<String>, Vec<IpAddr>) {
         if let Some(o) = self
             .hosts_override
@@ -377,6 +404,7 @@ impl RemoteServer {
         let tls =
             RustlsConfig::from_config(Arc::new(crate::tls::tls_config(&cert).map_err(other)?));
         *shared.sans.write().unwrap() = (cert.hosts.clone(), cert.ips.clone());
+        shared.set_primary(shared.desired_primary(&cert.ips));
         shared.refresh_status(&ips);
 
         let rt = tokio::runtime::Builder::new_multi_thread()

@@ -350,6 +350,56 @@ pub fn private_ipv4s() -> Vec<IpAddr> {
     }))
 }
 
+/// The interface of the default route, from `route -n get default` output
+/// (`  interface: en0`).
+pub fn parse_default_route_interface(out: &str) -> Option<String> {
+    out.lines().find_map(|l| {
+        let v = l.trim().strip_prefix("interface:")?.trim();
+        (!v.is_empty()).then(|| v.to_string())
+    })
+}
+
+/// The address a phone on the same network most likely reaches: the
+/// default-route interface's private IPv4, else en0's, else en1's, else the
+/// lowest private one. VM bridges (Parallels 10.211.55.x, VMware 172.16.x)
+/// would otherwise sort ahead of the home 192.168.x address. Pure.
+pub fn pick_primary_ipv4(default_if: Option<&str>, addrs: &[(String, Ipv4Addr)]) -> Option<IpAddr> {
+    let private = |a: &Ipv4Addr| !a.is_loopback() && a.is_private();
+    let on = |name: &str| {
+        addrs
+            .iter()
+            .filter(|(n, a)| n == name && private(a))
+            .map(|(_, a)| *a)
+            .min()
+    };
+    default_if
+        .and_then(on)
+        .or_else(|| on("en0"))
+        .or_else(|| on("en1"))
+        .or_else(|| addrs.iter().map(|(_, a)| *a).filter(private).min())
+        .map(IpAddr::V4)
+}
+
+/// [`pick_primary_ipv4`] for this machine (runs `route -n get default`;
+/// blocking, keep it off the UI thread).
+pub fn primary_ipv4() -> Option<IpAddr> {
+    let default_if = Command::new("route")
+        .args(["-n", "get", "default"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| parse_default_route_interface(&String::from_utf8_lossy(&o.stdout)));
+    let addrs: Vec<(String, Ipv4Addr)> = if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|i| match i.ip() {
+            IpAddr::V4(a) => Some((i.name, a)),
+            _ => None,
+        })
+        .collect();
+    pick_primary_ipv4(default_if.as_deref(), &addrs)
+}
+
 /// `["<name>.local", "localhost"]`, or `["localhost"]` without a name.
 pub fn san_hosts(local_host_name: Option<&str>) -> Vec<String> {
     let mut v = Vec::new();
@@ -523,6 +573,54 @@ mod tests {
     fn san_hosts_shapes() {
         assert_eq!(san_hosts(Some("mac")), vec!["mac.local", "localhost"]);
         assert_eq!(san_hosts(None), vec!["localhost"]);
+    }
+
+    #[test]
+    fn default_route_interface_parsing() {
+        let out = "   route to: default\ndestination: default\n       mask: default\n    gateway: 192.168.86.1\n  interface: en0\n      flags: <UP,GATEWAY,DONE,STATIC,PRCLONING,GLOBAL>\n";
+        assert_eq!(parse_default_route_interface(out).as_deref(), Some("en0"));
+        let vpn = "   route to: default\n  interface: utun4\n";
+        assert_eq!(parse_default_route_interface(vpn).as_deref(), Some("utun4"));
+        assert_eq!(
+            parse_default_route_interface("route: writing to routing socket: not in table\n"),
+            None
+        );
+        assert_eq!(parse_default_route_interface("  interface: \n"), None);
+    }
+
+    #[test]
+    fn primary_prefers_default_route_then_en0_en1() {
+        let a = |n: &str, ip: &str| (n.to_string(), ip.parse::<Ipv4Addr>().unwrap());
+        let addrs = vec![
+            a("lo0", "127.0.0.1"),
+            a("bridge100", "10.211.55.2"),
+            a("vmnet8", "172.16.12.1"),
+            a("en0", "192.168.86.30"),
+            a("en1", "192.168.1.9"),
+        ];
+        assert_eq!(
+            pick_primary_ipv4(Some("en0"), &addrs),
+            Some(ip("192.168.86.30"))
+        );
+        assert_eq!(
+            pick_primary_ipv4(Some("en1"), &addrs),
+            Some(ip("192.168.1.9"))
+        );
+        // No default route (or one without a private address): en0.
+        assert_eq!(pick_primary_ipv4(None, &addrs), Some(ip("192.168.86.30")));
+        assert_eq!(
+            pick_primary_ipv4(Some("utun3"), &addrs),
+            Some(ip("192.168.86.30"))
+        );
+        // No en0: en1.
+        let no_en0: Vec<_> = addrs.iter().filter(|(n, _)| n != "en0").cloned().collect();
+        assert_eq!(pick_primary_ipv4(None, &no_en0), Some(ip("192.168.1.9")));
+        // Neither: lowest private.
+        let only_vm = vec![a("vmnet8", "172.16.12.1"), a("bridge100", "10.211.55.2")];
+        assert_eq!(pick_primary_ipv4(None, &only_vm), Some(ip("10.211.55.2")));
+        // Public / link-local addresses never qualify.
+        let public = vec![a("en0", "8.8.8.8"), a("en0", "169.254.3.4")];
+        assert_eq!(pick_primary_ipv4(Some("en0"), &public), None);
     }
 
     #[test]

@@ -90,6 +90,12 @@ pub(crate) async fn cert_loop(
                 Err(e) => eprintln!("oo-remote: certificate reissue panicked: {e}"),
             }
         }
+        // Only an address the served cert covers (the Android link is HTTPS).
+        let (s2, served) = (s.clone(), cur.ips.clone());
+        if let Ok(primary) = tokio::task::spawn_blocking(move || s2.desired_primary(&served)).await
+        {
+            s.set_primary(primary);
+        }
         s.refresh_status(&ips);
     }
 }

@@ -56,7 +56,7 @@ pub(crate) struct RemoteUi {
     /// "Add a phone" is open; the setup port listens while it is, and a
     /// server (re)started meanwhile opens it too.
     pub setup_open: bool,
-    /// `http://<first private IP>:7080/setup` and its QR modules, fixed when
+    /// `http://<primary private IP>:7080/setup` and its QR modules, fixed when
     /// the panel opens. `None` when this Mac has no private IPv4 address.
     pub setup_url: Option<String>,
     pub setup_qr: Vec<Vec<bool>>,
@@ -508,9 +508,15 @@ impl HarnessWorkspace {
     /// Open "Add a phone": fix the setup URL and its QR, issue a pairing
     /// code, and open the setup port.
     pub(crate) fn remote_open_setup(&mut self, cx: &mut Context<Self>) {
-        let url = oo_remote::certs::private_ipv4s()
-            .into_iter()
-            .next()
+        // The server picks the default-route interface's address off-thread
+        // (a VM bridge or VPN must not win); before its first status, the
+        // lowest private address.
+        let url = self
+            .remote
+            .status
+            .as_ref()
+            .and_then(|s| s.primary_ip)
+            .or_else(|| oo_remote::certs::private_ipv4s().into_iter().next())
             .map(|ip| format!("http://{ip}:{SETUP_PORT}/setup"));
         self.remote.ui.setup_qr = url
             .as_deref()

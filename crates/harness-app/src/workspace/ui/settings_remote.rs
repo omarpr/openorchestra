@@ -556,7 +556,7 @@ mod tests {
                 "https://192.168.1.20:7443/".into(),
             ],
             ca_fingerprint: "AB:CD".into(),
-            stale_ip_devices: vec![],
+            ..ServerStatus::default()
         };
         assert_eq!(
             status_line(&RemoteServe::Serving, Some(&st), false),
