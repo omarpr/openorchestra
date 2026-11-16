@@ -11,11 +11,12 @@
 #   make doctor  — report which build/runtime tools are present
 #   make icon    — regenerate the app icon from script/gen-icon.py
 #   make dmg-background — regenerate the installer DMG's background art
+#   make web     — build the oo-remote PWA (web/remote/dist, embedded by crates/remote)
 #   make test    — headless workspace tests (harness-app excluded by design)
 
 APP_DIR := crates/harness-app
 
-.PHONY: setup run build check test app dmg dmg-notarized release icon dmg-background doctor
+.PHONY: setup run build check test app dmg dmg-notarized release icon dmg-background doctor web
 
 setup:
 	bash ./script/setup-macos.sh
@@ -55,3 +56,7 @@ dmg-background:
 
 doctor:
 	bash ./script/doctor.sh
+
+web:
+	pnpm -C web/remote install --frozen-lockfile
+	pnpm -C web/remote build
