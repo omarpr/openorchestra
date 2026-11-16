@@ -49,6 +49,23 @@ address. If the Mac's IP changes, Settings shows a notice and the phone's saved
 address needs updating. Changing the port also means re-adding the app on each
 phone.
 
+The phone app is called openOrchestra. On an iPhone or iPad opened in Safari it
+first asks you to add it to your Home Screen, so you pair once in the installed
+app (a "Pair in this browser instead" link skips that). The agent list shows
+each agent's icon and a status pill (RUNNING, WAITING, STOPPED).
+
+Opening an agent shows a **Conversation | Terminal** switch. For Claude Code and
+pi agents the Conversation view is the default: your messages and the agent's
+replies verbatim (with Markdown), one-line tool calls with a check or cross
+(tap one to see its output, capped at 64 KB), collapsed thinking, and a status
+bar ("Working..." with the current tool, "Needs your input", "Agent stopped").
+Images in replies are not shown. Other agents (for example Codex) show the
+Terminal only.
+
+On the Mac, a chip in the top bar shows whether the current terminal or agent
+tab is reachable from a phone, and **Settings → Remote → Agents on phone**
+turns each tab on or off.
+
 In Settings you can set a device to **Watch only** or **Revoke** it, and keep
 the Mac awake while serving. Phones on the local network only (private
 addresses) are accepted. A manual test list is in

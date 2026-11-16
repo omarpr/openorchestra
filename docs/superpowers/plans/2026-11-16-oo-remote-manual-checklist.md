@@ -3,7 +3,7 @@
 Things automated tests could not check. Use a scratch build and a scratch HOME
 (never your running app). Have a phone in hand. Each section says where to look.
 
-Run sections C–E once per device: iPhone, iPad, Android phone,
+Run sections C–E and G once per device: iPhone, iPad, Android phone,
 Android tablet (Chrome). Note the device at the top of each pass.
 
 Device: ______________  Date: __________
@@ -16,12 +16,16 @@ Device: ______________  Date: __________
 - [ ] Marking while Remote is off shows "Marked - turn on Remote control in Settings to reach it".
 - [ ] Choosing "Stop remote control" removes the dots. Closing a marked tab removes its mark.
 - [ ] A stale tab menu doesn't linger when you click elsewhere.
+- [ ] Top bar chip for the current terminal/agent tab: "📱 Remote off" when not allowed; "On phone" with a dot that fades in and out while a phone can reach it; "On phone · remote off" when the tab is allowed but Remote is off in Settings. Editor/diff tabs show no chip.
+- [ ] Remote dots on tabs and sidebar rows fade in and out while phones can reach them, and stop fading (steady, dimmed) when Remote is off.
 
 ## B. On the Mac: Settings → Remote
 
 - [ ] "Remote" sits between Notifications and Shortcuts in the Settings list.
 - [ ] Click On: "Starting…" then "Listening on https://<name>.local:7443/ and https://<ip>:7443/". Click Off: "Off".
 - [ ] Under the Port field: "Changing the port means re-adding the app on paired phones."
+- [ ] Each listening URL is on its own row with a Copy button; Copy puts that exact URL on the clipboard.
+- [ ] "Agents on phone" lists every terminal and agent tab with an On/Off toggle; toggling matches the tab's right-click mark and the dots.
 - [ ] Port: type 80 then Enter shows red "Use a port from 1024 to 65535". Type 7080 shows "Port 7080 is used to set up phones". Type 9443: status passes through "Starting…" and lists :9443 URLs; the window doesn't freeze. `lsof -i :7443` is empty and `lsof -i :9443` is listening.
 - [ ] Opening Settings with Cmd+, from an editor tab and typing goes into the Port field.
 - [ ] Add a phone: the QR is black on white with a white margin in both light and dark themes. A phone camera opens `http://<ip>:7080/setup`.
@@ -36,10 +40,11 @@ Device: ______________  Date: __________
 - [ ] Keep awake On: `pgrep caffeinate` finds a process while serving. Off or stopped: it's gone.
 - [ ] Quit the app while a phone is connected: the app exits promptly (a couple of seconds), with no hang.
 - [ ] Quit openOrchestra while a phone has Fit to phone on: after reopening (or in another tmux client), the desktop window is back to its own size, not phone size.
-- [ ] On a Mac with a VM or VPN interface (Parallels, VMware, a VPN with a private address): the Add a phone QR and the Android link use the Wi-Fi/Ethernet address, not the VM/VPN one.
+- [ ] On a Mac with a VPN or VM interface: a full-tunnel VPN's address is expected in the Add a phone QR and the Android link (that is the address the Mac uses to reach the network). With a split-tunnel VPN or a VM bridge (Parallels, VMware), the QR and link use the Wi-Fi/Ethernet address, not the VM/VPN one.
 
 ## C. Phone, first time
 
+- [ ] iPhone/iPad: open the setup page in Chrome (or another non-Safari browser): a banner says to open it in Safari and gives an address to copy. In Safari there is no banner.
 - [ ] Scan the QR from Add a phone. The setup page opens over http on port 7080.
 - [ ] iPhone/iPad: install the profile (Settings → Profile Downloaded), then Settings → General → About → Certificate Trust Settings, and turn on full trust for "openOrchestra Remote CA".
 - [ ] Android: install the CA certificate (Settings → Security → Encryption and credentials → Install a certificate → CA certificate) and accept the warning.
@@ -47,6 +52,7 @@ Device: ______________  Date: __________
 - [ ] iPhone/iPad: open `https://<name>.local:7443`. No certificate warning.
 - [ ] Android: open `https://<Mac IP>:7443`. No certificate warning.
 - [ ] Android: `https://<name>.local:7443` may not load. That is expected. Using the IP works.
+- [ ] iPhone/iPad in Safari, before installing: the page shows "Add openOrchestra to your Home Screen" first. After installing, open the Home Screen app and pair there. "Pair in this browser instead" pairs in Safari without installing.
 - [ ] Add to home screen (Share → Add to Home Screen on iOS; Install app in Chrome on Android). The app opens full screen with the right icon and name, with no browser bar.
 - [ ] The Pair screen asks for the code. Type it (the dash is added for you, lowercase becomes uppercase). A wrong code shows an error; after 5 wrong tries codes stop working until you press "New code".
 - [ ] A correct code pairs and shows the agent list. The device appears in Settings.
@@ -54,6 +60,7 @@ Device: ______________  Date: __________
 ## D. Phone, everyday use
 
 - [ ] Only marked agents appear. Unmarked tabs and shells never show.
+- [ ] The header reads "openOrchestra Agents" and each agent shows its icon. Status pills: RUNNING (spinner), WAITING (breathing amber), STOPPED (outline); an idle agent shows no pill.
 - [ ] Status dots update live (running, waiting, idle) when an agent changes state on the Mac.
 - [ ] Open an agent: the terminal fills in and shows live output as the agent works.
 - [ ] Type with the key bar (Esc, Tab, Ctrl, arrows, Enter, etc.) and the text arrives in the agent.
@@ -86,3 +93,29 @@ Device: ______________  Date: __________
 - [ ] In the non-serving build, mark a tab: the note says phones reach it through the other openOrchestra build, and the agent appears on the phone within a few seconds.
 - [ ] Revoke a device from either build: the phone is cut off within about 1 second.
 - [ ] Quit the serving build: the other can start serving when you turn Remote Off and On.
+
+## G. Conversation view (Claude Code and pi)
+
+Use a Claude Code agent and a pi agent marked for remote control.
+
+- [ ] Open the agent: the header reads `[icon] repo · branch · agent`, with a Conversation | Terminal switch and Conversation selected.
+- [ ] Your earlier messages and the agent's replies appear verbatim, with Markdown (lists, code blocks, links) rendered. Images in replies are not shown.
+- [ ] A tool call is one line with a check mark on success or a cross on failure. Tap it: a sheet shows the output. Output over 64 KB ends with "…[truncated]".
+- [ ] Thinking is collapsed: "💭 Thinking…" while it runs, "💭 Thought for N s" afterwards, and "💭 Thinking (not recorded)" when no duration was saved. Tapping expands it where text exists.
+- [ ] Send a message from the reply box: it appears in the conversation and the agent answers.
+- [ ] Status bar while the agent works: three bouncing dots, "Working…" and the current tool name. With the device's reduced-motion setting on, the dots do not bounce.
+- [ ] Status bar when the agent asks for permission or a question: amber "Needs your input"; tapping it focuses the reply box.
+- [ ] Quit the agent on the Mac: the bar reads "Agent stopped" and the reply box is disabled.
+- [ ] Scroll up while the agent keeps writing: a "New messages ↓" pill appears and the view does not jump. Tap it: you land at the bottom and the pill goes away. At the bottom the view follows new messages.
+- [ ] In Claude Code, rewind to an earlier message (Esc Esc): the conversation redraws to match, without duplicates.
+- [ ] Start a new session in the same tab (/clear or /new): the phone switches to the new conversation.
+- [ ] Switch to Terminal and back: the terminal works as in section D and the conversation keeps its place.
+- [ ] A Codex agent shows the Terminal only, with no switch.
+- [ ] Open an old link to an agent that was removed or unmarked: "Agent not found".
+- [ ] Reconnect after locking the phone: the conversation catches up with no gaps.
+
+## H. Projects sidebar order
+
+- [ ] The ⇅ button to the left of PROJECTS' + opens "Reorder projects" with a four-dot grip on each row. Dragging a row by its grip reorders the list, and the sidebar order follows after closing the panel.
+- [ ] A project's menu has "Move up" and "Move down" (absent at the ends of the list); each moves the project one place.
+- [ ] Quit and reopen: the order is kept.
