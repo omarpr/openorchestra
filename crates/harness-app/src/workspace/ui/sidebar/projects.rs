@@ -111,7 +111,22 @@ impl HarnessWorkspace {
                     })
                 }),
             );
+        // Drag a project header onto another to reorder the PROJECTS list.
+        let ghost_label = repo.name.clone();
+        let ghost_theme = hx.clone();
+        let drop_name = repo.name.clone();
+        let drop_bg = hx.surface;
         let header = div()
+            .id(repo_element_id("repo-drag", &repo.name))
+            .on_drag(DraggedProject { name: repo.name.clone() }, move |_, _, _, cx| {
+                let label = ghost_label.clone();
+                let hx = ghost_theme.clone();
+                cx.new(|_| crate::workspace::ui::center::DragGhost { label, hx })
+            })
+            .drag_over::<DraggedProject>(move |d, _, _, _| d.bg(drop_bg))
+            .on_drop(cx.listener(move |ws, dragged: &DraggedProject, _, cx| {
+                ws.move_repo(&dragged.name, &drop_name, cx);
+            }))
             .on_mouse_down(MouseButton::Right, {
                 let menu_repo = repo.name.clone();
                 cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
@@ -490,6 +505,8 @@ impl HarnessWorkspace {
             }))
         };
         let (r1, r2, r3, r4) = (repo.to_string(), repo.to_string(), repo.to_string(), repo.to_string());
+        let (up, down) = (self.repo_can_shift(repo, true), self.repo_can_shift(repo, false));
+        let (r5, r6) = (repo.to_string(), repo.to_string());
         div()
             .absolute()
             .left(x)
@@ -511,6 +528,8 @@ impl HarnessWorkspace {
                 false,
                 Box::new(move |ws, w, cx| ws.open_project_hooks(&r2, HookScriptPhase::Setup, HookLayer::Repo, w, cx)),
             ))
+            .when(up, |d| d.child(item("Move up", false, Box::new(move |ws, _, cx| ws.shift_repo(&r5, true, cx)))))
+            .when(down, |d| d.child(item("Move down", false, Box::new(move |ws, _, cx| ws.shift_repo(&r6, false, cx)))))
             .child(div().h(px(1.0)).mx_1().bg(hx.border))
             .child(item("Archive project", false, Box::new(move |ws, w, cx| ws.archive_repo(r3.clone(), w, cx))))
             .child(item(

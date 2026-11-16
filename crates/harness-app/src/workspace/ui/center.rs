@@ -4,10 +4,10 @@
 use super::super::*;
 use crate::workspace::remote::{mark_note, remote_menu_item};
 
-/// The label that follows the cursor while a tab is being dragged.
+/// The label that follows the cursor while a tab (or project) is being dragged.
 pub(crate) struct DragGhost {
-    label: String,
-    hx: HarnessTheme,
+    pub(crate) label: String,
+    pub(crate) hx: HarnessTheme,
 }
 
 impl Render for DragGhost {

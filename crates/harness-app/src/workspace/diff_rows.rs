@@ -382,7 +382,7 @@ pub(crate) const INLINE_BODY_MAX_H: f32 = 420.0;
 #[cfg(test)]
 mod diff_render_tests {
     use super::{
-        load_prefs, max_diff_width, readable_diff_lines, reordered, save_prefs_to, split_rows,
+        load_prefs, max_diff_width, readable_diff_lines, reordered, save_prefs_to, shifted, split_rows,
         split_dock_width, target_line_for_row, use_split, use_two_pane, DiffLineKind, DiffLocation, DiffView,
         Prefs, SplitRow, ToolTab, DIFF_TWO_PANE_MIN, MAX_PANEL_W, MIN_CENTER_W, SPLIT_MIN_W,
     };
@@ -720,6 +720,25 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
         assert_eq!(reordered(&[1, 2, 3, 4], 1, 3), vec![2, 3, 1, 4]);
         // Backward: 4 dropped onto 2 lands where 2 was.
         assert_eq!(reordered(&[1, 2, 3, 4], 4, 2), vec![1, 4, 2, 3]);
+    }
+
+    #[test]
+    fn dragging_a_project_onto_another_puts_it_at_that_position() {
+        let p = |s: &str| std::path::PathBuf::from(s);
+        let roots = [p("/a"), p("/b"), p("/c")];
+        assert_eq!(reordered(&roots, p("/a"), p("/c")), vec![p("/b"), p("/c"), p("/a")]);
+        assert_eq!(reordered(&roots, p("/c"), p("/a")), vec![p("/c"), p("/a"), p("/b")]);
+        assert_eq!(reordered(&roots, p("/x"), p("/a")), roots.to_vec());
+    }
+
+    #[test]
+    fn moving_a_project_up_or_down_swaps_it_with_its_neighbour() {
+        assert_eq!(shifted(&[1, 2, 3], &2, true), vec![2, 1, 3]);
+        assert_eq!(shifted(&[1, 2, 3], &2, false), vec![1, 3, 2]);
+        // Already at the edge, or unknown: unchanged.
+        assert_eq!(shifted(&[1, 2, 3], &1, true), vec![1, 2, 3]);
+        assert_eq!(shifted(&[1, 2, 3], &3, false), vec![1, 2, 3]);
+        assert_eq!(shifted(&[1, 2, 3], &9, true), vec![1, 2, 3]);
     }
 
     #[test]

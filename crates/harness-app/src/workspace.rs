@@ -160,10 +160,10 @@ pub(crate) struct DraggedTab {
     id: u64,
 }
 
-/// `ids` with `dragged` moved to `onto`'s position. Unknown or identical ids
-/// leave the order untouched.
-fn reordered(ids: &[u64], dragged: u64, onto: u64) -> Vec<u64> {
-    let mut out = ids.to_vec();
+/// `items` with `dragged` moved to `onto`'s position. Unknown or identical
+/// items leave the order untouched. Used for tabs (ids) and projects (roots).
+fn reordered<T: PartialEq + Clone>(items: &[T], dragged: T, onto: T) -> Vec<T> {
+    let mut out = items.to_vec();
     if dragged == onto {
         return out;
     }
@@ -173,9 +173,28 @@ fn reordered(ids: &[u64], dragged: u64, onto: u64) -> Vec<u64> {
     ) else {
         return out;
     };
-    let id = out.remove(from);
-    out.insert(to, id);
+    let item = out.remove(from);
+    out.insert(to, item);
     out
+}
+
+/// `items` with `item` swapped with its neighbour above (`up`) or below.
+/// At the edge, or for an unknown item, the order is unchanged.
+fn shifted<T: PartialEq + Clone>(items: &[T], item: &T, up: bool) -> Vec<T> {
+    let mut out = items.to_vec();
+    let Some(i) = out.iter().position(|x| x == item) else {
+        return out;
+    };
+    let j = if up { i.checked_sub(1) } else { Some(i + 1).filter(|j| *j < out.len()) };
+    if let Some(j) = j {
+        out.swap(i, j);
+    }
+    out
+}
+
+/// The project being dragged in the sidebar, by name.
+pub(crate) struct DraggedProject {
+    name: String,
 }
 
 pub(crate) struct Tab {

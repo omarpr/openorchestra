@@ -237,6 +237,43 @@ impl HarnessWorkspace {
         cx.notify();
     }
 
+    /// Drop project `dragged` onto `onto`'s position in the sidebar.
+    pub(crate) fn move_repo(&mut self, dragged: &str, onto: &str, cx: &mut Context<Self>) {
+        let (Some(from), Some(to)) = (self.repo_root_for_name(dragged), self.repo_root_for_name(onto)) else {
+            return;
+        };
+        let order = reordered(&self.repo_roots, from, to);
+        self.apply_repo_order(order, cx);
+    }
+
+    /// "Move up" / "Move down" from the project menu.
+    pub(crate) fn shift_repo(&mut self, name: &str, up: bool, cx: &mut Context<Self>) {
+        let Some(root) = self.repo_root_for_name(name) else { return };
+        let order = shifted(&self.repo_roots, &root, up);
+        self.apply_repo_order(order, cx);
+    }
+
+    /// Persist a new project order and re-sort the loaded views to match,
+    /// without a full refresh (which would re-run git for every repo).
+    fn apply_repo_order(&mut self, order: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if order == self.repo_roots {
+            return;
+        }
+        self.repo_roots = order;
+        save_repos(&self.repos_path, &self.repo_roots);
+        let roots = &self.repo_roots;
+        self.data
+            .repos
+            .sort_by_key(|r| roots.iter().position(|p| *p == r.repo_root).unwrap_or(usize::MAX));
+        cx.notify();
+    }
+
+    /// Whether project `name` can move up / down (it isn't already at that edge).
+    pub(crate) fn repo_can_shift(&self, name: &str, up: bool) -> bool {
+        let Some(i) = self.data.repos.iter().position(|r| r.name == name) else { return false };
+        if up { i > 0 } else { i + 1 < self.data.repos.len() }
+    }
+
     /// Remove a project from openOrchestra entirely, once the dialog confirms.
     /// Files on disk are untouched — this only forgets the project; re-add it
     /// to bring it back. Distinct from Archive, which keeps it restorable.
