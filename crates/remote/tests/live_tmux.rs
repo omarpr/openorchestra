@@ -390,3 +390,52 @@ async fn live_sessions_lists_names() {
     let names = oo_remote::tmux_bridge::live_sessions(&srv.tmux()).await;
     assert!(names.contains("s") && names.contains("other") && names.len() == 2);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn cancelled_fit_is_released() {
+    let srv = Server::new();
+    srv.new_session("s", "cat");
+    let orig = srv.window_size("s");
+    let hub = open(&srv, "s").await;
+    // Poll fit() once (queues the Fit command), then drop it mid-flight.
+    {
+        let fut = hub.fit(40, 20);
+        tokio::pin!(fut);
+        assert!(futures_poll_once(fut.as_mut()).await.is_none());
+    }
+    // Also cancel via a tiny timeout.
+    let _ = tokio::time::timeout(Duration::from_micros(1), hub.fit(45, 22)).await;
+    // Let the actor finish both in-flight fits and the resulting releases.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        poll_until(2, || srv.window_size("s") == orig).await,
+        "cancelled fit left window at {}",
+        srv.window_size("s")
+    );
+    assert!(
+        poll_until(2, || srv
+            .run(&["show-options", "-w", "-t", "=s:"])
+            .trim()
+            .is_empty())
+        .await,
+        "window-size still set locally"
+    );
+    // The refcount is back to zero: a fresh fit/drop cycle still restores.
+    let g = hub.fit(40, 20).await.unwrap();
+    assert_eq!(srv.window_size("s"), "40x20");
+    drop(g);
+    assert!(poll_until(2, || srv.window_size("s") == orig).await);
+    hub.shutdown().await;
+}
+
+/// Poll a future exactly once; `Some` if it completed.
+async fn futures_poll_once<F: std::future::Future>(
+    mut fut: std::pin::Pin<&mut F>,
+) -> Option<F::Output> {
+    std::future::poll_fn(|cx| match fut.as_mut().poll(cx) {
+        std::task::Poll::Ready(v) => std::task::Poll::Ready(Some(v)),
+        std::task::Poll::Pending => std::task::Poll::Ready(None),
+    })
+    .await
+}

@@ -218,7 +218,10 @@ enum Cmd {
     Fit {
         cols: u16,
         rows: u16,
-        done: oneshot::Sender<io::Result<()>>,
+        // The actor builds the guard: if the caller was cancelled, the guard
+        // is dropped here (failed send) or inside the dropped receiver, and
+        // either way queues a Release.
+        done: oneshot::Sender<io::Result<FitGuard>>,
     },
     Release,
     Shutdown {
@@ -298,6 +301,7 @@ impl SessionHub {
                 child,
                 stdin: Some(stdin),
                 pending,
+                cmds: cmds.downgrade(),
                 fits: 0,
                 saved: None,
             }
@@ -388,10 +392,7 @@ impl SessionHub {
         }
         let (done, rx) = oneshot::channel();
         self.request(Cmd::Fit { cols, rows, done })?;
-        rx.await.map_err(|_| hub_gone())??;
-        Ok(FitGuard {
-            cmds: self.cmds.clone(),
-        })
+        rx.await.map_err(|_| hub_gone())?
     }
 
     /// Restore any fitted size and detach the control client.
@@ -492,6 +493,9 @@ struct Actor {
     child: Child,
     stdin: Option<ChildStdin>,
     pending: Pending,
+    /// Weak, so the actor doesn't keep its own channel open; used to build
+    /// FitGuards.
+    cmds: mpsc::WeakUnboundedSender<Cmd>,
     fits: usize,
     saved: Option<(u16, u16)>,
 }
@@ -504,14 +508,21 @@ impl Actor {
                     let _ = done.send(self.exec(&lines).await);
                 }
                 Cmd::Fit { cols, rows, done } => {
-                    let _ = done.send(self.fit(cols, rows).await);
+                    let res = match self.fit(cols, rows).await {
+                        Ok(()) => match self.cmds.upgrade() {
+                            Some(cmds) => Ok(FitGuard { cmds }),
+                            None => {
+                                self.release().await;
+                                Err(hub_gone())
+                            }
+                        },
+                        Err(e) => Err(e),
+                    };
+                    // On a cancelled caller the send fails and the returned
+                    // guard drops here, queueing a Release.
+                    let _ = done.send(res);
                 }
-                Cmd::Release => {
-                    self.fits = self.fits.saturating_sub(1);
-                    if self.fits == 0 {
-                        self.restore().await;
-                    }
-                }
+                Cmd::Release => self.release().await,
                 Cmd::Shutdown { done } => {
                     self.stop().await;
                     if let Some(done) = done {
@@ -556,6 +567,13 @@ impl Actor {
                 }
                 Err(e)
             }
+        }
+    }
+
+    async fn release(&mut self) {
+        self.fits = self.fits.saturating_sub(1);
+        if self.fits == 0 {
+            self.restore().await;
         }
     }
 
