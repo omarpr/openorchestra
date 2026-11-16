@@ -159,10 +159,10 @@ pub(crate) fn write_atomic_private(path: &Path, bytes: &[u8]) -> io::Result<()> 
     result
 }
 
-fn new_mark_id() -> io::Result<String> {
+pub(crate) fn new_id(prefix: &str) -> io::Result<String> {
     let mut buf = [0u8; 16];
     getrandom::fill(&mut buf).map_err(|e| io::Error::other(e.to_string()))?;
-    let mut id = String::from("r_");
+    let mut id = String::from(prefix);
     id.extend(buf.iter().map(|b| BASE32[(*b & 31) as usize] as char));
     Ok(id)
 }
@@ -211,7 +211,7 @@ impl Store {
 
     /// Mark a tab for remote control; returns its id (existing id if already marked).
     pub fn mark(&self, key: &str, tab_id: u64) -> io::Result<String> {
-        let new_id = new_mark_id()?;
+        let new_id = new_id("r_")?;
         self.update(|f| {
             if let Some(m) = f.mark_for(key, tab_id) {
                 return m.id.clone();
