@@ -92,7 +92,7 @@ function Main() {
   }
 
   return (
-    <div className="flex h-full flex-col pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]">
+    <div className="oo-shell flex h-full flex-col pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]">
       <ConnectionBanner connected={connected} disabled={disabled} />
       {body}
       <ViewportDebug />
