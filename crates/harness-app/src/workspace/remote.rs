@@ -134,6 +134,45 @@ impl Drop for RemoteRuntime {
     }
 }
 
+/// The tab context menu's remote item for a tab kind: its label and, for a
+/// shell, a warning line. `None` for tabs that cannot be remote-controlled.
+pub(crate) fn remote_menu_item(
+    kind: &TabKind,
+    marked: bool,
+) -> Option<(&'static str, Option<&'static str>)> {
+    let label = if marked {
+        "Stop remote control"
+    } else {
+        "Allow remote control"
+    };
+    match kind {
+        TabKind::Shell => Some((label, Some("Gives a paired phone this shell"))),
+        TabKind::Agent(_) => Some((label, None)),
+        TabKind::Chat | TabKind::Diff | TabKind::Editor => None,
+    }
+}
+
+/// Whether any tab of the worktree with pane key `key` is marked.
+pub(crate) fn worktree_has_marks(file: &RemoteFile, key: &str) -> bool {
+    file.marked.iter().any(|m| m.worktree_key == key)
+}
+
+/// The pane key of a registry worktree: task members use the broker's
+/// member key, plain worktrees their id. Same key `remote_sources` uses.
+pub(crate) fn worktree_pane_key(task_id: Option<&str>, id: &str) -> String {
+    match task_id {
+        Some(tid) => a2a_broker::task_member_pane_key(tid, id),
+        None => id.to_string(),
+    }
+}
+
+/// Status message after a toggle: marking while remote is off is accepted but
+/// unreachable until the user turns it on.
+pub(crate) fn mark_note(enabled: bool, now_marked: bool) -> Option<&'static str> {
+    (!enabled && now_marked)
+        .then_some("Marked \u{2014} turn on Remote control in Settings to reach it")
+}
+
 /// One worktree's terminal tabs, as the snapshot builder sees them.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct MarkSource {
@@ -249,11 +288,7 @@ impl HarnessWorkspace {
                 "main".to_string(),
             ));
             for w in &repo.worktrees {
-                let key = w
-                    .task_id
-                    .as_ref()
-                    .map(|tid| a2a_broker::task_member_pane_key(tid, &w.id))
-                    .unwrap_or_else(|| w.id.clone());
+                let key = worktree_pane_key(w.task_id.as_deref(), &w.id);
                 out.push(self.remote_source(
                     key,
                     w.path.clone(),
@@ -374,7 +409,6 @@ impl HarnessWorkspace {
         cx.notify();
     }
 
-    #[allow(dead_code)] // called by the Remote settings / tab menu UI (Tasks 10–11)
     pub(crate) fn remote_toggle_mark(&mut self, key: &str, tab_id: u64, cx: &mut Context<Self>) {
         // Decide on the file's current contents, not the cache.
         let marked = self.remote.store.load().mark_for(key, tab_id).is_some();
@@ -393,7 +427,6 @@ impl HarnessWorkspace {
     }
 
     /// Cheap (cached file only): safe to call from render.
-    #[allow(dead_code)] // called by the Remote settings / tab menu UI (Tasks 10–11)
     pub(crate) fn remote_is_marked(&self, key: &str, tab_id: u64) -> bool {
         self.remote.file.mark_for(key, tab_id).is_some()
     }
@@ -690,4 +723,51 @@ mod tests {
                 .all(|a| a.status_since.is_none() && a.tool.is_none())
         );
     }
+
+    #[test]
+    fn menu_item_only_for_shell_and_agent() {
+        let agent = TabKind::Agent(AgentKind::Pi);
+        assert_eq!(
+            remote_menu_item(&TabKind::Shell, false),
+            Some(("Allow remote control", Some("Gives a paired phone this shell")))
+        );
+        assert_eq!(
+            remote_menu_item(&TabKind::Shell, true),
+            Some(("Stop remote control", Some("Gives a paired phone this shell")))
+        );
+        assert_eq!(remote_menu_item(&agent, false), Some(("Allow remote control", None)));
+        assert_eq!(remote_menu_item(&agent, true), Some(("Stop remote control", None)));
+        for k in [TabKind::Chat, TabKind::Diff, TabKind::Editor] {
+            assert_eq!(remote_menu_item(&k, false), None);
+        }
+    }
+
+    #[test]
+    fn worktree_dot_follows_marks() {
+        let f = file(vec![mark("wt-1", 3, "r_a")]);
+        assert!(worktree_has_marks(&f, "wt-1"));
+        assert!(!worktree_has_marks(&f, "wt-2"));
+        assert!(!worktree_has_marks(&file(vec![]), "wt-1"));
+    }
+
+    #[test]
+    fn pane_key_for_worktrees() {
+        assert_eq!(worktree_pane_key(None, "wt-1"), "wt-1");
+        assert_eq!(
+            worktree_pane_key(Some("t1"), "wt-1"),
+            a2a_broker::task_member_pane_key("t1", "wt-1")
+        );
+    }
+
+    #[test]
+    fn disabled_note_only_when_newly_marked_while_off() {
+        assert_eq!(
+            mark_note(false, true),
+            Some("Marked \u{2014} turn on Remote control in Settings to reach it")
+        );
+        assert_eq!(mark_note(true, true), None);
+        assert_eq!(mark_note(false, false), None);
+        assert_eq!(mark_note(true, false), None);
+    }
 }
+

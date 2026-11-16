@@ -225,6 +225,7 @@ impl HarnessWorkspace {
             menu: None,
             project_menu: None,
             tab_menu: None,
+            tab_context_menu: None,
             diff_base_menu: None,
             close_prompt: None,
             edit_prompt: None,

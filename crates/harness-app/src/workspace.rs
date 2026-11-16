@@ -569,6 +569,8 @@ pub struct HarnessWorkspace {
     project_menu: Option<(String, Pixels, Pixels)>,
     /// Open "new tab" menu, anchored under the `+` in the tab strip.
     tab_menu: Option<Pixels>,
+    /// Right-click menu on a Shell/Agent tab: the tab id and where it opened.
+    tab_context_menu: Option<(u64, Pixels)>,
     /// Open diff-base menu, anchored under its button in the diff header.
     diff_base_menu: Option<gpui::Point<Pixels>>,
     /// The quit confirmation is open (keep vs. close terminals). Present only

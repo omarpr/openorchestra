@@ -309,6 +309,32 @@ impl Render for HarnessWorkspace {
                 });
         }
 
+        if let Some((tab_id, x)) = self.tab_context_menu {
+            root = root
+                .child(
+                    div()
+                        .id("tab-context-menu-backdrop")
+                        .occlude()
+                        .absolute()
+                        .top(px(0.0))
+                        .left(px(0.0))
+                        .size_full()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|ws, _, _, cx| {
+                                ws.tab_context_menu = None;
+                                cx.notify();
+                            }),
+                        ),
+                )
+                .child({
+                    const MENU_W: f32 = 220.0;
+                    let max_left = f32::from(window.viewport_size().width) - MENU_W - 8.0;
+                    let x = px(f32::from(x).min(max_left).max(8.0));
+                    self.render_tab_context_menu(&hx, tab_id, x, cx)
+                });
+        }
+
         if let Some(at) = self.diff_base_menu {
             root = root
                 .child(
