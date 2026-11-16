@@ -279,6 +279,45 @@ async fn hub_reports_exit() {
     }
 }
 
+/// With the user's `detach-on-destroy off`, killing the watched session moves
+/// the control client to another session instead of exiting it: the hub must
+/// still report `stopped`, close, and not stay attached elsewhere.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn hub_reports_exit_with_detach_on_destroy_off() {
+    let srv = Server::new();
+    srv.new_session("s", "cat");
+    srv.new_session("keep", "cat");
+    assert!(srv.ok(&["set-option", "-g", "detach-on-destroy", "off"]));
+    let hubs = Hubs::new(srv.tmux());
+    let hub = hubs.get("s").await.expect("hub");
+    let mut rx = hub.subscribe();
+    assert!(srv.ok(&["kill-session", "-t", "=s"]));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Ok(HubEvent::Closed(r))) => {
+                assert_eq!(r, "stopped");
+                break;
+            }
+            Ok(Ok(HubEvent::Data(_))) => {}
+            other => panic!("no Closed: {other:?}"),
+        }
+    }
+    assert!(hub.is_closed());
+    // The server-owned client must not linger on the unmarked session.
+    assert!(
+        poll_until(3, || srv
+            .run(&["list-clients", "-t", "=keep", "-F", "#{client_name}"])
+            .trim()
+            .is_empty())
+        .await,
+        "control client still attached to 'keep'"
+    );
+    // A fresh hub is not handed out for the dead session.
+    assert!(hubs.get("s").await.is_err());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn init_frame_matches_pane() {

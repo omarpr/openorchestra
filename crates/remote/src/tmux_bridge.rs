@@ -84,8 +84,16 @@ pub async fn live_sessions(t: &Tmux) -> HashSet<String> {
 /// One notification line from a control-mode client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlEvent {
-    Output { pane: String, data: Vec<u8> },
+    Output {
+        pane: String,
+        data: Vec<u8>,
+    },
     Exit,
+    /// `%session-changed $<id> <name>`: the client is now attached to `id`.
+    SessionChanged {
+        id: String,
+        name: String,
+    },
     Other,
 }
 
@@ -100,6 +108,19 @@ fn parse_line_bytes(line: &[u8]) -> ControlEvent {
     let line = line.strip_suffix(b"\r").unwrap_or(line);
     if line == b"%exit" || line.starts_with(b"%exit ") {
         return ControlEvent::Exit;
+    }
+    if let Some(rest) = line.strip_prefix(b"%session-changed ") {
+        // The name is the rest of the line (it may contain spaces).
+        let rest = String::from_utf8_lossy(rest);
+        if let Some((id, name)) = rest.split_once(' ') {
+            if id.starts_with('$') {
+                return ControlEvent::SessionChanged {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                };
+            }
+        }
+        return ControlEvent::Other;
     }
     if let Some(rest) = line.strip_prefix(b"%output ") {
         let (pane, escaped) = match rest.iter().position(|&b| b == b' ') {
@@ -251,11 +272,20 @@ impl SessionHub {
         }
         let target = format!("={session}:");
         let out = t
-            .output(&["display-message", "-p", "-t", &target, "#{pane_id}"])
+            .output(&[
+                "display-message",
+                "-p",
+                "-t",
+                &target,
+                "#{pane_id} #{session_id}",
+            ])
             .await?;
-        let pane = String::from_utf8_lossy(&out).trim().to_string();
+        let out = String::from_utf8_lossy(&out);
+        let mut parts = out.split_whitespace();
+        let pane = parts.next().unwrap_or("").to_string();
+        let session_id = parts.next().unwrap_or("").to_string();
         // display-message exits 0 with empty output for an unknown target.
-        if !valid_pane_id(&pane) {
+        if !valid_pane_id(&pane) || !session_id.starts_with('$') {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 "tmux session not found",
@@ -290,9 +320,11 @@ impl SessionHub {
         tokio::spawn(read_loop(
             stdout,
             pane.clone(),
+            session_id,
             events.clone(),
             pending.clone(),
             closed.clone(),
+            cmds.downgrade(),
         ));
         tokio::spawn(
             Actor {
@@ -301,6 +333,7 @@ impl SessionHub {
                 child,
                 stdin: Some(stdin),
                 pending,
+                closed: closed.clone(),
                 cmds: cmds.downgrade(),
                 fits: 0,
                 saved: None,
@@ -431,12 +464,20 @@ impl Drop for FitGuard {
 }
 
 /// Reads the control client's stdout. Holds no reference to the hub.
+///
+/// Ends (and broadcasts `Closed`) on `%exit`, on EOF, and when the client is
+/// moved to another session: with the user's `detach-on-destroy off`, killing
+/// the attached session switches the client to some other (unmarked) session
+/// instead of exiting it. The actor is then told to detach the client.
+#[allow(clippy::too_many_arguments)]
 async fn read_loop(
     stdout: ChildStdout,
     pane: String,
+    session_id: String,
     events: broadcast::Sender<HubEvent>,
     pending: Pending,
     closed: Arc<AtomicBool>,
+    cmds: mpsc::WeakUnboundedSender<Cmd>,
 ) {
     let mut reader = BufReader::new(stdout);
     let mut buf = Vec::new();
@@ -478,12 +519,17 @@ async fn read_loop(
                 let _ = events.send(HubEvent::Data(Bytes::from(data)));
             }
             ControlEvent::Exit => break,
+            ControlEvent::SessionChanged { id, .. } if id != session_id => break,
             _ => {}
         }
     }
     closed.store(true, Ordering::SeqCst);
     pending.lock().unwrap().clear();
     let _ = events.send(HubEvent::Closed(STOPPED));
+    // Detach a client tmux moved elsewhere (no-op if it already exited).
+    if let Some(cmds) = cmds.upgrade() {
+        let _ = cmds.send(Cmd::Shutdown { done: None });
+    }
 }
 
 /// Owns the control client's stdin and the fit refcount; serializes commands.
@@ -493,6 +539,8 @@ struct Actor {
     child: Child,
     stdin: Option<ChildStdin>,
     pending: Pending,
+    /// Set by the reader when it stops: nothing will acknowledge commands.
+    closed: Arc<AtomicBool>,
     /// Weak, so the actor doesn't keep its own channel open; used to build
     /// FitGuards.
     cmds: mpsc::WeakUnboundedSender<Cmd>,
@@ -625,6 +673,14 @@ impl Actor {
             let (tx, rx) = oneshot::channel();
             self.pending.lock().unwrap().push_back(tx);
             acks.push(rx);
+        }
+        // Checked after queueing: the reader sets `closed` before it clears
+        // `pending`, so either the ack sender is dropped or we see it here.
+        if self.closed.load(Ordering::SeqCst) {
+            self.pending.lock().unwrap().clear();
+            return Err(hub_gone());
+        }
+        for line in lines {
             payload.extend_from_slice(line.as_bytes());
             payload.push(b'\n');
         }
@@ -769,6 +825,26 @@ mod tests {
                 data: vec![0xff, b'\r']
             }
         );
+    }
+
+    #[test]
+    fn parse_session_changed() {
+        assert_eq!(
+            parse_line("%session-changed $1 b"),
+            ControlEvent::SessionChanged {
+                id: "$1".into(),
+                name: "b".into()
+            }
+        );
+        assert_eq!(
+            parse_line("%session-changed $0 a b"),
+            ControlEvent::SessionChanged {
+                id: "$0".into(),
+                name: "a b".into()
+            }
+        );
+        assert_eq!(parse_line("%session-changed x"), ControlEvent::Other);
+        assert_eq!(parse_line("%sessions-changed"), ControlEvent::Other);
     }
 
     #[test]
