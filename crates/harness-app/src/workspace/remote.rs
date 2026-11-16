@@ -98,22 +98,26 @@ fn reconcile_action(
     }
 }
 
-/// One on/off cycle of the remote-control dot while phones can reach it.
-pub(crate) const REMOTE_BLINK_PERIOD: f32 = 1.2;
-/// The blink's "off" half, and the steady level when remote control is off.
-pub(crate) const REMOTE_DOT_DIM: f32 = 0.25;
+/// One fade-out-and-back cycle of the remote-control dot while phones can
+/// reach it.
+pub(crate) const REMOTE_BLINK_PERIOD: f32 = 1.6;
+/// The faintest point of the fade, and the steady level when remote is off.
+pub(crate) const REMOTE_DOT_DIM: f32 = 0.08;
 pub(crate) const REMOTE_DOT_OFF: f32 = 0.45;
-/// Repaint cadence for the blink — a two-state blink needs only a few frames
-/// a second, unlike the spinners' ~15 fps.
-const REMOTE_BLINK_FRAME: std::time::Duration = std::time::Duration::from_millis(250);
+/// Repaint cadence for the fade — the same ~15 fps the spinners use, so the
+/// fade reads smooth rather than stepped.
+const REMOTE_BLINK_FRAME: std::time::Duration = crate::workspace::render::INDICATOR_FRAME;
 
-/// Opacity of a marked tab's remote dot at clock time `t`: blinking while a
-/// phone can reach it (`live`), steady and dimmed otherwise.
+/// Opacity of a marked tab's remote dot at clock time `t`: while a phone can
+/// reach it (`live`) it fades smoothly out and back in (cosine ease, full at
+/// the start of each period, faintest at the middle); steady and dimmed
+/// otherwise.
 pub(crate) fn remote_dot_opacity(live: bool, t: f32) -> f32 {
     if !live {
         return REMOTE_DOT_OFF;
     }
-    if (t / REMOTE_BLINK_PERIOD).fract() < 0.5 { 1.0 } else { REMOTE_DOT_DIM }
+    let phase = (t / REMOTE_BLINK_PERIOD).fract() * std::f32::consts::TAU;
+    REMOTE_DOT_DIM + (1.0 - REMOTE_DOT_DIM) * (0.5 + 0.5 * phase.cos())
 }
 
 pub(crate) struct RemoteRuntime {
@@ -956,11 +960,23 @@ mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     #[test]
-    fn remote_dot_blinks_only_while_reachable() {
-        // Reachable: on for the first half of each period, dim for the second.
-        assert_eq!(remote_dot_opacity(true, 0.1), 1.0);
-        assert_eq!(remote_dot_opacity(true, REMOTE_BLINK_PERIOD * 0.75), REMOTE_DOT_DIM);
-        assert_eq!(remote_dot_opacity(true, REMOTE_BLINK_PERIOD + 0.1), 1.0);
+    fn remote_dot_fades_only_while_reachable() {
+        let p = REMOTE_BLINK_PERIOD;
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        // Reachable: full at the period start, faintest at mid-period, and a
+        // smooth ramp between (no jumps).
+        assert!(close(remote_dot_opacity(true, 0.0), 1.0));
+        assert!(close(remote_dot_opacity(true, p * 0.5), REMOTE_DOT_DIM));
+        assert!(close(remote_dot_opacity(true, p), 1.0));
+        let quarter = remote_dot_opacity(true, p * 0.25);
+        assert!(quarter > REMOTE_DOT_DIM && quarter < 1.0);
+        let step = (0..100)
+            .map(|i| {
+                let t = p * i as f32 / 100.0;
+                (remote_dot_opacity(true, t + p / 100.0) - remote_dot_opacity(true, t)).abs()
+            })
+            .fold(0.0_f32, f32::max);
+        assert!(step < 0.05, "fade jumps by {step} per 1% of the period");
         // Remote off: steady and dimmed, whatever the clock says.
         assert_eq!(remote_dot_opacity(false, 0.1), REMOTE_DOT_OFF);
         assert_eq!(remote_dot_opacity(false, REMOTE_BLINK_PERIOD * 0.75), REMOTE_DOT_OFF);
