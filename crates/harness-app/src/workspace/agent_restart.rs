@@ -84,9 +84,17 @@ impl HarnessWorkspace {
             .get(&key)
             .and_then(|w| w.agent.clone())
             .unwrap_or_else(|| task.agent_kind.clone());
-        let fresh = self.restart_tried.contains(&key);
+        let tried = self.restart_tried.contains(&key);
 
         self.select(Selection::Task { task_id: task_id.clone(), member_id: member_id.clone() }, window, cx);
+        // Nothing saved in this folder (the agent was closed before it ever
+        // talked): continuing would only print "No conversation found" and
+        // leave it stopped, so start fresh on this click.
+        let nothing_to_continue = self
+            .resolve()
+            .and_then(|r| agent_runtime::has_conversation(&kind, &r.path))
+            == Some(false);
+        let fresh = tried || nothing_to_continue;
         self.continue_next_agent = !fresh;
         self.open_tab(TabKind::Agent(kind.clone()), window, cx);
         self.continue_next_agent = false;
