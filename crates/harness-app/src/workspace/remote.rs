@@ -90,6 +90,24 @@ impl RemoteRuntime {
         }
     }
 
+    /// Stop the server (if any) on a detached std thread and drop
+    /// keep-awake. Never blocks the caller: `RemoteServer::stop` (and its
+    /// `Drop`) wait up to ~5 s for sockets to flush. If the process exits
+    /// while that thread runs, the OS closes the sockets.
+    pub(crate) fn shutdown_detached(&mut self) {
+        self.keep_awake = None;
+        self.status = None;
+        if let Some(server) = self.server.take() {
+            let spawned = std::thread::Builder::new()
+                .name("oo-remote-stop".into())
+                .spawn(move || server.stop());
+            if let Err(e) = spawned {
+                // No thread: leak rather than block the main thread.
+                log::warn!("remote: stop thread failed to spawn: {e}");
+            }
+        }
+    }
+
     fn reload(&mut self) {
         self.file = self.store.load();
     }
@@ -105,6 +123,14 @@ impl RemoteRuntime {
         } else if !want {
             self.keep_awake = None;
         }
+    }
+}
+
+impl Drop for RemoteRuntime {
+    /// The runtime drops with the workspace on the GPUI main thread (quit,
+    /// window close, app teardown): hand a live server to a std thread.
+    fn drop(&mut self) {
+        self.shutdown_detached();
     }
 }
 
@@ -548,6 +574,48 @@ mod tests {
         RemoteFile {
             marked: marks,
             ..RemoteFile::default()
+        }
+    }
+
+    /// Dropping the runtime (quit, window close, teardown) must not run the
+    /// blocking `RemoteServer::stop` on the caller's (GPUI main) thread.
+    #[test]
+    fn dropping_runtime_with_live_server_does_not_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rt = RemoteRuntime::new(dir.path());
+        let cfg = ServerConfig {
+            state_dir: dir.path().to_path_buf(),
+            port: 0,
+            setup_port: 0,
+            // Private socket name: never the user's default tmux server.
+            tmux: Tmux {
+                socket: Some(format!("oo-remote-test-{}", std::process::id())),
+            },
+            bind_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            hosts_override: Some((
+                vec!["localhost".into()],
+                vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+            )),
+        };
+        let server = RemoteServer::start(cfg, rt.snapshot_tx.subscribe()).expect("start");
+        let port = server.port();
+        rt.server = Some(server);
+        rt.serve = RemoteServe::Serving;
+        let t = std::time::Instant::now();
+        drop(rt);
+        let took = t.elapsed();
+        assert!(
+            took < Duration::from_millis(100),
+            "drop blocked for {took:?}"
+        );
+        // The detached stop really runs: the port is released shortly after.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_err() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "port {port} never released"
+            );
+            std::thread::sleep(Duration::from_millis(20));
         }
     }
 

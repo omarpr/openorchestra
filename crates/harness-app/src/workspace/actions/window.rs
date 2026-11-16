@@ -141,6 +141,7 @@ impl HarnessWorkspace {
         let sessions = self.live_harness_sessions();
         // Nothing of ours is running — no reason to ask.
         if sessions.is_empty() {
+            self.remote.shutdown_detached();
             cx.quit();
             return true;
         }
@@ -150,6 +151,7 @@ impl HarnessWorkspace {
                 if kill {
                     self.kill_sessions(&sessions);
                 }
+                self.remote.shutdown_detached();
                 cx.quit();
                 true
             }
@@ -177,6 +179,8 @@ impl HarnessWorkspace {
         if !keep {
             self.kill_sessions(&self.live_harness_sessions());
         }
+        // Stop the phone server off the main thread before quitting.
+        self.remote.shutdown_detached();
         cx.quit();
     }
 
