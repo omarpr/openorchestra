@@ -16,6 +16,13 @@ serde_json = "1"
 crossbeam-channel = "0.5"
 libc = "0.2"
 getrandom = "0.4"
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring", "x509-parser"] }
+if-addrs = "0.15.0"
+time = "0.3"
+base64 = "0.22"
+sha2 = "0.10"
+x509-parser = "0.18.1"
 
 [dev-dependencies]
+plist = "1.10.3"
 tempfile = "3"
