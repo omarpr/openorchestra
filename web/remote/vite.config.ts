@@ -14,8 +14,8 @@ export default defineConfig({
       strategies: "generateSW",
       includeAssets: ["apple-touch-icon.png"],
       manifest: {
-        name: "openOrchestra Remote",
-        short_name: "oo Remote",
+        name: "openOrchestra",
+        short_name: "openOrchestra",
         display: "standalone",
         start_url: "/",
         scope: "/",

@@ -8,8 +8,19 @@ import { AgentList } from "@/components/AgentList";
 import { AgentView } from "@/components/AgentView";
 import { ConnectionBanner } from "@/components/ConnectionBanner";
 import { PairScreen } from "@/components/PairScreen";
+import { InstallFirst } from "@/components/InstallFirst";
+import { isIOS, isStandalone } from "@/lib/standalone";
 import { Button } from "@/components/ui/button";
 import { Toaster } from "@/components/ui/sonner";
+
+function Brand() {
+  return (
+    <>
+      <img src="/logo-64.png" alt="" width={24} height={24} className="size-6 shrink-0 rounded-md" />
+      <h1 className="font-semibold">openOrchestra Agents</h1>
+    </>
+  );
+}
 
 function Main() {
   const { agents, connected, disabled } = useAgents();
@@ -20,8 +31,8 @@ function Main() {
   const selectedAgent = agents.find((a) => a.id === selectedId);
 
   const header = (
-    <header className="flex h-14 shrink-0 items-center justify-between border-b px-4">
-      <h1 className="font-semibold">Agents</h1>
+    <header className="flex h-14 shrink-0 items-center gap-2 border-b px-4">
+      <Brand />
     </header>
   );
 
@@ -32,7 +43,9 @@ function Main() {
         {!collapsed && (
           <aside className="flex w-80 shrink-0 flex-col border-r" aria-label="Agents">
             <div className="flex h-14 shrink-0 items-center justify-between border-b pl-4 pr-1">
-              <h1 className="font-semibold">Agents</h1>
+              <div className="flex min-w-0 items-center gap-2">
+                <Brand />
+              </div>
               <Button variant="ghost" size="icon" aria-label="Hide agent list" onClick={() => setCollapsed(true)}>
                 <PanelLeftClose />
               </Button>
@@ -87,9 +100,11 @@ function Main() {
 
 export default function App() {
   const token = useSyncExternalStore(subscribeToken, getToken);
+  const [pairHere, setPairHere] = useState(false);
+  const installFirst = !token && !pairHere && isIOS() && !isStandalone();
   return (
     <>
-      {token ? <Main /> : <PairScreen />}
+      {token ? <Main /> : installFirst ? <InstallFirst onPairHere={() => setPairHere(true)} /> : <PairScreen />}
       <Toaster position="top-center" />
     </>
   );

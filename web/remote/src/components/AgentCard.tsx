@@ -3,7 +3,7 @@ import type { Agent } from "@/lib/api";
 import { agentHref } from "@/lib/router";
 import { timeSince } from "@/lib/time";
 import { cn } from "@/lib/utils";
-import { Badge } from "@/components/ui/badge";
+import { AgentIcon } from "./AgentIcon";
 import { StatusPill } from "./StatusPill";
 
 export function AgentCard({ agent, selected = false }: { agent: Agent; selected?: boolean }) {
@@ -24,16 +24,14 @@ export function AgentCard({ agent, selected = false }: { agent: Agent; selected?
       )}
     >
       <div className="flex items-center justify-between gap-2">
-        <span className="truncate font-medium">{agent.title}</span>
+        <span className="flex min-w-0 items-center gap-1.5">
+          <AgentIcon kind={agent.agent_kind} />
+          <span className="truncate font-medium">{agent.title}</span>
+        </span>
         <StatusPill status={agent.status} />
       </div>
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
         <span className="truncate">{where}</span>
-        {agent.agent_kind && (
-          <Badge variant="secondary" className="shrink-0">
-            {agent.agent_kind}
-          </Badge>
-        )}
         <span className="ml-auto flex shrink-0 items-center gap-2">
           {agent.tool && <span className="max-w-28 truncate font-mono">{agent.tool}</span>}
           {since && <span>{since}</span>}

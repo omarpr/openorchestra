@@ -87,3 +87,55 @@
     overscroll-behavior: none;
   }
 }
+
+/* Status pills, matching the desktop app. */
+:root {
+  --oo-accent: #1f6feb;
+  --oo-amber: #9a6700;
+  --oo-stopped: #7b8493;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --oo-accent: #5b9bff;
+    --oo-amber: #e0a83b;
+    --oo-stopped: #646b76;
+  }
+}
+.oo-pill-running {
+  color: var(--oo-accent);
+  background: color-mix(in srgb, var(--oo-accent) 16%, transparent);
+}
+.oo-pill-waiting {
+  color: var(--oo-amber);
+  background: color-mix(in srgb, var(--oo-amber) 16%, transparent);
+}
+.oo-pill-stopped {
+  color: var(--oo-stopped);
+  border: 1px solid var(--oo-stopped);
+}
+@keyframes oo-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes oo-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.oo-spin {
+  animation: oo-spin 1s linear infinite;
+}
+.oo-breathe {
+  animation: oo-breathe 1.2s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .oo-spin,
+  .oo-breathe {
+    animation: none;
+  }
+}
