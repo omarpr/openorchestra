@@ -1,11 +1,25 @@
-import { useState } from "react";
 import { Send } from "lucide-react";
+import { useState } from "react";
 import { toast } from "sonner";
-import { ApiError, sendText } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { ApiError, sendText } from "@/lib/api";
 
-export function QuickReply({ id, disabled, inputRef }: { id: string; disabled: boolean; inputRef?: React.Ref<HTMLInputElement> }) {
+/** `name` is what the tab runs ("Claude Code"); `null` for a shell. */
+export function QuickReply({
+  id,
+  disabled,
+  name = null,
+  inputRef,
+}: {
+  id: string;
+  disabled: boolean;
+  name?: string | null;
+  inputRef?: React.Ref<HTMLInputElement>;
+}) {
+  const shell = name === null;
+  const label = shell ? "Type a command" : `Message ${name || "the agent"}`;
+  const stoppedText = shell ? "Shell closed" : "Agent stopped";
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -20,7 +34,7 @@ export function QuickReply({ id, disabled, inputRef }: { id: string; disabled: b
     } catch (err) {
       toast.error(
         err instanceof ApiError && err.code === "stopped"
-          ? "Agent stopped"
+          ? stoppedText
           : err instanceof ApiError && err.code === "read_only"
             ? "This device is watch only"
             : "Could not send. Try again.",
@@ -37,14 +51,20 @@ export function QuickReply({ id, disabled, inputRef }: { id: string; disabled: b
         value={text}
         onChange={(e) => setText(e.target.value)}
         disabled={disabled}
-        placeholder={disabled ? "Agent stopped" : "Message the agent"}
-        aria-label="Message the agent"
+        placeholder={disabled ? stoppedText : label}
+        aria-label={label}
         enterKeyHint="send"
         autoCapitalize="off"
         autoCorrect="off"
         className="h-11 min-w-0 flex-1 text-base"
       />
-      <Button type="submit" size="icon" aria-label="Send" disabled={disabled || busy || !text.trim()} className="size-11 shrink-0">
+      <Button
+        type="submit"
+        size="icon"
+        aria-label="Send"
+        disabled={disabled || busy || !text.trim()}
+        className="size-11 shrink-0"
+      >
         <Send />
       </Button>
     </form>

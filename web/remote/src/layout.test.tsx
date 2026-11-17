@@ -8,7 +8,9 @@ const agents: Agent[] = [
     title: "Fix login bug",
     agent_kind: "claude",
     project: "proj",
-    worktree: "main", branch: null, has_conversation: false,
+    worktree: "main",
+    branch: null,
+    has_conversation: false,
     status: "running",
     status_since: null,
     tool: "Edit",
@@ -43,13 +45,13 @@ describe("layout", () => {
     mockMedia(true);
     render(<App />);
     expect(screen.getByText("Fix login bug")).toBeInTheDocument();
-    expect(screen.getByText("Select an agent")).toBeInTheDocument();
+    expect(screen.getByText("Pick a tab")).toBeInTheDocument();
   });
 
   it("phone: only the list renders", () => {
     mockMedia(false);
     render(<App />);
     expect(screen.getByText("Fix login bug")).toBeInTheDocument();
-    expect(screen.queryByText("Select an agent")).not.toBeInTheDocument();
+    expect(screen.queryByText("Pick a tab")).not.toBeInTheDocument();
   });
 });

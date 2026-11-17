@@ -22,10 +22,17 @@ impl HarnessWorkspace {
 
         let (content, title) = match kind {
             TabKind::Shell => {
-                let session = self.has_tmux.then(|| crate::terminal_pane::TerminalSession {
-                    name: crate::tmux::session_name(&r.key, tab_id),
-                    attach_only: false,
-                    env: self.pane_env(&r),
+                let session = self.has_tmux.then(|| {
+                    let name = crate::tmux::session_name(&r.key, tab_id);
+                    // Plus the zsh hook that logs commands for the phone's
+                    // conversation view.
+                    let mut env = self.pane_env(&r);
+                    env.extend(self.remote.shell_env(&name));
+                    crate::terminal_pane::TerminalSession {
+                        name,
+                        attach_only: false,
+                        env,
+                    }
                 });
                 (
                     TabContent::Terminal(

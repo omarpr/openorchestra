@@ -61,8 +61,26 @@ pub(crate) fn router(shared: Arc<Shared>) -> Router {
         .fallback(crate::assets::serve)
         .layer(DefaultBodyLimit::max(MAX_BODY))
         // Outermost: every route, including the fallback.
+        .layer(middleware::from_fn_with_state(
+            shared.clone(),
+            trusted_filter,
+        ))
         .layer(middleware::from_fn(peer_filter))
         .with_state(shared)
+}
+
+/// 403 `untrusted_network` for a peer that isn't on a network the user
+/// trusted (see `crate::network`). Inside `peer_filter`.
+pub(crate) async fn trusted_filter(
+    State(s): AppState,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if !s.peer_trusted(peer.ip()) {
+        return error(StatusCode::FORBIDDEN, "untrusted_network");
+    }
+    next.run(req).await
 }
 
 /// 403 for peers outside loopback / RFC 1918 / link-local / ULA.
@@ -170,9 +188,12 @@ async fn pair(
         .take(MAX_DEVICE_NAME)
         .collect();
     let name = match name.trim() {
-        "" => "Phone".to_string(),
+        "" => "Device".to_string(),
         n => n.to_string(),
     };
+    if s.pair_locked(peer.ip(), Instant::now()) {
+        return error(StatusCode::LOCKED, "address_locked");
+    }
     let origin_host = host_without_port(&headers, &uri);
     let s2 = s.clone();
     let result = tokio::task::spawn_blocking(move || {
@@ -186,8 +207,14 @@ async fn pair(
     })
     .await;
     match result {
-        Ok(Ok((_, token))) => Json(json!({ "token": token })).into_response(),
-        Ok(Err(PairError::Invalid)) => error(StatusCode::UNAUTHORIZED, "invalid"),
+        Ok(Ok((_, token))) => {
+            s.pair_result(peer.ip(), true, Instant::now());
+            Json(json!({ "token": token })).into_response()
+        }
+        Ok(Err(PairError::Invalid)) => {
+            s.pair_result(peer.ip(), false, Instant::now());
+            error(StatusCode::UNAUTHORIZED, "invalid")
+        }
         Ok(Err(PairError::Locked)) => error(StatusCode::LOCKED, "locked"),
         Ok(Err(PairError::Io(e))) => {
             eprintln!("oo-remote: pairing failed: {e}");
@@ -401,7 +428,10 @@ async fn send(
     }
     // Text, then Enter as a separate write (see `tmux_bridge::line_keys`).
     match hub.send_line(flatten_newlines(&req.text).as_bytes()).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            s.input.record(&session, &device.name, SystemTime::now());
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => {
             eprintln!("oo-remote: send failed: {e}");
             error(StatusCode::SERVICE_UNAVAILABLE, "unavailable")

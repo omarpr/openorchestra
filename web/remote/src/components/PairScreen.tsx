@@ -1,17 +1,19 @@
 import { useRef, useState } from "react";
-import { ApiError, pair } from "@/lib/api";
-import { defaultDeviceName } from "@/lib/device";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { InputOTP, InputOTPGroup, InputOTPSeparator, InputOTPSlot } from "@/components/ui/input-otp";
+import { ApiError, pair } from "@/lib/api";
+import { defaultDeviceName } from "@/lib/device";
+import { hostName } from "@/lib/host";
 
 export const MSG_BAD_CODE = "That code didn't work — check Settings → Remote on your Mac";
 export const MSG_LOCKED = "Too many tries — make a new code on your Mac";
+export const MSG_ADDRESS_LOCKED = "Too many wrong codes from this device — try again in 10 minutes";
 
 function messageFor(e: unknown): string {
   if (e instanceof ApiError) {
-    if (e.status === 423) return MSG_LOCKED;
+    if (e.status === 423) return e.code === "address_locked" ? MSG_ADDRESS_LOCKED : MSG_LOCKED;
     if (e.status === 401) return MSG_BAD_CODE;
     if (e.status === 429) return "Too many tries — wait a minute and try again";
   }
@@ -25,6 +27,7 @@ export function PairScreen() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const inFlight = useRef(false);
+  const host = hostName();
 
   async function submit(value: string) {
     if (inFlight.current || value.length !== 8) return;
@@ -32,7 +35,7 @@ export function PairScreen() {
     setBusy(true);
     setError(null);
     try {
-      await pair(value.toUpperCase(), name.trim() || "Phone");
+      await pair(value.toUpperCase(), name.trim() || "Device");
     } catch (e) {
       setError(messageFor(e));
       setCode("");
@@ -46,7 +49,7 @@ export function PairScreen() {
     <main className="flex min-h-full items-center justify-center p-4 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))]">
       <Card className="w-full max-w-md">
         <CardHeader>
-          <CardTitle className="text-xl">Pair this device</CardTitle>
+          <CardTitle className="text-xl">{host ? `Pair with ${host}` : "Pair this device"}</CardTitle>
           <CardDescription>Enter the 8-character code shown in Settings → Remote on your Mac.</CardDescription>
         </CardHeader>
         <CardContent>

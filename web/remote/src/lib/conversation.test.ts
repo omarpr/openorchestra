@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mergeEntries, type ConvEntry } from "./conversation";
+import { type ConvEntry, mergeEntries } from "./conversation";
 
 const u = (id: string, text = id): ConvEntry => ({ id, kind: "user", text });
 
@@ -22,6 +22,12 @@ describe("mergeEntries", () => {
     expect(out).toHaveLength(200);
     expect(out[0].id).toBe("e2");
     expect(out[199].id).toBe("y");
-    expect(mergeEntries([], Array.from({ length: 300 }, (_, i) => u(`n${i}`)), true)).toHaveLength(200);
+    expect(
+      mergeEntries(
+        [],
+        Array.from({ length: 300 }, (_, i) => u(`n${i}`)),
+        true,
+      ),
+    ).toHaveLength(200);
   });
 });

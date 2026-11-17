@@ -1,7 +1,8 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import type { Agent } from "@/lib/api";
+import type { TermHandlers } from "@/lib/termSocket";
 
 const calls: string[] = [];
 const proposed: { value: { cols: number; rows: number } | undefined } = { value: { cols: 40, rows: 20 } };
@@ -42,7 +43,14 @@ vi.mock("@xterm/addon-fit", () => ({
   },
 }));
 
-const sockets: { url: string; h: any; fit: any; input: any; close: any }[] = [];
+interface FakeSocket {
+  url: string;
+  h: TermHandlers;
+  fit: Mock;
+  input: Mock;
+  close: Mock;
+}
+const sockets: FakeSocket[] = [];
 vi.mock("@/lib/termSocket", () => ({
   TermSocket: class {
     fit = vi.fn(() => calls.push("fitframe"));
@@ -51,9 +59,9 @@ vi.mock("@/lib/termSocket", () => ({
     constructor(
       public url: string,
       public token: string,
-      public h: any,
+      public h: TermHandlers,
     ) {
-      sockets.push(this as any);
+      sockets.push(this);
     }
   },
 }));
@@ -73,7 +81,9 @@ const agent: Agent = {
   title: "Fix login bug",
   agent_kind: "claude",
   project: "p",
-  worktree: "w", branch: null, has_conversation: false,
+  worktree: "w",
+  branch: null,
+  has_conversation: false,
   status: "running",
   status_since: null,
   tool: null,

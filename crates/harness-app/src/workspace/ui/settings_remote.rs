@@ -20,7 +20,7 @@ const QR_QUIET: usize = 4;
 
 impl HarnessWorkspace {
     /// The Remote pane of Settings, top to bottom: on/off and status, port,
-    /// "Add a phone", paired devices, the stale-IP notice, keep-awake.
+    /// "Add a device", paired devices, the stale-IP notice, keep-awake.
     pub(crate) fn render_remote_settings(
         &self,
         hx: &HarnessTheme,
@@ -66,8 +66,12 @@ impl HarnessWorkspace {
                     .child(div().flex_1().min_w_0().text_color(line_color).child(line)),
             );
         // One row per address, so long ones don't run off the card, each with
-        // a Copy button (settings text isn't selectable).
-        for (i, url) in serving_urls(&r.serve, r.status.as_ref()).iter().enumerate() {
+        // a Copy button (settings text isn't selectable). Only the main
+        // connection's address unless "Show all" was clicked.
+        let all_urls = serving_urls(&r.serve, r.status.as_ref());
+        let primary = r.status.as_ref().and_then(|s| s.primary_ip);
+        let (shown, hidden) = shown_urls(all_urls, primary, r.ui.show_all_urls);
+        for (i, url) in shown.iter().enumerate() {
             let copy = url.clone();
             col = col.child(
                 div()
@@ -110,9 +114,49 @@ impl HarnessWorkspace {
                     ),
             );
         }
+        if all_urls.len() > 1 {
+            let label = if hidden > 0 {
+                format!("Show all addresses ({})", all_urls.len())
+            } else {
+                "Show main address only".to_string()
+            };
+            col = col.child(
+                div().pb_1().pl(px(46.0)).text_xs().child(
+                    div()
+                        .id("remote-urls-toggle")
+                        .text_color(hx.tx2)
+                        .cursor_pointer()
+                        .hover(|d| d.text_color(hx.tx0))
+                        .child(label)
+                        .on_click(cx.listener(|ws, _, _, cx| {
+                            cx.stop_propagation();
+                            ws.remote.ui.show_all_urls = !ws.remote.ui.show_all_urls;
+                            cx.notify();
+                        })),
+                ),
+            );
+        }
+        if serving && r.status.as_ref().is_some_and(|s| s.ca_outdated) {
+            col = col
+                .child(div().pb_1().text_xs().text_color(hx.amber).child(
+                    "This Mac's name or address changed since its certificate was made, so \
+                     devices using the new one can't connect. A new certificate fixes that; \
+                     every device then has to be added again.",
+                ))
+                .child(
+                    div().pb_1().child(
+                        button(hx, "Create a new certificate")
+                            .id("remote-renew-ca")
+                            .on_click(cx.listener(|ws, _, _, cx| {
+                                cx.stop_propagation();
+                                ws.remote_renew_ca(cx);
+                            })),
+                    ),
+                );
+        }
         if r.serve == RemoteServe::OtherBuild {
             col = col.child(div().pb_1().text_xs().text_color(hx.tx2).child(
-                "The other openOrchestra build (Dev or release) is serving phones. Tabs you \
+                "The other openOrchestra build (Dev or release) is serving devices. Tabs you \
                  mark here reach them through it; this build takes over when it quits.",
             ));
         }
@@ -163,22 +207,22 @@ impl HarnessWorkspace {
                 .pb_1()
                 .text_xs()
                 .text_color(hx.tx2)
-                .child("Changing the port means re-adding the app on paired phones."),
+                .child("Changing the port means re-adding the app on paired devices."),
         );
         if let Some(e) = &r.ui.port_error {
             col = col.child(div().pb_1().text_xs().text_color(hx.red).child(e.clone()));
         }
 
-        // ---- Add a phone ---------------------------------------------------
-        col = col.child(section_title("Add a phone", hx));
-        if r.ui.setup_open && serving {
-            col = col.child(self.render_add_phone(hx, cx));
-        } else if serving {
+        // ---- Add a device --------------------------------------------------
+        col = col.child(section_title("Add a device", hx));
+        // The pairing steps open in their own dialog over Settings
+        // (`render_add_phone_dialog`).
+        if serving {
             col =
                 col.child(
                     div()
                         .pb_1()
-                        .child(button(hx, "Add a phone").id("remote-add-phone").on_click(
+                        .child(button(hx, "Add a device").id("remote-add-device").on_click(
                             cx.listener(|ws, _, _, cx| {
                                 cx.stop_propagation();
                                 ws.remote_open_setup(cx);
@@ -189,12 +233,12 @@ impl HarnessWorkspace {
             col = col.child(div().pb_1().text_xs().text_color(hx.tx2).child(if enabled {
                 "Available once Remote control is listening."
             } else {
-                "Turn on Remote control to add a phone."
+                "Turn on Remote control to add a device."
             }));
         }
 
         // ---- Agents on phone -------------------------------------------------
-        col = col.child(section_title("Agents on phone", hx));
+        col = col.child(section_title("Agents on devices", hx));
         let rows = crate::workspace::remote::remote_agent_rows(&self.remote_sources(), &r.file);
         if rows.is_empty() {
             col = col.child(
@@ -215,7 +259,6 @@ impl HarnessWorkspace {
                     .child("\u{276F}_")
                     .into_any_element(),
             };
-            let shell = row.kind.is_none();
             let mut toggles = div().flex().flex_none().gap_1p5();
             for (label, on) in [("On", true), ("Off", false)] {
                 let key = row.key.clone();
@@ -265,17 +308,58 @@ impl HarnessWorkspace {
                                             .text_color(hx.tx2)
                                             .child(format!("{} \u{00B7} {}", row.project, row.worktree)),
                                     ),
-                            )
-                            .when(shell, |d| {
-                                d.child(
-                                    div()
-                                        .text_color(hx.tx2)
-                                        .child("Gives a paired phone this shell"),
-                                )
-                            }),
+                            ),
                     )
                     .child(toggles),
             );
+        }
+
+        // ---- Networks ------------------------------------------------------
+        if let Some(st) = r.status.as_ref().filter(|_| serving) {
+            col = col.child(section_title("Networks", hx)).child(
+                div().pb_1().text_xs().text_color(hx.tx2).child(
+                    "Devices only connect from trusted networks. Adding a device trusts the \
+                     network you're on.",
+                ),
+            );
+            for (i, n) in st.networks.iter().enumerate() {
+                let key = n.key.clone();
+                let trust = !n.trusted;
+                let where_ = match (n.here, n.primary) {
+                    (true, true) => "this network",
+                    (true, false) => "also connected",
+                    (false, _) => "not connected now",
+                };
+                col = col.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .pb_1()
+                        .text_xs()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .font_family(hx.font_mono)
+                                .text_color(hx.tx0)
+                                .child(n.key.clone()),
+                        )
+                        .child(div().flex_none().text_color(hx.tx2).child(format!(
+                            "{where_} \u{00B7} {}",
+                            if n.trusted { "trusted" } else { "not trusted" }
+                        )))
+                        .child(
+                            button(hx, if trust { "Trust" } else { "Forget" })
+                                .id(("remote-net", i))
+                                .on_click(cx.listener(move |ws, _, _, cx| {
+                                    cx.stop_propagation();
+                                    ws.remote_set_network_trust(&key, trust, cx);
+                                })),
+                        ),
+                );
+            }
         }
 
         // ---- Paired devices ------------------------------------------------
@@ -319,7 +403,11 @@ impl HarnessWorkspace {
                                 div()
                                     .text_xs()
                                     .text_color(hx.tx2)
-                                    .child(last_seen_text(d.last_seen.as_deref(), now)),
+                                    .child(if oo_remote::auth::is_idle_expired(d, now) {
+                                        "expired \u{2014} unused for 30 days; pair it again".to_string()
+                                    } else {
+                                        last_seen_text(d.last_seen.as_deref(), now)
+                                    }),
                             ),
                     )
                     .child(
@@ -382,7 +470,80 @@ impl HarnessWorkspace {
         ))
     }
 
-    /// The open "Add a phone" panel: 1. trust this Mac (QR + fingerprint),
+    /// "Add a device" as a dialog over Settings: a backdrop click, ✕ or Done
+    /// closes it (and the setup port) and leaves Settings open.
+    pub(crate) fn render_add_phone_dialog(
+        &self,
+        hx: &HarnessTheme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let close = |ws: &mut Self, cx: &mut Context<Self>| {
+            ws.remote_close_setup();
+            cx.notify();
+        };
+        let header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(hx.tx0)
+                    .child("Add a device"),
+            )
+            .child(
+                div()
+                    .id("remote-setup-close")
+                    .px_2()
+                    .rounded_md()
+                    .text_sm()
+                    .text_color(hx.tx2)
+                    .cursor_pointer()
+                    .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
+                    .child("✕")
+                    .on_click(cx.listener(move |ws, _, _, cx| {
+                        cx.stop_propagation();
+                        close(ws, cx);
+                    })),
+            );
+        let card = div()
+            .id("remote-setup-card")
+            .flex()
+            .flex_col()
+            .gap_3()
+            .w(px(440.0))
+            .max_h(px(600.0))
+            .overflow_y_scroll()
+            .p_4()
+            .rounded_lg()
+            .bg(hx.bg1)
+            .border_1()
+            .border_color(hx.border)
+            .shadow_lg()
+            .child(header)
+            .child(self.render_add_phone(hx, cx));
+        div()
+            .id("remote-setup-backdrop")
+            .occlude()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui::hsla(0.0, 0.0, 0.0, 0.35))
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_scroll(|_, _, cx| cx.stop_propagation())
+            // Stop here: the Settings backdrop underneath would close Settings.
+            .on_click(cx.listener(move |ws, _, _, cx| {
+                cx.stop_propagation();
+                close(ws, cx);
+            }))
+            .child(card.on_click(|_, _, cx| cx.stop_propagation()))
+            .into_any_element()
+    }
+
+    /// The "Add a device" steps: 1. trust this Mac (QR + fingerprint),
     /// 2. pair (code).
     fn render_add_phone(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> gpui::Div {
         let ui = &self.remote.ui;
@@ -439,17 +600,21 @@ impl HarnessWorkspace {
             )
             .child(
                 div()
-                    .text_xs()
+                    .p_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(hx.amber)
+                    .text_sm()
                     .font_family(hx.font_mono)
                     .text_color(hx.tx0)
                     .child(fp),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(hx.tx1)
-                    .child("Compare this fingerprint with the one on your phone"),
-            );
+            .child(div().text_xs().text_color(hx.tx1).child(
+                "Before trusting it, check that the SHA-256 fingerprint your device shows for the \
+                 certificate matches this exactly. iPhone: on the profile, tap More Details \
+                 before Install. Android: Encryption & credentials \u{2192} User credentials. \
+                 Don't rely on the setup page: it can't vouch for itself.",
+            ));
 
         let mut pair = div().flex().flex_col().gap_1().child(step("2", "Pair"));
         match (&ui.code, &ui.code_error) {
@@ -490,12 +655,6 @@ impl HarnessWorkspace {
             .flex()
             .flex_col()
             .gap_3()
-            .mb_1()
-            .p_3()
-            .rounded_md()
-            .border_1()
-            .border_color(hx.border)
-            .bg(hx.bg0)
             .child(trust)
             .child(pair)
             .child(
@@ -581,7 +740,7 @@ pub(crate) fn parse_port(text: &str) -> Result<u16, String> {
         .filter(|p| *p >= 1024)
         .ok_or_else(|| "Use a port from 1024 to 65535".to_string())?;
     if port == SETUP_PORT {
-        return Err(format!("Port {SETUP_PORT} is used to set up phones"));
+        return Err(format!("Port {SETUP_PORT} is used to set up devices"));
     }
     Ok(port)
 }
@@ -618,7 +777,25 @@ pub(crate) fn fingerprint_lines(fp: &str) -> Vec<String> {
 }
 
 /// The addresses listed (one per row, each copyable) under "Listening on".
-/// Why "Add a phone" can't offer its QR (the setup port failed to open).
+/// The addresses to list: the main connection's (`primary`) alone unless
+/// `show_all`, plus how many are hidden. Falls back to the first address
+/// when none matches `primary`.
+pub(crate) fn shown_urls(
+    urls: &[String],
+    primary: Option<std::net::IpAddr>,
+    show_all: bool,
+) -> (Vec<String>, usize) {
+    if show_all || urls.len() <= 1 {
+        return (urls.to_vec(), 0);
+    }
+    let main = primary
+        .map(|ip| format!("//{ip}:"))
+        .and_then(|needle| urls.iter().find(|u| u.contains(&needle)))
+        .or(urls.first());
+    (main.into_iter().cloned().collect(), urls.len() - 1)
+}
+
+/// Why "Add a device" can't offer its QR (the setup port failed to open).
 pub(crate) fn setup_error(status: Option<&ServerStatus>) -> Option<&str> {
     status.and_then(|s| s.setup_error.as_deref())
 }
@@ -718,6 +895,29 @@ mod tests {
             ..ServerStatus::default()
         };
         assert_eq!(setup_error(Some(&st)), Some("Couldn't open port 7080"));
+    }
+
+    #[test]
+    fn only_the_main_connections_address_by_default() {
+        let urls: Vec<String> = [
+            "https://mac.local:7443/",
+            "https://192.168.86.26:7443/",
+            "https://192.168.139.3:7443/",
+        ]
+        .map(String::from)
+        .to_vec();
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        assert_eq!(
+            shown_urls(&urls, Some(ip("192.168.86.26")), false),
+            (vec!["https://192.168.86.26:7443/".to_string()], 2)
+        );
+        assert_eq!(shown_urls(&urls, Some(ip("192.168.86.26")), true), (urls.clone(), 0));
+        // No match (or no main connection): the first address.
+        assert_eq!(shown_urls(&urls, Some(ip("10.0.0.9")), false).0, vec![urls[0].clone()]);
+        assert_eq!(shown_urls(&urls, None, false).0, vec![urls[0].clone()]);
+        // "192.168.86.2" must not match "192.168.86.26".
+        assert_eq!(shown_urls(&urls, Some(ip("192.168.86.2")), false).0, vec![urls[0].clone()]);
+        assert_eq!(shown_urls(&urls[..1], None, false), (urls[..1].to_vec(), 0));
     }
 
     #[test]

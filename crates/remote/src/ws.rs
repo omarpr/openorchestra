@@ -16,7 +16,7 @@
 //!   "revoked"|"disabled"}` then a close frame (1000).
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
@@ -247,8 +247,9 @@ impl Term {
                                     }
                                     Ok(true) => {}
                                 }
-                                if let Err(e) = hub.send_input(data.as_bytes()).await {
-                                    eprintln!("oo-remote: input failed: {e}");
+                                match hub.send_input(data.as_bytes()).await {
+                                    Ok(()) => self.s.input.record(&session, &device.name, SystemTime::now()),
+                                    Err(e) => eprintln!("oo-remote: input failed: {e}"),
                                 }
                             }
                         }

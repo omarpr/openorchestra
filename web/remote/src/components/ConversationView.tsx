@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { useConversation } from "@/lib/conversation";
 import { EntryRow } from "@/components/EntryRow";
-import { ToolSheet, type ToolRef } from "@/components/ToolSheet";
+import { type ToolRef, ToolSheet } from "@/components/ToolSheet";
+import { useConversation } from "@/lib/conversation";
 
 const STICK_PX = 80;
 

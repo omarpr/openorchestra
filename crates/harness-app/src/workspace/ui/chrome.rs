@@ -168,7 +168,9 @@ impl HarnessWorkspace {
     /// Remote control for the current tab: a chip that shows whether paired
     /// phones can reach it and toggles that. Terminal tabs only.
     fn render_remote_chip(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        use crate::workspace::remote::{mark_note, remote_chip, RemoteChip, RemoteServe};
+        use crate::workspace::remote::{
+            chip_click, mark_note, remote_chip, ChipClick, RemoteChip, RemoteServe,
+        };
         let key = self.resolve()?.key;
         let tab = self.panes.get(&key)?.active_tab()?;
         let tab_id = tab.id;
@@ -176,29 +178,40 @@ impl HarnessWorkspace {
         let marked = self.remote_is_marked(&key, tab_id);
         let state = remote_chip(Self::remote_tab_kind(tab).is_some(), marked, self.remote_live())?;
         let (fg, bg, border, tooltip) = match state {
+            RemoteChip::Off if !self.remote.file.enabled => (
+                hx.tx2,
+                None,
+                hx.border,
+                "Remote control is off \u{2014} click to turn it on in Settings",
+            ),
             RemoteChip::Off => (
                 hx.tx2,
                 None,
                 hx.border,
-                "Let paired phones see and type into this tab",
+                "Let paired devices see and type into this tab",
             ),
             RemoteChip::OnLive => (
                 hx.accent,
                 Some(tint(hx.accent, 0.16)),
                 tint(hx.accent, 0.16),
-                "Paired phones can see and type into this tab \u{2014} click to stop",
+                "Paired devices can see and type into this tab \u{2014} click to stop",
             ),
             RemoteChip::OnUnreachable => (
                 hx.amber,
                 Some(tint(hx.amber, 0.16)),
                 tint(hx.amber, 0.16),
-                "Turn on Remote control in Settings \u{2192} Remote",
+                "Remote control is off \u{2014} click to turn it on in Settings",
             ),
         };
-        let label = match state {
-            RemoteChip::Off => "\u{1F4F1} Remote off",
-            RemoteChip::OnLive => "On phone",
-            RemoteChip::OnUnreachable => "On phone \u{00B7} remote off",
+        // A device typing into this tab right now: say who, on the chip.
+        let typing = (state == RemoteChip::OnLive)
+            .then(|| self.remote_typing(&crate::tmux::session_name(&key, tab_id)))
+            .flatten();
+        let label = match (state, &typing) {
+            (RemoteChip::OnLive, Some(device)) => format!("{device} typing\u{2026}"),
+            (RemoteChip::Off, _) => "Remote off".to_string(),
+            (RemoteChip::OnLive, None) => "Remote on".to_string(),
+            (RemoteChip::OnUnreachable, _) => "Remote paused".to_string(),
         };
         let dot_alpha = self.remote_dot_opacity();
         Some(
@@ -229,6 +242,15 @@ impl HarnessWorkspace {
                             .opacity(dot_alpha),
                     )
                 })
+                .when(state == RemoteChip::Off, |d| {
+                    d.child(
+                        gpui::svg()
+                            .size(px(12.0))
+                            .flex_none()
+                            .path("icons/oo/devices.svg")
+                            .text_color(fg),
+                    )
+                })
                 .child(label)
                 // Stop here so the title bar's drag / double-click zoom
                 // doesn't fire from the chip.
@@ -239,13 +261,27 @@ impl HarnessWorkspace {
                 .on_click(cx.listener(move |ws, _, _, cx| {
                     cx.stop_propagation();
                     let key = ws.resolve().map(|r| r.key).unwrap_or_default();
+                    let marked = ws.remote_is_marked(&key, tab_id);
+                    if let ChipClick::OpenSettings { mark } =
+                        chip_click(ws.remote.file.enabled, marked)
+                    {
+                        if mark {
+                            ws.remote_toggle_mark(&key, tab_id, cx);
+                        }
+                        ws.remote_open_settings(cx);
+                        ws.set_note(
+                            "Turn on Remote control to reach this tab from your devices".to_string(),
+                        );
+                        cx.notify();
+                        return;
+                    }
                     ws.remote_toggle_mark(&key, tab_id, cx);
                     let now = ws.remote_is_marked(&key, tab_id);
                     let other = ws.remote.serve == RemoteServe::OtherBuild;
                     if let Some(n) = mark_note(ws.remote.file.enabled, other, now) {
                         ws.set_note(n.to_string());
                     } else if now && is_shell {
-                        ws.set_note("Remote on \u{2014} a paired phone can use this shell".to_string());
+                        ws.set_note("Remote on \u{2014} paired devices can use this shell".to_string());
                     }
                     cx.notify();
                 }))

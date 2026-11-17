@@ -566,26 +566,25 @@ async fn read_only_cannot_send() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn cert_reload_on_ip_change() {
+/// The Mac gets an address its CA doesn't cover: the CA is never swapped
+/// behind the user's back (devices would stop trusting it), and the address
+/// is left off the certificate (one uncovered name fails the whole cert).
+/// Settings is told instead.
+async fn ip_change_outside_the_ca_is_reported_not_served() {
     let h = Harness::start(Harness::unused_tmux());
+    assert!(!h.server().status().ca_outdated);
     let new_ip: IpAddr = "10.123.45.67".parse().unwrap();
     h.server().test_set_hosts(
         vec!["localhost".to_string()],
         vec![IpAddr::V4(Ipv4Addr::LOCALHOST), new_ip],
     );
     let deadline = Instant::now() + Duration::from_secs(1);
-    loop {
-        let ips = presented_ips(&h).await;
-        if ips.contains(&new_ip) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "cert not reloaded within 1s: {ips:?}"
-        );
+    while !h.server().status().ca_outdated {
+        assert!(Instant::now() < deadline, "outdated CA never reported");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(h
+    assert!(!presented_ips(&h).await.contains(&new_ip));
+    assert!(!h
         .server()
         .status()
         .urls
@@ -631,7 +630,14 @@ async fn setup_port_only_when_open() {
     let r = plain.get(setup("/setup")).send().await.unwrap();
     assert_eq!(r.status(), 200);
     let page = r.text().await.unwrap();
-    assert!(page.contains(&h.server().status().ca_fingerprint), "{page}");
+    // The page can't vouch for itself (plain HTTP): it sends the reader to
+    // the device's own certificate screen, and never shows a fingerprint
+    // an attacker could simply replace.
+    assert!(
+        !page.contains(&h.server().status().ca_fingerprint),
+        "{page}"
+    );
+    assert!(page.contains("SHA-256"), "{page}");
     // iOS only installs profiles from Safari, and "Profile Downloaded" is
     // short-lived — the page must say both.
     assert!(page.contains("Safari"), "{page}");
@@ -765,6 +771,42 @@ async fn stop_sends_disabled_to_sse() {
     .expect("SSE still open after stop");
     assert!(tail.contains("event: closed"), "{tail}");
     assert!(tail.contains(r#"{"reason":"disabled"}"#), "{tail}");
+}
+
+/// Turning Remote off and on again keeps every paired device: the same
+/// token works against a fresh server on the same state directory.
+#[tokio::test(flavor = "multi_thread")]
+async fn pairing_survives_disable_and_reenable() {
+    let mut h = Harness::start(Harness::unused_tmux());
+    let token = h.device(false);
+    assert_eq!(h.get("/api/me", Some(&token)).await.status(), 200);
+    let srv = h.server.take().unwrap();
+    tokio::task::spawn_blocking(move || srv.stop())
+        .await
+        .unwrap();
+    assert_eq!(h.store().load().devices.len(), 1);
+
+    // The old listener may take a moment to free the port (the app retries
+    // the same way).
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let server = loop {
+        let (_snap, rx) = snapshot_channel();
+        match RemoteServer::start_with_cert_check(
+            config(&h.dir, h.port, h.setup_port, Harness::unused_tmux()),
+            rx,
+            Duration::from_secs(60),
+        ) {
+            Ok(s) => break s,
+            Err(e) if Instant::now() < deadline => {
+                eprintln!("restart retry: {e:?}");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(e) => panic!("restart: {e:?}"),
+        }
+    };
+    h.server = Some(server);
+    let r = h.get("/api/me", Some(&token)).await;
+    assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1008,19 +1050,14 @@ async fn cert_check_runs_despite_file_churn() {
         vec![IpAddr::V4(Ipv4Addr::LOCALHOST), new_ip],
     );
     let deadline = Instant::now() + Duration::from_millis(1500);
-    let mut seen = Vec::new();
-    while Instant::now() < deadline {
-        seen = presented_ips(&h).await;
-        if seen.contains(&new_ip) {
-            break;
-        }
+    while Instant::now() < deadline && !h.server().status().ca_outdated {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     stop.store(true, Ordering::SeqCst);
     churn.join().unwrap();
     assert!(
-        seen.contains(&new_ip),
-        "cert never rechecked under churn: {seen:?}"
+        h.server().status().ca_outdated,
+        "certificate never rechecked under churn"
     );
 }
 
@@ -1114,7 +1151,7 @@ async fn wait_size(tm: &TmuxServer, session: &str, want: &str, secs: u64) -> boo
     false
 }
 
-/// A phone that stops answering (left Wi-Fi with "Fit to phone" on) must not
+/// A phone that stops answering (left Wi-Fi with "Fit to screen" on) must not
 /// hold the desktop window at phone size: the idle limit drops its socket and
 /// with it the fit. A client that keeps reading (and so answers pings) stays.
 #[tokio::test(flavor = "multi_thread")]
@@ -1301,6 +1338,99 @@ mod conversation {
         let a = h.store().mark("k", 1).unwrap();
         h.set_agents(vec![conv_agent(&a, "claude-code", &path)]);
         (a, path)
+    }
+
+    /// Only a shared shell tab may record commands: its switch file exists
+    /// while it is marked, and none survive the server stopping.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shell_logging_switch_follows_sharing_and_remote() {
+        let mut h = Harness::start(Harness::unused_tmux());
+        let a = h.store().mark("k", 1).unwrap();
+        let mut first = agent(&a, "s_sw", "shell");
+        first.agent_kind = None;
+        h.set_agents(vec![first]);
+        let mut flag = oo_remote::shell::log_path(&h.dir, "s_sw").into_os_string();
+        flag.push(".on");
+        let flag = PathBuf::from(flag);
+        let wait = |want: bool| {
+            let flag = flag.clone();
+            async move {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while flag.exists() != want {
+                    assert!(Instant::now() < deadline, "switch never became {want}");
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        };
+        wait(true).await;
+        h.store().unmark("k", Some(1)).unwrap();
+        wait(false).await;
+        // Shared again (a new mark id, as the app would publish it).
+        let again = h.store().mark("k", 1).unwrap();
+        let mut shell = agent(&again, "s_sw", "shell");
+        shell.agent_kind = None;
+        h.set_agents(vec![shell]);
+        wait(true).await;
+        let srv = h.server.take().unwrap();
+        tokio::task::spawn_blocking(move || srv.stop())
+            .await
+            .unwrap();
+        assert!(!flag.exists(), "stopping Remote must silence every shell");
+    }
+
+    /// A shell tab (no agent kind) whose zsh hook wrote a command log under
+    /// the state dir is offered as a conversation; without the log it is
+    /// Terminal-only.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shell_tab_with_a_command_log_is_a_conversation() {
+        let h = Harness::start(Harness::unused_tmux());
+        let token = h.device(false);
+        let a = h.store().mark("k", 1).unwrap();
+        let mut shell = agent(&a, "s_shell", "shell");
+        shell.agent_kind = None;
+        h.set_agents(vec![shell.clone()]);
+        assert_eq!(h.agents(&token).await[0]["has_conversation"], false);
+
+        let log = oo_remote::shell::log_path(&h.dir, "s_shell");
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(
+            &log,
+            concat!(
+                r#"{"t":"hello","at":1}"#,
+                "\n",
+                r#"{"t":"start","n":1,"cmd":"ls","cwd":"/p","at":2}"#,
+                "\n",
+                r#"{"t":"end","n":1,"exit":0,"at":3,"out":"a.txt"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        // A fresh snapshot recomputes has_conversation.
+        h.set_agents(vec![shell]);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while h.agents(&token).await[0]["has_conversation"] != true {
+            assert!(
+                Instant::now() < deadline,
+                "shell never offered a conversation"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let mut sse = open(&h, &a, &token).await;
+        let (_, entries) = sse.entries().await;
+        assert_eq!(entries[0]["text"], "$ ls");
+        assert!(entries.iter().any(|e| e["tool"]["summary"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("exit 0"))));
+        let r = h
+            .get(
+                &format!("/api/agents/{a}/conversation/tool/o2-1"),
+                Some(&token),
+            )
+            .await;
+        assert_eq!(r.status(), 200);
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(body["text"], "a.txt");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1615,4 +1745,26 @@ mod conversation {
         assert_eq!(v["is_error"], true);
         assert_eq!(v["truncated"], false);
     }
+}
+
+/// Trusting and forgetting networks reaches the status the app shows, and is
+/// kept in its own file (never `remote.json`).
+#[tokio::test(flavor = "multi_thread")]
+async fn trusting_and_forgetting_a_network() {
+    let h = Harness::start(Harness::unused_tmux());
+    let key = "192.168.50.0/24 via 192.168.50.1";
+    h.server().trust_network(key).unwrap();
+    let st = h.server().status();
+    assert!(
+        st.networks.iter().any(|n| n.key == key && n.trusted),
+        "{:?}",
+        st.networks
+    );
+    let sec = std::fs::read_to_string(h.dir.join("remote/security.json")).unwrap();
+    assert!(sec.contains(key));
+    assert!(!std::fs::read_to_string(h.dir.join("remote.json"))
+        .unwrap_or_default()
+        .contains(key));
+    h.server().forget_network(key).unwrap();
+    assert!(!h.server().status().networks.iter().any(|n| n.key == key));
 }

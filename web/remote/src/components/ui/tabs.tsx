@@ -1,5 +1,5 @@
-import * as React from "react";
 import * as TabsPrimitive from "@radix-ui/react-tabs";
+import * as React from "react";
 import { cn } from "@/lib/utils";
 
 const Tabs = TabsPrimitive.Root;
@@ -10,7 +10,10 @@ const TabsList = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <TabsPrimitive.List
     ref={ref}
-    className={cn("inline-flex items-center justify-center rounded-lg bg-muted p-[3px] text-muted-foreground", className)}
+    className={cn(
+      "inline-flex items-center justify-center rounded-lg bg-muted p-[3px] text-muted-foreground",
+      className,
+    )}
     {...props}
   />
 ));

@@ -1004,6 +1004,11 @@ impl HarnessWorkspace {
                 cx.notify();
             }))
             .child(card.on_click(|_, _, cx| cx.stop_propagation()))
+            .when(
+                self.remote.ui.setup_open
+                    && self.remote.serve == crate::workspace::remote::RemoteServe::Serving,
+                |d| d.child(self.render_add_phone_dialog(hx, cx)),
+            )
             .into_any_element()
     }
 

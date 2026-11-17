@@ -38,6 +38,99 @@ pub struct Ca {
     pub cert_pem: String,
     pub cert_der: Vec<u8>,
     key_pem: String,
+    /// The names and addresses it may vouch for (its name constraints).
+    permitted: Permitted,
+}
+
+/// A CA's permitted subtrees: DNS names (each covers itself and its
+/// subdomains) and IPv4 ranges as (network, mask).
+#[derive(Clone, Debug, Default)]
+struct Permitted {
+    dns: Vec<String>,
+    v4: Vec<(u32, u32)>,
+}
+
+impl Ca {
+    fn from_parts(cert_pem: String, cert_der: Vec<u8>, key_pem: String) -> io::Result<Ca> {
+        let permitted = permitted(&cert_der)?.unwrap_or_default();
+        Ok(Ca {
+            cert_pem,
+            cert_der,
+            key_pem,
+            permitted,
+        })
+    }
+
+    pub fn covers_host(&self, host: &str) -> bool {
+        let h = host.to_ascii_lowercase();
+        self.permitted
+            .dns
+            .iter()
+            .any(|d| h == *d || h.ends_with(&format!(".{d}")))
+    }
+
+    pub fn covers_ip(&self, ip: IpAddr) -> bool {
+        match ip.to_canonical() {
+            IpAddr::V4(v4) => {
+                let a = u32::from(v4);
+                self.permitted.v4.iter().any(|(net, mask)| a & mask == *net)
+            }
+            IpAddr::V6(_) => false,
+        }
+    }
+
+    /// The `hosts` and `ips` this CA may vouch for: a server certificate
+    /// naming anything else would fail to verify for every name on it.
+    pub fn covered(&self, hosts: &[String], ips: &[IpAddr]) -> (Vec<String>, Vec<IpAddr>) {
+        (
+            hosts
+                .iter()
+                .filter(|h| self.covers_host(h))
+                .cloned()
+                .collect(),
+            ips.iter()
+                .copied()
+                .filter(|ip| self.covers_ip(*ip))
+                .collect(),
+        )
+    }
+
+    /// Whether some of `hosts`/`ips` (this Mac's names and addresses now)
+    /// fall outside the CA: it was made before a rename or an address change.
+    pub fn outdated_for(&self, hosts: &[String], ips: &[IpAddr]) -> bool {
+        hosts.iter().any(|h| !self.covers_host(h)) || ips.iter().any(|ip| !self.covers_ip(*ip))
+    }
+}
+
+/// The CA's permitted subtrees, or `None` without a name-constraints
+/// extension.
+fn permitted(der: &[u8]) -> io::Result<Option<Permitted>> {
+    let (_, cert) = x509_parser::parse_x509_certificate(der).map_err(invalid)?;
+    let Some(nc) = cert.name_constraints().map_err(invalid)? else {
+        return Ok(None);
+    };
+    let mut p = Permitted::default();
+    for st in nc.value.permitted_subtrees.iter().flatten() {
+        match &st.base {
+            x509_parser::extensions::GeneralName::DNSName(d) => p.dns.push(d.to_ascii_lowercase()),
+            x509_parser::extensions::GeneralName::IPAddress(b) if b.len() == 8 => {
+                let net = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+                let mask = u32::from_be_bytes([b[4], b[5], b[6], b[7]]);
+                p.v4.push((net, mask));
+            }
+            _ => {}
+        }
+    }
+    Ok(Some(p))
+}
+
+/// A CA from before constraints were narrowed to this Mac: none at all, or
+/// every `.local` name and private range. Replaced once (kept as `.bak`).
+fn is_legacy(der: &[u8]) -> io::Result<bool> {
+    Ok(match permitted(der)? {
+        None => true,
+        Some(p) => p.dns.iter().any(|d| d == "local"),
+    })
 }
 
 pub struct ServerCert {
@@ -74,28 +167,27 @@ fn issuer_for(ca: &Ca) -> io::Result<Issuer<'static, KeyPair>> {
 /// names and private, link-local and loopback IPv4. A phone trusting the CA
 /// (and anything that reads `ca.key`, which any process of this user can)
 /// then can't vouch for any public site. rcgen marks the extension critical.
-fn ca_name_constraints() -> NameConstraints {
-    let net = |a: [u8; 4], prefix: u8| {
-        GeneralSubtree::IpAddress(CidrSubnet::from_addr_prefix(IpAddr::V4(a.into()), prefix))
-    };
+fn ca_name_constraints(hosts: &[String], ips: &[IpAddr]) -> NameConstraints {
+    let one = |ip: IpAddr| GeneralSubtree::IpAddress(CidrSubnet::from_addr_prefix(ip, 32));
+    let mut permitted: Vec<GeneralSubtree> = hosts
+        .iter()
+        .map(|h| GeneralSubtree::DnsName(h.to_ascii_lowercase()))
+        .collect();
+    if !hosts.iter().any(|h| h.eq_ignore_ascii_case("localhost")) {
+        permitted.push(GeneralSubtree::DnsName("localhost".into()));
+    }
+    let loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    permitted.extend(
+        ips.iter()
+            .copied()
+            .filter(|ip| ip.is_ipv4() && *ip != loopback)
+            .map(one),
+    );
+    permitted.push(one(loopback));
     NameConstraints {
-        permitted_subtrees: vec![
-            GeneralSubtree::DnsName("local".into()),
-            GeneralSubtree::DnsName("localhost".into()),
-            net([10, 0, 0, 0], 8),
-            net([172, 16, 0, 0], 12),
-            net([192, 168, 0, 0], 16),
-            net([169, 254, 0, 0], 16),
-            net([127, 0, 0, 0], 8),
-        ],
+        permitted_subtrees: permitted,
         excluded_subtrees: Vec::new(),
     }
-}
-
-/// Whether the CA certificate carries a name-constraints extension.
-fn has_name_constraints(der: &[u8]) -> io::Result<bool> {
-    let (_, cert) = x509_parser::parse_x509_certificate(der).map_err(invalid)?;
-    Ok(cert.name_constraints().map_err(invalid)?.is_some())
 }
 
 /// Load `ca.crt`/`ca.key` from `dir`, generating them on first use. Existing
@@ -104,25 +196,32 @@ fn has_name_constraints(der: &[u8]) -> io::Result<bool> {
 /// constraints (an unreleased build; no phone trusts it yet) is replaced
 /// once, logged, by a constrained one; the server cert follows (it records
 /// the CA fingerprint it was issued under).
-pub fn load_or_create_ca(dir: &Path, computer_name: &str) -> io::Result<Ca> {
+///
+/// A new CA vouches only for `hosts` (this Mac's `.local` name) and `ips`
+/// (its addresses now), plus localhost. It is never replaced because those
+/// change later ([`Ca::outdated_for`] tells; [`retire_ca`] replaces it on
+/// request); only a legacy one is, once, keeping it as `ca.*.bak`.
+pub fn load_or_create_ca(
+    dir: &Path,
+    computer_name: &str,
+    hosts: &[String],
+    ips: &[IpAddr],
+) -> io::Result<Ca> {
     let crt = dir.join("ca.crt");
     let key = dir.join("ca.key");
     match (fs::read_to_string(&crt), fs::read_to_string(&key)) {
         (Ok(cert_pem), Ok(key_pem)) => {
             let cert_der = pem_to_der(&cert_pem)?;
             KeyPair::from_pem(&key_pem).map_err(invalid)?;
-            if has_name_constraints(&cert_der)? {
-                return Ok(Ca {
-                    cert_pem,
-                    cert_der,
-                    key_pem,
-                });
+            if !is_legacy(&cert_der)? {
+                return Ca::from_parts(cert_pem, cert_der, key_pem);
             }
             eprintln!(
-                "oo-remote: replacing the remote CA in {} with one limited to local names \
-                 (re-add the app on any phone that trusted the old one)",
+                "oo-remote: replacing the remote CA in {} with one limited to this Mac \
+                 (the old one is kept as ca.crt.bak; re-add the app on devices that trusted it)",
                 dir.display()
             );
+            retire_ca(dir)?;
         }
         (Err(a), Err(b))
             if a.kind() == io::ErrorKind::NotFound && b.kind() == io::ErrorKind::NotFound => {}
@@ -138,20 +237,34 @@ pub fn load_or_create_ca(dir: &Path, computer_name: &str) -> io::Result<Ca> {
     params.distinguished_name = dn;
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-    params.name_constraints = Some(ca_name_constraints());
+    params.name_constraints = Some(ca_name_constraints(hosts, ips));
     params.not_before = odt(now - Duration::from_secs(DAY));
     params.not_after = odt(now + Duration::from_secs(CA_VALID_DAYS * DAY));
     let kp = KeyPair::generate().map_err(err)?;
     let cert = params.self_signed(&kp).map_err(err)?;
-    let ca = Ca {
-        cert_pem: cert.pem(),
-        cert_der: cert.der().to_vec(),
-        key_pem: kp.serialize_pem(),
-    };
+    let ca = Ca::from_parts(cert.pem(), cert.der().to_vec(), kp.serialize_pem())?;
     // Key first: a crash between writes never leaves a cert without its key.
     write_atomic_private(&key, ca.key_pem.as_bytes())?;
     write_atomic_private(&crt, ca.cert_pem.as_bytes())?;
     Ok(ca)
+}
+
+/// Set the CA (and the server certificate it signed) aside as `*.bak`, so the
+/// next start makes a new one. Devices must trust the new one.
+pub fn retire_ca(dir: &Path) -> io::Result<()> {
+    for name in [
+        "ca.crt",
+        "ca.key",
+        "server.crt",
+        "server.key",
+        "server.json",
+    ] {
+        let from = dir.join(name);
+        if from.exists() {
+            fs::rename(&from, dir.join(format!("{name}.bak")))?;
+        }
+    }
+    Ok(())
 }
 
 /// Issue a leaf for `hosts` + `ips` (127.0.0.1 is always added).
@@ -308,9 +421,17 @@ fn new_uuid() -> String {
 }
 
 /// Unsigned iOS configuration profile installing `ca` as a root certificate.
+///
+/// Each CA gets its own name and `PayloadIdentifier`: iOS replaces an
+/// installed profile that has the same identifier, so a shared one would let
+/// a second Mac's profile silently remove the first Mac's CA.
 pub fn mobileconfig(ca: &Ca) -> String {
     let data = base64::engine::general_purpose::STANDARD.encode(&ca.cert_der);
     let (outer, inner) = (new_uuid(), new_uuid());
+    let name = xml_escape(
+        &ca_common_name(&ca.cert_der).unwrap_or_else(|| "openOrchestra Remote CA".into()),
+    );
+    let id: String = fingerprint_sha256(&ca.cert_der).replace(':', "")[..16].to_ascii_lowercase();
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -326,9 +447,9 @@ pub fn mobileconfig(ca: &Ca) -> String {
       <key>PayloadDescription</key>
       <string>Lets this device trust openOrchestra Remote over your local network.</string>
       <key>PayloadDisplayName</key>
-      <string>openOrchestra Remote CA</string>
+      <string>{name}</string>
       <key>PayloadIdentifier</key>
-      <string>com.openorchestra.remote.ca.cert</string>
+      <string>com.openorchestra.remote.ca.{id}.cert</string>
       <key>PayloadType</key>
       <string>com.apple.security.root</string>
       <key>PayloadUUID</key>
@@ -338,9 +459,9 @@ pub fn mobileconfig(ca: &Ca) -> String {
     </dict>
   </array>
   <key>PayloadDisplayName</key>
-  <string>openOrchestra Remote CA</string>
+  <string>{name}</string>
   <key>PayloadIdentifier</key>
-  <string>com.openorchestra.remote.ca</string>
+  <string>com.openorchestra.remote.ca.{id}</string>
   <key>PayloadType</key>
   <string>Configuration</string>
   <key>PayloadUUID</key>
@@ -351,6 +472,19 @@ pub fn mobileconfig(ca: &Ca) -> String {
 </plist>
 "#
     )
+}
+
+/// The certificate's subject CN, e.g. "openOrchestra Remote CA (Omar's Mac)".
+fn ca_common_name(der: &[u8]) -> Option<String> {
+    let (_, cert) = x509_parser::parse_x509_certificate(der).ok()?;
+    let cn = cert.subject().iter_common_name().next()?;
+    cn.as_str().ok().map(str::to_string)
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn scutil(key: &str) -> Option<String> {
@@ -445,7 +579,9 @@ pub fn primary_ipv4() -> Option<IpAddr> {
 pub fn san_hosts(local_host_name: Option<&str>) -> Vec<String> {
     let mut v = Vec::new();
     if let Some(n) = local_host_name {
-        v.push(format!("{n}.local"));
+        // Lowercase: the CA's name constraint is, and DNS names compare
+        // without case anyway.
+        v.push(format!("{n}.local").to_ascii_lowercase());
     }
     v.push("localhost".to_string());
     v
@@ -471,12 +607,22 @@ mod tests {
         vec!["mac.local".to_string(), "localhost".to_string()]
     }
 
+    /// The CA a Mac named mac.local at 192.168.1.20 and 10.211.55.2 makes.
+    fn ca_at(dir: &Path, name: &str) -> io::Result<Ca> {
+        load_or_create_ca(
+            dir,
+            name,
+            &hosts(),
+            &[ip("192.168.1.20"), ip("10.211.55.2")],
+        )
+    }
+
     #[test]
     fn ca_is_created_once() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("remote");
-        let a = load_or_create_ca(&dir, "Test Mac").unwrap();
-        let b = load_or_create_ca(&dir, "Test Mac").unwrap();
+        let a = ca_at(&dir, "Test Mac").unwrap();
+        let b = ca_at(&dir, "Test Mac").unwrap();
         assert_eq!(a.cert_der, b.cert_der);
         let (_, cert) = X509Certificate::from_der(&a.cert_der).unwrap();
         assert!(cert
@@ -526,7 +672,7 @@ mod tests {
     #[test]
     fn ca_is_name_constrained_and_still_validates_local_names() {
         let dir = tempfile::tempdir().unwrap();
-        let ca = load_or_create_ca(dir.path(), "Test Mac").unwrap();
+        let ca = ca_at(dir.path(), "Test Mac").unwrap();
         let (_, cert) = X509Certificate::from_der(&ca.cert_der).unwrap();
         let ext = cert
             .extensions()
@@ -547,15 +693,14 @@ mod tests {
                 other => panic!("unexpected subtree {other:?}"),
             }
         }
-        assert_eq!(dns, ["local", "localhost"]);
+        // This Mac only: its own name and addresses, nothing broader.
+        assert_eq!(dns, ["mac.local", "localhost"]);
         assert_eq!(
             nets,
             [
-                vec![10, 0, 0, 0, 255, 0, 0, 0],
-                vec![172, 16, 0, 0, 255, 240, 0, 0],
-                vec![192, 168, 0, 0, 255, 255, 0, 0],
-                vec![169, 254, 0, 0, 255, 255, 0, 0],
-                vec![127, 0, 0, 0, 255, 0, 0, 0],
+                vec![192, 168, 1, 20, 255, 255, 255, 255],
+                vec![10, 211, 55, 2, 255, 255, 255, 255],
+                vec![127, 0, 0, 1, 255, 255, 255, 255],
             ]
         );
 
@@ -574,6 +719,10 @@ mod tests {
         let evil = issue_server_cert(&ca, &["example.com".to_string()], &[ip("8.8.8.8")]);
         assert!(verify(&ca, &evil.cert_pem, "example.com").is_err());
         assert!(verify(&ca, &evil.cert_pem, "8.8.8.8").is_err());
+        // Nor for another device on the network: a router, another Mac.
+        let lan = issue_server_cert(&ca, &["printer.local".to_string()], &[ip("192.168.1.1")]);
+        assert!(verify(&ca, &lan.cert_pem, "printer.local").is_err());
+        assert!(verify(&ca, &lan.cert_pem, "192.168.1.1").is_err());
     }
 
     #[test]
@@ -591,21 +740,22 @@ mod tests {
         std::fs::create_dir_all(dir.path()).unwrap();
         std::fs::write(dir.path().join("ca.key"), kp.serialize_pem()).unwrap();
         std::fs::write(dir.path().join("ca.crt"), old.pem()).unwrap();
-        let old_ca = Ca {
-            cert_pem: old.pem(),
-            cert_der: old.der().to_vec(),
-            key_pem: kp.serialize_pem(),
-        };
+        let old_ca = Ca::from_parts(old.pem(), old.der().to_vec(), kp.serialize_pem()).unwrap();
         // A server cert issued under the old CA.
         let ips = [ip("192.168.1.20")];
         let now = SystemTime::now();
         let old_sc = load_or_issue_server_cert(dir.path(), &old_ca, &hosts(), &ips, now).unwrap();
 
-        let ca = load_or_create_ca(dir.path(), "Test Mac").unwrap();
+        let ca = ca_at(dir.path(), "Test Mac").unwrap();
         assert_ne!(ca.cert_der, old.der().to_vec());
-        assert!(has_name_constraints(&ca.cert_der).unwrap());
+        assert!(!is_legacy(&ca.cert_der).unwrap());
+        // The old one is kept, not destroyed.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("ca.crt.bak")).unwrap(),
+            old.pem()
+        );
         // Persisted: the next load keeps the new one.
-        let again = load_or_create_ca(dir.path(), "Test Mac").unwrap();
+        let again = ca_at(dir.path(), "Test Mac").unwrap();
         assert_eq!(again.cert_der, ca.cert_der);
         // The server cert is reissued under the new CA.
         let sc = load_or_issue_server_cert(dir.path(), &ca, &hosts(), &ips, now).unwrap();
@@ -614,9 +764,92 @@ mod tests {
     }
 
     #[test]
+    fn a_broad_ca_from_the_last_version_is_replaced_once_with_a_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        // The previous version: every .local name and private range.
+        let mut params = CertificateParams::default();
+        params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        params.name_constraints = Some(rcgen::NameConstraints {
+            permitted_subtrees: vec![
+                rcgen::GeneralSubtree::DnsName("local".into()),
+                rcgen::GeneralSubtree::IpAddress(rcgen::CidrSubnet::from_addr_prefix(
+                    ip("192.168.0.0"),
+                    16,
+                )),
+            ],
+            excluded_subtrees: Vec::new(),
+        });
+        let kp = KeyPair::generate().unwrap();
+        let old = params.self_signed(&kp).unwrap();
+        std::fs::write(dir.path().join("ca.key"), kp.serialize_pem()).unwrap();
+        std::fs::write(dir.path().join("ca.crt"), old.pem()).unwrap();
+        assert!(is_legacy(old.der()).unwrap());
+
+        let ca = ca_at(dir.path(), "Test Mac").unwrap();
+        assert_ne!(ca.cert_der, old.der().to_vec());
+        assert!(dir.path().join("ca.key.bak").is_file());
+        assert_eq!(ca_at(dir.path(), "Test Mac").unwrap().cert_der, ca.cert_der);
+    }
+
+    #[test]
+    fn a_mixed_case_mac_name_still_verifies() {
+        let dir = tempfile::tempdir().unwrap();
+        let hosts = san_hosts(Some("Omars-M5-Pro-2026"));
+        assert_eq!(hosts[0], "omars-m5-pro-2026.local");
+        let ca = load_or_create_ca(dir.path(), "Mac", &hosts, &[ip("192.168.86.26")]).unwrap();
+        let sc = issue_server_cert(&ca, &hosts, &[ip("192.168.86.26")]);
+        for name in [
+            "omars-m5-pro-2026.local",
+            "Omars-M5-Pro-2026.local",
+            "192.168.86.26",
+        ] {
+            verify(&ca, &sc.cert_pem, name).unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+        assert!(ca.covers_host("Omars-M5-Pro-2026.local"));
+    }
+
+    #[test]
+    fn an_address_change_never_replaces_the_ca_but_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = ca_at(dir.path(), "Test Mac").unwrap();
+        let moved = [ip("192.168.1.77")];
+        let again = load_or_create_ca(dir.path(), "Test Mac", &hosts(), &moved).unwrap();
+        assert_eq!(again.cert_der, ca.cert_der, "devices keep trusting it");
+        assert!(again.outdated_for(&hosts(), &moved));
+        assert!(!again.outdated_for(&hosts(), &[ip("192.168.1.20")]));
+        // The server certificate only names what the CA covers.
+        let (h, i) = again.covered(&hosts(), &[ip("192.168.1.20"), ip("192.168.1.77")]);
+        assert_eq!(h, hosts());
+        assert_eq!(i, vec![ip("192.168.1.20")]);
+        let renamed = vec!["newname.local".to_string()];
+        assert!(again.outdated_for(&renamed, &[]));
+    }
+
+    #[test]
+    fn retiring_the_ca_sets_everything_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = ca_at(dir.path(), "Test Mac").unwrap();
+        load_or_issue_server_cert(
+            dir.path(),
+            &ca,
+            &hosts(),
+            &[ip("192.168.1.20")],
+            SystemTime::now(),
+        )
+        .unwrap();
+        retire_ca(dir.path()).unwrap();
+        for f in ["ca.crt", "ca.key", "server.crt", "server.key"] {
+            assert!(!dir.path().join(f).exists(), "{f}");
+            assert!(dir.path().join(format!("{f}.bak")).exists(), "{f}.bak");
+        }
+        assert_ne!(ca_at(dir.path(), "Test Mac").unwrap().cert_der, ca.cert_der);
+    }
+
+    #[test]
     fn server_cert_has_sans_and_short_validity() {
         let dir = tempfile::tempdir().unwrap();
-        let ca = load_or_create_ca(dir.path(), "Test Mac").unwrap();
+        let ca = ca_at(dir.path(), "Test Mac").unwrap();
         let sc = issue_server_cert(&ca, &hosts(), &[ip("192.168.1.20")]);
         let der = x509_parser::pem::parse_x509_pem(sc.cert_pem.as_bytes())
             .unwrap()
@@ -679,7 +912,7 @@ mod tests {
     #[test]
     fn needs_reissue_on_ip_change() {
         let dir = tempfile::tempdir().unwrap();
-        let ca = load_or_create_ca(dir.path(), "Test Mac").unwrap();
+        let ca = ca_at(dir.path(), "Test Mac").unwrap();
         let ips = [ip("192.168.1.20")];
         let now = SystemTime::now();
         let sc = load_or_issue_server_cert(dir.path(), &ca, &hosts(), &ips, now).unwrap();
@@ -714,7 +947,7 @@ mod tests {
     fn mobileconfig_embeds_ca() {
         use base64::Engine;
         let dir = tempfile::tempdir().unwrap();
-        let ca = load_or_create_ca(dir.path(), "Test Mac").unwrap();
+        let ca = ca_at(dir.path(), "Test Mac").unwrap();
         let xml = mobileconfig(&ca);
         assert!(xml.contains("com.apple.security.root"));
         assert!(xml.contains(&base64::engine::general_purpose::STANDARD.encode(&ca.cert_der)));
@@ -723,6 +956,35 @@ mod tests {
         assert_eq!(
             d.get("PayloadType").unwrap().as_string(),
             Some("Configuration")
+        );
+    }
+
+    #[test]
+    fn mobileconfigs_from_two_macs_do_not_replace_each_other() {
+        let field = |xml: &str, k: &str| {
+            let v = plist::Value::from_reader_xml(xml.as_bytes()).unwrap();
+            v.as_dictionary()
+                .unwrap()
+                .get(k)
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_string()
+        };
+        let (d1, d2) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let a = mobileconfig(&ca_at(d1.path(), "Studio <A&B>").unwrap());
+        let b = mobileconfig(&ca_at(d2.path(), "Laptop").unwrap());
+        assert_ne!(
+            field(&a, "PayloadIdentifier"),
+            field(&b, "PayloadIdentifier")
+        );
+        assert_eq!(
+            field(&a, "PayloadDisplayName"),
+            "openOrchestra Remote CA (Studio <A&B>)"
+        );
+        assert_eq!(
+            field(&b, "PayloadDisplayName"),
+            "openOrchestra Remote CA (Laptop)"
         );
     }
 

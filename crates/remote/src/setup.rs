@@ -1,4 +1,4 @@
-//! Plain-HTTP setup port (7080, only while "Add a phone" is open): the
+//! Plain-HTTP setup port (7080, only while "Add a device" is open): the
 //! platform-detecting setup page and the public CA. Nothing else — never the
 //! API or the PWA.
 
@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 
-use crate::api::{peer_filter, AppState};
+use crate::api::{peer_filter, trusted_filter, AppState};
 use crate::server::Shared;
 
 pub(crate) fn router(shared: Arc<Shared>) -> Router {
@@ -21,6 +21,10 @@ pub(crate) fn router(shared: Arc<Shared>) -> Router {
         .route("/ca.crt", get(ca_crt))
         .route("/ca.mobileconfig", get(ca_mobileconfig))
         .fallback(|| async { StatusCode::NOT_FOUND })
+        .layer(middleware::from_fn_with_state(
+            shared.clone(),
+            trusted_filter,
+        ))
         .layer(middleware::from_fn(peer_filter))
         .with_state(shared)
 }
@@ -114,7 +118,6 @@ pub(crate) fn ios_non_safari(ua: &str) -> bool {
 
 async fn page(State(s): AppState, headers: axum::http::HeaderMap) -> Response {
     let (apple, android) = links(&s);
-    let fp = escape(&s.ca.fingerprint);
     let (apple, android) = (escape(&apple), escape(&android));
     let header_str = |name| {
         headers
@@ -140,12 +143,11 @@ async fn page(State(s): AppState, headers: axum::http::HeaderMap) -> Response {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>openOrchestra Remote — set up this phone</title>
+<title>openOrchestra Remote — set up this device</title>
 <style>
   :root {{ color-scheme: light dark; }}
   body {{ font: 17px/1.45 -apple-system, system-ui, sans-serif; margin: 0 auto; max-width: 36rem; padding: 1.25rem; }}
   h1 {{ font-size: 1.4rem; }}
-  .fp {{ font: 13px ui-monospace, monospace; word-break: break-all; padding: .6rem; border: 1px solid #8884; border-radius: .5rem; }}
   a.btn {{ display: block; text-align: center; padding: .9rem; min-height: 44px; box-sizing: border-box; border-radius: .6rem; background: #2563eb; color: #fff; text-decoration: none; margin: .75rem 0; }}
   ol li {{ margin: .4rem 0; }}
   .hidden {{ display: none; }}
@@ -156,15 +158,18 @@ async fn page(State(s): AppState, headers: axum::http::HeaderMap) -> Response {
 <body>
 <h1>Set up openOrchestra Remote</h1>
 {banner}
-<p>Check that this fingerprint matches the one in openOrchestra → Settings → Remote:</p>
-<p class="fp">{fp}</p>
+<p class="warn"><b>Check the certificate before you trust it.</b> This page comes over an unencrypted
+connection, so it can't vouch for itself. Your device's own certificate screen can: compare the
+<b>SHA-256 fingerprint</b> it shows with the one in the “Add a device” window on your Mac. They must
+match exactly. If they don't, stop: someone on this network may be interfering.</p>
 
 <section id="apple">
   <h2>iPhone / iPad</h2>
   <p>Do steps 1–2 in <b>Safari</b>: iOS won’t install a certificate profile from Chrome or other browsers.</p>
   <ol>
     <li><a class="btn" href="/ca.mobileconfig">Download the certificate profile</a> and tap <b>Allow</b> when asked.</li>
-    <li>Open the <b>Settings</b> app → <b>Profile Downloaded</b> (near the top) → <b>Install</b>. If it isn’t there, look in <b>General → VPN &amp; Device Management</b>. iOS discards a downloaded profile after a few minutes; download it again if it’s gone.</li>
+    <li>Open the <b>Settings</b> app → <b>Profile Downloaded</b> (near the top). If it isn’t there, look in <b>General → VPN &amp; Device Management</b>. iOS discards a downloaded profile after a few minutes; download it again if it’s gone.</li>
+    <li><b>Before tapping Install</b>: tap <b>More Details</b> → the certificate, and check its <b>SHA-256</b> fingerprint against your Mac. Then <b>Install</b>.</li>
     <li>Then <b>Settings → General → About → Certificate Trust Settings</b> and turn on full trust for “openOrchestra Remote CA”.</li>
     <li><a class="btn" href="{apple}">Open openOrchestra Remote</a>, then Share → <b>Add to Home Screen</b>, and pair from the home-screen app.</li>
   </ol>
@@ -175,6 +180,7 @@ async fn page(State(s): AppState, headers: axum::http::HeaderMap) -> Response {
   <ol>
     <li><a class="btn" href="/ca.crt">Download the CA certificate</a></li>
     <li>Open <b>Settings → Security → Encryption &amp; credentials → Install a certificate → CA certificate</b> and pick the downloaded file.</li>
+    <li>Then <b>Encryption &amp; credentials → User credentials</b> (or <b>Trusted credentials → User</b>) → <b>openOrchestra Remote CA</b>, and check its <b>SHA-256</b> fingerprint against your Mac. If it doesn't match, remove it.</li>
     <li><a class="btn" href="{android}">Open openOrchestra Remote</a> in Chrome, then menu → <b>Install app</b>, and pair from the installed app.</li>
   </ol>
   <p>Tip: reserve this Mac’s IP address on your router. If it changes, re-add the app.</p>

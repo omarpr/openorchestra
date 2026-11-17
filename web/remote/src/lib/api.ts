@@ -34,7 +34,7 @@ export class ApiError extends Error {
   }
 }
 
-async function errorCode(res: Response): Promise<string> {
+export async function errorCode(res: Response): Promise<string> {
   try {
     const t = await res.text();
     try {

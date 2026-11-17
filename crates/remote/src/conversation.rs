@@ -15,6 +15,8 @@ const MARKER: &str = "…[truncated]";
 pub enum TranscriptKind {
     ClaudeCode,
     Pi,
+    /// A shell tab's command log (see `crate::shell`).
+    Shell,
 }
 
 impl TranscriptKind {
@@ -139,10 +141,14 @@ fn active_branch<'a>(
 }
 
 pub fn parse_entries(kind: TranscriptKind, text: &str, cwd: Option<&Path>) -> Vec<Entry> {
+    if kind == TranscriptKind::Shell {
+        return crate::shell::parse_entries(text);
+    }
     let records = parse_lines(text);
     match kind {
         TranscriptKind::ClaudeCode => claude_entries(&records, cwd),
         TranscriptKind::Pi => pi_entries(&records, cwd),
+        TranscriptKind::Shell => unreachable!("handled above"),
     }
 }
 
@@ -460,6 +466,9 @@ fn pi_entries(records: &[Value], cwd: Option<&Path>) -> Vec<Entry> {
 
 /// Full result text for one tool call, capped at 64 KiB.
 pub fn tool_result(kind: TranscriptKind, text: &str, tool_id: &str) -> Option<ToolResult> {
+    if kind == TranscriptKind::Shell {
+        return crate::shell::tool_result(text, tool_id);
+    }
     for r in parse_lines(text) {
         let (content, is_error) = match kind {
             TranscriptKind::ClaudeCode => {
@@ -489,6 +498,7 @@ pub fn tool_result(kind: TranscriptKind, text: &str, tool_id: &str) -> Option<To
                     r["message"]["isError"].as_bool().unwrap_or(false),
                 )
             }
+            TranscriptKind::Shell => unreachable!("handled above"),
         };
         let full = result_text(&content);
         let truncated = full.len() > RESULT_CAP;

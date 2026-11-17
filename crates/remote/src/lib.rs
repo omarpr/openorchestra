@@ -1,5 +1,6 @@
 //! oo-remote — LAN remote control for openOrchestra agent tabs.
 
+pub mod activity;
 mod api;
 pub mod assets;
 pub mod auth;
@@ -8,8 +9,11 @@ pub mod conversation;
 mod conversation_api;
 pub mod keepawake;
 pub mod netfilter;
+pub mod network;
+pub mod security;
 pub mod server;
 mod setup;
+pub mod shell;
 pub mod store;
 mod tls;
 pub mod tmux_bridge;

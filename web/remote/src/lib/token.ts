@@ -1,34 +1,24 @@
 // Device token storage. localStorage may throw (private mode); fall back to memory.
+import { readPref, writePref } from "./storage";
+
 const KEY = "oo.token";
 let mem: string | null = null;
 const listeners = new Set<() => void>();
 
 export function getToken(): string | null {
-  try {
-    return localStorage.getItem(KEY) ?? mem;
-  } catch {
-    return mem;
-  }
+  return readPref(KEY) ?? mem;
 }
 
 export function setToken(token: string): void {
   mem = token;
-  try {
-    localStorage.setItem(KEY, token);
-  } catch {
-    /* memory only */
-  }
-  listeners.forEach((l) => l());
+  writePref(KEY, token);
+  for (const l of listeners) l();
 }
 
 export function clearToken(): void {
   mem = null;
-  try {
-    localStorage.removeItem(KEY);
-  } catch {
-    /* ignore */
-  }
-  listeners.forEach((l) => l());
+  writePref(KEY, null);
+  for (const l of listeners) l();
 }
 
 /** For useSyncExternalStore. */

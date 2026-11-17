@@ -64,14 +64,26 @@ pub(crate) async fn cert_loop(
                 continue;
             }
         };
-        let s2 = s.clone();
-        let Ok((hosts, new_ips)) = tokio::task::spawn_blocking(move || s2.desired_sans()).await
+        let (s2, ca3) = (s.clone(), ca.clone());
+        let Ok((hosts, new_ips, outdated)) = tokio::task::spawn_blocking(move || {
+            let (h, i) = s2.desired_sans();
+            let outdated = s2.ca_outdated(&ca3, &h, &i);
+            (h, i, outdated)
+        })
+        .await
         else {
             continue;
         };
         ips = new_ips;
-        if certs::needs_reissue(&cur, &hosts, &ips, SystemTime::now()) {
-            let (ca2, dir2, h2, i2) = (ca.clone(), dir.clone(), hosts.clone(), ips.clone());
+        s.status
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .ca_outdated = outdated;
+        // Only what the CA may vouch for: one name outside it would make the
+        // whole certificate fail.
+        let (hosts, covered_ips) = ca.covered(&hosts, &ips);
+        if certs::needs_reissue(&cur, &hosts, &covered_ips, SystemTime::now()) {
+            let (ca2, dir2, h2, i2) = (ca.clone(), dir.clone(), hosts.clone(), covered_ips.clone());
             let issued = tokio::task::spawn_blocking(move || {
                 let cert =
                     certs::load_or_issue_server_cert(&dir2, &ca2, &h2, &i2, SystemTime::now())?;

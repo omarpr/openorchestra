@@ -1,4 +1,4 @@
-import { UnauthorizedError } from "./api";
+import { ApiError, errorCode, UnauthorizedError } from "./api";
 
 export interface SseEvent {
   event: string;
@@ -13,25 +13,38 @@ export function parseSse(chunk: string, carry: string): { events: SseEvent[]; ca
   if (heldCr) raw = raw.slice(0, -1);
   const frames = raw.replace(/\r\n?/g, "\n").split("\n\n");
   const rest = (frames.pop() ?? "") + (heldCr ? "\r" : "");
-  const events: SseEvent[] = [];
-  for (const frame of frames) {
-    let event = "message";
-    const data: string[] = [];
-    for (const line of frame.split("\n")) {
-      if (line === "" || line.startsWith(":")) continue;
-      const i = line.indexOf(":");
-      const field = i < 0 ? line : line.slice(0, i);
-      let value = i < 0 ? "" : line.slice(i + 1);
-      if (value.startsWith(" ")) value = value.slice(1);
-      if (field === "event") {
-        event = value;
-      } else if (field === "data") {
-        data.push(value);
-      }
-    }
-    if (data.length > 0) events.push({ event, data: data.join("\n") });
-  }
+  const events = frames.map(parseFrame).filter((e): e is SseEvent => e !== null);
   return { events, carry: rest };
+}
+
+/** One frame's `event:` and `data:` lines; `null` without data (comments, keep-alives). */
+function parseFrame(frame: string): SseEvent | null {
+  let event = "message";
+  const data: string[] = [];
+  for (const line of frame.split("\n")) {
+    if (line === "" || line.startsWith(":")) continue;
+    const i = line.indexOf(":");
+    const field = i < 0 ? line : line.slice(0, i);
+    const value = i < 0 ? "" : line.slice(i + 1).replace(/^ /, "");
+    if (field === "event") event = value;
+    else if (field === "data") data.push(value);
+  }
+  return data.length > 0 ? { event, data: data.join("\n") } : null;
+}
+
+/** JSON in an event's data, or `null` for a malformed frame. */
+export function parseData<T>(data: string): T | null {
+  try {
+    return JSON.parse(data) as T;
+  } catch {
+    return null;
+  }
+}
+
+/** The reason in a `closed` event (`{"reason":"…"}`, or the raw text from an older server). */
+export function closedReason(data: string): string {
+  const j = parseData<{ reason?: string }>(data);
+  return j ? (j.reason ?? "") : data;
 }
 
 /**
@@ -49,6 +62,8 @@ export async function streamEvents(
     signal,
   });
   if (res.status === 401) throw new UnauthorizedError();
+  // 403 says why (e.g. `untrusted_network`): callers show it.
+  if (res.status === 403) throw new ApiError(403, await errorCode(res));
   if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
   const reader = res.body.getReader();
   const dec = new TextDecoder();
@@ -58,6 +73,6 @@ export async function streamEvents(
     if (done) break;
     const r = parseSse(dec.decode(value, { stream: true }), carry);
     carry = r.carry;
-    r.events.forEach(onEvent);
+    for (const e of r.events) onEvent(e);
   }
 }

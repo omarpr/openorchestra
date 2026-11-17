@@ -1,6 +1,6 @@
-import * as React from "react";
 import { OTPInput, OTPInputContext } from "input-otp";
 import { Minus } from "lucide-react";
+import * as React from "react";
 import { cn } from "@/lib/utils";
 
 const InputOTP = React.forwardRef<React.ElementRef<typeof OTPInput>, React.ComponentPropsWithoutRef<typeof OTPInput>>(
@@ -47,10 +47,10 @@ const InputOTPSlot = React.forwardRef<HTMLDivElement, React.ComponentPropsWithou
 InputOTPSlot.displayName = "InputOTPSlot";
 
 const InputOTPSeparator = React.forwardRef<HTMLDivElement, React.ComponentPropsWithoutRef<"div">>((props, ref) => (
-  <div ref={ref} role="separator" {...props}>
+  <div ref={ref} aria-hidden="true" {...props}>
     <Minus />
   </div>
 ));
 InputOTPSeparator.displayName = "InputOTPSeparator";
 
-export { InputOTP, InputOTPGroup, InputOTPSlot, InputOTPSeparator };
+export { InputOTP, InputOTPGroup, InputOTPSeparator, InputOTPSlot };
