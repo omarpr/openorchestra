@@ -1,12 +1,12 @@
-import { useRef, useState } from "react";
+import { Suspense, useRef, useState } from "react";
 import { AgentComposer } from "@/components/agent/AgentComposer";
 import { AgentHeader } from "@/components/agent/AgentHeader";
 import { AgentToolbar } from "@/components/agent/AgentToolbar";
 import { ConnectionState } from "@/components/agent/ConnectionState";
 import { NotShared } from "@/components/agent/NotShared";
-import { ConversationView } from "@/components/ConversationView";
+import { ConversationView, TerminalView } from "@/components/lazyViews";
 import { StatusBar } from "@/components/StatusBar";
-import { type TerminalHandle, TerminalView } from "@/components/TerminalView";
+import type { TerminalHandle } from "@/components/TerminalView";
 import { useClosures } from "@/hooks/useClosures";
 import { useFocusWhenWaiting } from "@/hooks/useFocusWhenWaiting";
 import { useIsTablet } from "@/hooks/useMedia";
@@ -71,31 +71,33 @@ export function AgentView({
       <ConnectionState closed={closed} connected={connected} shell={shell} onRetry={retry} />
 
       <div className="min-h-0 flex-1">
-        {notFound ? (
-          <NotShared showBack={!isTablet} />
-        ) : loading ? null : view === "conversation" ? (
-          <ConversationView
-            key={attempt}
-            id={id}
-            onClosed={report}
-            onConnection={setConnected}
-            shell={shell}
-            onOpenTerminal={() => pickView("terminal")}
-          />
-        ) : (
-          <TerminalView
-            key={attempt}
-            ref={term}
-            id={id}
-            fit={prefs.fit}
-            fontSize={prefs.fontSize}
-            ctrl={ctrl}
-            onCtrlUsed={() => setCtrl(false)}
-            onInit={setInitReadOnly}
-            onClosed={report}
-            onConnection={setConnected}
-          />
-        )}
+        <Suspense fallback={<ViewLoading />}>
+          {notFound ? (
+            <NotShared showBack={!isTablet} />
+          ) : loading ? null : view === "conversation" ? (
+            <ConversationView
+              key={attempt}
+              id={id}
+              onClosed={report}
+              onConnection={setConnected}
+              shell={shell}
+              onOpenTerminal={() => pickView("terminal")}
+            />
+          ) : (
+            <TerminalView
+              key={attempt}
+              ref={term}
+              id={id}
+              fit={prefs.fit}
+              fontSize={prefs.fontSize}
+              ctrl={ctrl}
+              onCtrlUsed={() => setCtrl(false)}
+              onInit={setInitReadOnly}
+              onClosed={report}
+              onConnection={setConnected}
+            />
+          )}
+        </Suspense>
       </div>
 
       {agent && view === "conversation" && !closed && <StatusBar status={agent.status} tool={agent.tool} />}
@@ -120,6 +122,15 @@ export function AgentView({
           }
         />
       )}
+    </div>
+  );
+}
+
+/** While a view's code downloads (first open only). */
+function ViewLoading() {
+  return (
+    <div role="status" className="flex h-full items-center justify-center text-sm text-muted-foreground">
+      Loading…
     </div>
   );
 }

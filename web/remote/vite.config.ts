@@ -36,6 +36,14 @@ export default defineConfig({
     }),
   ],
   resolve: { alias: { "@": path.resolve(__dirname, "src") } },
+  build: {
+    rollupOptions: {
+      output: {
+        // React changes far less often than the app: its own chunk stays cached across updates.
+        manualChunks: { react: ["react", "react-dom"] },
+      },
+    },
+  },
   test: {
     environment: "jsdom",
     globals: true,

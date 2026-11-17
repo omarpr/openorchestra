@@ -1,6 +1,12 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
-import { afterEach } from "vitest";
+import { afterEach, vi } from "vitest";
+
+// Production loads these views lazily; tests use them directly so renders stay synchronous.
+vi.mock("@/components/lazyViews", async () => ({
+  TerminalView: (await import("@/components/TerminalView")).TerminalView,
+  ConversationView: (await import("@/components/ConversationView")).ConversationView,
+}));
 
 // Newer Node ships its own (file-backed, often undefined) `localStorage` that can
 // shadow jsdom's. Install a plain in-memory Storage so tests are deterministic.
