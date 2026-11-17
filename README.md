@@ -10,6 +10,8 @@ broker.
 
 Everything runs on your Mac. There's no account, no cloud and no telemetry.
 
+![A Claude Code agent running in a worktree, with the sidebar on the left and the git changes panel on the right](docs/screenshots/running-agent.png)
+
 ## Features
 
 - **Tasks in worktrees.** `⌘N` creates a task: a git worktree on its own
@@ -46,7 +48,19 @@ Everything runs on your Mac. There's no account, no cloud and no telemetry.
 - **Footprint monitor.** The sidebar's STATS band shows the app's own CPU and
   memory use, broken down by worktree, including the agents' processes.
 
-<!-- Screenshots: add docs/screenshots/*.png here once captured. -->
+### The embedded editor
+
+The editor tab is zed's own workspace for the worktree: file tree, syntax
+highlighting and git gutter markers on what the agent changed.
+
+![The embedded zed editor showing a file tree and a Rust file with changed lines marked in the gutter](docs/screenshots/inside-editor.png)
+
+### Reviewing the agent's changes
+
+The Review panel lists the changed files against the chosen base
+(uncommitted work here), with unified or split diffs and real line numbers.
+
+![The Review panel showing four changed files and a unified diff of account.rs](docs/screenshots/embedded-diff.png)
 
 ## Requirements
 
