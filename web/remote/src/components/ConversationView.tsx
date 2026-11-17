@@ -1,7 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { useConversation } from "@/lib/conversation";
 import { EntryRow } from "@/components/EntryRow";
-import { ToolSheet, type ToolRef } from "@/components/ToolSheet";
+import { PendingMessages } from "@/components/PendingMessages";
+import { type ToolRef, ToolSheet } from "@/components/ToolSheet";
+import { usePending } from "@/hooks/usePending";
+import { useConversation } from "@/lib/conversation";
 
 const STICK_PX = 80;
 
@@ -9,9 +11,13 @@ interface Props {
   id: string;
   onClosed?(reason: string): void;
   onConnection?(connected: boolean): void;
+  /** A shell's conversation (wording of pending messages). */
+  shell?: boolean;
+  /** Switch to the terminal (offered when a message isn't picked up). */
+  onOpenTerminal?(): void;
 }
 
-export function ConversationView({ id, onClosed, onConnection }: Props) {
+export function ConversationView({ id, onClosed, onConnection, shell = false, onOpenTerminal }: Props) {
   const { entries, connected, closed } = useConversation(id);
   const scroller = useRef<HTMLDivElement>(null);
   const stuck = useRef(true);
@@ -28,6 +34,18 @@ export function ConversationView({ id, onClosed, onConnection }: Props) {
   useEffect(() => {
     if (closed) cb.current.onClosed?.(closed);
   }, [closed]);
+
+  // Sending a message shows it at the bottom: go there.
+  const pendingCount = usePending(id).length;
+  const lastPending = useRef(pendingCount);
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    const sent = pendingCount > lastPending.current;
+    lastPending.current = pendingCount;
+    if (!el || !(sent || stuck.current)) return;
+    el.scrollTop = el.scrollHeight;
+    stuck.current = true;
+  }, [pendingCount]);
 
   const seen = useRef<Set<string>>(new Set());
   useLayoutEffect(() => {
@@ -81,6 +99,7 @@ export function ConversationView({ id, onClosed, onConnection }: Props) {
         {entries.map((e) => (
           <EntryRow key={e.id} e={e} onTool={setTool} />
         ))}
+        <PendingMessages agentId={id} entries={entries} shell={shell} onOpenTerminal={onOpenTerminal} />
       </div>
       {unseen && (
         <button

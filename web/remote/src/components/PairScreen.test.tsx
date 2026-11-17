@@ -42,16 +42,38 @@ describe("PairScreen", () => {
   it("shows the 401 copy", async () => {
     fetchMock.mockResolvedValue(new Response(JSON.stringify({ error: "invalid" }), { status: 401 }));
     await enterCode();
-    expect(
-      await screen.findByText("That code didn't work — check Settings → Remote on your Mac"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("That code didn't work — check Settings → Remote on your Mac")).toBeInTheDocument();
   });
 
   it("shows the 423 copy", async () => {
     fetchMock.mockResolvedValue(new Response(JSON.stringify({ error: "locked" }), { status: 423 }));
     await enterCode();
+    expect(await screen.findByText("Too many tries — make a new code on your Mac")).toBeInTheDocument();
+  });
+
+  it("says when only this device is locked out", async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ error: "address_locked" }), { status: 423 }));
+    await enterCode();
     expect(
-      await screen.findByText("Too many tries — make a new code on your Mac"),
+      await screen.findByText("Too many wrong codes from this device — try again in 10 minutes"),
     ).toBeInTheDocument();
+  });
+});
+
+describe("Mac name", () => {
+  afterEach(() => document.querySelector('meta[name="oo-host"]')?.remove());
+
+  it("names the Mac being paired with when the server provides it", () => {
+    const m = document.createElement("meta");
+    m.name = "oo-host";
+    m.content = "Studio";
+    document.head.append(m);
+    render(<PairScreen />);
+    expect(screen.getByText("Pair with Studio")).toBeInTheDocument();
+  });
+
+  it("falls back to a generic title without it", () => {
+    render(<PairScreen />);
+    expect(screen.getByText("Pair this device")).toBeInTheDocument();
   });
 });

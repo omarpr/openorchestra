@@ -33,7 +33,7 @@ class ResizeObserverStub {
   disconnect() {}
 }
 // Plain assignment (not vi.stubGlobal) so tests' unstubAllGlobals() can't remove them.
-if (!("ResizeObserver" in globalThis)) (globalThis as any).ResizeObserver = ResizeObserverStub;
+if (!("ResizeObserver" in globalThis)) (globalThis as { ResizeObserver: unknown }).ResizeObserver = ResizeObserverStub;
 if (!document.elementFromPoint) document.elementFromPoint = () => null;
 
 afterEach(() => cleanup());

@@ -11,6 +11,7 @@ use gpui::{AssetSource, SharedString};
 /// Icons bundled with the app itself, by asset path.
 const OWN: &[(&str, &[u8])] = &[
     ("icons/oo/house.svg", include_bytes!("../icons/house.svg")),
+    ("icons/oo/devices.svg", include_bytes!("../icons/devices.svg")),
     (
         "icons/oo/agents/claudecode.svg",
         include_bytes!("../icons/agents/claudecode.svg"),

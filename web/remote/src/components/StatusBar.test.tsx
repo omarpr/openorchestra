@@ -22,7 +22,7 @@ describe("StatusBar", () => {
     expect(bar).toHaveTextContent("Bash: ls");
     const dots = container.querySelectorAll("[data-bounce-dot]");
     expect(dots).toHaveLength(3);
-    dots.forEach((d) => expect(d).toHaveClass("oo-bounce"));
+    for (const d of dots) expect(d).toHaveClass("oo-bounce");
   });
 
   it("running without a tool omits the summary", () => {

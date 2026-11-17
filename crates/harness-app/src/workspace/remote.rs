@@ -12,7 +12,7 @@
 //! process may exit before the stop thread gets to it and tmux sessions
 //! outlive the app. With no active fit it spawns nothing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
@@ -25,7 +25,7 @@ use oo_remote::{
 
 use super::*;
 
-/// Plain-HTTP setup port (served only while "Add a phone" is open).
+/// Plain-HTTP setup port (served only while "Add a device" is open).
 pub(crate) const SETUP_PORT: u16 = 7080;
 /// Watcher/refresh poll cadence; also the debounce for `remote.json` events.
 const TICK: Duration = Duration::from_millis(250);
@@ -53,7 +53,7 @@ pub(crate) enum RemoteServe {
 /// Settings → Remote panel state. Transient, never persisted.
 #[derive(Default)]
 pub(crate) struct RemoteUi {
-    /// "Add a phone" is open; the setup port listens while it is, and a
+    /// "Add a device" is open; the setup port listens while it is, and a
     /// server (re)started meanwhile opens it too.
     pub setup_open: bool,
     /// `http://<primary private IP>:7080/setup` and its QR modules, fixed when
@@ -67,13 +67,15 @@ pub(crate) struct RemoteUi {
     pub revoke_armed: Option<(String, Instant)>,
     /// Why the last Port entry was refused.
     pub port_error: Option<String>,
-    /// Device ids already paired when "Add a phone" opened: a device that
+    /// Device ids already paired when "Add a device" opened: a device that
     /// appears beyond these means a phone just paired, so the panel closes.
     pub setup_known: Vec<String>,
+    /// "Listening on" shows every address, not just the main connection's.
+    pub show_all_urls: bool,
 }
 
 /// The first device in `devices` that isn't in `known` — a phone that paired
-/// while "Add a phone" was open.
+/// while "Add a device" was open.
 pub(crate) fn newly_paired<'a>(
     known: &[String],
     devices: &'a [oo_remote::Device],
@@ -142,6 +144,9 @@ pub(crate) struct RemoteRuntime {
     pub serve: RemoteServe,
     pub status: Option<ServerStatus>,
     pub ui: RemoteUi,
+    /// Device ids seen at the last `remote.json` read (`None` before the
+    /// first), to notice a device pairing.
+    known_devices: Option<HashSet<String>>,
     state_dir: PathBuf,
     server: Option<RemoteServer>,
     snapshot_tx: tokio::sync::watch::Sender<Snapshot>,
@@ -163,6 +168,22 @@ pub(crate) struct RemoteRuntime {
 }
 
 impl RemoteRuntime {
+    /// Environment for a new shell tab's tmux session: loads the zsh hook
+    /// that logs each command for the phone (`oo_remote::shell`). Empty when
+    /// its startup files can't be written; the tab is then Terminal-only.
+    pub(crate) fn shell_env(&self, session: &str) -> Vec<(String, String)> {
+        match oo_remote::shell::install(&self.state_dir) {
+            Ok(zdotdir) => oo_remote::shell::session_env(
+                &zdotdir,
+                &oo_remote::shell::log_path(&self.state_dir, session),
+            ),
+            Err(e) => {
+                log::warn!("remote: shell integration unavailable: {e}");
+                Vec::new()
+            }
+        }
+    }
+
     pub(crate) fn new(state_dir: &Path) -> RemoteRuntime {
         let store = Store::new(state_dir);
         let file = store.load();
@@ -181,6 +202,7 @@ impl RemoteRuntime {
             serve: RemoteServe::Off,
             status: None,
             ui: RemoteUi::default(),
+            known_devices: None,
             state_dir: state_dir.to_path_buf(),
             server: None,
             snapshot_tx,
@@ -273,7 +295,7 @@ pub(crate) fn remote_menu_item(
         "Allow remote control"
     };
     match kind {
-        TabKind::Shell => Some((label, Some("Gives a paired phone this shell"))),
+        TabKind::Shell => Some((label, Some("Gives paired devices this shell"))),
         TabKind::Agent(_) => Some((label, None)),
         TabKind::Chat | TabKind::Diff | TabKind::Editor => None,
     }
@@ -307,7 +329,25 @@ pub(crate) fn mark_note(
     if !enabled {
         return Some("Marked \u{2014} turn on Remote control in Settings to reach it");
     }
-    other_build.then_some("Marked \u{2014} phones reach it through the other openOrchestra build")
+    other_build.then_some("Marked \u{2014} devices reach it through the other openOrchestra build")
+}
+
+/// What a click on the top-bar chip does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChipClick {
+    /// Remote control is on: mark / unmark the tab.
+    Toggle,
+    /// Remote control is off: keep the tab marked (marking it if needed) and
+    /// open Settings → Remote, where it can be turned on.
+    OpenSettings { mark: bool },
+}
+
+pub(crate) fn chip_click(enabled: bool, marked: bool) -> ChipClick {
+    if enabled {
+        ChipClick::Toggle
+    } else {
+        ChipClick::OpenSettings { mark: !marked }
+    }
 }
 
 /// The top-bar chip's state for the current tab.
@@ -490,6 +530,13 @@ impl HarnessWorkspace {
     /// Start the watcher/refresh loop and, when `remote.json` says enabled,
     /// the server. Called once from `new`.
     pub(crate) fn remote_init(&mut self, cx: &mut Context<Self>) {
+        // A previous run that was killed (not quit) can leave shell tabs
+        // switched to record their commands. With Remote off nothing should.
+        if !self.remote.file.enabled
+            && let Err(e) = oo_remote::shell::sync_flags(&self.remote.state_dir, &HashSet::new())
+        {
+            log::warn!("remote: clearing shell logging switches failed: {e}");
+        }
         let changes = self.remote.changes.take();
         cx.spawn(async move |view, cx| {
             let mut ticks: u32 = 0;
@@ -510,6 +557,7 @@ impl HarnessWorkspace {
                 let alive = view.update(cx, |ws, cx| {
                     if changed {
                         ws.remote.reload();
+                        ws.remote_note_new_devices();
                         ws.remote_close_setup_if_paired(cx);
                         ws.remote_reconcile(cx);
                     }
@@ -634,6 +682,57 @@ impl HarnessWorkspace {
 
     /// Rebuild the snapshot and publish it if it changed.
     /// Phones can reach marked tabs: this build or the other one is serving.
+    /// Replace the certificate authority devices trust (the old one is kept
+    /// as `*.bak`) and restart the server with a new one covering this Mac's
+    /// current name and addresses. Every device must trust it again.
+    pub(crate) fn remote_renew_ca(&mut self, cx: &mut Context<Self>) {
+        if self.remote.server.is_none() || self.remote.busy() {
+            return;
+        }
+        if let Err(e) = oo_remote::certs::retire_ca(&self.remote.state_dir.join("remote")) {
+            self.set_note(format!("remote: could not replace the certificate: {e}"));
+            return;
+        }
+        log::info!("remote: new certificate requested; restarting the server");
+        self.remote_stop(cx);
+        self.remote.serve = RemoteServe::Off;
+        self.set_note(
+            "New certificate made \u{2014} add each device again (Add a device) to trust it".to_string(),
+        );
+        cx.notify();
+    }
+
+    /// Let devices connect from (`trust`) or stop them connecting from the
+    /// network with `key`.
+    pub(crate) fn remote_set_network_trust(&mut self, key: &str, trust: bool, cx: &mut Context<Self>) {
+        let Some(server) = &self.remote.server else {
+            return;
+        };
+        let result = if trust {
+            server.trust_network(key)
+        } else {
+            server.forget_network(key)
+        };
+        let status = server.status();
+        self.remote.status = Some(status);
+        if let Err(e) = result {
+            self.set_note(format!("remote: could not save network setting: {e}"));
+        }
+        cx.notify();
+    }
+
+    /// The device that typed into tmux session `session` in the last few
+    /// seconds, if any (from the server's status, refreshed every second).
+    pub(crate) fn remote_typing(&self, session: &str) -> Option<String> {
+        self.remote
+            .status
+            .as_ref()?
+            .remote_input
+            .iter()
+            .find(|i| i.session == session)
+            .map(|i| i.device.clone())
+    }
+
     pub(crate) fn remote_live(&self) -> bool {
         matches!(self.remote.serve, RemoteServe::Serving | RemoteServe::OtherBuild)
     }
@@ -752,6 +851,17 @@ impl HarnessWorkspace {
         cx.notify();
     }
 
+    /// Open Settings on the Remote section (unless the blocking preflight
+    /// screen is up, which Settings would sit behind).
+    pub(crate) fn remote_open_settings(&mut self, cx: &mut Context<Self>) {
+        if crate::preflight::blocked(&self.preflight) {
+            return;
+        }
+        self.settings_open = true;
+        self.settings_section = crate::workspace::SettingsSection::Remote;
+        cx.notify();
+    }
+
     pub(crate) fn remote_toggle_mark(&mut self, key: &str, tab_id: u64, cx: &mut Context<Self>) {
         // Decide on the file's current contents, not the cache.
         let marked = self.remote.store.load().mark_for(key, tab_id).is_some();
@@ -774,7 +884,7 @@ impl HarnessWorkspace {
         self.remote.file.mark_for(key, tab_id).is_some()
     }
 
-    /// Open or close the plain-HTTP setup port ("Add a phone" panel). A
+    /// Open or close the plain-HTTP setup port ("Add a device" panel). A
     /// no-op unless this instance is serving. Binding is a quick syscall.
     pub(crate) fn remote_set_setup_open(&mut self, open: bool) {
         self.remote.ui.setup_open = open;
@@ -785,7 +895,7 @@ impl HarnessWorkspace {
         }
     }
 
-    /// Open "Add a phone": fix the setup URL and its QR, issue a pairing
+    /// Open "Add a device": fix the setup URL and its QR, issue a pairing
     /// code, and open the setup port.
     pub(crate) fn remote_open_setup(&mut self, cx: &mut Context<Self>) {
         // The server picks the default-route interface's address off-thread
@@ -804,13 +914,39 @@ impl HarnessWorkspace {
             .unwrap_or_default();
         self.remote.ui.setup_url = url;
         self.remote.ui.setup_known = self.remote.file.devices.iter().map(|d| d.id.clone()).collect();
+        // Adding a device here means trusting this network: devices only
+        // connect from trusted ones.
+        if let Some(server) = &self.remote.server {
+            if let Err(e) = server.trust_primary_network() {
+                log::warn!("remote: trusting this network failed: {e}");
+            }
+            self.remote.status = Some(server.status());
+        }
         self.remote_new_code(cx);
         self.remote_set_setup_open(true);
         cx.notify();
     }
 
-    /// A phone paired while "Add a phone" was open: close the panel (and the
+    /// A phone paired while "Add a device" was open: close the panel (and the
     /// setup port) and say which device it was — no Done click needed.
+    /// A device that paired while "Add a device" was not open (that dialog
+    /// announces its own): say so, so an unexpected one gets noticed.
+    fn remote_note_new_devices(&mut self) {
+        let ids: HashSet<String> = self.remote.file.devices.iter().map(|d| d.id.clone()).collect();
+        let Some(prev) = self.remote.known_devices.replace(ids) else {
+            return;
+        };
+        if self.remote.ui.setup_open {
+            return;
+        }
+        if let Some(d) = self.remote.file.devices.iter().find(|d| !prev.contains(&d.id)) {
+            self.set_note(format!(
+                "New device paired: \u{2018}{}\u{2019} \u{2014} revoke it in Settings \u{2192} Remote if that wasn\u{2019}t you",
+                d.name
+            ));
+        }
+    }
+
     fn remote_close_setup_if_paired(&mut self, cx: &mut Context<Self>) {
         if !self.remote.ui.setup_open {
             return;
@@ -825,13 +961,17 @@ impl HarnessWorkspace {
         cx.notify();
     }
 
-    /// Close "Add a phone" (and the setup port). Called when the panel is
+    /// Close "Add a device" (and the setup port). Called when the panel is
     /// closed, and whenever Settings closes or leaves the Remote section.
     pub(crate) fn remote_close_setup(&mut self) {
         if !self.remote.ui.setup_open {
             return;
         }
         self.remote_set_setup_open(false);
+        // A code is only good while its dialog is open.
+        if let Err(e) = auth::withdraw_codes(&self.remote.store) {
+            log::warn!("remote: withdrawing pairing codes failed: {e}");
+        }
         let ui = &mut self.remote.ui;
         ui.setup_url = None;
         ui.setup_qr = Vec::new();
@@ -1033,7 +1173,7 @@ impl HarnessWorkspace {
         let enabled = self.remote.file.enabled;
         match result {
             Ok(server) if enabled => {
-                // "Add a phone" is open across a (re)start.
+                // "Add a device" is open across a (re)start.
                 if self.remote.ui.setup_open {
                     server.set_setup_open(true);
                 }
@@ -1170,6 +1310,15 @@ mod tests {
             marked: marks,
             ..RemoteFile::default()
         }
+    }
+
+    #[test]
+    fn chip_click_leads_to_settings_while_remote_is_off() {
+        assert_eq!(chip_click(true, false), ChipClick::Toggle);
+        assert_eq!(chip_click(true, true), ChipClick::Toggle);
+        assert_eq!(chip_click(false, false), ChipClick::OpenSettings { mark: true });
+        // Never unmarks while off: the click is about getting it reachable.
+        assert_eq!(chip_click(false, true), ChipClick::OpenSettings { mark: false });
     }
 
     #[test]
@@ -1452,11 +1601,11 @@ mod tests {
         let agent = TabKind::Agent(AgentKind::Pi);
         assert_eq!(
             remote_menu_item(&TabKind::Shell, false),
-            Some(("Allow remote control", Some("Gives a paired phone this shell")))
+            Some(("Allow remote control", Some("Gives paired devices this shell")))
         );
         assert_eq!(
             remote_menu_item(&TabKind::Shell, true),
-            Some(("Stop remote control", Some("Gives a paired phone this shell")))
+            Some(("Stop remote control", Some("Gives paired devices this shell")))
         );
         assert_eq!(remote_menu_item(&agent, false), Some(("Allow remote control", None)));
         assert_eq!(remote_menu_item(&agent, true), Some(("Stop remote control", None)));
@@ -1497,7 +1646,7 @@ mod tests {
     fn other_build_note_when_marked_while_it_serves() {
         assert_eq!(
             mark_note(true, true, true),
-            Some("Marked \u{2014} phones reach it through the other openOrchestra build")
+            Some("Marked \u{2014} devices reach it through the other openOrchestra build")
         );
         assert_eq!(mark_note(true, true, false), None);
         // Off wins: turning it on is the first thing to do.

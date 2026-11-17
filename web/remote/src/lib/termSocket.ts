@@ -11,7 +11,11 @@ export class TermSocket {
   private ws: WebSocket;
   private done = false;
 
-  constructor(url: string, token: string, private h: TermHandlers) {
+  constructor(
+    url: string,
+    token: string,
+    private h: TermHandlers,
+  ) {
     const ws = new WebSocket(url);
     this.ws = ws;
     ws.binaryType = "arraybuffer";

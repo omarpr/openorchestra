@@ -15,6 +15,8 @@ const MARKER: &str = "…[truncated]";
 pub enum TranscriptKind {
     ClaudeCode,
     Pi,
+    /// A shell tab's command log (see `crate::shell`).
+    Shell,
 }
 
 impl TranscriptKind {
@@ -139,10 +141,14 @@ fn active_branch<'a>(
 }
 
 pub fn parse_entries(kind: TranscriptKind, text: &str, cwd: Option<&Path>) -> Vec<Entry> {
+    if kind == TranscriptKind::Shell {
+        return crate::shell::parse_entries(text);
+    }
     let records = parse_lines(text);
     match kind {
         TranscriptKind::ClaudeCode => claude_entries(&records, cwd),
         TranscriptKind::Pi => pi_entries(&records, cwd),
+        TranscriptKind::Shell => unreachable!("handled above"),
     }
 }
 
@@ -284,6 +290,33 @@ fn command_markup(text: &str) -> Option<Option<String>> {
     Some(out.map(clip))
 }
 
+/// A message the user typed while Claude was working, delivered mid-turn
+/// (`{"type":"attachment","attachment":{"type":"queued_command",
+/// "prompt":…,"origin":{"kind":"human"}}}`), as the user's entry. Queued
+/// notifications from tools (other origins) are not the user's.
+fn queued_message(r: &Value) -> Option<Entry> {
+    let a = &r["attachment"];
+    if r["type"] != "attachment" || a["type"] != "queued_command" || a["origin"]["kind"] != "human"
+    {
+        return None;
+    }
+    let text = match &a["prompt"] {
+        Value::String(s) => s.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|p| p["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => return None,
+    };
+    let id = format!("{}:queued", r["uuid"].as_str().unwrap_or_default());
+    let at = a["timestamp"]
+        .as_str()
+        .or_else(|| r["timestamp"].as_str())
+        .map(str::to_string);
+    text_entry(id, EntryKind::User, &text, at)
+}
+
 fn claude_entries(records: &[Value], cwd: Option<&Path>) -> Vec<Entry> {
     let mut results: HashMap<String, bool> = HashMap::new();
     for r in records {
@@ -318,6 +351,12 @@ fn claude_entries(records: &[Value], cwd: Option<&Path>) -> Vec<Entry> {
             let id = format!("{}:compact", r["uuid"].as_str().unwrap_or_default());
             let at = r["timestamp"].as_str().map(str::to_string);
             out.push(notice_entry(id, "Conversation compacted", at));
+            continue;
+        }
+        // A message typed while Claude was working is often handed to it
+        // mid-turn as a `queued_command` attachment, never as a user record.
+        if let Some(entry) = queued_message(r) {
+            out.push(entry);
             continue;
         }
         // The post-compaction summary is written as a user record; it is for
@@ -460,6 +499,9 @@ fn pi_entries(records: &[Value], cwd: Option<&Path>) -> Vec<Entry> {
 
 /// Full result text for one tool call, capped at 64 KiB.
 pub fn tool_result(kind: TranscriptKind, text: &str, tool_id: &str) -> Option<ToolResult> {
+    if kind == TranscriptKind::Shell {
+        return crate::shell::tool_result(text, tool_id);
+    }
     for r in parse_lines(text) {
         let (content, is_error) = match kind {
             TranscriptKind::ClaudeCode => {
@@ -489,6 +531,7 @@ pub fn tool_result(kind: TranscriptKind, text: &str, tool_id: &str) -> Option<To
                     r["message"]["isError"].as_bool().unwrap_or(false),
                 )
             }
+            TranscriptKind::Shell => unreachable!("handled above"),
         };
         let full = result_text(&content);
         let truncated = full.len() > RESULT_CAP;
@@ -575,6 +618,35 @@ pub fn tool_summary(name: &str, input: &Value, cwd: Option<&Path>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn messages_queued_while_claude_works_show_as_the_users() {
+        let log = r#"{"type":"user","uuid":"u1","parentUuid":null,"isSidechain":false,"timestamp":"2026-11-17T01:00:00Z","message":{"role":"user","content":"start"}}
+{"type":"assistant","uuid":"a1","parentUuid":"u1","isSidechain":false,"timestamp":"2026-11-17T01:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"Working."}]}}
+{"type":"attachment","uuid":"q1","parentUuid":"a1","isSidechain":false,"timestamp":"2026-11-17T01:00:05Z","attachment":{"type":"queued_command","prompt":"then start the app","origin":{"kind":"human"},"timestamp":"2026-11-17T01:00:05Z"}}
+{"type":"attachment","uuid":"q2","parentUuid":"q1","isSidechain":false,"timestamp":"2026-11-17T01:00:06Z","attachment":{"type":"queued_command","prompt":"<task-notification>done</task-notification>","origin":{"kind":"task"}}}
+{"type":"assistant","uuid":"a2","parentUuid":"q2","isSidechain":false,"timestamp":"2026-11-17T01:00:07Z","message":{"role":"assistant","content":[{"type":"text","text":"Starting it."}]}}
+"#;
+        let e = parse_entries(TranscriptKind::ClaudeCode, log, None);
+        let users: Vec<_> = e
+            .iter()
+            .filter(|e| e.kind == EntryKind::User)
+            .map(|e| (e.text.as_deref().unwrap(), e.at.as_deref()))
+            .collect();
+        assert_eq!(
+            users,
+            vec![
+                ("start", Some("2026-11-17T01:00:00Z")),
+                ("then start the app", Some("2026-11-17T01:00:05Z")),
+            ]
+        );
+        // In order, between Claude's replies.
+        let texts: Vec<_> = e.iter().filter_map(|e| e.text.as_deref()).collect();
+        assert_eq!(
+            texts,
+            vec!["start", "Working.", "then start the app", "Starting it."]
+        );
+    }
     use serde_json::json;
 
     const CLAUDE: &str = include_str!("../tests/fixtures/claude-transcript.jsonl");

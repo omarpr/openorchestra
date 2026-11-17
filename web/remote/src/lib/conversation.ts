@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { UnauthorizedError } from "@/lib/api";
-import { backoffMs } from "@/hooks/useAgents";
-import { streamEvents } from "@/lib/sse";
+import { closedReason, parseData, streamEvents } from "@/lib/sse";
 import { clearToken, getToken } from "@/lib/token";
+import { backoffMs } from "./backoff";
 
 export const WINDOW = 200;
 
@@ -43,6 +43,14 @@ export interface ConversationState {
   closed?: string;
 }
 
+/** A stream error retrying cannot fix, as a closure reason; `null` to retry. */
+function finalError(err: unknown): string | null {
+  if (err instanceof UnauthorizedError) return "revoked";
+  // 404: no conversation for this agent (view-local, unlike a real `unmarked`).
+  if (err instanceof Error && err.message === "HTTP 404") return "no_conversation";
+  return null;
+}
+
 /** Live conversation over SSE with 1s…15s backoff; `closed: revoked` clears the token like the agent list. */
 export function useConversation(id: string): ConversationState {
   const [state, setState] = useState<ConversationState>({ entries: [], connected: false });
@@ -75,35 +83,23 @@ export function useConversation(id: string): ConversationState {
           token,
           (e) => {
             if (mine.signal.aborted) return;
-            if (e.event === "entries") {
-              try {
-                const d = JSON.parse(e.data) as { replace?: boolean; entries?: ConvEntry[] };
-                attempt = 0;
-                setState((s) => ({
-                  ...s,
-                  connected: true,
-                  entries: mergeEntries(s.entries, d.entries ?? [], !!d.replace),
-                }));
-              } catch {
-                /* malformed frame */
-              }
-            } else if (e.event === "closed") {
-              let reason = "";
-              try {
-                reason = (JSON.parse(e.data) as { reason?: string }).reason ?? "";
-              } catch {
-                reason = e.data;
-              }
-              finish(reason || "closed");
-            }
+            if (e.event === "closed") return finish(closedReason(e.data) || "closed");
+            if (e.event !== "entries") return;
+            const d = parseData<{ replace?: boolean; entries?: ConvEntry[] }>(e.data);
+            if (!d) return;
+            attempt = 0;
+            setState((s) => ({
+              ...s,
+              connected: true,
+              entries: mergeEntries(s.entries, d.entries ?? [], !!d.replace),
+            }));
           },
           mine.signal,
         );
       } catch (err) {
         if (mine.signal.aborted || stopped) return;
-        if (err instanceof UnauthorizedError) return finish("revoked");
-        // 404: no conversation for this agent (view-local, unlike a real `unmarked`); retrying cannot help.
-        if (err instanceof Error && err.message === "HTTP 404") return finish("no_conversation");
+        const final = finalError(err);
+        if (final) return finish(final);
       }
       if (mine.signal.aborted || stopped) return;
       setState((s) => ({ ...s, connected: false }));

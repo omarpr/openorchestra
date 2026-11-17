@@ -1,4 +1,4 @@
-import { useLayoutEffect, type RefObject } from "react";
+import { type RefObject, useLayoutEffect } from "react";
 
 /** Below this much hidden height the difference is browser chrome, not the on-screen keyboard. */
 export const KEYBOARD_MIN_PX = 100;
@@ -62,7 +62,12 @@ export function useVisualViewport(ref: RefObject<HTMLElement | null>): void {
     const el = ref.current;
     if (!vv || !el) return;
     const update = () => {
-      const box = viewportBox({ innerHeight: window.innerHeight, height: vv.height, offsetTop: vv.offsetTop, scale: vv.scale });
+      const box = viewportBox({
+        innerHeight: window.innerHeight,
+        height: vv.height,
+        offsetTop: vv.offsetTop,
+        scale: vv.scale,
+      });
       for (const [k, v] of Object.entries(shellVars(box))) el.style.setProperty(k, v);
       // iOS may also scroll the document to reveal the input; the shell is fixed, so that scroll only
       // shifts things. Undo it (keyboard open, not zoomed, only when actually scrolled).

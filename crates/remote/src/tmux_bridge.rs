@@ -82,14 +82,20 @@ impl Tmux {
 
 /// Names of all sessions on the server (empty if no server is running).
 pub async fn live_sessions(t: &Tmux) -> HashSet<String> {
-    match t.output(&["list-sessions", "-F", "#{session_name}"]).await {
-        Ok(out) => String::from_utf8_lossy(&out)
-            .lines()
-            .filter(|l| !l.is_empty())
-            .map(str::to_string)
-            .collect(),
-        Err(_) => HashSet::new(),
-    }
+    try_live_sessions(t).await.unwrap_or_default()
+}
+
+/// [`live_sessions`], telling a failed listing apart from an empty one (for
+/// anything that deletes what isn't listed).
+pub async fn try_live_sessions(t: &Tmux) -> io::Result<HashSet<String>> {
+    let out = t
+        .output(&["list-sessions", "-F", "#{session_name}"])
+        .await?;
+    Ok(String::from_utf8_lossy(&out)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 /// One notification line from a control-mode client.

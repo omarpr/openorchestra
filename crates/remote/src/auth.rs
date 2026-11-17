@@ -16,8 +16,13 @@ use crate::{Device, PendingCode, RemoteFile, Store};
 
 const CODE_ALPHABET: &[u8; 31] = b"23456789ABCDEFGHJKMNPQRSTUVWXYZ";
 const CODE_TTL: Duration = Duration::from_secs(10 * 60);
-const MAX_FAILED: u32 = 5;
+/// Wrong codes (from any address) that void the open codes. A ceiling against
+/// brute force across many addresses; one address is stopped far sooner by
+/// the per-address lock in the server.
+const MAX_FAILED: u32 = 50;
 const TOUCH_INTERVAL: Duration = Duration::from_secs(60);
+/// A device unused this long (no request at all) must pair again.
+pub const DEVICE_IDLE_LIMIT: Duration = Duration::from_secs(30 * 86_400);
 
 #[derive(Debug)]
 pub enum PairError {
@@ -175,6 +180,16 @@ pub fn redeem_code(
 
 /// The device owning `token`, compared in constant time across all devices.
 pub fn authenticate<'a>(file: &'a RemoteFile, token: &str) -> Option<&'a Device> {
+    authenticate_at(file, token, SystemTime::now())
+}
+
+/// [`authenticate`] at `now`: a device idle past [`DEVICE_IDLE_LIMIT`] is
+/// refused (it stays listed, marked expired, until revoked).
+pub fn authenticate_at<'a>(
+    file: &'a RemoteFile,
+    token: &str,
+    now: SystemTime,
+) -> Option<&'a Device> {
     let hash = sha256_hex(token);
     let mut found = None;
     for d in &file.devices {
@@ -182,7 +197,22 @@ pub fn authenticate<'a>(file: &'a RemoteFile, token: &str) -> Option<&'a Device>
             found = Some(d);
         }
     }
-    found
+    found.filter(|d| !is_idle_expired(d, now))
+}
+
+/// Whether `d` went unused for [`DEVICE_IDLE_LIMIT`] by `now`, counting from
+/// its last request (or pairing, if it never made one). A clock that reads
+/// earlier than the record expires nothing.
+pub fn is_idle_expired(d: &Device, now: SystemTime) -> bool {
+    let last = d
+        .last_seen
+        .as_deref()
+        .and_then(parse_time)
+        .or_else(|| parse_time(&d.created));
+    last.is_some_and(|t| {
+        now.duration_since(t)
+            .is_ok_and(|idle| idle >= DEVICE_IDLE_LIMIT)
+    })
 }
 
 /// Record activity; writes at most once per 60s per device.
@@ -209,6 +239,11 @@ pub fn touch_last_seen(store: &Store, device_id: &str, now: SystemTime) -> io::R
             d.last_seen = Some(fmt_time(now));
         }
     })
+}
+
+/// Void every pairing code not yet used (the code's dialog closed).
+pub fn withdraw_codes(store: &Store) -> io::Result<()> {
+    store.update(|f| f.pending_codes.clear())
 }
 
 pub fn revoke(store: &Store, device_id: &str) -> io::Result<()> {
@@ -306,11 +341,28 @@ mod tests {
     }
 
     #[test]
-    fn five_failures_void_codes() {
+    fn devices_unused_for_30_days_are_refused() {
+        let (_t, s) = setup();
+        let paired = SystemTime::now();
+        let c = issue_code(&s, paired).unwrap();
+        let (_, token) = redeem_code(&s, &c, "x", "h", paired).unwrap();
+        let f = s.load();
+        let day = Duration::from_secs(86_400);
+        assert!(authenticate_at(&f, &token, paired + 29 * day).is_some());
+        assert!(authenticate_at(&f, &token, paired + 30 * day).is_none());
+        // Use resets the clock.
+        touch_last_seen(&s, &f.devices[0].id, paired + 29 * day).unwrap();
+        assert!(authenticate_at(&s.load(), &token, paired + 58 * day).is_some());
+        // A clock running behind the records never expires anyone.
+        assert!(authenticate_at(&s.load(), &token, paired - day).is_some());
+    }
+
+    #[test]
+    fn fifty_failures_void_codes() {
         let (_t, s) = setup();
         let now = SystemTime::now();
         let c = issue_code(&s, now).unwrap();
-        for _ in 0..5 {
+        for _ in 0..MAX_FAILED {
             assert!(matches!(
                 redeem_code(&s, "AAAA-AAAA", "x", "h", now),
                 Err(PairError::Invalid)

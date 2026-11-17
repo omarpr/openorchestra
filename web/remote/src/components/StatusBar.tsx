@@ -1,5 +1,5 @@
-import type { AgentStatus } from "@/lib/api";
 import { useReducedMotion } from "@/hooks/useReducedMotion";
+import type { AgentStatus } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 /** Live status strip under the conversation list. Idle/unknown hide it. */

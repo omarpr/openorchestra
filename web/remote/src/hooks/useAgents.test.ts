@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Agent } from "@/lib/api";
-import { UnauthorizedError } from "@/lib/api";
+import { ApiError, UnauthorizedError } from "@/lib/api";
 
 const clearToken = vi.fn();
 vi.mock("@/lib/token", () => ({
@@ -21,7 +21,9 @@ const mk = (id: string, status: Agent["status"], title = id): Agent => ({
   title,
   agent_kind: "claude",
   project: "p",
-  worktree: "w", branch: null, has_conversation: false,
+  worktree: "w",
+  branch: null,
+  has_conversation: false,
   status,
   status_since: null,
   tool: null,
@@ -45,6 +47,20 @@ describe("useAgents", () => {
   beforeEach(() => {
     clearToken.mockReset();
     streamEvents.mockReset();
+  });
+
+  it("says when the Mac refuses this network, and stops once it is trusted", async () => {
+    streamEvents.mockRejectedValueOnce(new ApiError(403, "untrusted_network"));
+    streamEvents.mockImplementation(async (_u, _t, onEvent, signal: AbortSignal) => {
+      onEvent({ event: "agents", data: "[]" });
+      await new Promise((r) => signal.addEventListener("abort", r));
+    });
+    const { result } = renderHook(() => useAgents());
+    await waitFor(() => expect(result.current.untrusted).toBe(true));
+    expect(result.current.connected).toBe(false);
+    act(() => result.current.retry());
+    await waitFor(() => expect(result.current.connected).toBe(true));
+    expect(result.current.untrusted).toBe(false);
   });
 
   it("delivers sorted agents and marks connected", async () => {

@@ -4,13 +4,23 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Agent } from "@/lib/api";
 import type { ConvEntry } from "@/lib/conversation";
 
-const stream: { onEvent: ((e: { event: string; data: string }) => void) | null; urls: string[]; reject: ((e: Error) => void) | null } = {
+const stream: {
+  onEvent: ((e: { event: string; data: string }) => void) | null;
+  urls: string[];
+  reject: ((e: Error) => void) | null;
+} = {
   onEvent: null,
   reject: null,
   urls: [],
 };
-vi.mock("@/lib/sse", () => ({
-  streamEvents: (url: string, _t: string, onEvent: (e: { event: string; data: string }) => void, signal: AbortSignal) => {
+vi.mock("@/lib/sse", async (orig) => ({
+  ...(await orig<typeof import("@/lib/sse")>()),
+  streamEvents: (
+    url: string,
+    _t: string,
+    onEvent: (e: { event: string; data: string }) => void,
+    signal: AbortSignal,
+  ) => {
     stream.urls.push(url);
     stream.onEvent = onEvent;
     return new Promise<void>((_res, rej) => {
@@ -55,10 +65,17 @@ vi.mock("@xterm/xterm", () => ({
     dispose() {}
   },
 }));
-vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit() {} proposeDimensions() { return undefined; } } }));
+vi.mock("@xterm/addon-fit", () => ({
+  FitAddon: class {
+    fit() {}
+    proposeDimensions() {
+      return undefined;
+    }
+  },
+}));
 
-import { ConversationView } from "./ConversationView";
 import { AgentView } from "./AgentView";
+import { ConversationView } from "./ConversationView";
 
 function push(entries: ConvEntry[], replace = false) {
   act(() => stream.onEvent?.({ event: "entries", data: JSON.stringify({ replace, entries }) }));
@@ -189,10 +206,11 @@ describe("ConversationView", () => {
   it("stays at the bottom when the list area resizes while stuck", () => {
     const observers: { cb: ResizeObserverCallback; els: Element[] }[] = [];
     const Orig = globalThis.ResizeObserver;
-    (globalThis as any).ResizeObserver = class {
+    const g = globalThis as { ResizeObserver: unknown };
+    g.ResizeObserver = class {
       els: Element[] = [];
       constructor(cb: ResizeObserverCallback) {
-        observers.push((this as any).rec = { cb, els: this.els });
+        observers.push({ cb, els: this.els });
       }
       observe(el: Element) {
         this.els.push(el);
@@ -208,7 +226,10 @@ describe("ConversationView", () => {
       Object.defineProperty(sc, "clientHeight", { value: 500, configurable: true });
       sc.scrollTop = 500;
       fireEvent.scroll(sc);
-      const fire = () => act(() => observers.filter((o) => o.els.includes(sc)).forEach((o) => o.cb([], {} as ResizeObserver)));
+      const fire = () =>
+        act(() => {
+          for (const o of observers.filter((o) => o.els.includes(sc))) o.cb([], {} as ResizeObserver);
+        });
       // The keyboard opens: the scroller shrinks and the browser leaves scrollTop alone.
       Object.defineProperty(sc, "clientHeight", { value: 200, configurable: true });
       fire();
@@ -219,7 +240,7 @@ describe("ConversationView", () => {
       fire();
       expect(sc.scrollTop).toBe(100);
     } finally {
-      (globalThis as any).ResizeObserver = Orig;
+      g.ResizeObserver = Orig;
     }
   });
 
@@ -406,8 +427,8 @@ describe("AgentView conversation switch", () => {
 
   it("waiting focuses the reply input once per transition", async () => {
     const { rerender } = render(<AgentView id="a1" agent={agent({ status: "running" })} />);
-    const input = () => screen.getByLabelText("Message the agent");
-    await screen.findByLabelText("Message the agent");
+    const input = () => screen.getByLabelText("Message Claude Code");
+    await screen.findByLabelText("Message Claude Code");
     expect(input()).not.toHaveFocus();
     rerender(<AgentView id="a1" agent={agent({ status: "waiting" })} />);
     expect(input()).toHaveFocus();
@@ -427,14 +448,14 @@ describe("AgentView conversation switch", () => {
 
   it("while the agent list is loading, the reply box is hidden", () => {
     render(<AgentView id="a1" />);
-    expect(screen.queryByLabelText("Message the agent")).not.toBeInTheDocument();
-    expect(screen.queryByText("Agent not found")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Message Claude Code")).not.toBeInTheDocument();
+    expect(screen.queryByText("This tab isn't shared")).not.toBeInTheDocument();
   });
 
-  it("once the list loaded and the id is missing: Agent not found with a way back", async () => {
+  it("once the list loaded and the id is missing: not-shared state with a way back", async () => {
     render(<AgentView id="a1" agentsLoaded />);
-    expect(screen.getByText("Agent not found")).toBeInTheDocument();
-    expect(screen.queryByLabelText("Message the agent")).not.toBeInTheDocument();
+    expect(screen.getByText("This tab isn't shared")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Message Claude Code")).not.toBeInTheDocument();
     expect(stream.urls).toHaveLength(0);
     expect(sockets).toHaveLength(0);
     await userEvent.click(screen.getByRole("button", { name: "All agents" }));

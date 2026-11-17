@@ -27,7 +27,8 @@ function snapshot(): string[] {
   const ar = active && active !== document.body ? active.getBoundingClientRect() : null;
   const vvBottom = vv ? vv.offsetTop + vv.height : NaN;
   const standalone =
-    window.matchMedia?.("(display-mode: standalone)").matches || (navigator as { standalone?: boolean }).standalone === true;
+    window.matchMedia?.("(display-mode: standalone)").matches ||
+    (navigator as { standalone?: boolean }).standalone === true;
   const r = (n: number | undefined) => (n === undefined || Number.isNaN(n) ? "–" : Math.round(n));
   return [
     `standalone ${standalone}  ua ${/CriOS/.test(navigator.userAgent) ? "Chrome" : /Safari/.test(navigator.userAgent) ? "Safari" : "other"}`,

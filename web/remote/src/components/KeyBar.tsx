@@ -31,7 +31,14 @@ export function KeyBar({
   return (
     <div className="flex gap-1 overflow-x-auto px-2 py-1" role="toolbar" aria-label="Terminal keys">
       {KEYS.slice(0, 2).map((k) => (
-        <button key={k.key} type="button" className={BTN} aria-label={k.aria ?? k.label} onMouseDown={keepFocus} onClick={() => onKey(k.key)}>
+        <button
+          key={k.key}
+          type="button"
+          className={BTN}
+          aria-label={k.aria ?? k.label}
+          onMouseDown={keepFocus}
+          onClick={() => onKey(k.key)}
+        >
           {k.label}
         </button>
       ))}
@@ -46,7 +53,14 @@ export function KeyBar({
         Ctrl
       </button>
       {KEYS.slice(2).map((k) => (
-        <button key={k.key} type="button" className={BTN} aria-label={k.aria ?? k.label} onMouseDown={keepFocus} onClick={() => onKey(k.key)}>
+        <button
+          key={k.key}
+          type="button"
+          className={BTN}
+          aria-label={k.aria ?? k.label}
+          onMouseDown={keepFocus}
+          onClick={() => onKey(k.key)}
+        >
           {k.label}
         </button>
       ))}

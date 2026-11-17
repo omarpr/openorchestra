@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@/hooks/useAgents", () => ({
   useAgents: () => ({ agents: [], connected: true, unauthorized: false, disabled: false }),
 }));
+
 import App from "./App";
 
 const IPHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15";
@@ -56,17 +57,17 @@ describe("pair gate", () => {
 });
 
 describe("header", () => {
-  it("reads openOrchestra Agents on phone", () => {
+  it("reads openOrchestra Remote on phone", () => {
     setup(ANDROID, true);
     localStorage.setItem("oo.token", "tok");
     window.location.hash = "";
     render(<App />);
-    expect(screen.getByRole("heading", { name: "openOrchestra Agents" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "openOrchestra Remote" })).toBeInTheDocument();
   });
-  it("reads openOrchestra Agents in the tablet list column", () => {
+  it("reads openOrchestra Remote in the tablet top bar", () => {
     setup(ANDROID, true, true);
     localStorage.setItem("oo.token", "tok");
     render(<App />);
-    expect(screen.getByRole("heading", { name: "openOrchestra Agents" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "openOrchestra Remote" })).toBeInTheDocument();
   });
 });

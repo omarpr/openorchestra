@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { fetchToolResult, type ToolResult } from "@/lib/api";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { fetchToolResult, type ToolResult } from "@/lib/api";
 
 export interface ToolRef {
   id: string;
@@ -54,7 +54,9 @@ export function ToolSheet({
             <p className="text-sm text-muted-foreground">Loading…</p>
           ) : (
             <>
-              <pre className={`whitespace-pre-wrap break-words font-mono text-xs ${res.is_error ? "text-destructive" : ""}`}>
+              <pre
+                className={`whitespace-pre-wrap break-words font-mono text-xs ${res.is_error ? "text-destructive" : ""}`}
+              >
                 {res.text || "(no output)"}
               </pre>
               {res.truncated && <p className="mt-2 font-mono text-xs text-muted-foreground">…[truncated]</p>}
