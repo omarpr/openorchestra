@@ -155,7 +155,17 @@ impl HarnessWorkspace {
         use crate::workspace::SettingsSection as S;
         let sec = self.settings_section;
 
-        let mut body = div().id("settings-body").flex_1().min_h_0().overflow_y_scroll().px_4().py_2();
+        // min_w_0: a flex child otherwise grows to its widest row and runs
+        // past the card (long addresses, network keys) instead of letting
+        // those rows truncate.
+        let mut body = div()
+            .id("settings-body")
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px_4()
+            .py_2();
 
         // Shared by every pane.
         let section_title = |label: &str| section_title(label, hx);

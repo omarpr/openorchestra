@@ -88,12 +88,18 @@ export async function listAgents(): Promise<Agent[]> {
   return (await request("/api/agents")).json();
 }
 
-export async function sendText(id: string, text: string): Promise<void> {
-  await request(`/api/agents/${encodeURIComponent(id)}/send`, {
+/**
+ * Type `text` into the agent's terminal. Resolves with when the Mac did it, by
+ * the Mac's clock (its `Date` header; the phone's clock may be off), in ms.
+ */
+export async function sendText(id: string, text: string): Promise<number> {
+  const res = await request(`/api/agents/${encodeURIComponent(id)}/send`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text }),
   });
+  const date = Date.parse(res.headers.get("Date") ?? "");
+  return Number.isNaN(date) ? Date.now() : date;
 }
 
 export interface ToolResult {

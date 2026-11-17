@@ -74,7 +74,14 @@ export function AgentView({
         {notFound ? (
           <NotShared showBack={!isTablet} />
         ) : loading ? null : view === "conversation" ? (
-          <ConversationView key={attempt} id={id} onClosed={report} onConnection={setConnected} />
+          <ConversationView
+            key={attempt}
+            id={id}
+            onClosed={report}
+            onConnection={setConnected}
+            shell={shell}
+            onOpenTerminal={() => pickView("terminal")}
+          />
         ) : (
           <TerminalView
             key={attempt}
@@ -99,6 +106,7 @@ export function AgentView({
           name={shell ? null : agentName(agent?.agent_kind ?? null)}
           stopped={stopped}
           inputRef={replyInput}
+          track={hasConv ? { queued: agent?.status === "running" } : undefined}
           terminal={
             view === "terminal"
               ? {

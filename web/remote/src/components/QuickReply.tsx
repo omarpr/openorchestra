@@ -3,7 +3,8 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { ApiError, sendText } from "@/lib/api";
+import { sendText } from "@/lib/api";
+import { sendErrorText, sendTracked } from "@/lib/send";
 
 /** `name` is what the tab runs ("Claude Code"); `null` for a shell. */
 export function QuickReply({
@@ -11,11 +12,17 @@ export function QuickReply({
   disabled,
   name = null,
   inputRef,
+  track,
 }: {
   id: string;
   disabled: boolean;
   name?: string | null;
   inputRef?: React.Ref<HTMLInputElement>;
+  /**
+   * Show each message in the conversation until the agent's transcript has it (`queued`: the
+   * agent is working, so it waits its turn). Without it, failures are a toast.
+   */
+  track?: { queued: boolean };
 }) {
   const shell = name === null;
   const label = shell ? "Type a command" : `Message ${name || "the agent"}`;
@@ -27,18 +34,18 @@ export function QuickReply({
     e.preventDefault();
     const t = text.trim();
     if (!t || busy || disabled) return;
+    if (track) {
+      // The bubble takes over: sending, sent, queued, or failed with Retry.
+      setText("");
+      await sendTracked(id, t, { queued: track.queued, shell });
+      return;
+    }
     setBusy(true);
     try {
       await sendText(id, t);
       setText("");
     } catch (err) {
-      toast.error(
-        err instanceof ApiError && err.code === "stopped"
-          ? stoppedText
-          : err instanceof ApiError && err.code === "read_only"
-            ? "This device is watch only"
-            : "Could not send. Try again.",
-      );
+      toast.error(sendErrorText(err, shell));
     } finally {
       setBusy(false);
     }

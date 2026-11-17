@@ -12,6 +12,7 @@ export function AgentComposer({
   stopped,
   inputRef,
   terminal,
+  track,
 }: {
   id: string;
   /** What the tab runs ("Claude Code"); `null` for a shell. */
@@ -20,6 +21,8 @@ export function AgentComposer({
   inputRef: RefObject<HTMLInputElement>;
   /** Present in the terminal view. */
   terminal?: { hideKeys: boolean; toggleKeys(): void; ctrl: boolean; toggleCtrl(): void; sendKey(k: Key): void };
+  /** Show sent messages in the conversation until read (see `QuickReply`). */
+  track?: { queued: boolean };
 }) {
   return (
     <div className="shrink-0 border-t bg-background">
@@ -27,7 +30,7 @@ export function AgentComposer({
         <KeyBar ctrl={terminal.ctrl} onToggleCtrl={terminal.toggleCtrl} onKey={terminal.sendKey} />
       )}
       <div className="flex items-center gap-2 px-2 pb-2">
-        <QuickReply id={id} disabled={stopped} name={name} inputRef={inputRef} />
+        <QuickReply id={id} disabled={stopped} name={name} inputRef={inputRef} track={track} />
         {terminal && (
           <Button
             variant="outline"

@@ -144,7 +144,7 @@ impl HarnessWorkspace {
                      every device then has to be added again.",
                 ))
                 .child(
-                    div().pb_1().child(
+                    div().flex().pb_1().child(
                         button(hx, "Create a new certificate")
                             .id("remote-renew-ca")
                             .on_click(cx.listener(|ws, _, _, cx| {
@@ -221,6 +221,7 @@ impl HarnessWorkspace {
             col =
                 col.child(
                     div()
+                        .flex()
                         .pb_1()
                         .child(button(hx, "Add a device").id("remote-add-device").on_click(
                             cx.listener(|ws, _, _, cx| {
@@ -290,21 +291,29 @@ impl HarnessWorkspace {
                             .flex_col()
                             .text_xs()
                             .child(
+                                // Both texts give way (with …) before the
+                                // On/Off buttons do.
                                 div()
                                     .flex()
+                                    .min_w_0()
+                                    .overflow_hidden()
                                     .gap_1p5()
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .max_w(px(160.0))
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .whitespace_nowrap()
+                                            .text_color(hx.tx0)
+                                            .child(display_title(&row.title, row.kind.is_none())),
+                                    )
                                     .child(
                                         div()
                                             .min_w_0()
                                             .overflow_hidden()
                                             .text_ellipsis()
                                             .whitespace_nowrap()
-                                            .text_color(hx.tx0)
-                                            .child(row.title.clone()),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_none()
                                             .text_color(hx.tx2)
                                             .child(format!("{} \u{00B7} {}", row.project, row.worktree)),
                                     ),
@@ -641,7 +650,7 @@ impl HarnessWorkspace {
             (None, None) => {}
         }
         pair = pair.child(
-            div().child(
+            div().flex().child(
                 button(hx, "New code")
                     .id("remote-new-code")
                     .on_click(cx.listener(|ws, _, _, cx| {
@@ -658,7 +667,7 @@ impl HarnessWorkspace {
             .child(trust)
             .child(pair)
             .child(
-                div().child(
+                div().flex().child(
                     button(hx, "Done")
                         .id("remote-setup-done")
                         .on_click(cx.listener(|ws, _, _, cx| {
@@ -669,6 +678,18 @@ impl HarnessWorkspace {
                 ),
             )
     }
+}
+
+/// A tab's title for a list that already shows its icon: a shell's "❯_ "
+/// prefix would repeat it.
+pub(crate) fn display_title(title: &str, shell: bool) -> String {
+    if shell {
+        let t = title.trim_start_matches('\u{276F}').trim_start_matches('_').trim_start();
+        if !t.is_empty() {
+            return t.to_string();
+        }
+    }
+    title.to_string()
 }
 
 /// A plain bordered button (the Settings "Reset …" style).
@@ -895,6 +916,14 @@ mod tests {
             ..ServerStatus::default()
         };
         assert_eq!(setup_error(Some(&st)), Some("Couldn't open port 7080"));
+    }
+
+    #[test]
+    fn shell_titles_drop_the_glyph_the_icon_already_shows() {
+        assert_eq!(display_title("\u{276F}_ shell", true), "shell");
+        assert_eq!(display_title("\u{276F}_ npm run dev", true), "npm run dev");
+        assert_eq!(display_title("\u{276F}_ ", true), "\u{276F}_ ");
+        assert_eq!(display_title("claude", false), "claude");
     }
 
     #[test]
