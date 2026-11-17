@@ -207,7 +207,10 @@ pub(crate) struct Shared {
     pub sans: RwLock<(Vec<String>, Vec<IpAddr>)>,
     pub ca: CaInfo,
     /// This Mac's name (`ComputerName`), shown on the phone so two Macs'
-    /// home-screen apps can be told apart.
+    /// home-screen apps can be told apart. Only the embedded web client reads
+    /// it, so a build without `web/remote/dist` (CI's headless job) sees it
+    /// unread.
+    #[cfg_attr(oo_remote_no_web, allow(dead_code))]
     pub host_name: String,
     pub status: RwLock<ServerStatus>,
     /// One clone per open WebSocket/SSE stream (for `stop`'s flush wait).
