@@ -1,13 +1,74 @@
 # openOrchestra
 
-A macOS harness for orchestrating coding agents — pi, Claude Code, Codex,
-OpenCode, and Kimi — across git worktrees, with a real embedded zed editor,
-per-worktree terminals, diff review, and native notifications when an agent
-needs you. Tasks that span several repos get one specialist agent per repo,
-coordinated through a localhost [A2A](docs/architecture.md) broker
-(`crates/a2a-broker`).
+A native macOS workspace for running coding agents (pi, Claude Code, Codex,
+OpenCode and Kimi) in parallel, each in its own git worktree, next to a real
+embedded zed editor. Agents live in tmux sessions, so they keep running when the
+app closes. Their changes appear in a diff panel you can review and comment on,
+and a native notification tells you when one needs you. Tasks that span several
+repos get one specialist agent per repo, coordinated over a localhost A2A
+broker.
 
-## Run it (macOS)
+Everything runs on your Mac. There's no account, no cloud and no telemetry.
+
+## Features
+
+- **Tasks in worktrees.** `⌘N` creates a task: a git worktree on its own
+  branch, with its own terminals, editor and agent. The sidebar groups tasks by
+  project and shows each one's branch, PR, ahead/behind, uncommitted changes,
+  CI status, and an agent pill (Running, Waiting, Stopped).
+- **Any agent CLI.** Each agent is the vendor's own CLI with your own login,
+  running in an embedded terminal. A new task starts its agent. A project's main
+  checkout opens with a plain shell, and the tab strip's `＋` adds more agents,
+  terminals or editors.
+- **Sessions that outlive the app.** Every terminal and agent tab is a tmux
+  session. Quitting or crashing doesn't stop the agent, and reopening
+  reattaches.
+- **A real IDE.** `⌘E` opens zed's own workspace for the worktree: file tree,
+  `⌘P` quick-open, `⌘⇧F` project search, the git panel, Markdown preview and
+  zed's language-server support (rust-analyzer for Rust). You get syntax
+  highlighting for Rust, TypeScript/TSX,
+  JavaScript, Go, Python, JSON, YAML, CSS and Bash.
+- **Diff review.** Each changed file expands inline with real line numbers. You
+  can use a side-by-side view, pick the diff base, and tick "reviewed" boxes
+  that track progress. Click a line number to comment, then copy every comment
+  as feedback for the agent or save them as Markdown. You can push from the
+  diff header.
+- **Multi-repo tasks.** A task can include several projects. Each one gets a
+  specialist agent, and a coordinator agent delegates to them through the A2A
+  broker (`crates/a2a-broker`).
+- **Setup and teardown scripts.** Each project's `⋯` menu has **Edit setup
+  scripts…**. Scripts committed to the repo (`.openorchestra/hooks.toml`) or
+  kept locally run when a worktree is created or archived. Before running
+  committed scripts, the app asks you to confirm.
+- **Notifications.** When an agent is waiting on you, you get a native banner
+  with a **View** button. `⌘⇧A` jumps to the next waiting agent.
+- **Remote control from your phone** on your home network (see below).
+- **Footprint monitor.** The sidebar's STATS band shows the app's own CPU and
+  memory use, broken down by worktree, including the agents' processes.
+
+<!-- Screenshots: add docs/screenshots/*.png here once captured. -->
+
+## Requirements
+
+- macOS 12 or later.
+- **git** and **tmux** are required. The app shows a requirements screen until
+  both are found.
+- Recommended: at least one agent CLI (`pi`, `claude`, `codex`, `opencode` or
+  `kimi`). Without one, agent tabs fall back to a plain shell.
+- Optional: `gh` (PR and CI badges) and `rust-analyzer` (Rust language
+  features).
+
+The requirements screen lists anything missing, with the command that installs
+it.
+
+## Install
+
+Download the `.dmg` from the
+[Releases](https://github.com/omarpr/openorchestra/releases) page. It is a
+universal build (Apple Silicon and Intel), signed and notarized, so it opens
+with a double-click.
+
+## Build from source
 
 ```sh
 make setup && make app && open dist/openOrchestra.app
@@ -26,6 +87,38 @@ make setup && make app && open dist/openOrchestra.app
 For development iterations, `make run` builds and launches the debug app in a
 separate `.app` bundle. This lets the development build use native macOS
 notifications; logs remain attached to the terminal.
+
+## Keyboard shortcuts
+
+These are the defaults. You can see and rebind all of them in **Settings →
+Shortcuts** (`⌘,`).
+
+| Shortcut | Action |
+|---|---|
+| `⌘N` | New task |
+| `⌘T` | New terminal tab |
+| `⌘E` | Open the editor (IDE) tab |
+| `⌘⇧C` | New agent chat tab |
+| `⌘W` | Close tab |
+| `⌘⌥↓` / `⌘⌥↑` | Next / previous worktree |
+| `⌘⇧]` / `⌘⇧[` | Next / previous tab |
+| `⌘1`…`⌘8`, `⌘9` | Go to tab N, last tab |
+| `⌘⇧A` | Jump to the next agent waiting on you |
+| `⌘B` | Toggle the sidebar |
+| `⌘⇧B` | Toggle the tools panel |
+| `⌘P` | Find file by name (in the editor) |
+| `⌘⇧F` | Find in files |
+| `⌘⇧D` | Project diff (git) |
+| `⌘⇧G` | Toggle the git panel |
+| `⌘F` | Find in the current file |
+
+## Where state lives
+
+App state is kept under `~/.openorchestra`: preferences, open tabs,
+review comments (`review-notes.json`), saved reviews (`reviews/`), local hook
+overrides (`hooks/`) and the remote-control settings (`remote.json`). Nothing is
+written into your repositories except worktrees and, if you choose, committed
+hook scripts.
 
 ## Remote control from your phone
 
@@ -72,7 +165,21 @@ the Mac awake while serving. Phones on the local network only (private
 addresses) are accepted. A manual test list is in
 [`docs/superpowers/plans/2026-11-16-oo-remote-manual-checklist.md`](docs/superpowers/plans/2026-11-16-oo-remote-manual-checklist.md).
 The PWA source is in `web/remote` (`make web` builds it); the server is the
-`crates/oo-remote` crate.
+`oo-remote` crate in `crates/remote`.
+
+## Repository layout
+
+| Path | What it is |
+|---|---|
+| `crates/harness-app` | The GPUI desktop app (its own Cargo workspace, see [CONTRIBUTING](CONTRIBUTING.md)) |
+| `crates/worktrees`, `forge`, `status-watch` | Git worktrees and hooks, `gh` PR/CI polling, agent status signals |
+| `crates/agent-runtime`, `pi-client` | Per-agent launch and status adapters, the pi RPC client |
+| `crates/a2a-broker` | The localhost agent-to-agent broker for multi-repo tasks |
+| `crates/remote` | `oo-remote`, the phone remote-control server |
+| `crates/agent-schema`, `crates/training` | The pi tool contract and session harvesting ([`agent-schema/`](agent-schema/README.md), [`training/`](training/README.md) hold their data and docs) |
+| `pi-ext` | pi extensions loaded per worktree (status signal, harness tools) |
+| `web/remote` | The phone web app (PWA) |
+| `docs` | Design records. [`architecture.md`](docs/architecture.md) is a dated snapshot; `docs/superpowers/` holds specs and plans |
 
 ## Contributors
 
