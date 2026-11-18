@@ -113,6 +113,9 @@ impl HarnessWorkspace {
             .border_color(hx.border)
             .text_xs()
             .font_family(hx.font_mono)
+            // Line height = row height: text taller than its fixed-height row
+            // gets its descenders painted over by the row below.
+            .line_height(px(self.diff_row_h()))
             // Typing with a line selected is the other way people say "I want to
             // change this". Modified chords are shortcuts, not text — ⌘C over a
             // selection must still copy — so they pass straight through.
@@ -234,11 +237,11 @@ impl HarnessWorkspace {
             gpui::ListHorizontalSizingBehavior::Unconstrained
         });
 
-        // 15 px is `DIFF_ROW_H`, the height every item is drawn at — uniform_list
+        // `diff_row_h()` is the height every item is drawn at — uniform_list
         // measures the first item and assumes the rest match, which is exactly
         // why notes and hunk rules are drawn at the row height too.
         let list = if bounded {
-            list.h(px((count as f32 * DIFF_ROW_H).min(INLINE_BODY_MAX_H)))
+            list.h(px((count as f32 * self.diff_row_h()).min(INLINE_BODY_MAX_H)))
         } else {
             list.flex_grow_1().min_h_0()
         };
@@ -279,7 +282,7 @@ impl HarnessWorkspace {
                 // Never truncate silently — a diff that just stops looks like
                 // the change is smaller than it is.
                 return div()
-                    .h(px(DIFF_ROW_H))
+                    .h(px(self.diff_row_h()))
                     .px_2()
                     .text_color(hx.amber)
                     .whitespace_nowrap()
@@ -295,13 +298,14 @@ impl HarnessWorkspace {
                 // here, and the comment editor holds the full text.
                 return div()
                     .flex()
-                    .h(px(DIFF_ROW_H))
+                    .h(px(self.diff_row_h()))
                     .items_center()
                     .pl(px(56.0))
                     .pr_2()
                     .bg(tint(hx.amber, 0.10))
                     .border_l_2()
                     .border_color(hx.amber)
+                    .font_family(hx.font_ui)
                     .text_color(hx.tx1)
                     .overflow_hidden()
                     .child(div().min_w_0().whitespace_nowrap().child(body))
@@ -320,7 +324,7 @@ impl HarnessWorkspace {
                 .flex()
                 .items_center()
                 .gap_2()
-                .h(px(DIFF_ROW_H))
+                .h(px(self.diff_row_h()))
                 .px_2()
                 .border_t_1()
                 .border_color(hx.border)
@@ -352,7 +356,7 @@ impl HarnessWorkspace {
         if r.kind == DiffLineKind::FileHeader {
             return div()
                 .flex()
-                .h(px(DIFF_ROW_H))
+                .h(px(self.diff_row_h()))
                 .bg(row_bg)
                 .px_2()
                 .text_color(fg)
@@ -375,7 +379,7 @@ impl HarnessWorkspace {
         div()
             .id(("diffrow", ix))
             .flex()
-            .h(px(DIFF_ROW_H))
+            .h(px(self.diff_row_h()))
             .bg(row_bg)
             .cursor_pointer()
             .on_mouse_down(
@@ -458,7 +462,7 @@ impl HarnessWorkspace {
 
     /// One side-by-side line: old on the left, new on the right.
     ///
-    /// Drawn at `DIFF_ROW_H` like every other body item, because `uniform_list`
+    /// Drawn at `diff_row_h()` like every other body item, because `uniform_list`
     /// measures the first one and assumes the rest match — the same contract
     /// hunk rules and review notes are held to.
     ///
@@ -498,7 +502,7 @@ impl HarnessWorkspace {
             .id(("splitrow", anchor.unwrap_or(usize::MAX)))
             .flex()
             .w_full()
-            .h(px(DIFF_ROW_H));
+            .h(px(self.diff_row_h()));
         if let Some(ix) = anchor {
             let row_file = file.to_string();
             let move_file = file.to_string();

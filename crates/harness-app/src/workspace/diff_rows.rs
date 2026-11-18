@@ -367,13 +367,29 @@ pub(crate) fn split_rows(rows: &[DiffRow]) -> Vec<SplitRow> {
 /// file. When it bites, the UI says so rather than truncating silently.
 pub(crate) const MAX_DIFF_LINES: usize = 50_000;
 
-/// Height every body item is drawn at.
+/// Body row height at the default 13 px font size — ~1.4× the 12 px
+/// (`text_xs`) diff text. Scaled with the font-size pref by
+/// `HarnessWorkspace::diff_row_h`.
 ///
-/// `uniform_list` measures the first item and assumes the rest match, so this is
-/// a contract, not a preference: hunk rules and review notes are drawn at the
-/// row height because a taller one would desynchronise the list's arithmetic
-/// from what is painted.
-pub(crate) const DIFF_ROW_H: f32 = 15.0;
+/// Rows used to be a fixed 15 px while text kept gpui's default ~1.6× line
+/// height, so a line was taller than its row and the next row painted over
+/// its descenders — worse still once the font-size pref grew the text.
+const DIFF_ROW_H_BASE: f32 = 17.0;
+
+impl HarnessWorkspace {
+    /// Height every body item is drawn at, and the body's line height.
+    ///
+    /// `uniform_list` measures the first item and assumes the rest match, so
+    /// this is a contract, not a preference: hunk rules and review notes are
+    /// drawn at the row height because a taller one would desynchronise the
+    /// list's arithmetic from what is painted. It follows the font-size pref
+    /// the same way the window's rem size does (`render.rs`), so text and row
+    /// grow together.
+    pub(crate) fn diff_row_h(&self) -> f32 {
+        let scale = self.prefs.font_size.unwrap_or(13.0) / 13.0;
+        (DIFF_ROW_H_BASE * scale).round()
+    }
+}
 
 /// How tall an inline-expanded body may grow in the narrow layout, where it
 /// lives inside the file list's own scroll area and so needs a definite height.
