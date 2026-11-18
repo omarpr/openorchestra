@@ -124,6 +124,8 @@ impl Render for MarkdownPreviewButton {
         let editor = self.editor.clone();
 
         IconButton::new("toggle-markdown-preview", IconName::Eye)
+            // Icon-only: give assistive tech a name to announce.
+            .aria_label("Preview Markdown")
             .icon_size(IconSize::Small)
             .style(ButtonStyle::Subtle)
             .tooltip(move |_window, cx| {
