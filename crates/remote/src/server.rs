@@ -239,6 +239,8 @@ pub(crate) struct Shared {
     ws_idle_ms: AtomicU64,
     /// A bad remote.json read was logged (once).
     bad_file_logged: AtomicBool,
+    /// Serializes `refresh_agents` transcript flag sync with final shutdown cleanup.
+    transcript_sync: Mutex<()>,
 }
 
 impl Shared {
@@ -290,6 +292,7 @@ impl Shared {
             ws_ping_ms: AtomicU64::new(WS_PING.as_millis() as u64),
             ws_idle_ms: AtomicU64::new(WS_IDLE.as_millis() as u64),
             bad_file_logged: AtomicBool::new(false),
+            transcript_sync: Mutex::new(()),
         };
         shared.status.write().unwrap().ca_fingerprint = shared.ca.fingerprint.clone();
         shared.set_networks(None);
@@ -432,6 +435,10 @@ impl Shared {
     }
 
     fn refresh_agents(&self) {
+        let _guard = self.transcript_sync.lock().unwrap_or_else(|e| e.into_inner());
+        if *self.shutdown.borrow() {
+            return;
+        }
         let list = self.agents_for(&self.file.borrow());
         self.sync_transcript_flags(&list);
         self.agents.send_if_modified(|cur| {
@@ -1006,8 +1013,15 @@ impl RemoteServer {
 
     fn shutdown_now(&mut self) {
         let Some(rt) = self.rt.take() else { return };
-        self.shared.shutdown.send_replace(true);
-        self.shared.sync_transcript_flags(&[]);
+        {
+            let _guard = self
+                .shared
+                .transcript_sync
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            self.shared.shutdown.send_replace(true);
+            self.shared.sync_transcript_flags(&[]);
+        }
         let deadline = Instant::now() + STOP_FLUSH;
         while Arc::strong_count(&self.shared.open_streams) > 1 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
@@ -1277,5 +1291,44 @@ mod tests {
         assert_eq!(out[1].tool, None);
         let json = serde_json::to_value(&out[0]).unwrap();
         assert!(json.get("session").is_none());
+    }
+
+    #[test]
+    fn refresh_agents_skips_flag_sync_after_shutdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let id = store.mark("k", 1).unwrap();
+        let mut opencode = info(&id, "harness_k_1");
+        opencode.agent_kind = Some("opencode".into());
+        let (snap_tx, snap_rx) = snapshot_channel();
+        snap_tx.send_replace(Snapshot {
+            agents: vec![opencode],
+        });
+        let ca = certs::load_or_create_ca(dir.path(), "host", &[], &[]).unwrap();
+        let cfg = ServerConfig {
+            state_dir: dir.path().to_path_buf(),
+            port: 0,
+            setup_port: 0,
+            bind_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            tmux: Tmux::default(),
+            hosts_override: None,
+        };
+        let shared = Shared::new(&cfg, snap_rx, 0, &ca, "host".into(), Duration::from_secs(60));
+        shared.refresh_agents();
+        let flag = opencode_transcripts(dir.path()).join("harness_k_1.jsonl.on");
+        assert!(flag.is_file());
+
+        {
+            let _guard = shared
+                .transcript_sync
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            shared.shutdown.send_replace(true);
+            shared.sync_transcript_flags(&[]);
+        }
+        assert!(!flag.exists());
+
+        shared.refresh_agents();
+        assert!(!flag.exists());
     }
 }
