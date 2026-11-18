@@ -492,19 +492,27 @@ pub fn url_for(row: &PortRow) -> String {
 
 /// Run `lsof`, `ps` and (when available) `tmux list-panes`. Blocking: call
 /// it off the UI thread. A tool that fails or is missing contributes nothing.
-pub fn sample(has_tmux: bool) -> PortsSample {
-    let stdout = |cmd: &str, args: &[&str]| {
-        std::process::Command::new(cmd)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-            .unwrap_or_default()
-    };
+/// Every external command a sample runs gets this long.
+const SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Run `lsof`, `ps`, and (when available) `tmux list-panes`, each bounded by
+/// [`SCAN_TIMEOUT`]. Blocking: call it off the UI thread. `None` when the
+/// listener scan or the process table didn't come back in time (an `lsof`
+/// stuck on an unreachable network mount, say): the caller keeps its last
+/// sample and the next tick retries. An empty answer is still `Some`.
+pub fn sample(has_tmux: bool) -> Option<PortsSample> {
+    sample_using(|cmd, args| run_bounded(cmd, args, SCAN_TIMEOUT), has_tmux)
+}
+
+/// [`sample`] with the command runner passed in, so tests can play a stalled
+/// or empty scan. `run` returns stdout, or `None` on timeout or spawn failure.
+pub fn sample_using(
+    run: impl Fn(&str, &[&str]) -> Option<String>,
+    has_tmux: bool,
+) -> Option<PortsSample> {
     // lsof exits 1 when nothing matches; its stdout is still the answer.
-    let listeners = parse_lsof(&stdout("lsof", &["-nP", "-w", "-iTCP", "-sTCP:LISTEN", "-F", "pcn"]));
-    let procs = parse_ps_paths(&stdout("ps", &["-axo", "pid=,ppid=,comm="]));
+    let listeners = parse_lsof(&run("lsof", &["-nP", "-w", "-iTCP", "-sTCP:LISTEN", "-F", "pcn"])?);
+    let procs = parse_ps_paths(&run("ps", &["-axo", "pid=,ppid=,comm="])?);
     let session_panes = if has_tmux { crate::tmux::list_session_panes() } else { Vec::new() };
     let engine_listening = listeners.iter().any(|l| {
         procs
@@ -512,7 +520,8 @@ pub fn sample(has_tmux: bool) -> PortsSample {
             .find(|p| p.pid == l.pid)
             .is_some_and(|p| ENGINE_HINTS.iter().any(|h| p.path.contains(h)))
     });
-    // Every listener's working folder, in one call.
+    // Every listener's working folder, in one call. Enrichment only: a
+    // timeout here leaves the rows without folders rather than dropping them.
     let mut pids: Vec<String> = listeners.iter().map(|l| l.pid.to_string()).collect();
     pids.sort();
     pids.dedup();
@@ -520,18 +529,18 @@ pub fn sample(has_tmux: bool) -> PortsSample {
         Default::default()
     } else {
         let list = pids.join(",");
-        run_bounded("lsof", &["-a", "-w", "-p", &list, "-d", "cwd", "-Fpn"], std::time::Duration::from_secs(2))
+        run("lsof", &["-a", "-w", "-p", &list, "-d", "cwd", "-Fpn"])
             .map(|out| parse_lsof_cwd(&out))
             .unwrap_or_default()
     };
     let containers = if engine_listening {
-        run_bounded("docker", &["ps", "--no-trunc", "--format", DOCKER_PS_FORMAT], std::time::Duration::from_secs(2))
+        run("docker", &["ps", "--no-trunc", "--format", DOCKER_PS_FORMAT])
             .map(|out| parse_docker_ps(&out))
             .unwrap_or_default()
     } else {
         Vec::new()
     };
-    PortsSample { app_pid: std::process::id(), listeners, procs, session_panes, containers, cwds }
+    Some(PortsSample { app_pid: std::process::id(), listeners, procs, session_panes, containers, cwds })
 }
 
 /// Run a command and return its stdout whatever its exit status, giving up
@@ -849,6 +858,16 @@ quiet-1\tbusybox\t\t\t\t\n";
     }
 
     #[test]
+    fn a_timed_out_listener_scan_is_no_sample_but_an_empty_one_is() {
+        // `None` from the runner = timed out or failed to start.
+        let timed_out = |cmd: &str, _: &[&str]| (cmd != "lsof").then(String::new);
+        assert!(sample_using(timed_out, false).is_none(), "keep the last sample; retry next tick");
+        let empty = |_: &str, _: &[&str]| Some(String::new());
+        let s = sample_using(empty, false).expect("an empty scan is a real answer");
+        assert!(s.listeners.is_empty());
+    }
+
+    #[test]
     fn tab_label_counts_only_while_visible() {
         assert_eq!(tab_label(2, true), "Ports · 2");
         assert_eq!(tab_label(2, false), "Ports", "a hidden tab's sample is stale");
@@ -1037,7 +1056,7 @@ quiet-1\tbusybox\t\t\t\t\n";
         let mut found = None;
         for _ in 0..30 {
             std::thread::sleep(std::time::Duration::from_millis(100));
-            let v = classify(&sample(false), &[]);
+            let v = classify(&sample(false).expect("scan finished"), &[]);
             if let Some(r) = v.other.iter().find(|r| r.port == 18765) {
                 found = Some(r.clone());
                 break;
@@ -1057,7 +1076,7 @@ quiet-1\tbusybox\t\t\t\t\n";
     #[test]
     #[ignore]
     fn live_sample_labels_running_containers() {
-        let s = sample(false);
+        let s = sample(false).expect("scan finished");
         assert!(!s.containers.is_empty(), "no containers seen; is an engine running?");
         let v = classify(&s, &[]);
         for c in &s.containers {

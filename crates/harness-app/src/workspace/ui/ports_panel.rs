@@ -200,8 +200,10 @@ impl HarnessWorkspace {
     pub(crate) fn refresh_ports(&mut self, cx: &mut Context<Self>) {
         let has_tmux = self.has_tmux;
         cx.spawn(async move |view, cx| {
-            let sample = cx.background_spawn(async move { ports::sample(has_tmux) }).await;
-            let _ = view.update(cx, |ws, cx| ws.apply_ports(sample, cx));
+            // `None`: the scan timed out; keep what's shown, the poll retries.
+            if let Some(sample) = cx.background_spawn(async move { ports::sample(has_tmux) }).await {
+                let _ = view.update(cx, |ws, cx| ws.apply_ports(sample, cx));
+            }
         })
         .detach();
     }

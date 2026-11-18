@@ -641,6 +641,8 @@ impl HarnessWorkspace {
                 let sample = cx
                     .background_spawn(async move { crate::ports::sample(sampler_has_tmux) })
                     .await;
+                // `None`: the scan timed out; keep the last sample, retry next tick.
+                let Some(sample) = sample else { continue };
                 if view.update(cx, |ws, cx| ws.apply_ports(sample, cx)).is_err() {
                     break;
                 }
