@@ -11,6 +11,7 @@
   <img src="https://img.shields.io/badge/macOS-12%2B-black?logo=apple&logoColor=white" alt="macOS 12 or later">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue" alt="License: GPL-3.0-or-later"></a>
   <img src="https://img.shields.io/badge/built%20with-Rust%20%2B%20GPUI-dea584?logo=rust&logoColor=white" alt="Built with Rust and GPUI">
+  <a href="https://join.slack.com/t/openorchestra-group/shared_invite/zt-4h5n9li83-bbPit9xyTUvizQt7wh9bgQ"><img src="https://img.shields.io/badge/Slack-join%20the%20community-4A154B?logo=slack&logoColor=white" alt="Join the openOrchestra Slack"></a>
 </p>
 
 A native macOS workspace for running coding agents (pi, Claude Code, Codex,
@@ -238,6 +239,13 @@ The PWA source is in `web/remote` (`make web` builds it); the server is the
     </td>
   </tr>
 </table>
+
+## Community
+
+Join the [openOrchestra Slack](https://join.slack.com/t/openorchestra-group/shared_invite/zt-4h5n9li83-bbPit9xyTUvizQt7wh9bgQ) to ask questions, share how you use it,
+and hear about new releases. Bugs and feature ideas still belong in
+[GitHub issues](https://github.com/omarpr/openorchestra/issues), and security
+reports go through [SECURITY.md](SECURITY.md).
 
 ## Contributing
 

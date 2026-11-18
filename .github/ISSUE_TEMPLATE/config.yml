@@ -3,6 +3,9 @@ contact_links:
   - name: Question or discussion
     url: https://github.com/omarpr/openorchestra/discussions
     about: Ask questions and talk through ideas before opening an issue.
+  - name: Slack community
+    url: https://join.slack.com/t/openorchestra-group/shared_invite/zt-4h5n9li83-bbPit9xyTUvizQt7wh9bgQ
+    about: Chat with other users and the maintainers.
   - name: Security vulnerability
     url: https://github.com/omarpr/openorchestra/security/advisories/new
     about: Report privately, not as a public issue.
