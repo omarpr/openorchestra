@@ -13,7 +13,9 @@ release, and you'll be credited in the advisory unless you'd rather not be.
 ## Supported versions
 
 Only the latest release gets security fixes. Update with
-`brew upgrade --cask openorchestra` or by downloading the newest `.dmg`.
+`brew upgrade --cask omarpr/tap/openorchestra` (the cask lives in the
+`omarpr/tap` tap, as in the README's install line) or by downloading the
+newest `.dmg`.
 
 ## Scope
 

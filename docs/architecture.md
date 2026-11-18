@@ -66,7 +66,7 @@ Non-goals for v1: collaboration/multiplayer, remote development, Windows support
 
 Three subsystems, cleanly separable:
 
-- **Shell (Rust/GPUI):** windowing, panes, editor, terminal, **file explorer / quick-open / project search** (§3.6), sidebar, diff panel. Built as `crates/harness-app` (the openOrchestra binary), plus three UI-free backend crates (`worktrees`, `forge`, `status-watch`).
+- **Shell (Rust/GPUI):** windowing, panes, editor, terminal, **file explorer / quick-open / project search** (§3.6), sidebar, diff panel. Built as `crates/harness-app` (the openOrchestra binary), over UI-free backend crates it path-depends on (`worktrees`, `forge`, `agent-runtime`, `a2a-broker`, `pi-client`, `remote`); `status-watch` and `agent-schema` arrive through `agent-runtime`.
 - **Agent runtime (adapter layer):** the substrate is running each agent's own CLI in the worktree terminal pty (like pi today). An `AgentRuntime` trait (§4.5) picks the command per `agent_kind` and, *optionally*, wires up that agent's signal surface. **pi-coding-agent** (TypeScript) is the reference: agent loop, tools, session persistence, provider layer, run as its TUI (Phase 2: also headless RPC sidecars). **OpenCode / Codex / Claude Code / Kimi** run the same way — user-installed CLIs — with optional enhancements via their own surfaces (HTTP/SSE, `notify`, hooks, ACP). We reimplement no agent loop.
 - **Model serving (LM Studio):** OpenAI-compatible endpoint serving our trained model locally — the provider for the pi reference runtime. Swappable for vLLM/SGLang later without touching the harness. (Other agents bring their own provider config.)
 
@@ -76,14 +76,14 @@ Three subsystems, cleanly separable:
 
 GPUI is Zed's GPU-accelerated UI framework, licensed **Apache-2.0** and usable standalone. Not published as a stable crates.io release; we depend on a **pinned git revision** of `zed-industries/zed` and upgrade deliberately, keeping gpui and the editor crates on the same revision.
 
-**Pinned rev (proven, Spikes 1/3/4):** tag **`v1.11.3`**, commit `952d712dac48a4af2c54fb22c82d82a9d69b72d4`.
+**Pinned rev:** tag **`v1.28.1`**, commit `e8bc16acee5ae1937600d571d441c4b5d7b0d288` (bumped from `v1.11.3`, the rev Spikes 1/3/4 proved, via `v1.27.0` / `c84af5b9…`). The pin lives in `harness-app/Cargo.toml`, whose header comment names the tag.
 
 Two out-of-tree consumption facts discovered during the spikes, now standing upgrade discipline:
 
-- **The gpui/gpui_platform split.** As of ~v1.11, gpui split into `gpui` + `gpui_platform` (+ per-OS `gpui_macos`/`gpui_linux`/…). The entry point is `gpui_platform::application().run(...)`, not the older `gpui::Application::new()`. Blog/example snippets predating the split are stale. (If v1.11.x shows macOS breakage, the fallback rev is `v1.10.3` / `0c54c414…`, but that predates the split and would need the old entry form.)
-- **`[patch.crates-io]` does not propagate** from a git dependency's workspace to an out-of-tree consumer. The relevant entries from zed's root `Cargo.toml` (`async-process`, `async-task`, `calloop`, `notify`, `notify-types`) are replicated in `harness-app/Cargo.toml`. **Re-diff zed's root `Cargo.toml` on every rev bump** (R1 sub-risk).
+- **The gpui/gpui_platform split.** As of ~v1.11, gpui split into `gpui` + `gpui_platform` (+ per-OS `gpui_macos`/`gpui_linux`/…). The entry point is `gpui_platform::application().run(...)`, not the older `gpui::Application::new()`. Blog/example snippets predating the split are stale. (If a rev shows macOS breakage, fall back to the previous pin, `v1.27.0` / `c84af5b9…`. Anything before ~v1.11 predates the split and would need the old entry form.)
+- **`[patch.crates-io]` does not propagate** from a git dependency's workspace to an out-of-tree consumer. The relevant entries from zed's root `Cargo.toml` (`async-process`, `async-task`, `calloop`, `notify`, `notify-types`, `windows-capture`, `tree-sitter-language`, `khronos-egl`) are replicated in `harness-app/Cargo.toml`. **Re-diff zed's root `Cargo.toml` on every rev bump** (R1 sub-risk).
 
-`harness-app` is deliberately **excluded from the repo-root Cargo workspace** and carries its own `[workspace]` table + `Cargo.lock`, so the ~880-crate zed dependency cone stays out of the headless crates' build graph.
+`harness-app` is deliberately **excluded from the repo-root Cargo workspace** and carries its own `[workspace]` table + `Cargo.lock`, so the ~1,200-crate zed dependency cone stays out of the headless crates' build graph.
 
 ### 3.2 Editor panes — **R1 retired**
 
@@ -92,7 +92,7 @@ We reuse Zed's `editor` crate (and its dependency cone: `project`, `language`, `
 Two design choices that keep the editor light in v1:
 
 - **Renders without a `Project`.** `Editor::for_buffer(buffer, None, window, cx)` gives a real embedded editor pane with no `workspace`-crate runtime and no LSP. `editor::init(cx)` is called (safe globals) but not required.
-- **One grammar, not eighteen.** We avoid the heavy `languages` crate (all grammars + LSP adapters + `pet*`). Instead the light `grammars` crate (rust-embed of zed's `config.toml` + `.scm` queries, *without* its `load-grammars` feature) + `tree-sitter-rust` directly, so exactly **one** grammar compiles. Parsing runs on the gpui `BackgroundExecutor`.
+- **A curated grammar set, not eighteen.** We avoid the heavy `languages` crate (all grammars + LSP adapters + `pet*`). Instead the light `grammars` crate (rust-embed of zed's `config.toml` + `.scm` queries, *without* its `load-grammars` feature) plus direct `tree-sitter-*` dependencies for exactly the languages we register: Rust, TypeScript/TSX, Go, Python, JSON, YAML, CSS, Bash. *(v1 shipped Rust alone; the set was widened later.)* Grammar versions are pinned to zed's own `Cargo.lock` (TypeScript, YAML and Go from zed's forks) so the queries compile against the node types they expect. Parsing runs on the gpui `BackgroundExecutor`.
 
 | Crate | License | Role |
 |---|---|---|
@@ -102,7 +102,7 @@ Two design choices that keep the editor light in v1:
 | `language` | GPL-3.0-or-later | Syntax, tree-sitter, language config |
 | `text` | GPL-3.0-or-later | Rope/buffer primitives |
 | `terminal`, `terminal_view` | GPL-3.0-or-later | Zed's terminal wrapper over alacritty |
-| `grammars` (zed) | GPL-3.0-or-later | Embedded grammar config + queries (Rust only, in v1) |
+| `grammars` (zed) | GPL-3.0-or-later | Embedded grammar config + queries for the curated set above |
 | `alacritty_terminal` (zed fork) | Apache-2.0 | Terminal emulation core |
 
 **Licensing consequence (R2 now actual):** linking `editor`/`terminal`/`grammars` makes the openOrchestra binary **GPL-3.0-or-later**, recorded in `harness-app/Cargo.toml`'s `license` field. Decision unchanged from v2: acceptable (internal tool; open-sourcing under GPL is an option, selling proprietary licenses is not).
@@ -167,7 +167,7 @@ Also worth recording: the harness passes a **blocked HTTP client**, so zed's col
 
 ## 4. Agent runtime: multi-agent, one per worktree
 
-**Package identity (corrected in v3).** The agent is **`@mariozechner/pi-coding-agent`** (binary `pi`), from `badlogic/pi-mono`, `packages/coding-agent`. The similarly-named `@mariozechner/pi` on npm is a **different tool** (a vLLM "pods" deployment CLI, binary `pi-pods`); every v2 reference to "pi" means `pi-coding-agent`. **Supported pin: `0.73.1`** — reconciled in M2, consistent across setup, doctor, and the extension header. **The harness pulls no agent's npm package into its own tree** — pi is a `$PATH` CLI like Codex/Claude Code/Kimi (§4.5). The extensions once carried a `@mariozechner/pi-coding-agent` devDependency *only* to `import type` two names; those types are now vendored in `pi-ext/pi-extension-api.d.ts`, so the package (deprecated, CVE-carrying) is no longer a build dependency. **Rename incoming:** the project has moved to `earendil-works/pi-mono` and the npm scope is being renamed to **`@earendil-works/pi-coding-agent`** (0.73.1 ships self-update support for exactly that migration); update the three pin sites when it publishes.
+**Package identity (corrected in v3).** The agent is **`@mariozechner/pi-coding-agent`** (binary `pi`), from `badlogic/pi-mono`, `packages/coding-agent`. The similarly-named `@mariozechner/pi` on npm is a **different tool** (a vLLM "pods" deployment CLI, binary `pi-pods`); every v2 reference to "pi" means `pi-coding-agent`. **Supported pin: `0.73.1`** — reconciled in M2, consistent across setup, doctor, and the extension header. **The harness pulls no agent's npm package into its own tree** — pi is a `$PATH` CLI like Codex/Claude Code/Kimi (§4.5). The extensions once carried a `@mariozechner/pi-coding-agent` devDependency *only* to `import type` two names; those types are now vendored in `pi-ext/pi-extension-api.d.ts`, so the package (deprecated, CVE-carrying) is no longer a build dependency. **Rename published, pin not yet migrated:** the project has moved to `earendil-works/pi-mono` and now publishes as **`@earendil-works/pi-coding-agent`** (from 0.74.0; 1.5.2 at the time of writing), while `@mariozechner/pi-coding-agent` stops at 0.73.1. 0.73.1 ships self-update support for exactly that migration. Moving the pin means updating the three pin sites and re-recording the `pi-client` conformance fixture, treating it as a protocol upgrade (§4.2).
 
 ### 4.1 Phased interaction model
 
