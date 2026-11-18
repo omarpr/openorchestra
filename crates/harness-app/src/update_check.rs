@@ -226,21 +226,29 @@ pub fn show_about(window: &mut Window, cx: &mut App) {
 }
 
 pub fn check_for_updates(window: &mut Window, cx: &mut App) {
-    let task = cx.background_executor().spawn(async move { fetch_latest() });
+    // Both the request and the Homebrew lookup touch the system (network,
+    // file metadata), so both run off the main thread.
+    let task = cx
+        .background_executor()
+        .spawn(async move { (fetch_latest(), installed_with_homebrew()) });
     let handle = window.window_handle();
     cx.spawn(async move |cx| {
-        let result = task.await;
+        let (result, brew) = task.await;
         handle
-            .update(cx, |_, window, cx| show_result(result, window, cx))
+            .update(cx, |_, window, cx| show_result(result, brew, window, cx))
             .ok();
     })
     .detach();
 }
 
-fn show_result(result: Result<Release, String>, window: &mut Window, cx: &mut App) {
+fn show_result(
+    result: Result<Release, String>,
+    brew: bool,
+    window: &mut Window,
+    cx: &mut App,
+) {
     match result {
         Ok(r) if is_newer(&r.version, VERSION) => {
-            let brew = installed_with_homebrew();
             let detail = if brew {
                 format!(
                     "You have {VERSION}. You installed openOrchestra with Homebrew, so upgrade with:\n\n{BREW_UPGRADE}"
