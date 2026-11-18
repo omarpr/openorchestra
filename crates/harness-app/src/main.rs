@@ -29,6 +29,7 @@ mod sounds;
 mod terminal_pane;
 mod theme;
 mod tmux;
+mod update_check;
 mod workspace;
 mod workspace_host;
 
@@ -58,6 +59,10 @@ actions!(
         OpenSettings,
         /// Open the tool-requirements screen on demand.
         FirstTimeChecks,
+        /// Show the version and project link (app menu).
+        About,
+        /// Ask GitHub for the latest release, on demand only (app menu).
+        CheckForUpdates,
         /// Close the active tab in the current worktree pane (⌘W outside an
         /// editor; inside one, the Workspace-scoped binding closes the file).
         CloseTab,
@@ -423,6 +428,9 @@ pub fn install_menus(cx: &mut gpui::App) {
             name: "openOrchestra".into(),
             disabled: false,
             items: vec![
+                gpui::MenuItem::action("About openOrchestra", About),
+                gpui::MenuItem::action("Check for updates…", CheckForUpdates),
+                gpui::MenuItem::separator(),
                 gpui::MenuItem::action("Settings…", OpenSettings),
                 gpui::MenuItem::action("First-time Checks…", FirstTimeChecks),
                 gpui::MenuItem::separator(),

@@ -12,6 +12,14 @@ Unreleased is empty.
 
 ## Unreleased
 
+### Added
+
+- **About openOrchestra** in the app menu: the standard macOS About panel with
+  the logo, the version and a link to the repository.
+- **Check for updates…** in the app menu. It asks GitHub for the latest release
+  only when you click it (there is no background check). Homebrew installs get
+  the `brew upgrade` command to copy; other installs get a download link.
+
 ### Security
 
 - The phone remote server sends `nosniff`, `no-referrer` and
