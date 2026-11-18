@@ -74,6 +74,9 @@ pub fn parse_latest(json: &[u8]) -> Result<Release, String> {
 pub fn fetch_latest() -> Result<Release, String> {
     let out = Command::new("/usr/bin/curl")
         .args([
+            // Must come first: ignore ~/.curlrc, which could add headers to
+            // stdout (`include`) and break parsing, or change the request.
+            "-q",
             "--silent",
             "--show-error",
             "--fail",
