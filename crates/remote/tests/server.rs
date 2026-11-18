@@ -1472,7 +1472,7 @@ mod conversation {
         let path = copy_fixture(tmp.path());
         let a = h.store().mark("k", 1).unwrap();
         h.set_agents(vec![
-            conv_agent(&a, "codex", &path),
+            conv_agent(&a, "kimi", &path),
             conv_agent("r_unmarked000000", "claude-code", &path),
         ]);
         assert_eq!(

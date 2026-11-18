@@ -295,6 +295,17 @@ pub fn claude_project_slug(dir: &Path) -> String {
         .collect()
 }
 
+fn install_remote_tab_helper(state_dir: &Path) -> std::io::Result<()> {
+    const HELPER: &str = include_str!("../shims/remote-tab.mjs");
+    let dir = state_dir.join("shims");
+    let target = dir.join("remote-tab.mjs");
+    if std::fs::read_to_string(&target).is_ok_and(|s| s == HELPER) { return Ok(()); }
+    std::fs::create_dir_all(&dir)?;
+    let tmp = dir.join(format!(".remote-tab-{}.tmp", std::process::id()));
+    std::fs::write(&tmp, HELPER)?;
+    std::fs::rename(tmp, target)
+}
+
 /// The default launch command for a kind, as one displayable line — e.g.
 /// `"claude --permission-mode auto"`.
 ///

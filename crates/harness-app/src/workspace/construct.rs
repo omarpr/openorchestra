@@ -659,11 +659,12 @@ impl HarnessWorkspace {
                     let _ = view.update(cx, |_, cx| cx.notify());
                     continue;
                 };
+                let started = std::time::Instant::now();
                 let sample = cx
                     .background_spawn(async move { crate::ports::sample(sampler_has_tmux) })
                     .await;
                 // `None`: the scan timed out; keep the last sample, retry next tick.
-                if view.update(cx, |ws, cx| ws.finish_ports_scan(seq, sample, cx)).is_err() {
+                if view.update(cx, |ws, cx| ws.finish_ports_scan(seq, started, sample, cx)).is_err() {
                     break;
                 }
             }

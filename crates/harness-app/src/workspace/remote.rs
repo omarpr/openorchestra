@@ -135,6 +135,7 @@ pub(crate) fn remote_dot_opacity(live: bool, t: f32) -> f32 {
 }
 
 pub(crate) struct RemoteRuntime {
+    signals: HashMap<(PathBuf, String), (AgentState, SystemTime, Option<String>)>,
     /// The blink repaint loop is running.
     pub blinking: bool,
     pub store: Store,
@@ -196,6 +197,7 @@ impl RemoteRuntime {
         };
         let (snapshot_tx, _) = snapshot_channel();
         RemoteRuntime {
+            signals: HashMap::new(),
             blinking: false,
             store,
             file,
@@ -253,8 +255,17 @@ impl RemoteRuntime {
     /// belongs to another session, so a new tab shows Terminal until its own
     /// first signal records a fresh one.
     pub(crate) fn forget_session(&mut self, root: &Path, kind: &str) {
+        self.signals.remove(&(root.to_owned(), kind.to_owned()));
         self.session_files
             .remove(&(root.to_path_buf(), kind.to_string()));
+    }
+
+    pub(crate) fn record_signal(&mut self, root: &Path, kind: &str, state: AgentState, tool: Option<String>) {
+        let entry = self.signals.entry((root.to_owned(), kind.to_owned()))
+            .or_insert_with(|| (state, SystemTime::now(), None));
+        if entry.0 != state { entry.1 = SystemTime::now(); }
+        entry.0 = state;
+        entry.2 = tool;
     }
 
     fn reload(&mut self) {
@@ -421,8 +432,7 @@ pub(crate) struct MarkSource {
 pub(crate) fn build_snapshot(
     file: &RemoteFile,
     sources: &[MarkSource],
-    status: &HashMap<PathBuf, AgentState>,
-    since: &HashMap<PathBuf, (SystemTime, Option<String>)>,
+    signals: &HashMap<(PathBuf, String), (AgentState, SystemTime, Option<String>)>,
     session_files: &HashMap<(PathBuf, String), PathBuf>,
 ) -> Snapshot {
     // Open tabs per (worktree root, agent kind), marked or not: with two,
@@ -438,24 +448,21 @@ pub(crate) fn build_snapshot(
     }
     let mut agents = Vec::new();
     for src in sources {
-        let state = status.get(&src.root).copied();
-        let (status_since, tool) = match (state, since.get(&src.root)) {
-            (Some(s), Some((at, tool))) if s != AgentState::Unknown => {
-                (Some(rfc3339(*at)), tool.clone())
-            }
-            _ => (None, None),
-        };
-        let status = state.unwrap_or(AgentState::Unknown).to_string();
         for (tab_id, title, kind) in &src.tabs {
             let Some(mark) = file.mark_for(&src.key, *tab_id) else {
                 continue;
             };
             // Shell tabs are Terminal-only: which agent runs there is unknown.
-            let transcript = kind
+            let key = kind
                 .as_ref()
                 .filter(|k| open.get(&(src.root.as_path(), k.as_str())) == Some(&1))
-                .and_then(|k| session_files.get(&(src.root.clone(), k.clone())))
-                .cloned();
+                .map(|k| (src.root.clone(), k.clone()));
+            let transcript = key.as_ref().and_then(|k| session_files.get(k)).cloned();
+            let (status, status_since, tool) = match key.as_ref().and_then(|k| signals.get(k)) {
+                Some((state, at, tool)) if *state != AgentState::Unknown =>
+                    (state.to_string(), Some(rfc3339(*at)), tool.clone()),
+                _ => (AgentState::Unknown.to_string(), None, None),
+            };
             agents.push(AgentInfo {
                 id: mark.id.clone(),
                 title: title.clone(),
@@ -520,6 +527,28 @@ pub(crate) fn fill_from_disk(
     }
 }
 
+fn apply_tab_record(agent: &mut AgentInfo, state_dir: &Path) {
+    if !matches!(agent.agent_kind.as_deref(), Some("claude-code" | "codex")) { return; }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct TabRecord {
+        agent: String,
+        state: AgentState,
+        timestamp: String,
+        status_since: Option<String>,
+        session_file: Option<PathBuf>,
+        tool: Option<agent_runtime::ToolCall>,
+    }
+    let path = state_dir.join("remote/tabs").join(format!("{}.json", agent.session));
+    let Ok(bytes) = std::fs::read(path) else { return };
+    let Ok(record) = serde_json::from_slice::<TabRecord>(&bytes) else { return };
+    if agent.agent_kind.as_ref() != Some(&record.agent) { return; }
+    agent.status = record.state.to_string();
+    agent.status_since = Some(record.status_since.unwrap_or(record.timestamp));
+    agent.tool = record.tool.map(|t| t.name);
+    agent.transcript = record.session_file;
+}
+
 fn rfc3339(t: SystemTime) -> String {
     time::OffsetDateTime::from(t)
         .format(&time::format_description::well_known::Rfc3339)
@@ -530,6 +559,13 @@ impl HarnessWorkspace {
     /// Start the watcher/refresh loop and, when `remote.json` says enabled,
     /// the server. Called once from `new`.
     pub(crate) fn remote_init(&mut self, cx: &mut Context<Self>) {
+        // Reattached agents keep invoking the installed shim without going through on_spawn.
+        for result in [
+            agent_runtime::ClaudeCodeRuntime::new(&self.remote.state_dir).materialize_shim(),
+            agent_runtime::CodexRuntime::new(&self.remote.state_dir).materialize_shim(),
+        ] {
+            if let Err(e) = result { log::warn!("remote: refreshing agent hook: {e}"); }
+        }
         // A previous run that was killed (not quit) can leave shell tabs
         // switched to record their commands. With Remote off nothing should.
         if !self.remote.file.enabled
@@ -793,13 +829,15 @@ impl HarnessWorkspace {
         } else {
             self.remote.disk_panes = None;
         }
-        let snap = build_snapshot(
+        let mut snap = build_snapshot(
             &self.remote.file,
             &sources,
-            &self.agent_status,
-            &self.agent_since,
+            &self.remote.signals,
             &self.remote.session_files,
         );
+        for agent in &mut snap.agents {
+            apply_tab_record(agent, &self.remote.state_dir);
+        }
         self.remote.snapshot_tx.send_if_modified(|cur| {
             if *cur == snap {
                 return false;
@@ -1404,11 +1442,10 @@ mod tests {
             "/r/proj",
             &[(7, "claude", Some("claude")), (8, "❯_ shell", None)],
         )];
-        let status = HashMap::from([(PathBuf::from("/r/proj"), AgentState::Waiting)]);
         let at = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        let since = HashMap::from([(PathBuf::from("/r/proj"), (at, Some("Bash".to_string())))]);
+        let signals = HashMap::from([((PathBuf::from("/r/proj"), "claude".into()), (AgentState::Waiting, at, Some("Bash".into())))]);
 
-        let snap = build_snapshot(&f, &sources, &status, &since, &HashMap::new());
+        let snap = build_snapshot(&f, &sources, &signals, &HashMap::new());
 
         assert_eq!(snap.agents.len(), 1);
         let a = &snap.agents[0];
@@ -1430,23 +1467,43 @@ mod tests {
             mark("wt-x", 1, "r_other"),
         ]);
         let sources = [source("main:proj", "/r/proj", &[(7, "shell", None)])];
-        let snap = build_snapshot(&f, &sources, &HashMap::new(), &HashMap::new(), &HashMap::new());
+        let snap = build_snapshot(&f, &sources, &HashMap::new(), &HashMap::new());
         assert!(snap.agents.is_empty(), "{:?}", snap.agents);
     }
 
     #[test]
-    fn two_marked_tabs_in_one_worktree_share_its_status() {
+    fn session_records_restore_each_shared_tabs_transcript_and_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let tabs = dir.path().join("remote/tabs");
+        std::fs::create_dir_all(&tabs).unwrap();
+        let f = file(vec![mark("k", 1, "a"), mark("k", 2, "b")]);
+        let sources = [source("k", "/same", &[(1, "Claude", Some("claude-code")), (2, "Codex", Some("codex"))])];
+        let mut snap = build_snapshot(&f, &sources, &HashMap::new(), &HashMap::new());
+        for (agent, (kind, state, path)) in snap.agents.iter_mut().zip([
+            ("claude-code", "idle", "/c.jsonl"), ("codex", "running", "/x.jsonl"),
+        ]) {
+            let data = serde_json::json!({"agent": kind, "state": state, "timestamp": "2026-11-18T12:00:00Z", "sessionFile": path});
+            std::fs::write(tabs.join(format!("{}.json", agent.session)), data.to_string()).unwrap();
+        }
+        for agent in &mut snap.agents { apply_tab_record(agent, dir.path()); }
+        assert_eq!((snap.agents[0].status.as_str(), snap.agents[0].transcript.as_deref()), ("idle", Some(Path::new("/c.jsonl"))));
+        assert_eq!((snap.agents[1].status.as_str(), snap.agents[1].transcript.as_deref()), ("running", Some(Path::new("/x.jsonl"))));
+    }
+
+    #[test]
+    fn codex_running_does_not_mark_claude_running_in_the_same_worktree() {
         let f = file(vec![mark("wt-1", 3, "r_a"), mark("wt-1", 4, "r_b")]);
         let sources = [source(
             "wt-1",
             "/w/1",
-            &[(3, "claude", Some("claude")), (4, "shell", None)],
+            &[(3, "codex", Some("codex")), (4, "claude", Some("claude-code"))],
         )];
-        let status = HashMap::from([(PathBuf::from("/w/1"), AgentState::Running)]);
-        let snap = build_snapshot(&f, &sources, &status, &HashMap::new(), &HashMap::new());
+        let status = HashMap::from([((PathBuf::from("/w/1"), "codex".into()), (AgentState::Running, UNIX_EPOCH, None))]);
+        let snap = build_snapshot(&f, &sources, &status, &HashMap::new());
         let ids: Vec<_> = snap.agents.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, ["r_a", "r_b"]);
-        assert!(snap.agents.iter().all(|a| a.status == "running"));
+        assert_eq!(snap.agents[0].status, "running");
+        assert_eq!(snap.agents[1].status, "unknown");
         assert_eq!(snap.agents[1].session, crate::tmux::session_name("wt-1", 4));
     }
 
@@ -1457,8 +1514,8 @@ mod tests {
             source("a", "/a", &[(1, "t", None)]),
             source("b", "/b", &[(2, "t", None)]),
         ];
-        let status = HashMap::from([(PathBuf::from("/a"), AgentState::Unknown)]);
-        let snap = build_snapshot(&f, &sources, &status, &HashMap::new(), &HashMap::new());
+        let status = HashMap::new();
+        let snap = build_snapshot(&f, &sources, &status, &HashMap::new());
         assert_eq!(snap.agents.len(), 2);
         assert!(snap.agents.iter().all(|a| a.status == "unknown"));
         assert!(
@@ -1483,7 +1540,7 @@ mod tests {
         let f = file(tabs.iter().map(|(id, _, _)| mark("k", *id, &format!("r{id}"))).collect());
         let sources = [source("k", "/R", tabs)];
         let sf = sessions(entries);
-        let snap = build_snapshot(&f, &sources, &HashMap::new(), &HashMap::new(), &sf);
+        let snap = build_snapshot(&f, &sources, &HashMap::new(), &sf);
         snap.agents.into_iter().map(|a| a.transcript).collect()
     }
 
@@ -1527,7 +1584,7 @@ mod tests {
             &[(1, "c1", Some("claude-code")), (2, "c2", Some("claude-code"))],
         )];
         let sf = sessions(&[("/R", "claude-code", "/c.jsonl")]);
-        let snap = build_snapshot(&f, &sources, &HashMap::new(), &HashMap::new(), &sf);
+        let snap = build_snapshot(&f, &sources, &HashMap::new(), &sf);
         assert_eq!(snap.agents.len(), 1);
         assert_eq!(snap.agents[0].transcript, None);
         // The same kind in another worktree is no duplicate.
@@ -1537,7 +1594,7 @@ mod tests {
             source("j", "/S", &[(2, "c2", Some("claude-code"))]),
         ];
         let sf = sessions(&[("/R", "claude-code", "/c.jsonl"), ("/S", "claude-code", "/s.jsonl")]);
-        let snap = build_snapshot(&f, &sources, &HashMap::new(), &HashMap::new(), &sf);
+        let snap = build_snapshot(&f, &sources, &HashMap::new(), &sf);
         let got: Vec<_> = snap.agents.into_iter().map(|a| a.transcript).collect();
         assert_eq!(
             got,
@@ -1558,7 +1615,7 @@ mod tests {
             "/R",
             &[(1, "c", Some("claude-code")), (2, "p", Some("pi"))],
         )];
-        let snap = build_snapshot(&f, &sources, &HashMap::new(), &HashMap::new(), &rt.session_files);
+        let snap = build_snapshot(&f, &sources, &HashMap::new(), &rt.session_files);
         let got: Vec<_> = snap.agents.into_iter().map(|a| a.transcript).collect();
         assert_eq!(got, [None, Some(PathBuf::from("/p.jsonl"))]);
         assert!(
@@ -1589,10 +1646,10 @@ mod tests {
         let f = file(vec![mark("k", 1, "r1")]);
         let mut src = source("k", "/R", &[(1, "sh", None)]);
         src.branch = "feat/x".into();
-        let snap = build_snapshot(&f, &[src.clone()], &HashMap::new(), &HashMap::new(), &HashMap::new());
+        let snap = build_snapshot(&f, &[src.clone()], &HashMap::new(), &HashMap::new());
         assert_eq!(snap.agents[0].branch.as_deref(), Some("feat/x"));
         src.branch = String::new();
-        let snap = build_snapshot(&f, &[src], &HashMap::new(), &HashMap::new(), &HashMap::new());
+        let snap = build_snapshot(&f, &[src], &HashMap::new(), &HashMap::new());
         assert_eq!(snap.agents[0].branch, None);
     }
 
@@ -1700,7 +1757,7 @@ mod tests {
             ]
         );
         assert!(sources[1].tabs.is_empty());
-        let snap = build_snapshot(&f, &sources, &HashMap::new(), &HashMap::new(), &HashMap::new());
+        let snap = build_snapshot(&f, &sources, &HashMap::new(), &HashMap::new());
         let ids: Vec<_> = snap.agents.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, ["r_live", "r_dev"]);
         assert_eq!(snap.agents[1].session, crate::tmux::session_name("wt-1", 9));

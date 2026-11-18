@@ -217,9 +217,10 @@ impl HarnessWorkspace {
         }
         let has_tmux = self.has_tmux;
         let seq = self.next_ports_seq();
+        let started = std::time::Instant::now();
         cx.spawn(async move |view, cx| {
             let sample = cx.background_spawn(async move { ports::sample(has_tmux) }).await;
-            let _ = view.update(cx, |ws, cx| ws.finish_ports_scan(seq, sample, cx));
+            let _ = view.update(cx, |ws, cx| ws.finish_ports_scan(seq, started, sample, cx));
         })
         .detach();
     }
@@ -230,11 +231,12 @@ impl HarnessWorkspace {
     pub(crate) fn finish_ports_scan(
         &mut self,
         seq: u64,
+        started: std::time::Instant,
         sample: Option<ports::PortsSample>,
         cx: &mut Context<Self>,
     ) {
         match sample {
-            Some(sample) => self.apply_ports(seq, sample, cx),
+            Some(sample) => self.apply_ports(seq, started, sample, cx),
             None => {
                 self.ports_scan_failed = true;
                 cx.notify();
@@ -251,12 +253,12 @@ impl HarnessWorkspace {
         self.ports_seq_issued
     }
 
-    pub(crate) fn apply_ports(&mut self, seq: u64, sample: ports::PortsSample, cx: &mut Context<Self>) {
+    fn apply_ports(&mut self, seq: u64, started: std::time::Instant, sample: ports::PortsSample, cx: &mut Context<Self>) {
         if !ports::accept_scan(&mut self.ports_seq_applied, seq) {
             return;
         }
         self.ports_sample = Some(sample);
-        self.ports_sample_at = Some(std::time::Instant::now());
+        self.ports_sample_at = Some(started);
         self.ports_scan_failed = false;
         cx.notify();
     }
@@ -442,14 +444,14 @@ impl HarnessWorkspace {
             )
             .when(!actionable, |d| d.opacity(0.6))
             .when(actionable, |d| {
-                d.child(small_button(hx, format!("port-open-{section}-{port}"), "Open").on_click({
+                d.child(small_button(hx, port_action_id("open", section, row.pid, port), "Open").on_click({
                     let url = url.clone();
                     cx.listener(move |_, _, _, cx| {
                         cx.stop_propagation();
                         cx.open_url(&url);
                     })
                 }))
-                .child(small_button(hx, format!("port-copy-{section}-{port}"), "Copy").on_click(
+                .child(small_button(hx, port_action_id("copy", section, row.pid, port), "Copy").on_click(
                     cx.listener(move |ws, _, _, cx| {
                         cx.stop_propagation();
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(url.clone()));
@@ -487,6 +489,12 @@ fn small_button(hx: &HarnessTheme, id: String, label: &'static str) -> gpui::Sta
         .child(label)
 }
 
+/// Stable, unique action ID for a row. Several processes may legally listen
+/// on the same port on different addresses, so the port alone is insufficient.
+fn port_action_id(action: &str, section: &str, pid: u32, port: u16) -> String {
+    format!("port-{action}-{section}-{pid}-{port}")
+}
+
 /// Whether a mouse-down closes the open `menu` from outside. `trigger_press`
 /// is the last press a dropdown button saw (menu, position), recorded in the
 /// capture phase, which reaches the button before the menu's outside handler
@@ -506,7 +514,7 @@ fn dismisses(
 
 #[cfg(test)]
 mod tests {
-    use super::{SortMenu, dismisses};
+    use super::{SortMenu, dismisses, port_action_id};
     use gpui::{point, px};
 
     #[test]
@@ -526,5 +534,17 @@ mod tests {
         assert!(dismisses(SortMenu::Field, None, elsewhere));
         // The other dropdown's button: this menu closes, that one opens.
         assert!(dismisses(SortMenu::Field, Some((SortMenu::Order, button)), button));
+    }
+
+    #[test]
+    fn port_actions_are_unique_for_distinct_listeners_on_one_port() {
+        assert_ne!(
+            port_action_id("open", "other", 41, 8080),
+            port_action_id("open", "other", 42, 8080),
+        );
+        assert_ne!(
+            port_action_id("open", "other", 41, 8080),
+            port_action_id("copy", "other", 41, 8080),
+        );
     }
 }

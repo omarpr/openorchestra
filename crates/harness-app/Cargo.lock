@@ -6962,6 +6962,7 @@ dependencies = [
  "time",
  "tokio",
  "x509-parser",
+ "zstd",
 ]
 
 [[package]]

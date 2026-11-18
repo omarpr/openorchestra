@@ -1,16 +1,15 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import type { Agent } from "@/lib/api";
 import { readPref, writePref } from "@/lib/storage";
 
 export type View = "conversation" | "terminal";
 
 /**
- * Which view an agent shows, remembered per agent. Without a conversation it is always the
- * terminal; the first time that happens it is remembered, so a conversation appearing later
- * doesn't pull the user off the terminal they are using.
+ * Remember explicit view choices. A pending transcript uses Terminal temporarily.
  */
 export function useViewChoice(id: string, agent: Agent | undefined, agentsLoaded: boolean) {
   const hasConv = agent?.has_conversation === true;
+  const canPick = hasConv || agent?.agent_kind === "claude-code" || agent?.agent_kind === "codex";
   const [saved, setSaved] = useState<View | null>(() => {
     const v = readPref(`oo.view.${id}`);
     return v === "conversation" || v === "terminal" ? v : null;
@@ -23,14 +22,10 @@ export function useViewChoice(id: string, agent: Agent | undefined, agentsLoaded
     [id],
   );
 
-  const noConvYet = !!agent && !hasConv && saved === null;
-  useEffect(() => {
-    if (noConvYet) pick("terminal");
-  }, [noConvYet, pick]);
-
   const notFound = !agent && agentsLoaded;
   return {
-    view: (hasConv ? (saved ?? "conversation") : "terminal") as View,
+    view: (canPick && saved ? saved : hasConv ? "conversation" : "terminal") as View,
+    canPick,
     pick,
     hasConv,
     notFound,

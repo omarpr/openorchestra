@@ -85,6 +85,32 @@ pub fn diff(prev: &[Entry], next: &[Entry]) -> Option<Update> {
 /// after the first newline (so the partial first line is dropped).
 pub fn read_capped(path: &Path, cap: u64) -> io::Result<String> {
     let mut f = fs::File::open(path)?;
+    if path.extension().is_some_and(|ext| ext == "zst") {
+        let mut reader = zstd::stream::read::Decoder::new(f)?;
+        let mut tail = std::collections::VecDeque::new();
+        let mut chunk = [0; 32768];
+        let mut truncated = false;
+        loop {
+            let n = reader.read(&mut chunk)?;
+            if n == 0 {
+                break;
+            }
+            tail.extend(&chunk[..n]);
+            let excess = tail.len().saturating_sub(cap as usize);
+            truncated |= excess > 0;
+            tail.drain(..excess);
+        }
+        let bytes = tail.make_contiguous();
+        let start = if truncated {
+            bytes
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(bytes.len(), |i| i + 1)
+        } else {
+            0
+        };
+        return Ok(String::from_utf8_lossy(&bytes[start..]).into_owned());
+    }
     let len = f.metadata()?.len();
     let mut buf = Vec::new();
     if len <= cap {

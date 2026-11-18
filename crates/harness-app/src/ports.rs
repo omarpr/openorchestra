@@ -557,10 +557,15 @@ pub fn url_for(row: &PortRow) -> String {
     }
 }
 
-/// Run `lsof`, `ps` and (when available) `tmux list-panes`. Blocking: call
-/// it off the UI thread. A tool that fails or is missing contributes nothing.
-/// Every external command a sample runs gets this long.
+/// Every individual command a sample runs gets at most this long. The sample
+/// also has one overall deadline, so serial optional enrichment cannot turn a
+/// three-second poll into a long-running background job.
 const SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The total time one Ports sample may spend, including tmux, cwd lookup and
+/// Docker enrichment. The two core probes can each consume their full per-
+/// command allowance; optional work uses only what remains.
+const SCAN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(6);
 
 /// Run `lsof`, `ps`, and (when available) `tmux list-panes`, each bounded by
 /// [`SCAN_TIMEOUT`]. Blocking: call it off the UI thread. `None` when the
@@ -568,19 +573,30 @@ const SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 /// stuck on an unreachable network mount, say): the caller keeps its last
 /// sample and the next tick retries. An empty answer is still `Some`.
 pub fn sample(has_tmux: bool) -> Option<PortsSample> {
-    sample_using(|cmd, args| run_bounded(cmd, args, SCAN_TIMEOUT).and_then(|ran| accepted(cmd, ran)), has_tmux)
+    let deadline = std::time::Instant::now() + SCAN_DEADLINE;
+    sample_using(
+        |cmd, args| {
+            time_left(deadline)
+                .and_then(|timeout| run_bounded(cmd, args, timeout))
+                .and_then(|ran| accepted(cmd, ran))
+        },
+        has_tmux,
+    )
 }
 
 /// [`sample`] with the command runner passed in, so tests can play a stalled
 /// or empty scan. `run` returns stdout, or `None` on timeout or spawn failure.
-pub fn sample_using(
+fn sample_using(
     run: impl Fn(&str, &[&str]) -> Option<String>,
     has_tmux: bool,
 ) -> Option<PortsSample> {
     // lsof exits 1 when nothing matches; its stdout is still the answer.
     let listeners = parse_lsof(&run("lsof", &["-nP", "-w", "-iTCP", "-sTCP:LISTEN", "-F", "pcn"])?);
     let procs = parse_ps_paths(&run("ps", &["-axo", "pid=,ppid=,comm="])?);
-    let session_panes = if has_tmux { crate::tmux::list_session_panes() } else { Vec::new() };
+    let session_panes = if has_tmux {
+        run("tmux", &["list-panes", "-a", "-F", "#{session_name} #{pane_pid}"])
+            .map(|s| crate::tmux::parse_session_panes(&s)).unwrap_or_default()
+    } else { Vec::new() };
     let engine_listening = listeners.iter().any(|l| {
         procs
             .iter()
@@ -620,6 +636,13 @@ pub fn sample_using(
         None => Vec::new(),
     };
     Some(PortsSample { app_pid: std::process::id(), listeners, procs, session_panes, containers, cwds })
+}
+
+/// Remaining scan budget, if any. A zero-duration command timeout is not
+/// useful: skip the optional operation instead.
+fn time_left(deadline: std::time::Instant) -> Option<std::time::Duration> {
+    deadline.checked_duration_since(std::time::Instant::now())
+        .filter(|left| !left.is_zero()).map(|left| left.min(SCAN_TIMEOUT))
 }
 
 /// A Docker endpoint that stays on this machine: a Unix socket (or a Windows
