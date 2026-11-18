@@ -12,6 +12,14 @@ Unreleased is empty.
 
 ## Unreleased
 
+### Security
+
+- The phone remote server sends `nosniff`, `no-referrer` and
+  `X-Frame-Options: DENY` on every response, including the API and the setup
+  page (the web pages already had a Content-Security-Policy).
+- Pairing results are logged: each successful pairing, each wrong code, and
+  each address locked out after repeated wrong codes.
+
 ## 1.0.0 - 2026-11-17
 
 First public release: a native macOS app to run Claude Code, Codex, OpenCode,
