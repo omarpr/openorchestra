@@ -16,6 +16,7 @@ use tokio::sync::{Mutex, Semaphore};
 use tokio::time::timeout;
 
 use crate::api::{authed, error, AppState};
+use crate::server::Shared;
 
 const MAX_SECONDS: usize = 30;
 const MAX_SAMPLE_RATE: usize = 192_000;
@@ -103,6 +104,14 @@ fn valid_wav(bytes: &[u8]) -> bool {
         && data_len <= rate * MAX_SECONDS * 2
 }
 
+fn check_writable(s: &Shared, device_id: &str) -> Option<(StatusCode, &'static str)> {
+    match s.current_file().devices.iter().find(|d| d.id == device_id) {
+        Some(d) if !d.read_only => None,
+        Some(_) => Some((StatusCode::FORBIDDEN, "read_only")),
+        None => Some((StatusCode::UNAUTHORIZED, "unauthorized")),
+    }
+}
+
 pub(crate) async fn transcribe(State(s): AppState, request: Request) -> Response {
     let (device, _) = match authed(&s, request.headers()) {
         Ok(value) => value,
@@ -148,6 +157,9 @@ pub(crate) async fn transcribe(State(s): AppState, request: Request) -> Response
     else {
         return error(StatusCode::SERVICE_UNAVAILABLE, "voice_failed");
     };
+    if let Some((status, code)) = check_writable(&s, &device.id) {
+        return error(status, code);
+    }
     let mut shutdown = s.shutdown.subscribe();
     let result = tokio::select! {
         _ = shutdown.wait_for(|stopped| *stopped) => {
@@ -172,13 +184,8 @@ pub(crate) async fn transcribe(State(s): AppState, request: Request) -> Response
         Some(4) => return error(StatusCode::SERVICE_UNAVAILABLE, "voice_model_unavailable"),
         _ => return error(StatusCode::SERVICE_UNAVAILABLE, "voice_failed"),
     }
-    if !s
-        .current_file()
-        .devices
-        .iter()
-        .any(|d| d.id == device.id && !d.read_only)
-    {
-        return error(StatusCode::FORBIDDEN, "read_only");
+    if let Some((status, code)) = check_writable(&s, &device.id) {
+        return error(status, code);
     }
     let text = String::from_utf8_lossy(&output.stdout);
     (

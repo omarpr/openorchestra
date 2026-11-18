@@ -1335,6 +1335,55 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn voice_rechecks_write_access_before_starting_helper() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const WAV: &[u8] = b"RIFF\x26\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x80\x3e\0\0\0\x7d\0\0\x02\0\x10\0data\x02\0\0\0\0\0";
+        let dir = tempfile::tempdir().unwrap();
+        let (mut shared, _, writer, _) = paired_fixture(dir.path(), crate::Tmux::default());
+        let marker = dir.path().join("helper-ran");
+        let helper = dir.path().join("voice-test");
+        std::fs::write(
+            &helper,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in --available) exit 0;; esac\n: > '{}'\nprintf 'ok\\n'\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        shared.voice.use_test_helper(helper);
+        let shared = Arc::new(shared);
+        let app = router(shared.clone());
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, Infallible>>(2);
+        let body_stream =
+            stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|item| (item, rx)) });
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/api/voice")
+            .header(header::AUTHORIZATION, format!("Bearer {writer}"))
+            .header(header::CONTENT_TYPE, "audio/wav")
+            .body(Body::from_stream(body_stream))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo("127.0.0.1:1234".parse::<SocketAddr>().unwrap()));
+
+        let resp_task = tokio::spawn(async move { app.oneshot(request).await.unwrap() });
+        tx.send(Ok(Bytes::from_static(&WAV[..20]))).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let writer_id = shared.current_file().devices[0].id.clone();
+        auth::revoke(&shared.store(), &writer_id).unwrap();
+        tx.send(Ok(Bytes::from_static(&WAV[20..]))).await.unwrap();
+        drop(tx);
+
+        let resp = resp_task.await.unwrap();
+        assert_eq!(resp.status(), 401);
+        assert!(!marker.exists(), "helper must not run after device revocation");
+    }
+
     #[test]
     fn flattens_each_newline_kind_to_one_space() {
         assert_eq!(flatten_newlines("a\nb"), "a b");
