@@ -473,9 +473,21 @@ pub fn tab_label(task_count: usize, visible: bool) -> String {
     }
 }
 
-/// The browser URL for a local port.
-pub fn url(port: u16) -> String {
-    format!("http://localhost:{port}")
+/// The browser URL for a row. `localhost` when the server accepts loopback
+/// (bound to every interface or to a loopback address); otherwise the one
+/// address it is bound to, since `localhost` would miss it or reach a
+/// different server on the same port.
+pub fn url_for(row: &PortRow) -> String {
+    let port = row.port;
+    let loopback_ok = row
+        .addrs
+        .iter()
+        .any(|a| matches!(a.as_str(), "*" | "127.0.0.1" | "::1" | "localhost"));
+    match row.addrs.first() {
+        Some(addr) if !loopback_ok && addr.contains(':') => format!("http://[{addr}]:{port}"),
+        Some(addr) if !loopback_ok => format!("http://{addr}:{port}"),
+        _ => format!("http://localhost:{port}"),
+    }
 }
 
 /// Run `lsof`, `ps` and (when available) `tmux list-panes`. Blocking: call
@@ -821,6 +833,19 @@ quiet-1\tbusybox\t\t\t\t\n";
         assert_eq!(serde_json::from_str::<PortSort>(&json).unwrap(), by(SortField::Name, SortOrder::Desc));
         assert_eq!(serde_json::from_str::<PortSort>(r#"{"field":"name"}"#).unwrap().order, SortOrder::Asc);
         assert_eq!(PortSort::default(), by(SortField::Port, SortOrder::Asc));
+    }
+
+    #[test]
+    fn url_uses_localhost_only_when_the_server_accepts_loopback() {
+        let at = |addrs: &[&str]| PortRow {
+            addrs: addrs.iter().map(|a| a.to_string()).collect(),
+            ..row(8080, "node", None)
+        };
+        assert_eq!(url_for(&at(&["*"])), "http://localhost:8080");
+        assert_eq!(url_for(&at(&["127.0.0.1"])), "http://localhost:8080");
+        assert_eq!(url_for(&at(&["::1"])), "http://localhost:8080");
+        assert_eq!(url_for(&at(&["192.168.1.20"])), "http://192.168.1.20:8080");
+        assert_eq!(url_for(&at(&["fe80::1"])), "http://[fe80::1]:8080");
     }
 
     #[test]

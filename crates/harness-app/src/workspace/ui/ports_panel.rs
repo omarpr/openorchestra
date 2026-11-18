@@ -294,6 +294,7 @@ impl HarnessWorkspace {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let port = row.port;
+        let url = ports::url_for(row);
         let loopback_only = row
             .addrs
             .iter()
@@ -367,17 +368,18 @@ impl HarnessWorkspace {
                     .text_color(hx.tx2)
                     .child(detail),
             )
-            .child(small_button(hx, format!("port-open-{section}-{port}"), "Open").on_click(
+            .child(small_button(hx, format!("port-open-{section}-{port}"), "Open").on_click({
+                let url = url.clone();
                 cx.listener(move |_, _, _, cx| {
                     cx.stop_propagation();
-                    cx.open_url(&ports::url(port));
-                }),
-            ))
+                    cx.open_url(&url);
+                })
+            }))
             .child(small_button(hx, format!("port-copy-{section}-{port}"), "Copy").on_click(
                 cx.listener(move |ws, _, _, cx| {
                     cx.stop_propagation();
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(ports::url(port)));
-                    ws.set_note(format!("copied {}", ports::url(port)));
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(url.clone()));
+                    ws.set_note(format!("copied {url}"));
                     cx.notify();
                 }),
             ))
