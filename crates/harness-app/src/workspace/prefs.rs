@@ -35,6 +35,7 @@ pub(crate) enum ToolTab {
     Git,
     #[default]
     Review,
+    Ports,
 }
 
 /// Sub-tab inside the Files tools surface: tree vs. project search.
@@ -145,6 +146,9 @@ pub(crate) struct Prefs {
     /// Active tab inside the tools panel. Absent in older prefs → Review.
     #[serde(default)]
     pub(crate) tool_tab: ToolTab,
+    /// Row order in the Ports tool tab. Absent in older prefs → port ascending.
+    #[serde(default)]
+    pub(crate) ports_sort: crate::ports::PortSort,
     /// Unified or side-by-side bodies. Absent in older prefs files, which land
     /// on `Unified` — what they were already showing.
     #[serde(default)]
@@ -197,6 +201,7 @@ impl Default for Prefs {
             diff_width: 380.0,
             diff_location: DiffLocation::Dock,
             tool_tab: ToolTab::default(),
+            ports_sort: Default::default(),
             diff_view: DiffView::default(),
             diff_list_width: 280.0,
             sidebar_open: true,
@@ -439,5 +444,15 @@ mod collapsed_prefs_tests {
         // "collapsed", so existing prefs files keep their meaning.
         assert!(Archived.collapsed_by_default());
         assert!(![Stats, Tasks, Projects].iter().any(|s| s.collapsed_by_default()));
+    }
+
+    #[test]
+    fn ports_sections_share_the_sidebar_header_keys() {
+        // The Ports tab's two lists use the same collapsible header as the
+        // sidebar, so their collapse state persists the same way.
+        use crate::workspace::ui::sidebar::SidebarSection::*;
+        assert_eq!([PortsTask.label(), PortsOther.label()], ["THIS TASK", "OTHER ON THIS MAC"]);
+        assert!(PortsOther.collapsed_by_default(), "the rest of the Mac starts folded away");
+        assert!(!PortsTask.collapsed_by_default());
     }
 }

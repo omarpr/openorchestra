@@ -38,7 +38,6 @@ settings = { git = "https://github.com/zed-industries/zed.git", rev = "e8bc16ace
 theme = { git = "https://github.com/zed-industries/zed.git", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 theme_settings = { git = "https://github.com/zed-industries/zed.git", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 release_channel = { git = "https://github.com/zed-industries/zed.git", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
-task = { git = "https://github.com/zed-industries/zed.git", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 # `debug-embed`: since v1.2x zed's debug builds read their embedded assets
 # (default settings, keymaps, icons, grammars' queries) from "the checkout that
 # built this binary", found by walking up to the first `.git`. For us that is
@@ -76,15 +75,27 @@ tree-sitter-json = "=0.24.8"
 tree-sitter-python = "=0.25.0"
 tree-sitter-css = "=0.23.2"
 tree-sitter-bash = "=0.25.1"
+# The rest of zed's built-in configs (grammars crate), at the revs and exact
+# versions zed's own Cargo.toml/Cargo.lock use. markdown is zed's fork (a
+# serialize() buffer-overflow fix); cpp, gitcommit, gomod and gowork are
+# pinned to git revs exactly as zed pins them.
+tree-sitter-md = { git = "https://github.com/zed-industries/tree-sitter-markdown", rev = "b596e737286780d7bfa9fcddceaeeb754574b352" }
+tree-sitter-c = "=0.24.1"
+tree-sitter-cpp = { git = "https://github.com/tree-sitter/tree-sitter-cpp", rev = "5cb9b693cfd7bfacab1d9ff4acac1a4150700609" }
+tree-sitter-diff = "=0.1.0"
+tree-sitter-gitcommit = { git = "https://github.com/zed-industries/tree-sitter-git-commit", rev = "88309716a69dd13ab83443721ba6e0b491d37ee9" }
+tree-sitter-go-mod = { git = "https://github.com/camdencheek/tree-sitter-go-mod", rev = "2e886870578eeba1927a2dc4bd2e2b3f598c5f9a", package = "tree-sitter-gomod" }
+tree-sitter-gowork = { git = "https://github.com/zed-industries/tree-sitter-go-work", rev = "acb0617bf7f4fda02c6217676cc64acb89536dc7" }
+tree-sitter-jsdoc = "=0.23.2"
+tree-sitter-regex = "=0.24.3"
 
 # Spike 4: the headless worktree manager + registry (git worktree lifecycle,
 # status, merge-base diff). Path dep — light (serde only), no zed cone.
 worktrees = { path = "../worktrees" }
-# Live sidebar data: forge poller (PR/CI badges via `gh`) + status watcher
-# (agent pill via .harness/status.json). Path deps; degrade gracefully when gh
-# or pi are absent.
+# Live sidebar data: forge poller (PR/CI badges via `gh`). Path dep; degrades
+# gracefully when gh is absent. (The agent pill's status watcher arrives
+# through agent-runtime.)
 forge = { path = "../forge" }
-status-watch = { path = "../status-watch" }
 # The agent-agnostic layer (§4.5-4.6): picks the CLI per worktree, drops in the
 # per-agent config, and normalizes every adapter's signal onto one bus.
 agent-runtime = { path = "../agent-runtime" }

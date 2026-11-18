@@ -371,6 +371,12 @@ impl HarnessWorkspace {
             .when_some(tab.agent.clone(), |d, kind| {
                 d.child(div().mr_1().size(px(14.0)).child(agent_icon(&kind, 13.0)))
             })
+            // A file tab is a view into zed (the service workspace), so it
+            // wears the Editor tab's `{ }` mark: same glyph, same spacing as
+            // the "{ } editor" title, never italic even on a preview tab.
+            .when(matches!(tab.content, TabContent::File { .. }), |d| {
+                d.child(div().flex_none().mr_1().not_italic().child("{ }"))
+            })
             .when(remote_menu, |d| {
                 d.on_mouse_down(
                     MouseButton::Right,

@@ -403,14 +403,14 @@ describe("AgentView conversation switch", () => {
     expect(screen.getByRole("status")).toHaveTextContent(/Remote control was turned off/);
   });
 
-  it("a conversation appearing while on Terminal does not switch away from it", () => {
+  it("opens the conversation when the initial transcript arrives", () => {
     const { rerender } = render(<AgentView id="a1" agent={agent({ has_conversation: false })} />);
     expect(sockets).toHaveLength(1);
-    expect(localStorage.getItem("oo.view.a1")).toBe("terminal");
+    expect(localStorage.getItem("oo.view.a1")).toBeNull();
     rerender(<AgentView id="a1" agent={agent({ has_conversation: true })} />);
-    expect(screen.getByRole("tab", { name: "Terminal" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Conversation" })).toHaveAttribute("aria-selected", "true");
     expect(sockets).toHaveLength(1);
-    expect(stream.urls).toHaveLength(0);
+    expect(stream.urls).toHaveLength(1);
   });
 
   it("nothing is saved while the agent list is still loading", () => {
@@ -418,8 +418,17 @@ describe("AgentView conversation switch", () => {
     expect(localStorage.getItem("oo.view.a1")).toBeNull();
   });
 
-  it("no conversation: Terminal and no switch", () => {
-    render(<AgentView id="a1" agent={agent({ has_conversation: false })} />);
+  it.each(["claude-code", "codex"])("offers Conversation for %s while its transcript is pending", async (kind) => {
+    const { rerender } = render(<AgentView id="a1" agent={agent({ agent_kind: kind, has_conversation: false })} />);
+    await userEvent.click(screen.getByRole("tab", { name: "Conversation" }));
+    expect(screen.getByText(/Waiting for a transcript/)).toBeInTheDocument();
+    expect(stream.urls).toHaveLength(0);
+    rerender(<AgentView id="a1" agent={agent({ agent_kind: kind })} />);
+    expect(stream.urls).toEqual(["/api/agents/a1/conversation"]);
+  });
+
+  it("unsupported agent: Terminal and no switch", () => {
+    render(<AgentView id="a1" agent={agent({ agent_kind: "kimi", has_conversation: false })} />);
     expect(screen.queryByRole("tab")).not.toBeInTheDocument();
     expect(sockets).toHaveLength(1);
     expect(stream.urls).toHaveLength(0);

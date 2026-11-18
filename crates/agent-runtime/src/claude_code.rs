@@ -67,7 +67,8 @@ impl ClaudeCodeRuntime {
         self.state_dir.join("shims").join(SHIM_FILENAME)
     }
 
-    fn materialize_shim(&self) -> io::Result<PathBuf> {
+    pub fn materialize_shim(&self) -> io::Result<PathBuf> {
+        crate::install_remote_tab_helper(&self.state_dir)?;
         let path = self.shim_path();
         if fs::read_to_string(&path).is_ok_and(|existing| existing == SHIM) {
             return Ok(path);

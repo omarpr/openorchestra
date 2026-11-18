@@ -21,6 +21,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { recordTab } from "./remote-tab.mjs";
+import os from "node:os";
+import { pathToFileURL } from "node:url";
 
 function readStdin() {
 	try {
@@ -50,22 +53,24 @@ export function classify(payload) {
 	return "running";
 }
 
-export function writeStatus(cwd, state) {
+export function writeStatus(cwd, state, sessionFile = null, sessionId) {
 	try {
 		const dir = path.join(cwd, ".harness");
 		fs.mkdirSync(dir, { recursive: true });
 		const payload =
-			JSON.stringify({ state, agent: "codex", timestamp: new Date().toISOString(), sessionFile: null }, null, "\t") +
+			JSON.stringify({ state, agent: "codex", timestamp: new Date().toISOString(), sessionFile }, null, "\t") +
 			"\n";
 		const tmp = path.join(dir, `.status-${process.pid}-${crypto.randomBytes(4).toString("hex")}.tmp`);
 		fs.writeFileSync(tmp, payload, "utf8");
 		fs.renameSync(tmp, path.join(dir, "status.json")); // atomic on POSIX
+		recordTab(payload, sessionId);
 	} catch {
 		// Never let status bookkeeping break the agent.
 	}
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && fs.existsSync(process.argv[1]) &&
+	import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href) {
 	// The hook lives in the user's GLOBAL codex config (~/.codex/hooks.json), so
 	// this shim runs for every codex everywhere. Only harness-spawned codex
 	// processes carry this marker (set on the pty env and inherited); without
@@ -87,6 +92,19 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 	// Attribution: prefer the payload's own cwd, then codex's project-dir env,
 	// then this process's cwd — the worktree the harness launched codex in.
 	const cwd = payload?.cwd || process.env.CODEX_PROJECT_DIR || process.cwd();
-	writeStatus(cwd, classify(payload));
+	let file = payload?.transcript_path;
+	const id = payload?.session_id || payload?.thread_id || process.env.CODEX_THREAD_ID;
+	if (!file && typeof id === "string" && /^[a-f\d]{8}-[a-f\d]{4}-7[a-f\d]{3}-[a-f\d]{4}-[a-f\d]{12}$/i.test(id)) {
+		const date = new Date(Number.parseInt(id.replaceAll("-", "").slice(0, 12), 16));
+		const base = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+		const dir = path.join(base, "sessions", String(date.getFullYear()),
+			String(date.getMonth() + 1).padStart(2, "0"), String(date.getDate()).padStart(2, "0"));
+		try {
+			const name = fs.readdirSync(dir).find(n => n.startsWith("rollout-") &&
+				(n.endsWith(id + ".jsonl") || n.endsWith(id + ".jsonl.zst")));
+			if (name) file = path.join(dir, name);
+		} catch { /* The first turn may precede rollout creation. */ }
+	}
+	writeStatus(cwd, classify(payload), typeof file === "string" && path.isAbsolute(file) ? file : null, id);
 	process.exit(0);
 }

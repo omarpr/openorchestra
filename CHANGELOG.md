@@ -12,6 +12,40 @@ Unreleased is empty.
 
 ## Unreleased
 
+### Added
+
+- **Ports tab** in the tools panel: the servers a task is running, with Open in
+  browser and Copy URL, plus the rest of the Mac's listening ports under
+  "Other on this Mac".
+- Ports published by Docker containers show the container (Compose service and
+  project, or the container name) with a Docker icon and the port inside it.
+  Compose containers started from a task's folder appear under that task, as
+  do containers with a folder from the task mounted in. A plain `docker run`
+  container whose name starts with the project's (`comicchat-ergo` for
+  `comic-chat`) is listed there too, marked "matched by name".
+- A server that's no longer under the task's terminals (started in the
+  background, its shell gone) is still listed under the task when it runs from
+  inside the task's folder. Hovering a row shows its folder.
+- Ports tab rows can be sorted by port or name, ascending or descending, from
+  two dropdowns; the choice is remembered. Its "This task" and "Other on this
+  Mac" lists collapse like the sidebar's sections and remember their state.
+- File tabs show the editor's `{ }` mark, so it's clear they are the zed
+  editor.
+- Syntax highlighting for the rest of zed's built-in languages: Markdown, C,
+  C++, JSONC, `.env`, diffs, git commit messages, go.mod/go.work, JSDoc and
+  regular expressions.
+
+### Fixed
+
+- The Review base menu on a project's main checkout read "vs HEAD" and showed
+  the same files as Uncommitted. It now reads "vs origin/<default branch>" and
+  shows everything the checked-out branch changes.
+- The Markdown preview (eye) button showed on the preview itself, where it did
+  nothing. It now shows only on the Markdown file.
+- The Markdown preview (eye) button did nothing in a file's own tab when focus
+  was elsewhere, for example after opening the file from the Git panel or a
+  commit. It now always previews the file it sits above.
+
 ## 1.0.1 - 2026-11-17
 
 ### Added

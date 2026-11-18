@@ -45,6 +45,7 @@ impl HarnessWorkspace {
             .map(|r| self.review.count(&r.key))
             .unwrap_or(0);
         let dirty = self.selection_dirty_count();
+        let ports = self.ports_task_count();
 
         let mut strip = div()
             .flex()
@@ -56,7 +57,7 @@ impl HarnessWorkspace {
             .border_b_1()
             .border_color(hx.border);
 
-        for tab in [ToolTab::Files, ToolTab::Git, ToolTab::Review] {
+        for tab in [ToolTab::Files, ToolTab::Git, ToolTab::Review, ToolTab::Ports] {
             let selected = active == tab;
             let label = match tab {
                 ToolTab::Files => "Files".to_string(),
@@ -64,6 +65,7 @@ impl HarnessWorkspace {
                 ToolTab::Git => "Git".to_string(),
                 ToolTab::Review if review_count > 0 => format!("Review · {review_count}"),
                 ToolTab::Review => "Review".to_string(),
+                ToolTab::Ports => crate::ports::tab_label(ports, self.ports_visible()),
             };
             strip = strip.child(
                 div()
@@ -253,6 +255,7 @@ impl HarnessWorkspace {
                 let width = self.tools_panel_width(window);
                 self.render_diff_surface(hx, Some(width), false, cx)
             }
+            ToolTab::Ports => self.render_ports_panel(hx, cx),
             ToolTab::Files if self.files_sub_tab == FilesSubTab::Search => {
                 self.render_project_search_panel(hx, cx)
             }
@@ -427,6 +430,7 @@ impl ToolTab {
             ToolTab::Files => "files",
             ToolTab::Git => "git",
             ToolTab::Review => "review",
+            ToolTab::Ports => "ports",
         }
     }
 }

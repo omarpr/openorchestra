@@ -16,6 +16,7 @@ mod settings;
 /// port field's commit use.
 pub(crate) mod settings_remote;
 mod start_specialists;
+pub(crate) mod ports_panel;
 mod tool_panel;
 /// `pub(crate)` for `SidebarSection` alone — its variant labels are the keys
 /// `Prefs::collapsed_sections` persists, so the prefs tests pin them.

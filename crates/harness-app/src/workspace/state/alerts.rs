@@ -167,6 +167,7 @@ impl HarnessWorkspace {
     pub(crate) fn apply_agent(&mut self, signal: AgentSignal, cx: &mut Context<Self>) {
         let previous = self.agent_status.insert(signal.worktree_root.clone(), signal.state);
         let tool = signal.tool.as_ref().map(|t| t.name.clone());
+        self.remote.record_signal(&signal.worktree_root, signal.kind.as_str(), signal.state, tool.clone());
         match self.agent_since.get_mut(&signal.worktree_root) {
             // Same state: keep its start time, follow the tool.
             Some(since) if previous == Some(signal.state) => since.1 = tool,

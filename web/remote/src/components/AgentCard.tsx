@@ -36,7 +36,7 @@ export function AgentCard({
     >
       <div className="flex items-center justify-between gap-2">
         <span className="flex min-w-0 items-center gap-1.5">
-          <AgentIcon kind={agent.agent_kind} />
+          {agent.agent_kind && <AgentIcon kind={agent.agent_kind} />}
           <span className="truncate font-medium">{agent.title}</span>
         </span>
         <StatusPill status={agent.status} />

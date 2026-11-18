@@ -24,6 +24,11 @@ describe("AgentCard", () => {
     expect(screen.getByText("proj · main")).toBeInTheDocument();
     expect(screen.getByText("Edit")).toBeInTheDocument();
   });
+  it("keeps just the shell glyph supplied by the tab title", () => {
+    render(<AgentCard agent={{ ...base, title: "❯_ shell", agent_kind: null }} />);
+    expect(screen.getByText("❯_ shell")).toBeInTheDocument();
+    expect(screen.queryByText("◇")).not.toBeInTheDocument();
+  });
   it("uses a monogram for unknown kinds", () => {
     const { container } = render(<AgentCard agent={{ ...base, agent_kind: "my-agent" }} />);
     const el = container.querySelector('[data-agent="my-agent"]');

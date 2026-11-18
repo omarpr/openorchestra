@@ -36,7 +36,7 @@ export function AgentView({
   const [initReadOnly, setInitReadOnly] = useState(false);
   const meReadOnly = useReadOnly();
   const prefs = useTerminalPrefs(id);
-  const { view, pick, hasConv, notFound, loading } = useViewChoice(id, agent, agentsLoaded);
+  const { view, pick, hasConv, canPick, notFound, loading } = useViewChoice(id, agent, agentsLoaded);
   const { closed, connected, setConnected, report, retry, attempt } = useClosures(view, remoteUp);
 
   const shell = agent ? isShell(agent) : false;
@@ -62,7 +62,7 @@ export function AgentView({
       <AgentToolbar
         view={view}
         onPickView={pickView}
-        canPick={hasConv}
+        canPick={canPick}
         fontSize={prefs.fontSize}
         onStepFont={prefs.stepFont}
         watchOnly={meReadOnly !== null && readOnly}
@@ -75,7 +75,8 @@ export function AgentView({
           {notFound ? (
             <NotShared showBack={!isTablet} />
           ) : loading ? null : view === "conversation" ? (
-            <ConversationView
+            <AgentConversation
+              ready={hasConv}
               key={attempt}
               id={id}
               onClosed={report}
@@ -122,6 +123,18 @@ export function AgentView({
           }
         />
       )}
+    </div>
+  );
+}
+
+function AgentConversation({ ready, ...props }: React.ComponentProps<typeof ConversationView> & { ready: boolean }) {
+  if (ready) return <ConversationView {...props} />;
+  return (
+    <div
+      role="status"
+      className="flex h-full items-center justify-center px-4 text-center text-sm text-muted-foreground"
+    >
+      Waiting for a transcript for this tab. You can use Terminal in the meantime.
     </div>
   );
 }

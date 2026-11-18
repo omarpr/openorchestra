@@ -56,7 +56,7 @@ impl HarnessWorkspace {
                 .px_1p5()
                 .rounded_md()
                 .text_xs()
-                .font_family(hx.font_mono)
+                .font_family(hx.font_ui)
                 .text_color(color)
                 .when(!self.pushing, |d| {
                     d.cursor_pointer().hover(|d| d.bg(hx.surface))
@@ -87,7 +87,7 @@ impl HarnessWorkspace {
             .rounded_md()
             .bg(hx.surface)
             .text_xs()
-            .font_family(hx.font_mono)
+            .font_family(hx.font_ui)
             .text_color(hx.tx1)
             .cursor_pointer()
             .tooltip(tip("What the diff is measured against"))
@@ -297,7 +297,7 @@ impl HarnessWorkspace {
                     // *wrapping*, and a long branch wrapped to three lines inside
                     // this `h(px(34.0))` row overflowed it above and below —
                     // painting over the row beneath.
-                    .child(div().flex_1().min_w_0().text_xs().font_family(hx.font_mono).text_color(hx.tx1).truncate().child(r.branch.clone())),
+                    .child(div().flex_1().min_w_0().text_xs().font_family(hx.font_ui).text_color(hx.tx1).truncate().child(r.branch.clone())),
             )
             .child(
                 div()
@@ -370,7 +370,7 @@ impl HarnessWorkspace {
                             .items_center()
                             .gap_2()
                             .text_xs()
-                            .font_family(hx.font_mono)
+                            .font_family(hx.font_ui)
                             .children(self.render_push_control(hx, r, cx))
                             .child(self.render_diff_view_toggle(hx, body_width, cx))
                             .child(div().flex_none().text_color(hx.green).child(format!("+{adds}")))

@@ -262,6 +262,14 @@ impl HarnessWorkspace {
             diff_surface_focus: cx.focus_handle(),
             resource: None,
             resource_history: crate::resource_monitor::History::new(RESOURCE_HISTORY),
+            ports_sample: None,
+            ports_seq_issued: 0,
+            ports_seq_applied: 0,
+            ports_gate: Default::default(),
+            ports_sample_at: None,
+            ports_scan_failed: false,
+            ports_sort_menu: None,
+            ports_sort_trigger_press: None,
             archived_repos,
             archived_path,
             confirm_removal: None,
@@ -618,6 +626,45 @@ impl HarnessWorkspace {
                     .update(cx, |ws, cx| ws.apply_resource(raw, cx))
                     .is_err()
                 {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        // Listening ports for the Ports tool tab. Polls only while that tab is
+        // on screen; `set_tool_tab` takes an immediate sample when it opens.
+        // The first pass runs without waiting, so a Ports tab restored open
+        // at launch fills in at once rather than after a full interval.
+        cx.spawn(async move |view, cx| {
+            let mut first = true;
+            loop {
+                if !std::mem::take(&mut first) {
+                    cx.background_executor().timer(Duration::from_secs(3)).await;
+                }
+                let Ok(visible) = view.read_with(cx, |ws, _| ws.ports_visible()) else {
+                    break;
+                };
+                if !visible {
+                    continue;
+                }
+                // A scan already running (a refresh): skip this tick.
+                let Ok(started) = view.update(cx, |ws, _| {
+                    ws.ports_gate.try_start(false).then(|| ws.next_ports_seq())
+                }) else {
+                    break;
+                };
+                let Some(seq) = started else {
+                    // Still redraw: a sample can age past current meanwhile.
+                    let _ = view.update(cx, |_, cx| cx.notify());
+                    continue;
+                };
+                let started = std::time::Instant::now();
+                let sample = cx
+                    .background_spawn(async move { crate::ports::sample(sampler_has_tmux) })
+                    .await;
+                // `None`: the scan timed out; keep the last sample, retry next tick.
+                if view.update(cx, |ws, cx| ws.finish_ports_scan(seq, started, sample, cx)).is_err() {
                     break;
                 }
             }

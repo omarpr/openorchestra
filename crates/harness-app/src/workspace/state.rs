@@ -25,19 +25,30 @@ pub(crate) fn diff_base_ref(base: DiffBase, compare_ref: &str) -> &str {
     }
 }
 
+/// The main checkout's selection.
+///
+/// `compare_ref` is the repo's default branch, like a worktree's. It used to
+/// be a hardcoded `"HEAD"` from before the diff-base menu existed (main only
+/// ever showed uncommitted work); with the menu, that made "vs <branch>" read
+/// "vs HEAD" and diff exactly what "Uncommitted" does. Uncommitted still maps
+/// to `HEAD` through [`diff_base_ref`].
+fn main_resolved(r: &crate::data::RepoView) -> Resolved {
+    Resolved {
+        key: format!("main:{}", r.name),
+        path: r.repo_root.clone(),
+        editor_path: r.repo_root.clone(),
+        agent_kind: None,
+        compare_ref: r.compare_ref.clone(),
+        branch: r.head_branch.clone(),
+        task_id: None,
+    }
+}
+
 impl HarnessWorkspace {
 
     pub(crate) fn resolve(&self) -> Option<Resolved> {
         let primary = self.data.repos.first()?;
-        let main_of = |r: &crate::data::RepoView| Resolved {
-            key: format!("main:{}", r.name),
-            path: r.repo_root.clone(),
-            editor_path: r.repo_root.clone(),
-            agent_kind: None,
-            compare_ref: "HEAD".to_string(),
-            branch: r.head_branch.clone(),
-            task_id: None,
-        };
+        let main_of = main_resolved;
         match &self.selection {
             Selection::Main(repo) => {
                 let r = self.data.repos.iter().find(|x| &x.name == repo).unwrap_or(primary);
@@ -411,3 +422,38 @@ impl HarnessWorkspace {
 
 }
 
+#[cfg(test)]
+mod main_resolve_tests {
+    use super::{diff_base_ref, main_resolved};
+    use crate::data::RepoView;
+    use crate::workspace::DiffBase;
+    use std::path::PathBuf;
+
+    fn repo(head: &str) -> RepoView {
+        RepoView {
+            name: "app".into(),
+            repo_root: PathBuf::from("/r/app"),
+            default_branch: "master".into(),
+            head_branch: head.into(),
+            compare_ref: "origin/master".into(),
+            ahead: 0,
+            behind: 0,
+            dirty: 0,
+            worktrees: vec![],
+        }
+    }
+
+    #[test]
+    fn main_checkout_compares_against_the_default_branch() {
+        // A main checkout on a feature branch: "vs <default>" must measure
+        // the branch, not collapse to HEAD (which is just Uncommitted again).
+        let r = main_resolved(&repo("feat/ports-panel"));
+        assert_eq!(r.compare_ref, "origin/master");
+        assert_eq!(DiffBase::DefaultBranch.label(&r.compare_ref), "vs origin/master");
+        assert_ne!(
+            diff_base_ref(DiffBase::DefaultBranch, &r.compare_ref),
+            diff_base_ref(DiffBase::Uncommitted, &r.compare_ref),
+            "the two menu choices must differ"
+        );
+    }
+}

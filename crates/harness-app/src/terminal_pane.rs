@@ -130,11 +130,14 @@ impl TerminalPane {
         let (shell, spawned) = match session {
             // tmux-backed: run a tmux client; the agent and its env live in the
             // tmux server.
-            Some(sess) => {
+            Some(mut sess) => {
                 let label = agent
                     .as_ref()
                     .map(|c| c.label.clone())
                     .unwrap_or_else(|| "shell".to_string());
+                if agent.is_some() && !sess.attach_only {
+                    sess.env.push(("HARNESS_REMOTE_SESSION".into(), sess.name.clone()));
+                }
                 let args = crate::tmux::client_args(
                     &sess.name,
                     &self.worktree_root,

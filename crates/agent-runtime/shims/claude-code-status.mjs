@@ -19,6 +19,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { recordTab } from "./remote-tab.mjs";
+import os from "node:os";
+import { pathToFileURL } from "node:url";
 
 const CWD = process.env.CLAUDE_PROJECT_DIR || process.cwd();
 
@@ -89,7 +92,7 @@ export function toolFrom(payload) {
 	return { name, id: typeof id === "string" ? id : null, input };
 }
 
-export function writeStatus(cwd, state, sessionFile, tool) {
+export function writeStatus(cwd, state, sessionFile, tool, sessionId) {
 	try {
 		const dir = path.join(cwd, ".harness");
 		fs.mkdirSync(dir, { recursive: true });
@@ -108,6 +111,7 @@ export function writeStatus(cwd, state, sessionFile, tool) {
 		const tmp = path.join(dir, `.status-${process.pid}-${crypto.randomBytes(4).toString("hex")}.tmp`);
 		fs.writeFileSync(tmp, payload, "utf8");
 		fs.renameSync(tmp, path.join(dir, "status.json")); // atomic on POSIX
+		recordTab(payload, sessionId);
 	} catch {
 		// Never let status bookkeeping break the agent.
 	}
@@ -115,7 +119,8 @@ export function writeStatus(cwd, state, sessionFile, tool) {
 
 // Only run when invoked as the hook, so the test harness can import the pure
 // functions above without side effects.
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && fs.existsSync(process.argv[1]) &&
+	import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href) {
 	let payload = {};
 	try {
 		payload = JSON.parse(readStdin() || "{}");
@@ -124,7 +129,13 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 	}
 	// transcript_path is the harvesting hook (§6.4): the one peer agent that
 	// exposes a session transcript we could train from.
-	const sessionFile = pick(payload, "transcript_path", "transcriptPath", "session.transcript_path");
-	writeStatus(CWD, classify(payload), sessionFile, toolFrom(payload));
+	let sessionFile = pick(payload, "transcript_path", "transcriptPath", "session.transcript_path");
+	if (!sessionFile && /^[a-f\d-]{36}$/i.test(payload.session_id ?? "")) {
+		const config = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
+		const project = CWD.replace(/[^a-z0-9]/gi, "-");
+		const candidate = path.join(config, "projects", project, payload.session_id + ".jsonl");
+		if (fs.existsSync(candidate)) sessionFile = candidate;
+	}
+	writeStatus(CWD, classify(payload), sessionFile, toolFrom(payload), payload.session_id);
 	process.exit(0);
 }

@@ -71,7 +71,7 @@ impl HarnessWorkspace {
             .flex_none()
             .items_center()
             .gap_1()
-            .font_family(hx.font_mono);
+            .font_family(hx.font_ui);
         if !in_tool_strip {
             row = row.px_3().pb_1().child(div().flex_1()).child(div().flex_1());
         }

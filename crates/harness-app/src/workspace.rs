@@ -764,6 +764,25 @@ pub struct HarnessWorkspace {
     resource: Option<crate::resource_monitor::Snapshot>,
     /// Rolling trail of recent totals, drawn as the band's sparklines.
     resource_history: crate::resource_monitor::History,
+    /// Latest listening-ports sample for the Ports tool tab; `None` until the
+    /// tab is first shown. Sampled only while the tab is visible.
+    ports_sample: Option<crate::ports::PortsSample>,
+    /// Ports scans are numbered as they start; `ports_seq_applied` is the
+    /// newest one shown, so an older scan finishing late is dropped.
+    ports_seq_issued: u64,
+    ports_seq_applied: u64,
+    /// One Ports scan at a time (`ports::ScanGate`).
+    ports_gate: crate::ports::ScanGate,
+    /// When `ports_sample` was taken, and whether the last scan failed: an
+    /// old sample is shown as updating, never as current.
+    ports_sample_at: Option<std::time::Instant>,
+    ports_scan_failed: bool,
+    /// Which Ports sort dropdown is open, if any.
+    ports_sort_menu: Option<crate::workspace::ui::ports_panel::SortMenu>,
+    /// The last press on a sort dropdown's button (which menu, where), so the
+    /// open menu's outside handler leaves that press to the button
+    /// (`ports_panel::dismisses`).
+    ports_sort_trigger_press: Option<(crate::workspace::ui::ports_panel::SortMenu, gpui::Point<Pixels>)>,
     /// Project roots the user archived — hidden from the active list but kept so
     /// they can be restored. Persisted to `archived.json`; never deletes files.
     archived_repos: Vec<PathBuf>,

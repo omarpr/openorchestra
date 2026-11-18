@@ -156,7 +156,7 @@ impl HarnessWorkspace {
                         .flex_none()
                         .w(px(14.0))
                         .text_xs()
-                        .font_family(hx.font_mono)
+                        .font_family(hx.font_ui)
                         .text_color(if reviewed { hx.green } else { hx.tx2 })
                         .cursor_pointer()
                         .tooltip(tip(if reviewed {
@@ -216,7 +216,7 @@ impl HarnessWorkspace {
                         .flex_none()
                         .w(px(12.0))
                         .text_xs()
-                        .font_family(hx.font_mono)
+                        .font_family(hx.font_ui)
                         .text_color(badge_color)
                         .child(file.change.badge().to_string()),
                 )
@@ -224,8 +224,10 @@ impl HarnessWorkspace {
                     let label = div()
                         .flex_1()
                         .min_w_0()
-                        .text_xs()
-                        .font_family(hx.font_mono)
+                        // text_sm = Zed's default label size, so file names
+                        // match the Files and Git panels beside this tab.
+                        .text_sm()
+                        .font_family(hx.font_ui)
                         .text_color(if reviewed { hx.tx2 } else { hx.tx1 })
                         .whitespace_nowrap()
                         .overflow_hidden();
@@ -275,7 +277,7 @@ impl HarnessWorkspace {
                     div()
                         .flex_none()
                         .text_xs()
-                        .font_family(hx.font_mono)
+                        .font_family(hx.font_ui)
                         .text_color(hx.green)
                         .child(format!("+{}", file.adds)),
                 )
@@ -283,7 +285,7 @@ impl HarnessWorkspace {
                     div()
                         .flex_none()
                         .text_xs()
-                        .font_family(hx.font_mono)
+                        .font_family(hx.font_ui)
                         .text_color(hx.red)
                         .child(format!("−{}", file.dels)),
                 ),

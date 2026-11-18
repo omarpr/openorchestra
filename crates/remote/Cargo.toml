@@ -1,6 +1,6 @@
 [package]
 name = "oo-remote"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "LAN remote control for openOrchestra agent tabs (remote.json store, pairing, server)"
 # Headless: no zed dependency. GPL to match the app it ships in.
@@ -29,6 +29,7 @@ axum-server = { version = "0.9.2", features = ["tls-rustls-ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rust-embed = { version = "8.11", features = ["debug-embed"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+zstd = "0.13"
 
 [dev-dependencies]
 plist = "1.10.3"

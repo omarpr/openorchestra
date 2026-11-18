@@ -14,6 +14,7 @@ const MARKER: &str = "…[truncated]";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TranscriptKind {
     ClaudeCode,
+    Codex,
     Pi,
     /// A shell tab's command log (see `crate::shell`).
     Shell,
@@ -22,6 +23,7 @@ pub enum TranscriptKind {
 impl TranscriptKind {
     pub fn from_agent_kind(kind: &str) -> Option<TranscriptKind> {
         match kind {
+            "codex" => Some(TranscriptKind::Codex),
             "claude-code" => Some(TranscriptKind::ClaudeCode),
             "pi" => Some(TranscriptKind::Pi),
             _ => None,
@@ -147,6 +149,7 @@ pub fn parse_entries(kind: TranscriptKind, text: &str, cwd: Option<&Path>) -> Ve
     let records = parse_lines(text);
     match kind {
         TranscriptKind::ClaudeCode => claude_entries(&records, cwd),
+        TranscriptKind::Codex => codex_entries(&records, cwd),
         TranscriptKind::Pi => pi_entries(&records, cwd),
         TranscriptKind::Shell => unreachable!("handled above"),
     }
@@ -420,6 +423,106 @@ fn claude_entries(records: &[Value], cwd: Option<&Path>) -> Vec<Entry> {
     out
 }
 
+fn codex_entries(records: &[Value], cwd: Option<&Path>) -> Vec<Entry> {
+    let mut out = Vec::new();
+    let mut tools = HashMap::<&str, usize>::new();
+    // Current Codex emits completed UI items alongside raw model messages.
+    // Only the UI item identifies a real user prompt (the model also receives
+    // environment and instruction messages with role=user).
+    let completed_ids: HashSet<&str> = records.iter()
+        .filter(|r| r["type"] == "event_msg" && r["payload"]["type"] == "item_completed"
+            && r["payload"]["item"]["type"] == "AgentMessage")
+        .filter_map(|r| r["payload"]["item"]["id"].as_str())
+        .collect();
+    let has_assistant_events = records
+        .iter()
+        .any(|r| r["type"] == "event_msg" && r["payload"]["type"] == "agent_message");
+    for (index, r) in records.iter().enumerate() {
+        let p = &r["payload"];
+        let at = r["timestamp"].as_str().map(str::to_owned);
+        let id = format!("codex:{}:{index}", at.as_deref().unwrap_or_default());
+        match (r["type"].as_str(), p["type"].as_str()) {
+            (Some("response_item"), Some("message"))
+                if p["role"] == "assistant" && !has_assistant_events
+                    && !p["id"].as_str().is_some_and(|id| completed_ids.contains(id)) =>
+            {
+                for (i, part) in p["content"].as_array().into_iter().flatten().enumerate() {
+                    if part["type"] == "output_text" {
+                        out.extend(text_entry(
+                            format!("{id}:{i}"),
+                            EntryKind::Assistant,
+                            part["text"].as_str().unwrap_or_default(),
+                            at.clone(),
+                        ));
+                    }
+                }
+            }
+            (Some("event_msg"), Some("item_completed")) => {
+                let item = &p["item"];
+                let kind = match item["type"].as_str() {
+                    Some("UserMessage") => EntryKind::User,
+                    Some("AgentMessage") => EntryKind::Assistant,
+                    _ => continue,
+                };
+                let id = item["id"].as_str().unwrap_or(&id);
+                for (i, part) in item["content"].as_array().into_iter().flatten().enumerate() {
+                    if matches!(part["type"].as_str(), Some("text" | "Text")) {
+                        out.extend(text_entry(format!("{id}:{i}"), kind,
+                            part["text"].as_str().unwrap_or_default(), at.clone()));
+                    }
+                }
+            }
+            (Some("response_item"), Some("reasoning")) => {
+                out.push(thinking_entry(id, "", None, at));
+            }
+            (Some("event_msg"), Some("user_message" | "agent_message")) => {
+                let kind = if p["type"] == "user_message" {
+                    EntryKind::User
+                } else {
+                    EntryKind::Assistant
+                };
+                out.extend(text_entry(
+                    id,
+                    kind,
+                    p["message"].as_str().unwrap_or_default(),
+                    at,
+                ));
+            }
+            (Some("response_item"), Some("function_call" | "custom_tool_call")) => {
+                let (Some(tid), Some(name)) = (p["call_id"].as_str(), p["name"].as_str()) else {
+                    continue;
+                };
+                let args = p["arguments"]
+                    .as_str()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or(Value::Null);
+                tools.insert(tid, out.len());
+                out.push(tool_entry(
+                    tid.into(),
+                    ToolLine {
+                        id: tid.into(),
+                        name: name.into(),
+                        summary: tool_summary(name, &args, cwd),
+                        status: ToolStatus::Pending,
+                    },
+                    at,
+                ));
+            }
+            (Some("response_item"), Some("function_call_output" | "custom_tool_call_output")) => {
+                if let Some(tool) = p["call_id"]
+                    .as_str()
+                    .and_then(|id| tools.get(id))
+                    .and_then(|&ix| out[ix].tool.as_mut())
+                {
+                    tool.status = ToolStatus::Ok;
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 fn pi_blocks(message: &Value) -> Vec<Value> {
     match &message["content"] {
         Value::String(s) => vec![serde_json::json!({"type": "text", "text": s})],
@@ -504,6 +607,19 @@ pub fn tool_result(kind: TranscriptKind, text: &str, tool_id: &str) -> Option<To
     }
     for r in parse_lines(text) {
         let (content, is_error) = match kind {
+            TranscriptKind::Codex => {
+                let p = &r["payload"];
+                if r["type"] != "response_item"
+                    || p["call_id"] != tool_id
+                    || !matches!(
+                        p["type"].as_str(),
+                        Some("function_call_output" | "custom_tool_call_output")
+                    )
+                {
+                    continue;
+                }
+                (p["output"].clone(), false)
+            }
             TranscriptKind::ClaudeCode => {
                 if r["type"] != "user" {
                     continue;
@@ -882,8 +998,32 @@ mod tests {
     }
 
     #[test]
+    fn codex_messages_and_tools_exclude_internal_records() {
+        let log = r#"{"type":"event_msg","payload":{"type":"user_message","message":"run checks"}}
+{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"private setup"}]}}
+{"type":"response_item","payload":{"type":"function_call","call_id":"call1","name":"exec_command","arguments":"{}"}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"call1","output":"passed"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done"}]}}"#;
+        let entries = parse_entries(TranscriptKind::Codex, log, None);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].text.as_deref(), Some("run checks"));
+        assert_eq!(entries[1].tool.as_ref().unwrap().status, ToolStatus::Ok);
+        assert_eq!(entries[2].text.as_deref(), Some("Done"));
+        assert_eq!(
+            tool_result(TranscriptKind::Codex, log, "call1")
+                .unwrap()
+                .text,
+            "passed"
+        );
+    }
+
+    #[test]
     fn unknown_kinds_unsupported() {
-        assert_eq!(TranscriptKind::from_agent_kind("codex"), None);
+        assert_eq!(TranscriptKind::from_agent_kind("kimi"), None);
+        assert_eq!(
+            TranscriptKind::from_agent_kind("codex"),
+            Some(TranscriptKind::Codex)
+        );
         assert_eq!(
             TranscriptKind::from_agent_kind("claude-code"),
             Some(TranscriptKind::ClaudeCode)
