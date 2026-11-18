@@ -20,6 +20,7 @@ impl HarnessWorkspace {
 
         let tab_id = self.next_tab_id();
 
+        let mut pending_agent_launch = None;
         let (content, title) = match kind {
             TabKind::Shell => {
                 let session = self.has_tmux.then(|| {
@@ -42,22 +43,24 @@ impl HarnessWorkspace {
                 )
             }
             TabKind::Agent(ref agent) => {
-                let command = self.agent_command_for(agent, &r);
-                let label = command
-                    .as_ref()
-                    .map(|c| c.label.clone())
-                    .unwrap_or_else(|| "shell".to_string());
+                let prep = self.prepare_agent_launch(agent, &r);
                 let session = self.has_tmux.then(|| crate::terminal_pane::TerminalSession {
                     name: crate::tmux::session_name(&r.key, tab_id),
                     attach_only: false,
                     env: self.pane_env(&r),
                 });
-                (
-                    TabContent::Terminal(cx.new(|cx| {
-                        TerminalPane::new(r.path.clone(), command, session, window, cx)
-                    })),
-                    label,
-                )
+                let label = agent.as_str().to_string();
+                let term_pane = cx.new(|cx| {
+                    TerminalPane::new_pending(
+                        r.path.clone(),
+                        label.clone(),
+                        session.as_ref().map(|s| s.name.clone()),
+                        window,
+                        cx,
+                    )
+                });
+                pending_agent_launch = Some((prep, session, term_pane.clone()));
+                (TabContent::Terminal(term_pane), label)
             }
             // Nothing to construct: the surface reads state the view already
             // holds, so the tab is a marker saying where to draw it.
@@ -108,24 +111,52 @@ impl HarnessWorkspace {
         pane.last_used = self.pane_clock;
         pane.tabs.push(Tab { id: tab_id, title, content, agent: agent_of_kind });
         pane.active = tab_id;
-        let opened_agent_key = matches!(kind, TabKind::Agent(_)).then(|| r.key.clone());
         if let TabKind::Agent(a) = &kind {
             // The transcript on record is an earlier session's, not this tab's.
             self.remote.forget_session(&r.path, a.as_str());
         }
         self.focus_active_pane(window, cx);
         self.save_panes();
-        if let Some(key) = opened_agent_key {
-            self.flush_a2a_inbox_for_pane(&key);
-            // New tmux sessions are not always listed instantly; retry shortly.
-            let retry_key = key.clone();
-            cx.spawn(async move |view, cx| {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(750))
+        if let Some((prep, session, term_pane)) = pending_agent_launch {
+            let key = r.key.clone();
+            cx.spawn_in(window, async move |view, cx| {
+                let command = cx
+                    .background_executor()
+                    .spawn(async move { prep.resolve() })
                     .await;
-                let _ = view.update(cx, |ws, _cx| {
-                    ws.flush_a2a_inbox_for_pane(&retry_key);
-                });
+                let launched = view
+                    .update_in(cx, |ws, window, cx| {
+                        let Some(pane) = ws.panes.get_mut(&key) else {
+                            return false;
+                        };
+                        let Some(tab) = pane.tabs.iter_mut().find(|t| t.id == tab_id) else {
+                            return false;
+                        };
+                        let label = command
+                            .as_ref()
+                            .map(|c| c.label.clone())
+                            .unwrap_or_else(|| "shell".to_string());
+                        if tab.title != label {
+                            tab.title = label;
+                            ws.save_panes();
+                        }
+                        term_pane.update(cx, |pane, cx| {
+                            pane.launch(command, session, window, cx);
+                        });
+                        ws.flush_a2a_inbox_for_pane(&key);
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if launched {
+                    // New tmux sessions are not always listed instantly; retry shortly.
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(750))
+                        .await;
+                    let _ = view.update(cx, |ws, _cx| {
+                        ws.flush_a2a_inbox_for_pane(&key);
+                    });
+                }
             })
             .detach();
         }

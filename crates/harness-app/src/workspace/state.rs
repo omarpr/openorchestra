@@ -290,45 +290,27 @@ impl HarnessWorkspace {
         agent_runtime::fidelity_for(kind)
     }
 
-    /// Prepare the worktree's agent adapter and return the command to run.
+    /// Prepare the worktree's agent adapter synchronously (in-memory wiring
+    /// only) and return the filesystem-dependent command preparation to run
+    /// on a background worker.
     ///
     /// Separate from tab creation because it also wires up the status signal
     /// and the local git excludes, which are per-worktree, not per-tab.
-    /// Prepare an adapter and command for a *specific* agent kind — the ＋
-    /// menu offers all enabled agents, not only the worktree's default.
     ///
     /// A user command override replaces the launch command but NOT the
     /// adapter wiring: hooks, excludes, and the status watch still belong to
     /// the kind, or an overridden Claude Code would silently lose its status
     /// pill and notifications.
-    pub(crate) fn agent_command_for(
+    pub(crate) fn prepare_agent_launch(
         &mut self,
         kind: &AgentKind,
         r: &Resolved,
-    ) -> Option<agent_runtime::AgentCommand> {
-        let signal = self
-            .prefs
-            .agents
-            .get(kind.as_str())
-            .and_then(|p| p.signal.clone());
+    ) -> AgentLaunchPrep {
+        let agent_pref = self.prefs.agents.get(kind.as_str());
+        let signal = agent_pref.and_then(|p| p.signal.clone());
+        let override_cmd = agent_pref.and_then(|p| p.command.clone());
         let runtime =
             agent_runtime::runtime_for_with_signal(kind, &r.path, &self.state_dir, signal);
-        if let Err(e) = runtime.on_spawn(&r.path) {
-            log::warn!("{kind} setup failed for {}: {e}", r.path.display());
-        }
-        // The harness runs inside the user's own repository, so anything it
-        // drops there would otherwise show up as uncommitted changes in their
-        // project. Exclude locally rather than touching their .gitignore.
-        // A coordinator's task folder is not a checkout (`.git` is a dir in
-        // a main checkout, a file in a linked worktree; absent here).
-        if r.path.join(".git").exists()
-            && let Err(e) = self
-                .manager
-                .git()
-                .exclude_locally(&r.path, runtime.ignored_paths())
-        {
-            log::warn!("could not add local git excludes for {}: {e}", r.path.display());
-        }
         // Worktrees and main checkouts are watched up front with their own
         // kinds; only the coordinator's task folder (created on first open)
         // is watched here, so opening an agent in a worktree never retags
@@ -355,28 +337,68 @@ impl HarnessWorkspace {
                 })
                 .ok();
         }
+        AgentLaunchPrep {
+            kind: kind.clone(),
+            path: r.path.clone(),
+            runtime,
+            task: r
+                .task_id
+                .as_ref()
+                .and_then(|tid| self.task_store.get(tid).cloned()),
+            tasks_root: self.data_dir.join("tasks"),
+            override_cmd,
+            continue_next_agent: self.continue_next_agent,
+        }
+    }
+}
+
+/// Captured UI-thread inputs for preparing an agent command on a worker thread.
+pub(crate) struct AgentLaunchPrep {
+    kind: AgentKind,
+    path: PathBuf,
+    runtime: Box<dyn agent_runtime::AgentRuntime>,
+    task: Option<worktrees::Task>,
+    tasks_root: PathBuf,
+    override_cmd: Option<String>,
+    continue_next_agent: bool,
+}
+
+impl AgentLaunchPrep {
+    /// Run filesystem-dependent setup (`on_spawn`, local git excludes, task
+    /// context, `$PATH` lookup, and `prepare_launch`) off the UI thread.
+    pub(crate) fn resolve(self) -> Option<agent_runtime::AgentCommand> {
+        if let Err(e) = self.runtime.on_spawn(&self.path) {
+            log::warn!("{} setup failed for {}: {e}", self.kind, self.path.display());
+        }
+        // The harness runs inside the user's own repository, so anything it
+        // drops there would otherwise show up as uncommitted changes in their
+        // project. Exclude locally rather than touching their .gitignore.
+        // A coordinator's task folder is not a checkout (`.git` is a dir in
+        // a main checkout, a file in a linked worktree; absent here).
+        if self.path.join(".git").exists()
+            && let Err(e) = GitWorktrees::new(SystemRunner)
+                .exclude_locally(&self.path, self.runtime.ignored_paths())
+        {
+            log::warn!(
+                "could not add local git excludes for {}: {e}",
+                self.path.display()
+            );
+        }
         // Resolve the adapter command first so a prefs override can keep the
         // managed env (HARNESS_MANAGED / HARNESS_AGENT) that hooks need.
-        let runtime_cmd = runtime.command(&r.path);
+        let mut runtime_cmd = self.runtime.command(&self.path);
         let runtime_env = runtime_cmd
             .as_ref()
             .map(|c| c.env.clone())
             .unwrap_or_default();
 
-        let context_path = r.task_id.as_ref().and_then(|tid| {
-            let task = self.task_store.get(tid)?;
-            let tasks_root = self.data_dir.join("tasks");
-            worktrees::ensure_task_agent_context(task, &tasks_root)
+        let context_path = self.task.as_ref().and_then(|task| {
+            worktrees::ensure_task_agent_context(task, &self.tasks_root)
                 .ok()
                 .flatten()
         });
 
-        if let Some(cmd) = self
-            .prefs
-            .agents
-            .get(kind.as_str())
-            .and_then(|p| p.command.clone())
-        {
+        if let Some(cmd) = self.override_cmd {
             // Login + interactive: an override is a line the user typed, so it
             // has to resolve the way it would in their terminal — including
             // aliases and shell functions, which only exist once `.zshrc` runs.
@@ -393,19 +415,18 @@ impl HarnessWorkspace {
                     path.to_string_lossy().into_owned(),
                 ));
             }
-            return Some(runtime.prepare_launch(agent_runtime::AgentCommand {
+            return Some(self.runtime.prepare_launch(agent_runtime::AgentCommand {
                 program: shell.into(),
                 args,
                 env,
-                label: kind.as_str().to_string(),
+                label: self.kind.as_str().to_string(),
             }));
         }
         if runtime_cmd.is_none() {
-            log::info!("{kind} not on PATH — falling back to a plain shell");
+            log::info!("{} not on PATH — falling back to a plain shell", self.kind);
         }
-        let mut runtime_cmd = runtime_cmd;
         if let (Some(cmd), Some(path)) = (runtime_cmd.as_mut(), context_path.as_ref()) {
-            agent_runtime::apply_task_context(cmd, kind, path);
+            agent_runtime::apply_task_context(cmd, &self.kind, path);
         }
         // A restart of a missing agent continues its last conversation in this
         // folder, where the CLI can scope that to the folder (see
@@ -413,13 +434,12 @@ impl HarnessWorkspace {
         // fresh.
         if self.continue_next_agent
             && let Some(cmd) = runtime_cmd.as_mut()
-            && let Some(args) = agent_runtime::continue_args(kind, &cmd.args)
+            && let Some(args) = agent_runtime::continue_args(&self.kind, &cmd.args)
         {
             cmd.args = args;
         }
-        runtime_cmd.map(|cmd| runtime.prepare_launch(cmd))
+        runtime_cmd.map(|cmd| self.runtime.prepare_launch(cmd))
     }
-
 }
 
 #[cfg(test)]

@@ -117,6 +117,47 @@ impl TerminalPane {
         this
     }
 
+    /// Construct a pane in its spawning state without launching the process yet,
+    /// for async command preparation off the UI thread.
+    pub fn new_pending(
+        worktree_root: PathBuf,
+        label: String,
+        session_name: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let window_id = window.window_handle().window_id().as_u64();
+        Self {
+            view: None,
+            spawned: label,
+            error: None,
+            worktree_root,
+            window_id,
+            respawn_pending: false,
+            tmux_backed: session_name.is_some(),
+            focus_handle: cx.focus_handle(),
+            tmux_session: session_name,
+            copy_mode: false,
+            watching_copy_mode: false,
+            held_keys: Vec::new(),
+            cancelling_copy_mode: false,
+        }
+    }
+
+    /// Launch the resolved command in a pane created with [`Self::new_pending`].
+    pub fn launch(
+        &mut self,
+        agent: Option<AgentCommand>,
+        session: Option<TerminalSession>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.tmux_backed = session.is_some();
+        self.tmux_session = session.as_ref().map(|s| s.name.clone());
+        self.spawn(agent, session, window, cx);
+        cx.notify();
+    }
+
     fn spawn(
         &mut self,
         agent: Option<AgentCommand>,
