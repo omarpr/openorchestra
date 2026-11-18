@@ -947,6 +947,7 @@ quiet-1\tbusybox\t\t\t\t\n";
             .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
+        let pid = child.id();
         let mut found = None;
         for _ in 0..30 {
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -956,9 +957,11 @@ quiet-1\tbusybox\t\t\t\t\n";
                 break;
             }
         }
+        // Kill and reap before any assertion can panic, so no zombie is left.
         let _ = child.kill();
+        let _ = child.wait();
         let row = found.expect("port 18765 not found");
-        assert_eq!(row.pid, child.id());
+        assert_eq!(row.pid, pid);
         assert_eq!(row.addrs, vec!["127.0.0.1".to_string()]);
         assert!(row.name.to_ascii_lowercase().starts_with("python"), "{}", row.name);
     }
