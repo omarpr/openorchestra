@@ -96,7 +96,7 @@ export default Plugin.define({
           dirty = true;
           fs.rmSync(file, { force: true });
         }
-        if (!next || !dirty) return;
+        if (!next || (!dirty && fs.existsSync(file))) return;
         const messages = context.data.session.message.list(next);
         if (!messages) return;
         const contents = entries(next, messages);
