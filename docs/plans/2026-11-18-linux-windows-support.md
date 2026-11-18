@@ -80,8 +80,11 @@ line references are as of commit `1f5dd98`.
 ## Windows options
 
 - **A. WSL2 only.** Ship the Linux build and run it under WSLg. Costs little
-  beyond the Linux port, but it is second-class: the GUI runs inside WSL, and
-  repos must live on the Linux side.
+  beyond the Linux port, but it is second-class: the GUI runs inside WSL.
+  Repos on the Windows drive (`/mnt/c/...`) do work, but keeping them on the
+  Linux side is recommended: git is much faster there, and the diff and
+  git-status watchers rely on file-change events, which aren't reliably
+  delivered into WSL for files changed from the Windows side.
 - **B. Native, no persistence.** Build on the existing no-tmux path.
   - Fix the compile breaks.
   - Use `USERPROFILE` / `dirs`.
