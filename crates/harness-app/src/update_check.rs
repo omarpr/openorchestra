@@ -270,13 +270,15 @@ fn show_result(result: Result<Release, String>, window: &mut Window, cx: &mut Ap
             .detach();
         }
         Ok(_) => {
-            let _ = window.prompt(
+            // Only "OK": nothing to do with the answer, so stop listening.
+            // The alert stays up either way.
+            drop(window.prompt(
                 PromptLevel::Info,
                 "You’re up to date",
                 Some(&format!("openOrchestra {VERSION} is the latest version.")),
                 &["OK"],
                 cx,
-            );
+            ));
         }
         Err(e) => {
             let answer = window.prompt(
