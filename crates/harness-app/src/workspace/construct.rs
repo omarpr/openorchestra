@@ -266,7 +266,7 @@ impl HarnessWorkspace {
             ports_seq_issued: 0,
             ports_seq_applied: 0,
             ports_sort_menu: None,
-            ports_sort_menu_closed: None,
+            ports_sort_trigger_press: None,
             archived_repos,
             archived_path,
             confirm_removal: None,

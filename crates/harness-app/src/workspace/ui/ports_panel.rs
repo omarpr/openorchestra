@@ -134,16 +134,13 @@ impl HarnessWorkspace {
             .hover(|d| d.bg(hx.surface))
             .child(current)
             .child(div().text_color(hx.tx2).child("▾"))
-            .on_click(cx.listener(move |ws, ev: &gpui::ClickEvent, _, cx| {
-                let dismissed_at = ws
-                    .ports_sort_menu_closed
-                    .take()
-                    .and_then(|(m, at)| (m == menu).then_some(at));
-                let pressed_at = match ev {
-                    gpui::ClickEvent::Mouse(m) => Some(m.down.position),
-                    _ => None,
-                };
-                ws.ports_sort_menu = toggled(open, dismissed_at, pressed_at).then_some(menu);
+            // Capture phase: runs before the open menu's outside handler for
+            // this same press, so that handler can leave it to the button.
+            .capture_any_mouse_down(cx.listener(move |ws, ev: &MouseDownEvent, _, _| {
+                ws.ports_sort_trigger_press = Some((menu, ev.position));
+            }))
+            .on_click(cx.listener(move |ws, _, _, cx| {
+                ws.ports_sort_menu = (!open).then_some(menu);
                 cx.notify();
             }));
         let mut col = div().flex().flex_col().child(button);
@@ -159,9 +156,10 @@ impl HarnessWorkspace {
                 .flex()
                 .flex_col()
                 .on_mouse_down_out(cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
-                    ws.ports_sort_menu = None;
-                    ws.ports_sort_menu_closed = Some((menu, ev.position));
-                    cx.notify();
+                    if dismisses(menu, ws.ports_sort_trigger_press.take(), ev.position) {
+                        ws.ports_sort_menu = None;
+                        cx.notify();
+                    }
                 }));
             for (label, selected, choice) in items {
                 list = list.child(
@@ -433,41 +431,44 @@ fn small_button(hx: &HarnessTheme, id: String, label: &'static str) -> gpui::Sta
         .child(label)
 }
 
-/// What a click on a sort dropdown's button does to its menu. `dismissed_at`
-/// is where the mouse-down that last closed this menu from outside landed;
-/// `pressed_at` is where this click's mouse-down landed (`None` for a
-/// keyboard click).
+/// Whether a mouse-down closes the open `menu` from outside. `trigger_press`
+/// is the last press a dropdown button saw (menu, position), recorded in the
+/// capture phase, which reaches the button before the menu's outside handler
+/// for the same press.
 ///
-/// A press on the button of an open menu reaches the menu's outside handler
-/// first, which closes it; the click then lands on the button. That is the
-/// one click to swallow, recognised by sharing the dismissing press's
-/// position. A time window instead also swallowed a genuine quick click on
-/// the button after closing the menu elsewhere.
-fn toggled(open: bool, dismissed_at: Option<gpui::Point<Pixels>>, pressed_at: Option<gpui::Point<Pixels>>) -> bool {
-    let same_press = dismissed_at.is_some() && dismissed_at == pressed_at;
-    !open && !same_press
+/// A press on the menu's own button is left to the button: its click
+/// toggles the menu closed, and a press that never becomes a click (released
+/// elsewhere, a right-click) leaves it open. Nothing is remembered past this
+/// press, so no later click can be mistaken for it.
+fn dismisses(
+    menu: SortMenu,
+    trigger_press: Option<(SortMenu, gpui::Point<Pixels>)>,
+    press_at: gpui::Point<Pixels>,
+) -> bool {
+    trigger_press != Some((menu, press_at))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::toggled;
+    use super::{SortMenu, dismisses};
     use gpui::{point, px};
 
     #[test]
-    fn the_press_that_dismissed_a_menu_does_not_reopen_it() {
-        let at = Some(point(px(40.), px(12.)));
-        // Clicking the button of an open menu: its mouse-down closed the menu
-        // from outside first, then the click lands on the button.
-        assert!(!toggled(false, at, at));
+    fn a_press_on_the_menus_own_button_leaves_it_to_the_button() {
+        // Left, right, released elsewhere: whatever the press turns into, the
+        // outside handler must not close the menu; the button's own click
+        // toggles it, and a press that isn't a click leaves it open.
+        let at = point(px(40.), px(12.));
+        assert!(!dismisses(SortMenu::Field, Some((SortMenu::Field, at)), at));
     }
 
     #[test]
-    fn any_other_click_on_the_button_toggles_it() {
-        let dismissed = Some(point(px(300.), px(500.)));
-        let here = Some(point(px(40.), px(12.)));
-        assert!(toggled(false, dismissed, here), "a quick new click after an outside dismissal opens it");
-        assert!(toggled(false, None, here));
-        assert!(!toggled(true, None, here));
-        assert!(toggled(false, dismissed, None), "keyboard click");
+    fn any_other_press_closes_it() {
+        let button = point(px(40.), px(12.));
+        let elsewhere = point(px(300.), px(500.));
+        assert!(dismisses(SortMenu::Field, Some((SortMenu::Field, button)), elsewhere));
+        assert!(dismisses(SortMenu::Field, None, elsewhere));
+        // The other dropdown's button: this menu closes, that one opens.
+        assert!(dismisses(SortMenu::Field, Some((SortMenu::Order, button)), button));
     }
 }

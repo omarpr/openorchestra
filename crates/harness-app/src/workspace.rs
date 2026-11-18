@@ -773,10 +773,10 @@ pub struct HarnessWorkspace {
     ports_seq_applied: u64,
     /// Which Ports sort dropdown is open, if any.
     ports_sort_menu: Option<crate::workspace::ui::ports_panel::SortMenu>,
-    /// The dropdown a click outside just closed, and where that press landed.
-    /// If it was on the dropdown's own button, the click arrives there next
-    /// and must not reopen it (`ports_panel::toggled`).
-    ports_sort_menu_closed: Option<(crate::workspace::ui::ports_panel::SortMenu, gpui::Point<Pixels>)>,
+    /// The last press on a sort dropdown's button (which menu, where), so the
+    /// open menu's outside handler leaves that press to the button
+    /// (`ports_panel::dismisses`).
+    ports_sort_trigger_press: Option<(crate::workspace::ui::ports_panel::SortMenu, gpui::Point<Pixels>)>,
     /// Project roots the user archived — hidden from the active list but kept so
     /// they can be restored. Persisted to `archived.json`; never deletes files.
     archived_repos: Vec<PathBuf>,
