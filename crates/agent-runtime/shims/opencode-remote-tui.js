@@ -6,14 +6,23 @@ const MAX_ROWS = 200;
 const MAX_BYTES = 2 * 1024 * 1024;
 const TEXT_LIMIT = 16 * 1024;
 
+function truncate(text, max) {
+  const safe = typeof text.toWellFormed === "function" ? text.toWellFormed() : text;
+  if (safe.length <= max) return safe;
+  let end = max;
+  const code = safe.charCodeAt(end - 1);
+  if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+  return safe.slice(0, end);
+}
+
 function firstLine(text) {
   const line = text?.trim().split("\n", 1)[0] ?? "";
-  return line.length > 80 ? `${line.slice(0, 80)}…` : line;
+  return line.length > 80 ? `${truncate(line, 80)}…` : line;
 }
 
 function assistantEntry(id, at, part) {
   if (part.type === "text" && part.text?.trim()) {
-    return { id, at, kind: "assistant", text: part.text.slice(0, TEXT_LIMIT) };
+    return { id, at, kind: "assistant", text: truncate(part.text, TEXT_LIMIT) };
   }
   if (part.type !== "tool" || typeof part.name !== "string") return null;
 
@@ -27,10 +36,10 @@ function assistantEntry(id, at, part) {
   if (status !== "pending") {
     const output = result || (status === "error" ? state.error?.message ?? "Tool failed" : "");
     entry.result = {
-      text: output.slice(0, TEXT_LIMIT),
+      text: truncate(output, TEXT_LIMIT),
       is_error: status === "error",
       truncated: output.length > TEXT_LIMIT,
-      ...(typeof command === "string" && command ? { input: command.slice(0, TEXT_LIMIT) } : {}),
+      ...(typeof command === "string" && command ? { input: truncate(command, TEXT_LIMIT) } : {}),
     };
   }
   return entry;
@@ -43,7 +52,7 @@ function entries(sessionID, messages) {
     const millis = message.time?.created;
     const at = Number.isFinite(millis) ? new Date(millis).toISOString() : undefined;
     if (message.type === "user" && message.text?.trim()) {
-      rows.push({ id, at, kind: "user", text: message.text.slice(0, TEXT_LIMIT) });
+      rows.push({ id, at, kind: "user", text: truncate(message.text, TEXT_LIMIT) });
     }
     if (message.type === "assistant") {
       for (const [index, part] of (message.content ?? []).entries()) {
