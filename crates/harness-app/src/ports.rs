@@ -1181,11 +1181,26 @@ quiet-1\tbusybox\t\t\t\t\n";
         let s = sample(false).expect("scan finished");
         assert!(!s.containers.is_empty(), "no containers seen; is an engine running?");
         let v = classify(&s, &[]);
+        // Only a port exactly one container publishes is attributable; two
+        // containers on one port number stay unlabelled by design.
+        let publishers = |port: u16| {
+            s.containers.iter().filter(|c| c.published.iter().any(|(h, _)| *h == port)).count()
+        };
         for c in &s.containers {
             for (host, inner) in &c.published {
-                let row = v.other.iter().find(|r| r.port == *host);
-                let row = row.unwrap_or_else(|| panic!("{}:{host} not listed", c.name));
-                let info = row.container.as_ref().unwrap_or_else(|| panic!(":{host} unlabelled"));
+                if publishers(*host) != 1 {
+                    eprintln!(":{host} skipped: published by several containers");
+                    continue;
+                }
+                // The engine's labelled row, not the first row on that port:
+                // a native server can share the number on another address.
+                let row = v
+                    .other
+                    .iter()
+                    .find(|r| r.port == *host && r.container.is_some())
+                    .unwrap_or_else(|| panic!("{}:{host} has no labelled engine row", c.name));
+                let info = row.container.as_ref().expect("filtered on is_some");
+                assert_eq!(info.name, c.name);
                 assert_eq!(info.container_port, *inner);
                 eprintln!(":{host} -> {} (→ {inner}) via {}", info.label, row.name);
             }
