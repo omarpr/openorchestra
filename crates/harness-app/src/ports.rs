@@ -592,6 +592,7 @@ fn is_local_docker_endpoint(host: &str) -> bool {
 /// `timeout`: a stopped Docker daemon can leave `docker ps` waiting.
 fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration) -> Option<String> {
     use std::io::Read;
+    use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
     let mut child = std::process::Command::new(cmd)
@@ -599,49 +600,59 @@ fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration) -> Option
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        // Its own process group, so a timeout can kill helpers it started
-        // too: one that inherited stdout would otherwise hold the pipe open.
+        // Its own process group, so a timeout can stop helpers it started.
         .process_group(0)
         .spawn()
         .ok()?;
-    // Drain stdout on its own thread so a large output can't fill the pipe
-    // while we wait; the deadline covers this read as well as the exit.
+    // Read stdout here, non-blocking, against the deadline: no reader thread
+    // that a helper holding the pipe could leave blocked. Dropping `stdout`
+    // closes our read end whatever the helpers do.
     let mut stdout = child.stdout.take()?;
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut buf = String::new();
-        let _ = stdout.read_to_string(&mut buf);
-        let _ = tx.send(buf);
-    });
+    // SAFETY: fcntl on a pipe fd we own, only adding O_NONBLOCK.
+    unsafe {
+        let fd = stdout.as_raw_fd();
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
     let deadline = std::time::Instant::now() + timeout;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let mut eof = false;
     let mut exited = false;
-    let mut output = None;
     while std::time::Instant::now() < deadline {
+        while !eof {
+            match stdout.read(&mut chunk) {
+                Ok(0) => eof = true,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break, // WouldBlock: nothing more for now.
+            }
+        }
         if !exited {
             exited = matches!(child.try_wait(), Ok(Some(_)) | Err(_));
-        }
-        if output.is_none() {
-            output = rx.try_recv().ok();
         }
         // Exit status is ignored: lsof exits 1 when one of the pids has
         // gone, yet still prints the rest; a failed `docker ps` prints
         // nothing, which parses to nothing.
-        if exited && output.is_some() {
-            return output;
+        if exited && eof {
+            return Some(String::from_utf8_lossy(&buf).into_owned());
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    // Out of time: kill the whole group, which closes the pipe and lets the
-    // reader thread finish, then reap the child.
-    // SAFETY: killpg only sends a signal. The group id is our child's pid.
-    // If the child is unreaped, the id is still ours; if it already exited
-    // and was reaped, the id lives on as long as any group member (the
-    // helper holding the pipe) does, and POSIX doesn't reuse a pid while a
-    // process group with that id exists. With no members left, it's ESRCH.
-    unsafe {
-        libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+    // Out of time. Close our read end first: a helper still holding the
+    // pipe (in this group or one of its own) then gets EPIPE, and nothing
+    // of ours waits on it.
+    drop(stdout);
+    if !exited {
+        // The child is unreaped, so its pid, which is the group id, is still
+        // ours: stop the group, then reap. Once reaped we don't signal the
+        // group, since an empty group's id can be reused.
+        // SAFETY: killpg only sends a signal, to a group we created.
+        unsafe {
+            libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+        }
+        let _ = child.wait();
     }
-    let _ = child.wait();
     None
 }
 
@@ -1021,6 +1032,31 @@ quiet-1\tbusybox\t\t\t\t\n";
         assert!(accept_scan(&mut applied, 3));
         assert!(!accept_scan(&mut applied, 2));
         assert_eq!(applied, 3);
+    }
+
+    #[test]
+    fn a_timeout_closes_the_pipe_even_on_a_helper_in_its_own_group() {
+        // The helper leaves the process group (so no group kill reaches it),
+        // keeps our stdout, and writes after the deadline. Once run_bounded
+        // has given up, the read end must be closed: the write then fails.
+        let dir = tempfile::tempdir().unwrap();
+        let mark = dir.path().join("mark");
+        let script = dir.path().join("helper.py");
+        std::fs::write(
+            &script,
+            "import os, sys, time\nos.setpgrp()\ntime.sleep(0.8)\ntry:\n    print('late', flush=True)\n    r = 'open'\nexcept BrokenPipeError:\n    r = 'closed'\nopen(sys.argv[1], 'w').write(r)\n",
+        )
+        .unwrap();
+        let cmd = format!("python3 '{}' '{}' & echo hi", script.display(), mark.display());
+        let out = run_bounded("sh", &["-c", &cmd], std::time::Duration::from_millis(300));
+        assert_eq!(out, None);
+        for _ in 0..40 {
+            if mark.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(std::fs::read_to_string(&mark).unwrap(), "closed");
     }
 
     #[test]
