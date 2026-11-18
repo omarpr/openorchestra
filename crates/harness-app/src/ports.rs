@@ -527,7 +527,7 @@ const SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 /// stuck on an unreachable network mount, say): the caller keeps its last
 /// sample and the next tick retries. An empty answer is still `Some`.
 pub fn sample(has_tmux: bool) -> Option<PortsSample> {
-    sample_using(|cmd, args| run_bounded(cmd, args, SCAN_TIMEOUT), has_tmux)
+    sample_using(|cmd, args| run_bounded(cmd, args, SCAN_TIMEOUT).and_then(|ran| accepted(cmd, ran)), has_tmux)
 }
 
 /// [`sample`] with the command runner passed in, so tests can play a stalled
@@ -590,59 +590,72 @@ fn is_local_docker_endpoint(host: &str) -> bool {
 /// Run a command and return its stdout whatever its exit status, giving up
 /// (and killing it) after
 /// `timeout`: a stopped Docker daemon can leave `docker ps` waiting.
-fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration) -> Option<String> {
-    use std::io::Read;
-    use std::os::fd::AsRawFd;
+/// How a bounded command finished: its exit code (`None` if a signal ended
+/// it) and what it wrote.
+#[derive(Debug)]
+pub struct Ran {
+    pub code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// A command's output if it finished cleanly, else `None`. Clean is exit 0,
+/// or for `lsof` exit 1 with nothing on stderr: lsof uses 1 both for "no
+/// matches" (and a pid that exited mid-scan, with the rest still printed) and
+/// for real errors, which it reports on stderr (`-w` silences warnings).
+/// A signal (no exit code) is never clean, even with empty output: an empty
+/// listener list would otherwise clear every row.
+fn accepted(cmd: &str, ran: Ran) -> Option<String> {
+    let clean = match ran.code {
+        Some(0) => true,
+        Some(1) => cmd == "lsof" && ran.stderr.trim().is_empty(),
+        _ => false,
+    };
+    clean.then_some(ran.stdout)
+}
+
+fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration) -> Option<Ran> {
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
     let mut child = std::process::Command::new(cmd)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         // Its own process group, so a timeout can stop helpers it started.
         .process_group(0)
         .spawn()
         .ok()?;
-    // Read stdout here, non-blocking, against the deadline: no reader thread
-    // that a helper holding the pipe could leave blocked. Dropping `stdout`
-    // closes our read end whatever the helpers do.
-    let mut stdout = child.stdout.take()?;
-    // SAFETY: fcntl on a pipe fd we own, only adding O_NONBLOCK.
-    unsafe {
-        let fd = stdout.as_raw_fd();
-        let flags = libc::fcntl(fd, libc::F_GETFL);
-        libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-    }
+    // Read both pipes here, non-blocking, against the deadline: no reader
+    // thread that a helper holding a pipe could leave blocked. Dropping them
+    // closes our read ends whatever the helpers do.
+    let mut stdout = NonBlocking::new(child.stdout.take()?);
+    let mut stderr = NonBlocking::new(child.stderr.take()?);
     let deadline = std::time::Instant::now() + timeout;
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 8192];
-    let mut eof = false;
+    let mut code = None;
     let mut exited = false;
     while std::time::Instant::now() < deadline {
-        while !eof {
-            match stdout.read(&mut chunk) {
-                Ok(0) => eof = true,
-                Ok(n) => buf.extend_from_slice(&chunk[..n]),
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(_) => break, // WouldBlock: nothing more for now.
+        stdout.drain();
+        stderr.drain();
+        if !exited {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    exited = true;
+                    code = status.code();
+                }
+                Ok(None) => {}
+                Err(_) => exited = true,
             }
         }
-        if !exited {
-            exited = matches!(child.try_wait(), Ok(Some(_)) | Err(_));
-        }
-        // Exit status is ignored: lsof exits 1 when one of the pids has
-        // gone, yet still prints the rest; a failed `docker ps` prints
-        // nothing, which parses to nothing.
-        if exited && eof {
-            return Some(String::from_utf8_lossy(&buf).into_owned());
+        if exited && stdout.eof && stderr.eof {
+            return Some(Ran { code, stdout: stdout.text(), stderr: stderr.text() });
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    // Out of time. Close our read end first: a helper still holding the
-    // pipe (in this group or one of its own) then gets EPIPE, and nothing
-    // of ours waits on it.
-    drop(stdout);
+    // Out of time. Close our read ends first: a helper still holding a pipe
+    // (in this group or one of its own) then gets EPIPE, and nothing of ours
+    // waits on it.
+    drop((stdout, stderr));
     if !exited {
         // The child is unreaped, so its pid, which is the group id, is still
         // ours: stop the group, then reap. Once reaped we don't signal the
@@ -654,6 +667,42 @@ fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration) -> Option
         let _ = child.wait();
     }
     None
+}
+
+/// A child's pipe, switched to non-blocking, collecting what it has so far.
+struct NonBlocking<R: std::io::Read + std::os::fd::AsRawFd> {
+    pipe: R,
+    buf: Vec<u8>,
+    eof: bool,
+}
+
+impl<R: std::io::Read + std::os::fd::AsRawFd> NonBlocking<R> {
+    fn new(pipe: R) -> Self {
+        // SAFETY: fcntl on a pipe fd we own, only adding O_NONBLOCK.
+        unsafe {
+            let fd = pipe.as_raw_fd();
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+        Self { pipe, buf: Vec::new(), eof: false }
+    }
+
+    /// Read whatever is available now, without waiting.
+    fn drain(&mut self) {
+        let mut chunk = [0u8; 8192];
+        while !self.eof {
+            match self.pipe.read(&mut chunk) {
+                Ok(0) => self.eof = true,
+                Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break, // WouldBlock: nothing more for now.
+            }
+        }
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.buf).into_owned()
+    }
 }
 
 #[cfg(test)]
@@ -975,10 +1024,11 @@ quiet-1\tbusybox\t\t\t\t\n";
         let t0 = std::time::Instant::now();
         let out = run_bounded("sh", &["-c", "sleep 3 & echo hi"], std::time::Duration::from_millis(300));
         assert!(t0.elapsed() < std::time::Duration::from_millis(1500), "{:?}", t0.elapsed());
-        assert_eq!(out, None, "output never completed within the deadline");
-        // A command that finishes in time still returns its output.
-        let ok = run_bounded("sh", &["-c", "echo hi"], std::time::Duration::from_secs(2));
-        assert_eq!(ok.as_deref(), Some("hi\n"));
+        assert!(out.is_none(), "output never completed within the deadline");
+        // A command that finishes in time still returns its output and code.
+        let ok = run_bounded("sh", &["-c", "echo hi; echo oops >&2; exit 3"], std::time::Duration::from_secs(2))
+            .expect("finished in time");
+        assert_eq!((ok.code, ok.stdout.as_str(), ok.stderr.as_str()), (Some(3), "hi\n", "oops\n"));
     }
 
     /// A fake runner: an OrbStack listener, and `endpoint` as the active
@@ -1049,7 +1099,7 @@ quiet-1\tbusybox\t\t\t\t\n";
         .unwrap();
         let cmd = format!("python3 '{}' '{}' & echo hi", script.display(), mark.display());
         let out = run_bounded("sh", &["-c", &cmd], std::time::Duration::from_millis(300));
-        assert_eq!(out, None);
+        assert!(out.is_none());
         for _ in 0..40 {
             if mark.exists() {
                 break;
@@ -1057,6 +1107,24 @@ quiet-1\tbusybox\t\t\t\t\n";
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         assert_eq!(std::fs::read_to_string(&mark).unwrap(), "closed");
+    }
+
+    #[test]
+    fn only_a_clean_finish_counts_as_a_scan() {
+        let ran = |code: Option<i32>, out: &str, err: &str| Ran {
+            code,
+            stdout: out.into(),
+            stderr: err.into(),
+        };
+        assert_eq!(accepted("ps", ran(Some(0), "1 0 /sbin/launchd\n", "")).as_deref(), Some("1 0 /sbin/launchd\n"));
+        // lsof's documented "nothing matched" (and a pid gone mid-scan).
+        assert_eq!(accepted("lsof", ran(Some(1), "", "")).as_deref(), Some(""));
+        // lsof's other status-1 failures say why on stderr.
+        assert_eq!(accepted("lsof", ran(Some(1), "", "lsof: unacceptable port specification\n")), None);
+        // Killed by a signal before writing anything: no exit code.
+        assert_eq!(accepted("lsof", ran(None, "", "")), None);
+        assert_eq!(accepted("ps", ran(Some(1), "", "")), None, "status 1 is only lsof's no-match");
+        assert_eq!(accepted("docker", ran(Some(1), "", "Cannot connect to the Docker daemon\n")), None);
     }
 
     #[test]
