@@ -46,10 +46,15 @@ jobs:
         working-directory: crates/harness-app
         run: cargo audit --file Cargo.lock
 
-  # The phone client (web/remote) is embedded in the app, so its runtime
-  # dependencies ship to users. Gate on those only (`--prod`): the dev tooling
-  # (vite, vitest, workbox) never ships, and some of its transitive advisories
-  # have no patched release, which would keep a full audit permanently red.
+  # The phone client (web/remote) is embedded in the app. Audit the whole
+  # graph, dev tooling included: `--prod` would miss code that ships through
+  # a devDependency, such as the Workbox runtime (workbox-precaching,
+  # workbox-routing) that vite-plugin-pwa's generateSW bundles into sw.js.
+  #
+  # Accepted advisories, each build-time only and with no patched release.
+  # Remove an entry once a fix exists; any other advisory fails the job.
+  #   GHSA-fc5q-39xc-vjpf  picomatch 4.0.7 ReDoS (vite/rollup file matching
+  #                        over our own globs at build time)
   pnpm-audit:
     runs-on: ubuntu-latest
     steps:
@@ -57,7 +62,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Audit phone client runtime dependencies
+      - name: Audit phone client dependencies
         working-directory: web/remote
         # Reads pnpm-lock.yaml; no install needed. Same pnpm as packageManager.
-        run: npx --yes pnpm@12.21.0 audit --prod
+        run: npx --yes pnpm@12.21.0 audit --ignore GHSA-fc5q-39xc-vjpf
