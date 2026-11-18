@@ -22,6 +22,7 @@ mod markdown_preview;
 mod markdown_preview_button;
 mod notifier;
 mod panes_state;
+mod ports;
 mod preflight;
 mod resource_monitor;
 mod shortcuts;

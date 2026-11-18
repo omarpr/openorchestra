@@ -61,7 +61,7 @@ impl Check {
 /// `pi` is still one of them — it is what the native chat pane speaks — but it
 /// no longer leads, because nothing here needs *pi* specifically and a screen
 /// that names one vendor reads as a requirement rather than an example.
-const AGENTS: [&str; 5] = ["claude", "codex", "opencode", "kimi", "pi"];
+pub(crate) const AGENTS: [&str; 5] = ["claude", "codex", "opencode", "kimi", "pi"];
 
 /// Probe every tool. `lookup` returns the version string for a binary on PATH,
 /// or `None` when it is absent.

@@ -229,6 +229,30 @@ pub fn agent_running_in(procs: &[ProcInfo], roots: &[u32]) -> bool {
     false
 }
 
+/// Every pid in the subtrees rooted at `roots` (roots included), from
+/// `(pid, parent)` edges. Cycle-safe.
+pub fn descendants(
+    edges: impl IntoIterator<Item = (u32, Option<u32>)>,
+    roots: &[u32],
+) -> HashSet<u32> {
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (pid, parent) in edges {
+        if let Some(pp) = parent {
+            children.entry(pp).or_default().push(pid);
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut stack = roots.to_vec();
+    while let Some(pid) = stack.pop() {
+        if seen.insert(pid)
+            && let Some(kids) = children.get(&pid)
+        {
+            stack.extend(kids.iter().copied());
+        }
+    }
+    seen
+}
+
 /// `"34%"` — integer percent, clamped at zero so a transient negative delta
 /// from sysinfo never prints a minus sign.
 pub fn fmt_cpu(pct: f32) -> String {
@@ -426,6 +450,14 @@ mod tests {
             &[wt("wtA", "A")],
         );
         assert_eq!(snap.per_worktree[0].usage, Usage::default());
+    }
+
+    #[test]
+    fn descendants_walks_deep_and_survives_cycles() {
+        let edges = [(2, Some(1)), (3, Some(2)), (4, Some(3)), (9, Some(8)), (1, Some(4))];
+        let got = descendants(edges, &[2]);
+        assert_eq!(got, HashSet::from([1, 2, 3, 4]));
+        assert!(descendants(edges, &[]).is_empty());
     }
 
     #[test]
