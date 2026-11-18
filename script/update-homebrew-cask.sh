@@ -2,7 +2,7 @@
 # Publish a released openOrchestra build to the Homebrew tap.
 #
 #   ./script/update-homebrew-cask.sh --check            # preflight only
-#   ./script/update-homebrew-cask.sh <tag> [<dmg>]      # e.g. v0.1.0+294
+#   ./script/update-homebrew-cask.sh <tag> [<dmg>]      # e.g. v1.0.0
 #
 # Renders packaging/homebrew/openorchestra.rb for <tag>, writes it to
 # Casks/openorchestra.rb in the local checkout of the tap (`brew tap
@@ -71,11 +71,10 @@ fi
 TAG="$1"
 LOCAL_DMG="${2:-}"
 
-[[ "$TAG" =~ ^v([0-9]+(\.[0-9]+)+)\+([0-9]+)$ ]] \
-  || die "tag must look like v<version>+<build>, e.g. v0.1.0+294 (got: $TAG)"
+[[ "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]] \
+  || die "tag must look like v<major>.<minor>.<patch>, e.g. v1.0.0 (got: $TAG)"
 VERSION="${BASH_REMATCH[1]}"
-BUILD="${BASH_REMATCH[3]}"
-ASSET="openOrchestra-$VERSION+$BUILD-universal.dmg"
+ASSET="openOrchestra-$VERSION-universal.dmg"
 
 preflight
 
@@ -93,13 +92,13 @@ if [ -n "$LOCAL_DMG" ]; then
     || die "local $LOCAL_DMG does not match the uploaded asset (local $LOCAL_SHA, release $SHA)"
 fi
 
-say "updating $TAP to $VERSION,$BUILD"
+say "updating $TAP to $VERSION"
 git -C "$TAP_DIR" pull --ff-only --quiet
 mkdir -p "$TAP_DIR/Casks"
 CASK="$TAP_DIR/Casks/$CASK_NAME.rb"
-sed -e "s/^  version \"VERSION_CSV\"$/  version \"$VERSION,$BUILD\"/" \
+sed -e "s/^  version \"VERSION\"$/  version \"$VERSION\"/" \
     -e "s/^  sha256 \"SHA256\"$/  sha256 \"$SHA\"/" "$TEMPLATE" > "$CASK"
-grep -q -e VERSION_CSV -e '"SHA256"' "$CASK" && die "template placeholders were not all filled in"
+grep -q -e '"VERSION"' -e '"SHA256"' "$CASK" && die "template placeholders were not all filled in"
 ruby -c "$CASK" >/dev/null || die "rendered cask is not valid Ruby"
 
 # On any failure below, put the tap back the way it was, so a retry starts
@@ -116,14 +115,14 @@ brew audit --cask --online --strict "$TAP/$CASK_NAME"
 git -C "$TAP_DIR" add -- "Casks/$CASK_NAME.rb"
 trap - ERR
 if git -C "$TAP_DIR" diff --cached --quiet; then
-  say "tap already has $CASK_NAME $VERSION,$BUILD; nothing to commit"
+  say "tap already has $CASK_NAME $VERSION; nothing to commit"
 else
-  git -C "$TAP_DIR" commit --quiet -m "$CASK_NAME $VERSION,$BUILD"
+  git -C "$TAP_DIR" commit --quiet -m "$CASK_NAME $VERSION"
 fi
 # Push even when there was nothing to commit: a previous run may have
 # committed and then failed to push, and its commit is the one users need.
 git -C "$TAP_DIR" push --quiet origin HEAD \
   || die "committed to $TAP_DIR but the push failed; retry with: git -C \"$TAP_DIR\" push origin HEAD"
 
-say "published $CASK_NAME $VERSION,$BUILD to $TAP"
+say "published $CASK_NAME $VERSION to $TAP"
 echo "    install with:  brew install --cask $TAP/$CASK_NAME"

@@ -72,14 +72,20 @@ if ((notarize)) && ((!make_dmg)); then
 fi
 
 # ---------------------------------------------------------------------------
-# Version. Single source of truth is the crate manifest; the commit count is
-# the monotonically-increasing build number macOS wants in CFBundleVersion.
+# Version. Single source of truth is the crate manifest, bumped by hand for
+# every release (semver: patch = fixes, minor = features, major = a change
+# older builds can't follow, such as unreadable ~/.openorchestra state). The tag
+# and DMG carry only that version. The commit count is the
+# monotonically-increasing build number macOS wants in CFBundleVersion, and
+# stays inside the bundle: a `+<build>` in the tag had to be URL-encoded
+# everywhere and split apart again for Homebrew.
 # ---------------------------------------------------------------------------
 VERSION="$(sed -n '/^\[package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p;}' "$CRATE/Cargo.toml" | head -1)"
 [ -n "$VERSION" ] || die "could not parse version from $CRATE/Cargo.toml"
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+  || die "version in $CRATE/Cargo.toml must be MAJOR.MINOR.PATCH (got: $VERSION)"
 BUILD="$(git -C "$ROOT" rev-list --count HEAD)"
-FULL="$VERSION+$BUILD"
-TAG="v$FULL"
+TAG="v$VERSION"
 
 # ---------------------------------------------------------------------------
 # Preflight. Check everything that can fail *before* starting a 40-minute
@@ -94,7 +100,7 @@ if ((publish)); then
   # would silently widen the range.
   git -C "$ROOT" fetch --tags --quiet || true
   if git -C "$ROOT" rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-    die "tag $TAG already exists — bump version in $CRATE/Cargo.toml, or commit first"
+    die "tag $TAG already exists — bump version in $CRATE/Cargo.toml"
   fi
   REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
   [ -n "$REPO" ] || die "could not determine the GitHub repository"
@@ -233,7 +239,7 @@ lipo -info "$APP/Contents/MacOS/$APP_NAME" 2>/dev/null || true
 # icons on either side of an arrow (assets/dmg-background*.png, drawn by
 # script/gen-dmg-background.py, which shares this layout).
 # ---------------------------------------------------------------------------
-DMG="$ROOT/dist/$APP_NAME-$FULL-$ARCH_TAG.dmg"
+DMG="$ROOT/dist/$APP_NAME-$VERSION-$ARCH_TAG.dmg"
 
 # Window layout in points. Must match W/H/ICON/*_X/ICON_Y in
 # script/gen-dmg-background.py, or the arrow won't sit between the icons.

@@ -80,8 +80,12 @@ make doctor  # report which build/runtime tools are present
 Crate sources are shared, so nothing re-downloads, but the Intel slice is a cold
 build of the whole zed cone the first time. `make release` refuses to run on a
 dirty tree or an existing tag — a published build must be reproducible from its
-tag. Version comes from `crates/harness-app/Cargo.toml`; the build number is the
-commit count.
+tag. Version comes from `crates/harness-app/Cargo.toml` and is bumped by hand
+for every release, following semver: **patch** (1.0.1) for fixes only, **minor**
+(1.1.0) for features that keep older state working, **major** (2.0.0) for a
+change older builds can't follow, such as `~/.openorchestra` state they can't
+read or dropping a macOS version. The tag is `v<version>`. The commit count is
+the build number inside the bundle (`CFBundleVersion`), never part of the tag.
 
 ### The one build gotcha
 

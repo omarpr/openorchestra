@@ -25,10 +25,11 @@ touching the tap.
 
 ## Version format
 
-Tags are `v<version>+<build>` (for example `v0.1.0+294`). The cask version is
-`<version>,<build>`, and the URL rebuilds the tag with the `+` encoded as `%2B`,
-which is how GitHub serves both the tag and the asset name. `livecheck` reads
-the latest release's tag the same way.
+Tags are `v<major>.<minor>.<patch>` (for example `v1.0.0`), the cask version is
+the same number, and the asset is `openOrchestra-<version>-universal.dmg`.
+`livecheck` reads the latest GitHub release. Releases before 1.0.0 used
+`v0.1.0+<build>` tags; the script doesn't handle those, and no cask was ever
+published for them.
 
 ## Install
 
