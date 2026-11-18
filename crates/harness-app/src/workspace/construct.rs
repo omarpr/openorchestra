@@ -629,9 +629,14 @@ impl HarnessWorkspace {
 
         // Listening ports for the Ports tool tab. Polls only while that tab is
         // on screen; `set_tool_tab` takes an immediate sample when it opens.
+        // The first pass runs without waiting, so a Ports tab restored open
+        // at launch fills in at once rather than after a full interval.
         cx.spawn(async move |view, cx| {
+            let mut first = true;
             loop {
-                cx.background_executor().timer(Duration::from_secs(3)).await;
+                if !std::mem::take(&mut first) {
+                    cx.background_executor().timer(Duration::from_secs(3)).await;
+                }
                 let Ok(visible) = view.read_with(cx, |ws, _| ws.ports_visible()) else {
                     break;
                 };
