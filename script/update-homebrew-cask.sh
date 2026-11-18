@@ -52,6 +52,17 @@ preflight() {
   [ -n "${TAP_DIR:-}" ] && [ -d "$TAP_DIR/.git" ] \
     || die "tap $TAP is not checked out; run: brew tap $TAP"
   git -C "$TAP_DIR" remote get-url origin >/dev/null 2>&1 || die "tap $TAP has no origin remote"
+
+  # Homebrew 7 won't load a cask from a third-party tap until it is trusted,
+  # and `brew audit` below loads it by name. Checked here so a release fails
+  # before the build, not after the GitHub Release is already public. (Users
+  # are unaffected: `brew install --cask omarpr/tap/openorchestra` trusts the
+  # cask it names.)
+  local trusted
+  trusted="$(brew trust --json=v1 2>/dev/null || true)"
+  if ! printf '%s' "$trusted" | grep -qE "\"($TAP|$TAP/$CASK_NAME)\""; then
+    die "Homebrew doesn't trust $TAP/$CASK_NAME yet; run once: brew trust --cask $TAP/$CASK_NAME"
+  fi
   [ -z "$(git -C "$TAP_DIR" status --porcelain)" ] \
     || die "tap checkout $TAP_DIR has uncommitted changes; commit or discard them first"
 }
