@@ -365,7 +365,11 @@ pub fn classify(s: &PortsSample, scopes: &[Scope]) -> PortsView {
         if pid == s.app_pid || SYSTEM_PREFIXES.iter().any(|p| path.starts_with(p)) {
             continue;
         }
-        let (container, scope) = match published.get(&port) {
+        // Container metadata only for a port an engine holds: a native server
+        // on the same port number (say [::1]:8080 beside a container's
+        // 127.0.0.1:8080) is not that container.
+        let is_engine = ENGINE_HINTS.iter().any(|h| path.contains(h));
+        let (container, scope) = match published.get(&port).filter(|_| is_engine) {
             Some(&(c, container_port)) => {
                 let label = match (&c.compose_service, &c.compose_project) {
                     (Some(svc), Some(proj)) => format!("{svc} · {proj}"),
@@ -385,7 +389,7 @@ pub fn classify(s: &PortsSample, scopes: &[Scope]) -> PortsView {
             // gone), but running from inside a scope's folder. An engine's
             // folder says nothing about its containers, so engines never
             // match this way.
-            None if !ENGINE_HINTS.iter().any(|h| path.contains(h)) => {
+            None if !is_engine => {
                 let scope = cwd.as_ref().and_then(|d| {
                     scopes.iter().find(|sc| sc.path.as_ref().is_some_and(|p| d.starts_with(p)))
                 });
@@ -683,6 +687,29 @@ quiet-1\tbusybox\t\t\t\t\n";
         assert_eq!(c.label, "comicchat-ergo");
         assert_eq!(c.container_port, 6667);
         assert_eq!(v.other[1].container, None, "engine's own port stays plain");
+    }
+
+    #[test]
+    fn a_native_server_on_a_containers_port_keeps_its_own_identity() {
+        // A container publishes 127.0.0.1:8080 (held by OrbStack) while an
+        // unrelated node listens on [::1]:8080. Only the engine's row is the
+        // container.
+        let s = PortsSample {
+            app_pid: 1,
+            listeners: vec![l(41084, "127.0.0.1", 8080), l(7, "::1", 8080)],
+            procs: vec![
+                p(41084, 0, "/Applications/OrbStack.app/Contents/MacOS/OrbStack"),
+                p(7, 0, "/opt/homebrew/bin/node"),
+            ],
+            session_panes: vec![],
+            containers: vec![container("web-1", 8080, 80, None)],
+            cwds: Default::default(),
+        };
+        let v = classify(&s, &[]);
+        let node = v.other.iter().find(|r| r.pid == 7).unwrap();
+        assert_eq!(node.container, None, "node is not the container");
+        let engine = v.other.iter().find(|r| r.pid == 41084).unwrap();
+        assert!(engine.container.is_some());
     }
 
     #[test]
