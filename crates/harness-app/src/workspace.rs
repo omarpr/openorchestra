@@ -773,6 +773,10 @@ pub struct HarnessWorkspace {
     ports_seq_applied: u64,
     /// One Ports scan at a time (`ports::ScanGate`).
     ports_gate: crate::ports::ScanGate,
+    /// When `ports_sample` was taken, and whether the last scan failed: an
+    /// old sample is shown as updating, never as current.
+    ports_sample_at: Option<std::time::Instant>,
+    ports_scan_failed: bool,
     /// Which Ports sort dropdown is open, if any.
     ports_sort_menu: Option<crate::workspace::ui::ports_panel::SortMenu>,
     /// The last press on a sort dropdown's button (which menu, where), so the

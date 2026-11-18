@@ -197,10 +197,16 @@ impl HarnessWorkspace {
         // The label shows a count only while Ports is visible (`tab_label`);
         // don't classify and sort on every Files/Git/Review render for a
         // number that would be thrown away.
-        if !self.ports_visible() {
+        // An old sample's count would read as current: none until a scan lands.
+        if !self.ports_visible() || !self.ports_current() {
             return 0;
         }
         self.ports_view().map(|v| v.task.len()).unwrap_or(0)
+    }
+
+    /// Whether the shown sample is recent enough to present as current.
+    fn ports_current(&self) -> bool {
+        self.ports_sample_at.is_some_and(|at| ports::is_current(at.elapsed()))
     }
 
     /// Take one sample now, off the UI thread.
@@ -227,8 +233,12 @@ impl HarnessWorkspace {
         sample: Option<ports::PortsSample>,
         cx: &mut Context<Self>,
     ) {
-        if let Some(sample) = sample {
-            self.apply_ports(seq, sample, cx);
+        match sample {
+            Some(sample) => self.apply_ports(seq, sample, cx),
+            None => {
+                self.ports_scan_failed = true;
+                cx.notify();
+            }
         }
         if self.ports_gate.finish() && self.ports_visible() {
             self.refresh_ports(cx);
@@ -246,6 +256,8 @@ impl HarnessWorkspace {
             return;
         }
         self.ports_sample = Some(sample);
+        self.ports_sample_at = Some(std::time::Instant::now());
+        self.ports_scan_failed = false;
         cx.notify();
     }
 
@@ -258,11 +270,31 @@ impl HarnessWorkspace {
                 .justify_center()
                 .text_xs()
                 .text_color(hx.tx2)
-                .child("Looking for ports…")
+                .child(if self.ports_scan_failed {
+                    "Can't list ports right now. Retrying…"
+                } else {
+                    "Looking for ports…"
+                })
                 .into_any_element();
         };
+        // Rows from an old sample: shown for context, marked as such, and
+        // without Open/Copy until a scan succeeds.
+        let current = self.ports_current();
 
         let sort_bar = self.render_ports_sort_bar(hx, cx);
+        let stale_note = (!current).then(|| {
+            div()
+                .flex_none()
+                .px_3()
+                .py_1()
+                .text_xs()
+                .text_color(hx.tx2)
+                .child(if self.ports_scan_failed {
+                    "Can't list ports right now. These rows may be out of date; retrying…"
+                } else {
+                    "Updating… these rows may be out of date."
+                })
+        });
         let mut body = div()
             .id("ports-scroll")
             .flex()
@@ -299,7 +331,7 @@ impl HarnessWorkspace {
             );
         } else {
             for row in &view.task {
-                body = body.child(self.render_port_row(hx, "task", row, cx));
+                body = body.child(self.render_port_row(hx, "task", row, current, cx));
             }
         }
 
@@ -311,7 +343,7 @@ impl HarnessWorkspace {
         ));
         if !self.section_collapsed(SidebarSection::PortsOther) {
             for row in &view.other {
-                body = body.child(self.render_port_row(hx, "other", row, cx));
+                body = body.child(self.render_port_row(hx, "other", row, current, cx));
             }
         }
         div()
@@ -320,6 +352,7 @@ impl HarnessWorkspace {
             .flex_1()
             .min_h_0()
             .child(sort_bar)
+            .children(stale_note)
             .child(body)
             .into_any_element()
     }
@@ -329,6 +362,7 @@ impl HarnessWorkspace {
         hx: &HarnessTheme,
         section: &str,
         row: &PortRow,
+        actionable: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let port = row.port;
@@ -406,21 +440,24 @@ impl HarnessWorkspace {
                     .text_color(hx.tx2)
                     .child(detail),
             )
-            .child(small_button(hx, format!("port-open-{section}-{port}"), "Open").on_click({
-                let url = url.clone();
-                cx.listener(move |_, _, _, cx| {
-                    cx.stop_propagation();
-                    cx.open_url(&url);
-                })
-            }))
-            .child(small_button(hx, format!("port-copy-{section}-{port}"), "Copy").on_click(
-                cx.listener(move |ws, _, _, cx| {
-                    cx.stop_propagation();
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(url.clone()));
-                    ws.set_note(format!("copied {url}"));
-                    cx.notify();
-                }),
-            ))
+            .when(!actionable, |d| d.opacity(0.6))
+            .when(actionable, |d| {
+                d.child(small_button(hx, format!("port-open-{section}-{port}"), "Open").on_click({
+                    let url = url.clone();
+                    cx.listener(move |_, _, _, cx| {
+                        cx.stop_propagation();
+                        cx.open_url(&url);
+                    })
+                }))
+                .child(small_button(hx, format!("port-copy-{section}-{port}"), "Copy").on_click(
+                    cx.listener(move |ws, _, _, cx| {
+                        cx.stop_propagation();
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(url.clone()));
+                        ws.set_note(format!("copied {url}"));
+                        cx.notify();
+                    }),
+                ))
+            })
     }
 }
 

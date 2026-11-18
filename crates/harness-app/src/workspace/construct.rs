@@ -266,6 +266,8 @@ impl HarnessWorkspace {
             ports_seq_issued: 0,
             ports_seq_applied: 0,
             ports_gate: Default::default(),
+            ports_sample_at: None,
+            ports_scan_failed: false,
             ports_sort_menu: None,
             ports_sort_trigger_press: None,
             archived_repos,
@@ -652,7 +654,11 @@ impl HarnessWorkspace {
                 }) else {
                     break;
                 };
-                let Some(seq) = started else { continue };
+                let Some(seq) = started else {
+                    // Still redraw: a sample can age past current meanwhile.
+                    let _ = view.update(cx, |_, cx| cx.notify());
+                    continue;
+                };
                 let sample = cx
                     .background_spawn(async move { crate::ports::sample(sampler_has_tmux) })
                     .await;

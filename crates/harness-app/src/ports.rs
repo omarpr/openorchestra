@@ -489,6 +489,17 @@ pub fn accept_scan(applied: &mut u64, seq: u64) -> bool {
     }
 }
 
+/// How old a sample can be and still be shown as current: a 3 s poll plus a
+/// slow scan (each command is bounded at 2 s). Older means it was kept from
+/// before the tab was hidden, or scans have been failing since.
+const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Whether a sample this old may be shown as current, with its count and its
+/// Open/Copy actions. "A stale number reads as a current one."
+pub fn is_current(age: std::time::Duration) -> bool {
+    age <= STALE_AFTER
+}
+
 /// Keeps Ports scans from overlapping: each one runs lsof, ps and maybe
 /// docker, and clicking the Ports tab (or reopening the panel) asks for one
 /// whether or not the last is still waiting on lsof.
@@ -1169,6 +1180,14 @@ quiet-1\tbusybox\t\t\t\t\n";
         assert!(!gate.finish(), "nothing queued");
         assert!(gate.try_start(false), "idle again");
         assert!(!gate.finish());
+    }
+
+    #[test]
+    fn a_sample_is_current_only_within_one_scan_cycle() {
+        use std::time::Duration;
+        assert!(is_current(Duration::from_secs(0)));
+        assert!(is_current(Duration::from_secs(9)), "a 3 s poll plus a slow scan");
+        assert!(!is_current(Duration::from_secs(11)), "kept from before the tab was hidden, or scans failing");
     }
 
     #[test]
