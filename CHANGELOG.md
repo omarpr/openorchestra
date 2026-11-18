@@ -19,7 +19,10 @@ Unreleased is empty.
   "Other on this Mac".
 - Ports published by Docker containers show the container (Compose service and
   project, or the container name) with a Docker icon and the port inside it.
-  Compose containers started from a task's folder appear under that task.
+  Compose containers started from a task's folder appear under that task, as
+  do containers with a folder from the task mounted in. A plain `docker run`
+  container whose name starts with the project's (`comicchat-ergo` for
+  `comic-chat`) is listed there too, marked "matched by name".
 
 ## 1.0.1 - 2026-11-17
 

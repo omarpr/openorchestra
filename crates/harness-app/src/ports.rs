@@ -44,6 +44,9 @@ pub struct Scope {
     /// The worktree (or checkout) folder; a Compose container started from
     /// inside it belongs to this scope.
     pub path: Option<PathBuf>,
+    /// The repo name, for matching containers by name when nothing else
+    /// links them (`comicchat-ergo` → `comic-chat`).
+    pub repo: Option<String>,
 }
 
 /// A running container with its published ports, from `docker ps`.
@@ -57,6 +60,8 @@ pub struct Container {
     pub compose_service: Option<String>,
     /// Where `docker compose up` ran.
     pub working_dir: Option<PathBuf>,
+    /// Host folders bind-mounted into the container.
+    pub binds: Vec<PathBuf>,
 }
 
 /// What a port row knows about the container behind it.
@@ -67,6 +72,9 @@ pub struct ContainerInfo {
     pub container_port: u16,
     pub name: String,
     pub image: String,
+    /// Placed in the task only because its name starts with the repo's: a
+    /// guess, so the row says so.
+    pub matched_by_name: bool,
 }
 
 /// One port shown in the tab: a process listening on a port, on one or more
@@ -131,8 +139,9 @@ pub fn parse_ps_paths(out: &str) -> Vec<ProcPath> {
 }
 
 /// The `docker ps --format` template [`parse_docker_ps`] reads: tab-separated
-/// name, image, ports, compose project, compose service, compose working dir.
-pub const DOCKER_PS_FORMAT: &str = "{{.Names}}\t{{.Image}}\t{{.Ports}}\t{{.Label \"com.docker.compose.project\"}}\t{{.Label \"com.docker.compose.service\"}}\t{{.Label \"com.docker.compose.project.working_dir\"}}";
+/// name, image, ports, compose project, compose service, compose working dir,
+/// mounts (volume names and bind sources, comma-separated; needs `--no-trunc`).
+pub const DOCKER_PS_FORMAT: &str = "{{.Names}}\t{{.Image}}\t{{.Ports}}\t{{.Label \"com.docker.compose.project\"}}\t{{.Label \"com.docker.compose.service\"}}\t{{.Label \"com.docker.compose.project.working_dir\"}}\t{{.Mounts}}";
 
 /// Parse `docker ps --format DOCKER_PS_FORMAT` output.
 pub fn parse_docker_ps(out: &str) -> Vec<Container> {
@@ -160,6 +169,15 @@ pub fn parse_docker_ps(out: &str) -> Vec<Container> {
                 compose_project: opt(f.next()),
                 compose_service: opt(f.next()),
                 working_dir: opt(f.next()).map(PathBuf::from),
+                // Bind sources are absolute paths; anything else is a volume name.
+                binds: f
+                    .next()
+                    .unwrap_or("")
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|m| m.starts_with('/'))
+                    .map(PathBuf::from)
+                    .collect(),
             })
         })
         .collect()
@@ -264,17 +282,13 @@ pub fn classify(s: &PortsSample, scopes: &[Scope]) -> PortsView {
             (Some(svc), Some(proj)) => format!("{svc} · {proj}"),
             _ => c.name.clone(),
         };
+        let (scope, matched_by_name) = container_scope(c, scopes);
         let container = Some(ContainerInfo {
             label,
             container_port,
             name: c.name.clone(),
             image: c.image.clone(),
-        });
-        // Path::starts_with is per component: `feat-xy` is not inside `feat-x`.
-        let scope = c.working_dir.as_ref().and_then(|wd| {
-            scopes
-                .iter()
-                .find(|sc| sc.path.as_ref().is_some_and(|p| wd.starts_with(p)))
+            matched_by_name,
         });
         match scope {
             Some(sc) => {
@@ -285,6 +299,40 @@ pub fn classify(s: &PortsSample, scopes: &[Scope]) -> PortsView {
         }
     }
     view
+}
+
+/// Which scope a container belongs to, and whether that was only a name
+/// guess. In order of trust: the Compose folder (decisive either way: a Compose
+/// container from elsewhere is never re-homed by name), a bind-mounted folder
+/// inside the scope, then a container name starting with the repo name.
+fn container_scope<'a>(c: &Container, scopes: &'a [Scope]) -> (Option<&'a Scope>, bool) {
+    // Path::starts_with is per component: `feat-xy` is not inside `feat-x`.
+    let inside = |dir: &PathBuf| {
+        scopes.iter().find(|sc| sc.path.as_ref().is_some_and(|p| dir.starts_with(p)))
+    };
+    if let Some(wd) = &c.working_dir {
+        return (inside(wd), false);
+    }
+    if let Some(sc) = c.binds.iter().find_map(inside) {
+        return (Some(sc), false);
+    }
+    let name = squash(&c.name);
+    let by_name = scopes.iter().find(|sc| {
+        sc.repo
+            .as_deref()
+            .map(squash)
+            .is_some_and(|repo| repo.len() >= MIN_NAME_MATCH && name.starts_with(&repo))
+    });
+    (by_name, by_name.is_some())
+}
+
+/// Shorter repo names than this never match by name: `ui` or `db` would claim
+/// half the containers on the machine.
+const MIN_NAME_MATCH: usize = 4;
+
+/// Lowercase alphanumerics only, so `comic-chat` and `comicchat` compare equal.
+fn squash(s: &str) -> String {
+    s.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_lowercase()).collect()
 }
 
 /// The tab label: the count only while the tab is visible, since sampling
@@ -325,7 +373,7 @@ pub fn sample(has_tmux: bool) -> PortsSample {
             .is_some_and(|p| ENGINE_HINTS.iter().any(|h| p.path.contains(h)))
     });
     let containers = if engine_listening {
-        run_bounded("docker", &["ps", "--format", DOCKER_PS_FORMAT], std::time::Duration::from_secs(2))
+        run_bounded("docker", &["ps", "--no-trunc", "--format", DOCKER_PS_FORMAT], std::time::Duration::from_secs(2))
             .map(|out| parse_docker_ps(&out))
             .unwrap_or_default()
     } else {
@@ -386,7 +434,7 @@ mod tests {
     }
 
     fn scope(prefix: &str, label: &str) -> Scope {
-        Scope { label: label.into(), session_prefix: prefix.into(), path: None }
+        Scope { label: label.into(), session_prefix: prefix.into(), path: None, repo: None }
     }
 
     #[test]
@@ -416,7 +464,64 @@ quiet-1\tbusybox\t\t\t\t\n";
             compose_project: wd.map(|_| "urbital".into()),
             compose_service: wd.map(|_| "db".into()),
             working_dir: wd.map(PathBuf::from),
+            binds: vec![],
         }
+    }
+
+    fn engine_sample(containers: Vec<Container>, ports: &[u16]) -> PortsSample {
+        PortsSample {
+            app_pid: 1,
+            listeners: ports.iter().map(|&p| l(41084, "*", p)).collect(),
+            procs: vec![p(41084, 0, "/Applications/OrbStack.app/Contents/MacOS/OrbStack")],
+            session_panes: vec![],
+            containers,
+        }
+    }
+
+    fn repo_scope(repo: &str, path: &str) -> Scope {
+        Scope {
+            label: repo.into(),
+            session_prefix: "oo-x".into(),
+            path: Some(PathBuf::from(path)),
+            repo: Some(repo.into()),
+        }
+    }
+
+    #[test]
+    fn parse_docker_ps_keeps_bind_sources_not_volume_names() {
+        let out = "a\timg\t0.0.0.0:1->1/tcp\t\t\t\t/wt/comic-chat/x/data,named_vol\n";
+        assert_eq!(parse_docker_ps(out)[0].binds, vec![PathBuf::from("/wt/comic-chat/x/data")]);
+    }
+
+    #[test]
+    fn classify_puts_a_container_with_a_bind_mount_from_the_task_in_the_task() {
+        let mut c = container("whatever-1", 7000, 7000, None);
+        c.binds = vec![PathBuf::from("/wt/comic-chat/x/data")];
+        let v = classify(&engine_sample(vec![c], &[7000]), &[repo_scope("comic-chat", "/wt/comic-chat/x")]);
+        assert_eq!(v.task.len(), 1);
+        assert!(!v.task[0].container.as_ref().unwrap().matched_by_name);
+    }
+
+    #[test]
+    fn classify_matches_a_plain_container_by_repo_name_and_says_so() {
+        let c = container("comicchat-ergo", 8067, 8067, None);
+        let v = classify(&engine_sample(vec![c], &[8067]), &[repo_scope("comic-chat", "/wt/comic-chat/x")]);
+        assert_eq!(v.task.len(), 1);
+        assert!(v.task[0].container.as_ref().unwrap().matched_by_name);
+    }
+
+    #[test]
+    fn name_matching_never_overrides_compose_or_short_names() {
+        // A compose container from elsewhere stays where its folder says.
+        let compose = container("comicchat-db-1", 5432, 5432, Some("/elsewhere"));
+        // A two-letter repo name would match far too much.
+        let short = container("ui-thing", 3000, 3000, None);
+        let v = classify(
+            &engine_sample(vec![compose, short], &[5432, 3000]),
+            &[repo_scope("comic-chat", "/wt/comic-chat/x"), repo_scope("ui", "/wt/ui/x")],
+        );
+        assert!(v.task.is_empty(), "{:?}", v.task);
+        assert_eq!(v.other.len(), 2);
     }
 
     #[test]
@@ -468,6 +573,7 @@ quiet-1\tbusybox\t\t\t\t\n";
             label: "urbital".into(),
             session_prefix: "oo-x".into(),
             path: Some(PathBuf::from("/wt/urbital/feat-x")),
+            repo: None,
         };
         let v = classify(&s, &[sc]);
         assert_eq!(v.task.len(), 1);

@@ -119,7 +119,11 @@ timeout, active context only) and label those rows with the Docker icon
 (zed's `icons/file_icons/docker.svg`), `service · project` (or the container
 name) and the port inside the container. A Compose container whose
 `com.docker.compose.project.working_dir` is inside a scope's folder is listed
-under This task. No `docker` CLI or a stopped daemon: rows stay plain.
+under This task. Otherwise, a container with a bind mount inside a scope's
+folder goes there; failing that, one whose name starts with the scope's repo
+name (alphanumerics only, case-insensitive, repo name at least 4 characters)
+goes there marked "matched by name". A Compose container is never re-homed by
+name. No `docker` CLI or a stopped daemon: rows stay plain.
 
 Each row: port, bind address (`*`, `127.0.0.1`, `::1`), process name, PID
 (on hover), and its share state.

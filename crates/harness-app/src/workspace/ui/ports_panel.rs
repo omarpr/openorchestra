@@ -15,10 +15,11 @@ impl HarnessWorkspace {
     /// the same keys the footprint monitor attributes by (`apply_resource`),
     /// plus each one's folder so Compose containers started there count too.
     pub(crate) fn ports_scopes(&self) -> Vec<Scope> {
-        let scope = |label: &str, key: &str, path: Option<&std::path::Path>| Scope {
+        let scope = |label: &str, key: &str, path: Option<&std::path::Path>, repo: Option<&str>| Scope {
             label: label.to_string(),
             session_prefix: crate::tmux::session_prefix(key),
             path: path.map(|p| p.to_path_buf()),
+            repo: repo.map(str::to_string),
         };
         let task_scopes = |task_id: &str| -> Vec<Scope> {
             let Some(task) = self.task_store.get(task_id) else {
@@ -29,18 +30,18 @@ impl HarnessWorkspace {
                 .iter()
                 .map(|m| {
                     let key = a2a_broker::task_member_pane_key(&task.id, &m.worktree_id);
-                    scope(&m.repo, &key, Some(&m.path))
+                    scope(&m.repo, &key, Some(&m.path), Some(&m.repo))
                 })
                 .collect();
             if super::super::coordinator::has_coordinator(task) {
-                out.push(scope("coordinator", &a2a_broker::coordinator_pane_key(&task.id), None));
+                out.push(scope("coordinator", &a2a_broker::coordinator_pane_key(&task.id), None, None));
             }
             out
         };
         match &self.selection {
             Selection::Main(repo) => {
                 let root = self.data.repos.iter().find(|r| &r.name == repo).map(|r| r.repo_root.as_path());
-                vec![scope(repo, &format!("main:{repo}"), root)]
+                vec![scope(repo, &format!("main:{repo}"), root, Some(repo))]
             }
             Selection::Task { task_id, .. } => task_scopes(task_id),
             Selection::Worktree(id) => match self
@@ -51,14 +52,12 @@ impl HarnessWorkspace {
             {
                 Some(tid) => task_scopes(&tid),
                 None => {
-                    let path = self
-                        .data
-                        .repos
-                        .iter()
-                        .flat_map(|r| &r.worktrees)
-                        .find(|w| &w.id == id)
-                        .map(|w| w.path.as_path());
-                    vec![scope(id, id, path)]
+                    let found = self.data.repos.iter().find_map(|r| {
+                        r.worktrees.iter().find(|w| &w.id == id).map(|w| (r, w))
+                    });
+                    let path = found.map(|(_, w)| w.path.as_path());
+                    let repo = found.map(|(r, _)| r.name.as_str());
+                    vec![scope(id, id, path, repo)]
                 }
             },
         }
@@ -179,6 +178,9 @@ impl HarnessWorkspace {
         // A container port reads as the container ("db · urbital · → 5432"),
         // not as the engine process that happens to hold the socket.
         let what = match &row.container {
+            Some(c) if c.matched_by_name => {
+                format!("{} · → {} · matched by name", c.label, c.container_port)
+            }
             Some(c) => format!("{} · → {}", c.label, c.container_port),
             None => format!("{} · {reach}", row.name),
         };
@@ -187,7 +189,14 @@ impl HarnessWorkspace {
             None => what,
         };
         let hover = match &row.container {
-            Some(c) => format!("container {} · image {} · via {} (pid {})", c.name, c.image, row.name, row.pid),
+            Some(c) => {
+                let why = if c.matched_by_name {
+                    " · listed here because its name starts with the project's; nothing else links it"
+                } else {
+                    ""
+                };
+                format!("container {} · image {} · via {} (pid {}){why}", c.name, c.image, row.name, row.pid)
+            }
             None => format!("{} (pid {})", row.name, row.pid),
         };
         let is_container = row.container.is_some();
