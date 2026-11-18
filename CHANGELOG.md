@@ -19,6 +19,12 @@ Unreleased is empty.
 - **Check for updates…** in the app menu. It asks GitHub for the latest release
   only when you click it (there is no background check). Homebrew installs get
   the `brew upgrade` command to copy; other installs get a download link.
+- `make release` asks whether to bump the version (patch, minor or major) and
+  shows the current and latest released versions first.
+
+### Changed
+
+- Release tags now point at the exact commit that was built.
 
 ### Security
 

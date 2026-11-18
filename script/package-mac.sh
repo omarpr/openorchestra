@@ -371,6 +371,17 @@ release_notes() {
   range="${prev:+$prev..}HEAD"
 
   printf '%s\n\n' "$INSTALL_NOTE"
+  # This version's CHANGELOG.md section (cut by release-version.sh) leads:
+  # it says what changed for users. The commit list below stays for detail.
+  local notes
+  notes="$(awk -v v="$VERSION" '
+    index($0, "## " v " - ") == 1 { on = 1; next }
+    on && /^## / { exit }
+    on { print }
+  ' "$ROOT/CHANGELOG.md" 2>/dev/null | sed -e '/./,$!d')"
+  if [ -n "$notes" ]; then
+    printf '%s\n\n' "$notes"
+  fi
   printf "## What's Changed\n"
   while IFS=$'\x1f' read -r sha subject author; do
     handle="$(gh api "repos/$REPO/commits/$sha" --jq '.author.login // empty' 2>/dev/null || true)"
@@ -395,7 +406,10 @@ release_notes() {
 
 if ((publish)); then
   say "publishing GitHub Release $TAG"
+  # --target: tag the commit that was built. Without it gh tags the default
+  # branch's tip on GitHub, which need not be this commit.
   gh release create "$TAG" "$DMG" \
+    --target "$(git -C "$ROOT" rev-parse HEAD)" \
     --title "$APP_NAME $VERSION ($BUILD)" \
     --notes "$(release_notes)"
   say "published: $(gh release view "$TAG" --json url --jq .url)"

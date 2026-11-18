@@ -8,7 +8,8 @@
 #   make app     — build openOrchestra.app (macOS bundle → dist/)
 #   make dmg     — universal (arm64+x86_64) bundle + .dmg → dist/  (two compiles)
 #   make dmg-notarized — ...and Developer ID signed + notarized by Apple
-#   make release — notarized universal .dmg, published to GitHub Releases and the Homebrew tap
+#   make release — asks for a version bump, then a notarized universal .dmg published to GitHub
+#                  Releases and the Homebrew tap
 #   make doctor  — report which build/runtime tools are present
 #   make icon    — regenerate the app icon from script/gen-icon.py
 #   make dmg-background — regenerate the installer DMG's background art
@@ -46,6 +47,7 @@ dmg-notarized: setup
 	bash ./script/package-mac.sh --universal --dmg --notarize
 
 release: setup
+	bash ./script/release-version.sh
 	bash ./script/package-mac.sh --universal --dmg --publish
 
 icon:
