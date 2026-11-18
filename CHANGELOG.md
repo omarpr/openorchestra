@@ -35,6 +35,9 @@ Unreleased is empty.
 - The Review base menu on a project's main checkout read "vs HEAD" and showed
   the same files as Uncommitted. It now reads "vs origin/<default branch>" and
   shows everything the checked-out branch changes.
+- The Markdown preview (eye) button did nothing in a file's own tab when focus
+  was elsewhere, for example after opening the file from the Git panel or a
+  commit. It now always previews the file it sits above.
 
 ## 1.0.1 - 2026-11-17
 

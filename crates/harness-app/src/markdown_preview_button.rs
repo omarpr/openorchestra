@@ -31,7 +31,7 @@
 //! `::markdown_preview::init(cx)` call: without it the path resolves to the
 //! local module and the code silently means something else.
 
-use gpui::{Action, EventEmitter, Modifiers, WeakEntity};
+use gpui::{Action, Entity, EventEmitter, Modifiers, WeakEntity};
 use ui::{Tooltip, prelude::*, text_for_keystroke};
 use workspace::{ItemHandle, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView, Workspace};
 
@@ -45,6 +45,9 @@ pub struct MarkdownPreviewButton {
     /// `set_active_pane_item` reported a visible location is what puts an
     /// empty toolbar strip above the editor (see the impl below).
     show: bool,
+    /// The Markdown editor this button sits above. The click previews *this*
+    /// editor, not whatever the window's focus happens to name (see `render`).
+    editor: Option<WeakEntity<editor::Editor>>,
 }
 
 impl MarkdownPreviewButton {
@@ -52,6 +55,7 @@ impl MarkdownPreviewButton {
         Self {
             workspace: workspace.weak_handle(),
             show: false,
+            editor: None,
         }
     }
 
@@ -61,15 +65,17 @@ impl MarkdownPreviewButton {
     /// `is_markdown_file` is what `OpenPreview` itself consults, so sharing it
     /// keeps the button from appearing on files the action would refuse — or
     /// hiding on ones it would accept.
-    fn is_markdown(item: Option<&dyn ItemHandle>, cx: &mut Context<Self>) -> bool {
+    fn markdown_editor(
+        item: Option<&dyn ItemHandle>,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<editor::Editor>> {
         // Resolve the editor first so the `&App` borrow ends before
         // `is_markdown_file` takes `cx` mutably.
-        let Some(editor) = item.and_then(|item| item.act_as::<editor::Editor>(cx)) else {
-            return false;
-        };
+        let editor = item.and_then(|item| item.act_as::<editor::Editor>(cx))?;
         ::markdown_preview::markdown_preview_view::MarkdownPreviewView::is_markdown_file(
             &editor, cx,
         )
+        .then_some(editor)
     }
 }
 
@@ -82,7 +88,9 @@ impl ToolbarItemView for MarkdownPreviewButton {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> ToolbarItemLocation {
-        self.show = Self::is_markdown(active_pane_item, cx);
+        let editor = Self::markdown_editor(active_pane_item, cx);
+        self.show = editor.is_some();
+        self.editor = editor.map(|e| e.downgrade());
         cx.notify();
         // `Hidden` — not "PrimaryRight rendering nothing" — is load-bearing.
         // `Toolbar::render` collapses to an empty div only when EVERY item is
@@ -104,6 +112,7 @@ impl Render for MarkdownPreviewButton {
         }
 
         let workspace = self.workspace.clone();
+        let editor = self.editor.clone();
 
         IconButton::new("toggle-markdown-preview", IconName::Eye)
             .icon_size(IconSize::Small)
@@ -124,20 +133,32 @@ impl Render for MarkdownPreviewButton {
                 )
             })
             .on_click(move |_, window, cx| {
-                let Some(workspace) = workspace.upgrade() else {
+                let (Some(workspace), Some(editor)) =
+                    (workspace.upgrade(), editor.as_ref().and_then(|e| e.upgrade()))
+                else {
                     return;
                 };
-                // Dispatch the actions rather than calling MarkdownPreviewView
-                // directly, so the button and the keybindings travel one code
-                // path. Updating inside the workspace puts the dispatch on the
-                // hosted Workspace's focus path, which is where
-                // `markdown_preview::init`'s observe_new registered the handler.
-                workspace.update(cx, |_, cx| {
-                    if window.modifiers().alt {
-                        window
-                            .dispatch_action(Box::new(::markdown_preview::OpenPreviewToTheSide), cx);
+                // Call zed's preview entry points on this button's editor and
+                // pane directly. It used to dispatch `OpenPreview`, but
+                // `Window::dispatch_action` routes from the *focused* element:
+                // in a harness file tab, focus is often outside the hosted
+                // Workspace (the tab strip, the tools panel's Git panel), so
+                // the action had no handler and the click did nothing; or it
+                // sat on another item (the commit view a file was opened
+                // from), which zed then judged not Markdown. ⌘⇧M keeps the
+                // action route, where focus being in the editor is a given.
+                use ::markdown_preview::markdown_preview_view::MarkdownPreviewView;
+                let to_the_side = window.modifiers().alt;
+                workspace.update(cx, |workspace, cx| {
+                    let Some(pane) = workspace.pane_for(&editor) else {
+                        return;
+                    };
+                    if to_the_side {
+                        MarkdownPreviewView::open_preview_to_the_side_of_pane(
+                            workspace, editor, pane, window, cx,
+                        );
                     } else {
-                        window.dispatch_action(Box::new(::markdown_preview::OpenPreview), cx);
+                        MarkdownPreviewView::open_preview_in_pane(workspace, editor, pane, window, cx);
                     }
                 });
             })
