@@ -420,6 +420,28 @@ pub(crate) fn still_allowed(s: &Shared, device_id: &str, id: &str, session: &str
         && s.session_for(&file, id).as_deref() == Some(session)
 }
 
+/// Fresh re-check for screenshots: `id` still maps to `session` with the same
+/// `kind`, and the device is still paired and writable. Returns `Some(true)`
+/// for native Codex image delivery when allowed.
+fn screenshot_still_allowed(
+    s: &Shared,
+    device_id: &str,
+    id: &str,
+    session: &str,
+    kind: &str,
+) -> Option<bool> {
+    let file = s.current_file();
+    if !file
+        .devices
+        .iter()
+        .any(|d| d.id == device_id && !d.read_only)
+    {
+        return None;
+    }
+    let (cur_session, cur_kind) = s.screenshot_target(&file, id)?;
+    (cur_session == session && cur_kind == kind).then(|| cur_kind == "codex")
+}
+
 #[derive(Deserialize)]
 struct SendReq {
     text: String,
@@ -434,7 +456,7 @@ struct ScreenshotReq<'a> {
 struct Screenshot {
     bytes: Vec<u8>,
     extension: &'static str,
-    native_image: bool,
+    kind: String,
 }
 
 fn screenshot_extension(bytes: &[u8]) -> Option<&'static str> {
@@ -758,7 +780,7 @@ async fn send_screenshot(State(s): AppState, Path(id): Path<String>, request: Re
     let screenshot = Screenshot {
         bytes,
         extension,
-        native_image: kind == "codex",
+        kind,
     };
     send_reply(&s, &id, &device, &session, &text, Some(screenshot)).await
 }
@@ -826,7 +848,7 @@ async fn send_screenshot_reply(
     text: &str,
     screenshot: Screenshot,
 ) -> Result<(), (StatusCode, &'static str)> {
-    let native_image = screenshot.native_image;
+    let expected_kind = screenshot.kind;
     let state_dir = s.state_dir.clone();
     // The path is sent as terminal input, so reject terminal control characters.
     if !state_dir.is_absolute()
@@ -847,10 +869,11 @@ async fn send_screenshot_reply(
         }
         _ => return Err((StatusCode::SERVICE_UNAVAILABLE, "unavailable")),
     };
-    if !still_allowed(s, &device.id, id, session) {
+    let Some(native_image) = screenshot_still_allowed(s, &device.id, id, session, &expected_kind)
+    else {
         let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(path)).await;
         return Err((StatusCode::NOT_FOUND, "not_found"));
-    }
+    };
     let path = path.to_string_lossy();
     let text = if text.trim().is_empty() {
         "Please inspect the attached screenshot."
@@ -1013,6 +1036,36 @@ mod tests {
         assert_eq!(screenshot_extension(&valid_webp_vp8l), Some("webp"));
         assert_eq!(
             screenshot_extension(&valid_webp_vp8l[..valid_webp_vp8l.len() - 2]),
+            None
+        );
+    }
+
+    #[test]
+    fn screenshot_still_allowed_rejects_kind_change() {
+        use crate::{snapshot_channel, Snapshot};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut shared, id, _, _) = paired_fixture(dir.path(), crate::Tmux::default());
+        let writer_id = shared.current_file().devices[0].id.clone();
+        let mut agent = shared.snapshot.borrow().agents[1].clone();
+        let (tx, rx) = snapshot_channel();
+        tx.send(Snapshot {
+            agents: vec![agent.clone()],
+        })
+        .unwrap();
+        shared.snapshot = rx;
+
+        assert_eq!(
+            screenshot_still_allowed(&shared, &writer_id, &id, "s_codex", "codex"),
+            Some(true)
+        );
+        agent.agent_kind = Some("claude".into());
+        tx.send(Snapshot {
+            agents: vec![agent],
+        })
+        .unwrap();
+        assert_eq!(
+            screenshot_still_allowed(&shared, &writer_id, &id, "s_codex", "codex"),
             None
         );
     }
