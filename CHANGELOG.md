@@ -12,6 +12,8 @@ Unreleased is empty.
 
 ## Unreleased
 
+## 1.0.1 - 2026-11-17
+
 ### Added
 
 - **About openOrchestra** in the app menu: the standard macOS About panel with
