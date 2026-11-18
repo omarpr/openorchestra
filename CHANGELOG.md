@@ -12,6 +12,8 @@ Unreleased is empty.
 
 ## Unreleased
 
+## 1.1.0 - 2026-11-18
+
 ### Added
 
 - **Ports tab** in the tools panel: the servers a task is running, with Open in
