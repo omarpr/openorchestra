@@ -8,11 +8,14 @@
 #   ./script/package-mac.sh --universal --dmg      # ...and a .dmg beside it
 #   ./script/package-mac.sh --universal --dmg --notarize  # ...Developer ID + notarized
 #   ./script/package-mac.sh --universal --dmg --publish   # ...and a GitHub Release
+#                                                         #    + the Homebrew tap
 #
 # Without --notarize the bundle is ad-hoc signed for local use and Gatekeeper
 # requires a right-click → Open on any other Mac. --publish implies --notarize,
 # so a published release is never ad-hoc signed. The signing, submission, and
-# stapling themselves live in script/notarize-mac.sh.
+# stapling themselves live in script/notarize-mac.sh. --publish also updates
+# the Homebrew cask (script/update-homebrew-cask.sh); OO_SKIP_HOMEBREW=1 skips
+# that, e.g. while the repository is still private.
 #
 # Design + the measurements behind it:
 #   docs/superpowers/specs/2026-07-26-universal-dmg-packaging-design.md
@@ -95,6 +98,11 @@ if ((publish)); then
   fi
   REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
   [ -n "$REPO" ] || die "could not determine the GitHub repository"
+  if [ "${OO_SKIP_HOMEBREW:-0}" != 1 ]; then
+    say "preflight: homebrew tap"
+    "$ROOT/script/update-homebrew-cask.sh" --check \
+      || die "homebrew preflight failed (set OO_SKIP_HOMEBREW=1 to release without updating the tap)"
+  fi
 fi
 
 # Same rule, applied to Apple: a missing certificate or an unauthenticated
@@ -385,6 +393,12 @@ if ((publish)); then
     --title "$APP_NAME $VERSION ($BUILD)" \
     --notes "$(release_notes)"
   say "published: $(gh release view "$TAG" --json url --jq .url)"
+  if [ "${OO_SKIP_HOMEBREW:-0}" != 1 ]; then
+    # The release is already public at this point, so a tap failure must not
+    # read as a failed release: say exactly how to finish the job instead.
+    "$ROOT/script/update-homebrew-cask.sh" "$TAG" "$DMG" \
+      || die "release $TAG is published, but the Homebrew tap was not updated; retry with: ./script/update-homebrew-cask.sh $TAG"
+  fi
 fi
 
 say "done"

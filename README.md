@@ -77,7 +77,13 @@ it.
 
 ## Install
 
-Download the `.dmg` from the
+With [Homebrew](https://brew.sh):
+
+```sh
+brew install --cask omarpr/tap/openorchestra
+```
+
+This also installs `tmux`. Or download the `.dmg` from the
 [Releases](https://github.com/omarpr/openorchestra/releases) page. It is a
 universal build (Apple Silicon and Intel), signed and notarized, so it opens
 with a double-click.

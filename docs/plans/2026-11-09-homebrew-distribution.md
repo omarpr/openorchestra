@@ -1,6 +1,8 @@
 # Homebrew distribution
 
-Status: distribution approach undecided.
+Status: implemented as option 1 on 2026-11-17: a cask in the public
+`omarpr/homebrew-tap`, updated by `make release`. See
+[`packaging/homebrew/README.md`](../../packaging/homebrew/README.md).
 
 ## Requirements
 
