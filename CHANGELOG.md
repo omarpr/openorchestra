@@ -31,12 +31,17 @@ Unreleased is empty.
   Mac" lists collapse like the sidebar's sections and remember their state.
 - File tabs show the editor's `{ }` mark, so it's clear they are the zed
   editor.
+- Syntax highlighting for the rest of zed's built-in languages: Markdown, C,
+  C++, JSONC, `.env`, diffs, git commit messages, go.mod/go.work, JSDoc and
+  regular expressions.
 
 ### Fixed
 
 - The Review base menu on a project's main checkout read "vs HEAD" and showed
   the same files as Uncommitted. It now reads "vs origin/<default branch>" and
   shows everything the checked-out branch changes.
+- The Markdown preview (eye) button showed on the preview itself, where it did
+  nothing. It now shows only on the Markdown file.
 - The Markdown preview (eye) button did nothing in a file's own tab when focus
   was elsewhere, for example after opening the file from the Git panel or a
   commit. It now always previews the file it sits above.

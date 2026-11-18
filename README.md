@@ -42,8 +42,10 @@ Everything runs on your Mac. There's no account, no cloud and no telemetry.
 - **A real IDE.** `⌘E` opens zed's own workspace for the worktree: file tree,
   `⌘P` quick-open, `⌘⇧F` project search, the git panel, Markdown preview and
   zed's language-server support (rust-analyzer for Rust). You get syntax
-  highlighting for Rust, TypeScript/TSX,
-  JavaScript, Go, Python, JSON, YAML, CSS and Bash.
+  highlighting for every language zed has built in: Rust, TypeScript/TSX,
+  JavaScript, Go (plus go.mod and go.work), Python, C, C++, JSON and JSONC,
+  YAML, CSS, Bash and `.env`, Markdown, diffs, git commit messages, JSDoc and
+  regular expressions.
 - **Diff review.** Each changed file expands inline with real line numbers. You
   can use a side-by-side view, pick the diff base, and tick "reviewed" boxes
   that track progress. Click a line number to comment, then copy every comment
