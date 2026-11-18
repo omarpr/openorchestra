@@ -7,6 +7,13 @@
 
 // The harness-theme `json!` literal (Spike 3c) nests past the default limit.
 #![recursion_limit = "256"]
+// Dev builds only: the unoptimized binary's unwind table (__eh_frame, ~40 MB)
+// is over the 16 MB that Apple's compact unwind index can address, so ld warns
+// on every link. It is harmless: functions it can't index unwind through
+// __eh_frame directly. Release builds (~14 MB) don't hit it, and keep every
+// linker message. `-Wl,-no_compact_unwind` is NOT a fix: without the compact
+// index, panics abort ("failed to initiate panic, error 5").
+#![cfg_attr(debug_assertions, allow(linker_messages))]
 
 mod app_assets;
 mod chat_pane;
