@@ -283,10 +283,23 @@ fn parse_published(entry: &str) -> Option<Vec<(u16, u16)>> {
     Some((h0..=h1).map(|h| (h, i0 + (h - h0))).collect())
 }
 
-/// Path fragments of the processes that publish container ports on the host
-/// (OrbStack, Docker Desktop, Colima/Lima, Podman, Rancher Desktop). `docker
-/// ps` only runs when one of them is listening.
-const ENGINE_HINTS: &[&str] = &["OrbStack", "Docker.app", "com.docker", "colima", "lima", "podman", "Rancher"];
+/// App bundles whose processes publish container ports on the host.
+const ENGINE_BUNDLES: &[&str] =
+    &["/OrbStack.app/", "/Docker.app/", "/Rancher Desktop.app/", "/Podman Desktop.app/"];
+
+/// Executables that publish container ports when not inside one of those
+/// bundles: Docker Desktop's backend and proxy, Lima's host agent (Colima),
+/// and Podman machine's gvproxy.
+const ENGINE_EXECUTABLES: &[&str] =
+    &["com.docker.backend", "com.docker.vpnkit", "vpnkit-bridge", "limactl", "gvproxy"];
+
+/// Whether a process is a container engine publishing ports, by identity: an
+/// executable inside a known engine's app bundle, or a known engine
+/// executable by exact name. A substring anywhere in the path also matched
+/// project folders such as `podman-tools` or `lima-notes`.
+fn is_engine_path(path: &str) -> bool {
+    ENGINE_BUNDLES.iter().any(|b| path.contains(b)) || ENGINE_EXECUTABLES.contains(&basename(path))
+}
 
 /// Parse `lsof -a -p <pids> -d cwd -Fpn` output into pid → working folder.
 pub fn parse_lsof_cwd(out: &str) -> std::collections::HashMap<u32, PathBuf> {
@@ -379,7 +392,7 @@ pub fn classify(s: &PortsSample, scopes: &[Scope]) -> PortsView {
         // Container metadata only for a port an engine holds: a native server
         // on the same port number (say [::1]:8080 beside a container's
         // 127.0.0.1:8080) is not that container.
-        let is_engine = ENGINE_HINTS.iter().any(|h| path.contains(h));
+        let is_engine = is_engine_path(path);
         let (container, scope) = match published.get(&port).filter(|_| is_engine) {
             Some(&(c, container_port)) => {
                 let label = match (&c.compose_service, &c.compose_project) {
@@ -531,7 +544,7 @@ pub fn sample_using(
         procs
             .iter()
             .find(|p| p.pid == l.pid)
-            .is_some_and(|p| ENGINE_HINTS.iter().any(|h| p.path.contains(h)))
+            .is_some_and(|p| is_engine_path(&p.path))
     });
     // Every listener's working folder, in one call. Enrichment only: a
     // timeout here leaves the rows without folders rather than dropping them.
@@ -788,6 +801,35 @@ quiet-1\tbusybox\t\t\t\t\n";
         assert_eq!(node.container, None, "node is not the container");
         let engine = v.other.iter().find(|r| r.pid == 41084).unwrap();
         assert!(engine.container.is_some());
+    }
+
+    #[test]
+    fn a_project_folder_named_like_an_engine_is_not_an_engine() {
+        // A native server under `podman-tools` on [::1]:8080 while a container
+        // publishes 127.0.0.1:8080 via OrbStack: the native row is neither
+        // that container nor exempt from working-folder attribution.
+        let tools = "/Users/me/src/podman-tools";
+        let s = PortsSample {
+            app_pid: 1,
+            listeners: vec![l(41084, "127.0.0.1", 8080), l(7, "::1", 8080)],
+            procs: vec![
+                p(41084, 0, "/Applications/OrbStack.app/Contents/MacOS/OrbStack"),
+                p(7, 0, "/Users/me/src/podman-tools/bin/web"),
+            ],
+            session_panes: vec![],
+            containers: vec![container("web-1", 8080, 80, None)],
+            cwds: [(7, PathBuf::from(tools))].into_iter().collect(),
+        };
+        let v = classify(&s, &[repo_scope("podman-tools", tools)]);
+        assert_eq!(v.task.len(), 1, "{v:?}");
+        assert_eq!(v.task[0].pid, 7);
+        assert_eq!(v.task[0].container, None);
+        assert!(is_engine_path("/Applications/OrbStack.app/Contents/Frameworks/OrbStack Helper.app/Contents/MacOS/OrbStack Helper"));
+        assert!(is_engine_path("/Applications/Docker.app/Contents/MacOS/com.docker.backend"));
+        assert!(is_engine_path("/opt/homebrew/bin/limactl"));
+        assert!(is_engine_path("/opt/homebrew/Cellar/podman/5.2/libexec/podman/gvproxy"));
+        assert!(!is_engine_path("/Users/me/src/podman-tools/bin/web"));
+        assert!(!is_engine_path("/Users/me/lima-notes/server"));
     }
 
     #[test]
