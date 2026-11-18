@@ -60,15 +60,20 @@ mod tests {
     }
 
     #[test]
-    fn zed_builtin_languages_are_all_curated() {
-        // Every language zed's `grammars` crate ships a config for, except
-        // its internal keybinding-context one.
-        let names: Vec<&str> = curated().into_iter().map(|(n, _)| n).collect();
-        for want in [
-            "markdown", "markdown-inline", "c", "cpp", "diff", "jsonc", "env", "gitcommit",
-            "gomod", "gowork", "jsdoc", "regex",
-        ] {
-            assert!(names.contains(&want), "{want} missing from the curated set");
-        }
+    fn the_curated_set_is_exactly_zeds_builtin_languages() {
+        // Every config in zed's `grammars` crate at the pinned rev, except its
+        // internal `zed-keybind-context`. Exact, so dropping one fails too.
+        let mut want = vec![
+            "bash", "c", "cpp", "css", "diff", "env", "gitcommit", "go", "gomod", "gowork",
+            "javascript", "jsdoc", "json", "jsonc", "markdown", "markdown-inline", "python",
+            "regex", "rust", "tsx", "typescript", "yaml",
+        ];
+        let mut names: Vec<&str> = curated().into_iter().map(|(n, _)| n).collect();
+        let listed = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), listed, "a language is listed twice");
+        want.sort_unstable();
+        assert_eq!(names, want);
     }
 }
