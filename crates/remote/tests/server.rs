@@ -1458,11 +1458,28 @@ mod conversation {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert_eq!(h.agents(&token).await[0]["has_conversation"], false);
+        let mut events = h.get("/api/events", Some(&token)).await;
+        let first = events.chunk().await.unwrap().unwrap();
+        let first_text = String::from_utf8_lossy(&first);
+        assert!(first_text.contains("\"has_conversation\":false"), "{first_text}");
         std::fs::write(&log, concat!(
             r#"{"id":"m1","kind":"user","text":"list files"}"#, "\n",
             r#"{"id":"t1","kind":"tool","tool":{"id":"t1","name":"bash","summary":"ls","status":"ok"},"result":{"text":"a.txt","input":"ls","is_error":false,"truncated":false}}"#, "\n",
         )).unwrap();
 
+        let pushed = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut acc = String::new();
+            loop {
+                let c = events.chunk().await.unwrap().unwrap();
+                acc.push_str(&String::from_utf8_lossy(&c));
+                if acc.contains("\"has_conversation\":true") {
+                    return acc;
+                }
+            }
+        })
+        .await
+        .expect("SSE did not announce OpenCode export creation");
+        assert!(pushed.contains(&id), "{pushed}");
         assert_eq!(h.agents(&token).await[0]["has_conversation"], true);
         let mut sse = open(&h, &id, &token).await;
         let (_, entries) = sse.entries().await;

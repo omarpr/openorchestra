@@ -1113,6 +1113,9 @@ async fn live_loop(s: Arc<Shared>) {
     }
 }
 
+/// How often `agents_loop` checks whether a pending Shell/OpenCode export appeared.
+const EXPORT_POLL: Duration = Duration::from_millis(250);
+
 /// Recompute the SSE agents list whenever its inputs change.
 async fn agents_loop(s: Arc<Shared>) {
     let mut stop = s.shutdown.subscribe();
@@ -1121,6 +1124,11 @@ async fn agents_loop(s: Arc<Shared>) {
     let mut live = s.live.subscribe();
     let mut snap_open = true;
     loop {
+        let pending_export = s
+            .agents
+            .borrow()
+            .iter()
+            .any(|a| a.transcript.is_some() && !a.has_conversation);
         tokio::select! {
             _ = stopped(&mut stop) => return,
             r = snap.changed(), if snap_open => {
@@ -1129,6 +1137,7 @@ async fn agents_loop(s: Arc<Shared>) {
             }
             _ = file.changed() => {}
             _ = live.changed() => {}
+            _ = tokio::time::sleep(EXPORT_POLL), if pending_export => {}
         }
         s.refresh_agents();
     }
@@ -1330,5 +1339,51 @@ mod tests {
 
         shared.refresh_agents();
         assert!(!flag.exists());
+    }
+
+    #[tokio::test]
+    async fn agents_loop_announces_when_opencode_export_appears() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let id = store.mark("k", 1).unwrap();
+        let mut opencode = info(&id, "harness_k_1");
+        opencode.agent_kind = Some("opencode".into());
+        let (snap_tx, snap_rx) = snapshot_channel();
+        snap_tx.send_replace(Snapshot {
+            agents: vec![opencode],
+        });
+        let ca = certs::load_or_create_ca(dir.path(), "host", &[], &[]).unwrap();
+        let cfg = ServerConfig {
+            state_dir: dir.path().to_path_buf(),
+            port: 0,
+            setup_port: 0,
+            bind_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            tmux: Tmux::default(),
+            hosts_override: None,
+        };
+        let shared = Arc::new(Shared::new(
+            &cfg,
+            snap_rx,
+            0,
+            &ca,
+            "host".into(),
+            Duration::from_secs(60),
+        ));
+        shared.refresh_agents();
+        let mut rx = shared.agents.subscribe();
+        assert!(!rx.borrow_and_update()[0].has_conversation);
+
+        let task = tokio::spawn(agents_loop(shared.clone()));
+        let log = opencode_transcripts(dir.path()).join("harness_k_1.jsonl");
+        std::fs::write(&log, "{}\n").unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), rx.changed())
+            .await
+            .expect("agents_loop notified export creation")
+            .unwrap();
+        assert!(rx.borrow()[0].has_conversation);
+
+        shared.shutdown.send_replace(true);
+        let _ = task.await;
     }
 }
