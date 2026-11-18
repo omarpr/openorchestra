@@ -3,7 +3,7 @@
 //! file decides which sessions count as "this task" and draws the rows.
 
 use super::super::*;
-use crate::ports::{self, PortRow, PortsView, Scope};
+use crate::ports::{self, PortRow, PortSort, PortsView, Scope};
 
 impl HarnessWorkspace {
     /// Whether the Ports tab is on screen, which is the only time it samples.
@@ -67,7 +67,48 @@ impl HarnessWorkspace {
     /// before the first sample lands.
     fn ports_view(&self) -> Option<PortsView> {
         let sample = self.ports_sample.as_ref()?;
-        Some(ports::classify(sample, &self.ports_scopes()))
+        let mut view = ports::classify(sample, &self.ports_scopes());
+        ports::sort_rows(&mut view.task, self.prefs.ports_sort);
+        ports::sort_rows(&mut view.other, self.prefs.ports_sort);
+        Some(view)
+    }
+
+    /// "Sort: Port ↑ · Port ↓ · Name" above the lists.
+    fn render_ports_sort_bar(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
+        let current = self.prefs.ports_sort;
+        let mut bar = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_1()
+            .px_3()
+            .py_1()
+            .border_b_1()
+            .border_color(hx.border)
+            .child(div().text_xs().text_color(hx.tx2).mr_1().child("Sort"));
+        for sort in PortSort::ALL {
+            let selected = sort == current;
+            bar = bar.child(
+                div()
+                    .id(gpui::SharedString::from(format!("ports-sort-{sort:?}")))
+                    .px_2()
+                    .py(px(2.0))
+                    .rounded_md()
+                    .text_xs()
+                    .cursor_pointer()
+                    .when(selected, |d| d.bg(hx.surface2).text_color(hx.tx0))
+                    .when(!selected, |d| {
+                        d.text_color(hx.tx2).hover(|h| h.bg(hx.surface).text_color(hx.tx1))
+                    })
+                    .child(sort.label())
+                    .on_click(cx.listener(move |ws, _, _, cx| {
+                        ws.prefs.ports_sort = sort;
+                        ws.save_prefs(cx);
+                        cx.notify();
+                    })),
+            );
+        }
+        bar.into_any_element()
     }
 
     /// Count for the tab label: ports in this task.
@@ -103,6 +144,7 @@ impl HarnessWorkspace {
                 .into_any_element();
         };
 
+        let sort_bar = self.render_ports_sort_bar(hx, cx);
         let mut body = div()
             .id("ports-scroll")
             .flex()
@@ -159,7 +201,14 @@ impl HarnessWorkspace {
                 body = body.child(self.render_port_row(hx, "other", row, cx));
             }
         }
-        body.into_any_element()
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(sort_bar)
+            .child(body)
+            .into_any_element()
     }
 
     fn render_port_row(

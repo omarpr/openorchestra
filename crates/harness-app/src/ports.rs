@@ -91,6 +91,46 @@ pub struct PortRow {
     pub container: Option<ContainerInfo>,
 }
 
+/// How the Ports tab orders its rows. Persisted in prefs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortSort {
+    #[default]
+    PortAsc,
+    PortDesc,
+    Name,
+}
+
+impl PortSort {
+    pub const ALL: [PortSort; 3] = [PortSort::PortAsc, PortSort::PortDesc, PortSort::Name];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PortSort::PortAsc => "Port ↑",
+            PortSort::PortDesc => "Port ↓",
+            PortSort::Name => "Name",
+        }
+    }
+}
+
+impl PortRow {
+    /// What the row is called: the container when there is one, else the
+    /// process.
+    pub fn display_name(&self) -> &str {
+        self.container.as_ref().map(|c| c.label.as_str()).unwrap_or(&self.name)
+    }
+}
+
+/// Order rows in place.
+pub fn sort_rows(rows: &mut [PortRow], by: PortSort) {
+    match by {
+        PortSort::PortAsc => rows.sort_by_key(|r| (r.port, r.pid)),
+        PortSort::PortDesc => rows.sort_by_key(|r| std::cmp::Reverse((r.port, r.pid))),
+        // Port breaks ties, so several `node` rows keep a stable order.
+        PortSort::Name => rows.sort_by_cached_key(|r| (r.display_name().to_lowercase(), r.port, r.pid)),
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PortsView {
     pub task: Vec<PortRow>,
@@ -581,6 +621,56 @@ quiet-1\tbusybox\t\t\t\t\n";
         assert_eq!(v.task[0].container.as_ref().unwrap().label, "db · urbital");
         assert_eq!(v.other.len(), 1, "a sibling folder with a shared name prefix is not inside");
         assert_eq!(v.other[0].port, 8081);
+    }
+
+    fn row(port: u16, name: &str, container: Option<&str>) -> PortRow {
+        PortRow {
+            port,
+            addrs: vec!["*".into()],
+            pid: port as u32,
+            name: name.into(),
+            member: None,
+            container: container.map(|c| ContainerInfo {
+                label: c.into(),
+                container_port: port,
+                name: c.into(),
+                image: "img".into(),
+                matched_by_name: false,
+            }),
+        }
+    }
+
+    fn ports(rows: &[PortRow]) -> Vec<u16> {
+        rows.iter().map(|r| r.port).collect()
+    }
+
+    #[test]
+    fn sort_rows_by_port_both_ways() {
+        let mut rows = vec![row(5173, "node", None), row(3000, "node", None), row(8080, "ruby", None)];
+        sort_rows(&mut rows, PortSort::PortDesc);
+        assert_eq!(ports(&rows), vec![8080, 5173, 3000]);
+        sort_rows(&mut rows, PortSort::PortAsc);
+        assert_eq!(ports(&rows), vec![3000, 5173, 8080]);
+    }
+
+    #[test]
+    fn sort_rows_by_name_uses_the_container_and_ignores_case() {
+        let mut rows = vec![
+            row(9000, "Zeta", None),
+            row(5433, "OrbStack Helper", Some("db · urbital")),
+            row(4000, "node", None),
+            row(3000, "node", None),
+        ];
+        sort_rows(&mut rows, PortSort::Name);
+        // db (container) < node (3000, then 4000: port breaks ties) < Zeta
+        assert_eq!(ports(&rows), vec![5433, 3000, 4000, 9000]);
+    }
+
+    #[test]
+    fn port_sort_persists_as_snake_case_and_defaults_to_port_asc() {
+        assert_eq!(serde_json::to_string(&PortSort::PortDesc).unwrap(), r#""port_desc""#);
+        assert_eq!(serde_json::from_str::<PortSort>(r#""name""#).unwrap(), PortSort::Name);
+        assert_eq!(PortSort::default(), PortSort::PortAsc);
     }
 
     #[test]

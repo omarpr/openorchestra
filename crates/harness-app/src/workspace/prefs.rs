@@ -146,6 +146,9 @@ pub(crate) struct Prefs {
     /// Active tab inside the tools panel. Absent in older prefs → Review.
     #[serde(default)]
     pub(crate) tool_tab: ToolTab,
+    /// Row order in the Ports tool tab. Absent in older prefs → port ascending.
+    #[serde(default)]
+    pub(crate) ports_sort: crate::ports::PortSort,
     /// Unified or side-by-side bodies. Absent in older prefs files, which land
     /// on `Unified` — what they were already showing.
     #[serde(default)]
@@ -198,6 +201,7 @@ impl Default for Prefs {
             diff_width: 380.0,
             diff_location: DiffLocation::Dock,
             tool_tab: ToolTab::default(),
+            ports_sort: Default::default(),
             diff_view: DiffView::default(),
             diff_list_width: 280.0,
             sidebar_open: true,
