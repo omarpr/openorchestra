@@ -44,6 +44,8 @@ const MAX_CODE: usize = 32;
 /// Upper bound on opening a session's control client.
 pub(crate) const HUB_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const SSE_KEEPALIVE: Duration = Duration::from_secs(15);
+pub(crate) const MAX_CONCURRENT_SCREENSHOTS: usize = 2;
+pub(crate) const SCREENSHOT_READ_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub(crate) type AppState = State<Arc<Shared>>;
 
@@ -488,17 +490,30 @@ async fn send_screenshot(State(s): AppState, Path(id): Path<String>, request: Re
     let Some((session, kind)) = s.screenshot_target(&file, &id) else {
         return error(StatusCode::NOT_FOUND, "not_found");
     };
-    let Ok(body) = axum::body::to_bytes(request.into_body(), MAX_SCREENSHOT_BODY).await else {
-        return error(StatusCode::PAYLOAD_TOO_LARGE, "too_large");
+    let Ok(_permit) = s.screenshot_slots.try_acquire() else {
+        return error(StatusCode::TOO_MANY_REQUESTS, "screenshot_busy");
     };
-    let Ok(req) = serde_json::from_slice::<ScreenshotReq<'_>>(&body) else {
-        return error(StatusCode::BAD_REQUEST, "bad_request");
-    };
-    if req.image.len() > MAX_ENCODED_SCREENSHOT || req.text.len() > MAX_SEND_TEXT {
-        return error(StatusCode::PAYLOAD_TOO_LARGE, "too_large");
-    }
-    let Ok(bytes) = STANDARD.decode(req.image) else {
-        return error(StatusCode::BAD_REQUEST, "bad_request");
+    let (text, bytes) = {
+        let body = match tokio::time::timeout(
+            s.screenshot_read_timeout,
+            axum::body::to_bytes(request.into_body(), MAX_SCREENSHOT_BODY),
+        )
+        .await
+        {
+            Ok(Ok(body)) => body,
+            Ok(Err(_)) => return error(StatusCode::PAYLOAD_TOO_LARGE, "too_large"),
+            Err(_) => return error(StatusCode::REQUEST_TIMEOUT, "screenshot_timeout"),
+        };
+        let Ok(req) = serde_json::from_slice::<ScreenshotReq<'_>>(&body) else {
+            return error(StatusCode::BAD_REQUEST, "bad_request");
+        };
+        if req.image.len() > MAX_ENCODED_SCREENSHOT || req.text.len() > MAX_SEND_TEXT {
+            return error(StatusCode::PAYLOAD_TOO_LARGE, "too_large");
+        }
+        let Ok(bytes) = STANDARD.decode(req.image) else {
+            return error(StatusCode::BAD_REQUEST, "bad_request");
+        };
+        (req.text, bytes)
     };
     if bytes.len() > MAX_SCREENSHOT_BYTES {
         return error(StatusCode::PAYLOAD_TOO_LARGE, "too_large");
@@ -511,7 +526,7 @@ async fn send_screenshot(State(s): AppState, Path(id): Path<String>, request: Re
         extension,
         native_image: kind == "codex",
     };
-    send_reply(&s, &id, &device, &session, &req.text, Some(screenshot)).await
+    send_reply(&s, &id, &device, &session, &text, Some(screenshot)).await
 }
 
 async fn send_reply(
@@ -716,6 +731,37 @@ mod tests {
         store.unmark("test", Some(1)).unwrap();
         assert_eq!(upload(&app, &id, Some(&writer), TEST_PNG).await, 404);
         assert!(!dir.path().join("remote/screenshots").exists());
+    }
+
+    #[tokio::test]
+    async fn screenshot_limits_concurrency_and_times_out_stalled_uploads() {
+        let dir = tempfile::tempdir().unwrap();
+        let no_tmux = crate::Tmux {
+            socket: Some(crate::store::new_id("oo-unstarted-test-").unwrap()),
+        };
+        let (mut shared, id, writer, _) = paired_fixture(dir.path(), no_tmux);
+        shared.screenshot_read_timeout = Duration::from_millis(20);
+        let shared = Arc::new(shared);
+        let app = router(shared.clone());
+
+        let mut stalled = Request::builder()
+            .method("POST")
+            .uri(format!("/api/agents/{id}/send-screenshot"))
+            .header(header::AUTHORIZATION, format!("Bearer {writer}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from_stream(stream::pending::<Result<Bytes, Infallible>>()))
+            .unwrap();
+        stalled
+            .extensions_mut()
+            .insert(ConnectInfo("127.0.0.1:1234".parse::<SocketAddr>().unwrap()));
+        assert_eq!(app.clone().oneshot(stalled).await.unwrap().status(), 408);
+
+        let _permits = shared
+            .screenshot_slots
+            .acquire_many(MAX_CONCURRENT_SCREENSHOTS as u32)
+            .await
+            .unwrap();
+        assert_eq!(upload(&app, &id, Some(&writer), TEST_PNG).await, 429);
     }
 
     #[tokio::test]

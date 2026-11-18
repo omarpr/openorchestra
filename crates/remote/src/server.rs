@@ -231,6 +231,9 @@ pub(crate) struct Shared {
     pub(crate) cert_check: Duration,
     /// Test hook: pause between opening the hub and typing in `send`.
     pub(crate) test_send_delay_ms: AtomicU64,
+    /// Bounded concurrency and read deadline for screenshot uploads.
+    pub(crate) screenshot_slots: tokio::sync::Semaphore,
+    pub(crate) screenshot_read_timeout: Duration,
     /// Terminal socket ping period / idle limit, in ms (shorter in tests).
     ws_ping_ms: AtomicU64,
     ws_idle_ms: AtomicU64,
@@ -282,6 +285,8 @@ impl Shared {
             cert_wake: Notify::new(),
             cert_check,
             test_send_delay_ms: AtomicU64::new(0),
+            screenshot_slots: tokio::sync::Semaphore::new(crate::api::MAX_CONCURRENT_SCREENSHOTS),
+            screenshot_read_timeout: crate::api::SCREENSHOT_READ_TIMEOUT,
             ws_ping_ms: AtomicU64::new(WS_PING.as_millis() as u64),
             ws_idle_ms: AtomicU64::new(WS_IDLE.as_millis() as u64),
             bad_file_logged: AtomicBool::new(false),
