@@ -1,9 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { EntryRow } from "@/components/EntryRow";
 import { PendingMessages } from "@/components/PendingMessages";
+import { StatusBar } from "@/components/StatusBar";
 import { type ToolRef, ToolSheet } from "@/components/ToolSheet";
 import { usePending } from "@/hooks/usePending";
-import { useConversation } from "@/lib/conversation";
+import type { Agent } from "@/lib/api";
+import { type ConvEntry, isThinkingMarker, useConversation } from "@/lib/conversation";
 
 const STICK_PX = 80;
 
@@ -13,11 +15,12 @@ interface Props {
   onConnection?(connected: boolean): void;
   /** A shell's conversation (wording of pending messages). */
   shell?: boolean;
+  activity?: Pick<Agent, "status" | "status_since" | "tool">;
   /** Switch to the terminal (offered when a message isn't picked up). */
   onOpenTerminal?(): void;
 }
 
-export function ConversationView({ id, onClosed, onConnection, shell = false, onOpenTerminal }: Props) {
+export function ConversationView({ id, onClosed, onConnection, shell = false, activity, onOpenTerminal }: Props) {
   const { entries, connected, closed } = useConversation(id);
   const scroller = useRef<HTMLDivElement>(null);
   const stuck = useRef(true);
@@ -51,7 +54,7 @@ export function ConversationView({ id, onClosed, onConnection, shell = false, on
   useLayoutEffect(() => {
     const el = scroller.current;
     if (!el) return;
-    const fresh = entries.some((e) => !seen.current.has(e.id));
+    const fresh = entries.some((e) => !isThinkingMarker(e) && !seen.current.has(e.id));
     seen.current = new Set(entries.map((e) => e.id));
     if (stuck.current) {
       el.scrollTop = el.scrollHeight;
@@ -87,30 +90,42 @@ export function ConversationView({ id, onClosed, onConnection, shell = false, on
 
   // Live status of the open tool: a sheet opened while it ran fetches once it finishes.
   const toolPending = !!tool && entries.find((e) => e.tool?.id === tool.id)?.tool?.status === "pending";
+  const last = entries[entries.length - 1];
+  const liveThinking = connected && isLiveThinking(last, activity);
 
   return (
     <div className="relative flex h-full min-h-0 flex-col">
-      <div
-        ref={scroller}
-        data-testid="conversation-scroll"
-        onScroll={onScroll}
-        className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-3 py-3"
-      >
-        {entries.map((e) => (
-          <EntryRow key={e.id} e={e} onTool={setTool} />
-        ))}
-        <PendingMessages agentId={id} entries={entries} shell={shell} onOpenTerminal={onOpenTerminal} />
-      </div>
-      {unseen && (
-        <button
-          type="button"
-          onClick={jump}
-          className="absolute bottom-3 left-1/2 min-h-11 -translate-x-1/2 rounded-full bg-primary px-4 text-sm font-medium text-primary-foreground shadow-lg"
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        <div
+          ref={scroller}
+          data-testid="conversation-scroll"
+          onScroll={onScroll}
+          className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-3 py-3"
         >
-          New messages ↓
-        </button>
-      )}
+          {entries.map((e) => (
+            <EntryRow key={e.id} e={e} onTool={setTool} liveThinking={liveThinking && e === last} />
+          ))}
+          <PendingMessages agentId={id} entries={entries} shell={shell} onOpenTerminal={onOpenTerminal} />
+        </div>
+        {unseen && (
+          <button
+            type="button"
+            onClick={jump}
+            className="absolute bottom-3 left-1/2 min-h-11 -translate-x-1/2 rounded-full bg-primary px-4 text-sm font-medium text-primary-foreground shadow-lg"
+          >
+            New messages ↓
+          </button>
+        )}
+      </div>
+      {activity && !liveThinking && <StatusBar status={activity.status} tool={activity.tool} />}
       <ToolSheet agentId={id} tool={tool} pending={toolPending} onClose={() => setTool(null)} />
     </div>
   );
+}
+
+/** A marker from an earlier turn stays static even before the new prompt arrives. */
+function isLiveThinking(entry: ConvEntry | undefined, activity: Props["activity"]): boolean {
+  if (activity?.status !== "running" || !activity.status_since) return false;
+  if (!entry?.at || !isThinkingMarker(entry)) return false;
+  return Date.parse(entry.at) >= Date.parse(activity.status_since);
 }

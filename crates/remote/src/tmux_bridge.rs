@@ -265,11 +265,10 @@ enum Cmd {
         lines: Vec<String>,
         done: oneshot::Sender<io::Result<()>>,
     },
-    /// `text`, ack, a short pause, then `enter`; one command so no other
-    /// input lands in between. Enter is skipped if the text failed.
+    /// Optional attachment paste, then text and Enter in separate batches.
+    /// One command keeps other input from landing in between.
     SendLine {
-        text: Vec<String>,
-        enter: Vec<String>,
+        batches: [Vec<String>; 3],
         done: oneshot::Sender<io::Result<()>>,
     },
     Fit {
@@ -464,12 +463,23 @@ impl SessionHub {
 
     /// Type `text` and then press Enter as a separate write (quick reply).
     pub async fn send_line(&self, text: &[u8]) -> io::Result<()> {
+        self.send_line_batches(text, &[]).await
+    }
+
+    /// Paste the image path on its own so Codex can recognize and attach it.
+    pub(crate) async fn send_line_with_image(&self, text: &[u8], path: &str) -> io::Result<()> {
+        let paste = format!("\x1b[200~{path}\x1b[201~");
+        self.send_line_batches(text, paste.as_bytes()).await
+    }
+
+    async fn send_line_batches(&self, text: &[u8], paste: &[u8]) -> io::Result<()> {
         let (text, enter) = line_keys(&self.pane, text);
         if enter.is_empty() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "bad pane"));
         }
         let (done, rx) = oneshot::channel();
-        self.request(Cmd::SendLine { text, enter, done })?;
+        let batches = [hex_keys(&self.pane, paste), text, enter];
+        self.request(Cmd::SendLine { batches, done })?;
         rx.await.map_err(|_| hub_gone())?
     }
 
@@ -616,24 +626,22 @@ struct Actor {
 }
 
 impl Actor {
+    async fn send_line(&mut self, [paste, text, enter]: [Vec<String>; 3]) -> io::Result<()> {
+        for batch in [paste, text].iter().filter(|batch| !batch.is_empty()) {
+            self.exec(batch).await?;
+            tokio::time::sleep(ENTER_DELAY).await;
+        }
+        self.exec(&enter).await
+    }
+
     async fn run(mut self, mut rx: mpsc::UnboundedReceiver<Cmd>) {
         while let Some(cmd) = rx.recv().await {
             match cmd {
                 Cmd::Send { lines, done } => {
                     let _ = done.send(self.exec(&lines).await);
                 }
-                Cmd::SendLine { text, enter, done } => {
-                    let mut res = Ok(());
-                    if !text.is_empty() {
-                        res = self.exec(&text).await;
-                        if res.is_ok() {
-                            tokio::time::sleep(ENTER_DELAY).await;
-                        }
-                    }
-                    if res.is_ok() {
-                        res = self.exec(&enter).await;
-                    }
-                    let _ = done.send(res);
+                Cmd::SendLine { batches, done } => {
+                    let _ = done.send(self.send_line(batches).await);
                 }
                 Cmd::Fit { cols, rows, done } => {
                     let res = match self.fit(cols, rows).await {

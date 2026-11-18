@@ -202,6 +202,11 @@ pub trait AgentRuntime: Send + Sync {
     /// failing, since a terminal is still useful.
     fn command(&self, worktree_root: &Path) -> Option<AgentCommand>;
 
+    /// Apply adapter-specific launch wiring after the app has resolved overrides and resume args.
+    fn prepare_launch(&self, command: AgentCommand) -> AgentCommand {
+        command
+    }
+
     /// A stream of signals this adapter produces itself.
     ///
     /// `None` for adapters whose signal arrives through a shared source instead
@@ -372,7 +377,7 @@ pub fn runtime_for_with_signal(
 ) -> Box<dyn AgentRuntime> {
     match kind {
         AgentKind::Pi => Box::new(PiRuntime::new(state_dir)),
-        AgentKind::OpenCode => Box::new(OpenCodeRuntime::new(worktree_root)),
+        AgentKind::OpenCode => Box::new(OpenCodeRuntime::new(worktree_root).with_state_dir(state_dir)),
         AgentKind::ClaudeCode => Box::new(ClaudeCodeRuntime::new(state_dir)),
         AgentKind::Codex => Box::new(CodexRuntime::new(state_dir)),
         AgentKind::Kimi => Box::new(KimiRuntime),

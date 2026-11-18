@@ -393,12 +393,12 @@ impl HarnessWorkspace {
                     path.to_string_lossy().into_owned(),
                 ));
             }
-            return Some(agent_runtime::AgentCommand {
+            return Some(runtime.prepare_launch(agent_runtime::AgentCommand {
                 program: shell.into(),
                 args,
                 env,
                 label: kind.as_str().to_string(),
-            });
+            }));
         }
         if runtime_cmd.is_none() {
             log::info!("{kind} not on PATH — falling back to a plain shell");
@@ -417,7 +417,7 @@ impl HarnessWorkspace {
         {
             cmd.args = args;
         }
-        runtime_cmd
+        runtime_cmd.map(|cmd| runtime.prepare_launch(cmd))
     }
 
 }

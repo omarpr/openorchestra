@@ -7,6 +7,7 @@
 //! drives pushes to already-open streams.
 
 use std::convert::Infallible;
+use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -19,6 +20,8 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
 use axum::{Json, Router};
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use futures_util::stream::{self, Stream};
 use serde::Deserialize;
 use serde_json::json;
@@ -32,6 +35,10 @@ use crate::{Device, RemoteFile};
 pub(crate) const MAX_SEND_TEXT: usize = 16 * 1024;
 /// Request bodies above this are rejected (413) before parsing.
 const MAX_BODY: usize = 64 * 1024;
+const MAX_SCREENSHOT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_ENCODED_SCREENSHOT: usize = MAX_SCREENSHOT_BYTES.div_ceil(3) * 4;
+// Base64 for the image, room for JSON escaping of the caption and the wrapper.
+const MAX_SCREENSHOT_BODY: usize = MAX_ENCODED_SCREENSHOT + MAX_SEND_TEXT * 6 + 128;
 const MAX_DEVICE_NAME: usize = 64;
 const MAX_CODE: usize = 32;
 /// Upper bound on opening a session's control client.
@@ -44,9 +51,11 @@ pub(crate) fn router(shared: Arc<Shared>) -> Router {
     Router::new()
         .route("/api/pair", post(pair))
         .route("/api/me", get(me))
+        .route("/api/voice", post(crate::voice::transcribe))
         .route("/api/agents", get(agents))
         .route("/api/events", get(events))
         .route("/api/agents/{id}/send", post(send))
+        .route("/api/agents/{id}/send-screenshot", post(send_screenshot))
         .route(
             "/api/agents/{id}/conversation",
             get(crate::conversation_api::stream),
@@ -263,7 +272,13 @@ async fn pair(
 
 async fn me(State(s): AppState, headers: HeaderMap) -> Response {
     match authed(&s, &headers) {
-        Ok((d, _)) => Json(json!({ "name": d.name, "read_only": d.read_only })).into_response(),
+        Ok((d, _)) => {
+            let mut reply = json!({ "name": d.name, "read_only": d.read_only });
+            if !d.read_only && s.voice.available().await {
+                reply["voice_input"] = json!(true);
+            }
+            Json(reply).into_response()
+        }
         Err(r) => r,
     }
 }
@@ -406,6 +421,30 @@ struct SendReq {
     text: String,
 }
 
+#[derive(Deserialize)]
+struct ScreenshotReq<'a> {
+    text: String,
+    image: &'a str,
+}
+
+struct Screenshot {
+    bytes: Vec<u8>,
+    extension: &'static str,
+    native_image: bool,
+}
+
+fn screenshot_extension(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("png")
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some("jpg")
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        Some("webp")
+    } else {
+        None
+    }
+}
+
 /// `\r\n`, `\r` and `\n` each become one space.
 pub fn flatten_newlines(text: &str) -> String {
     text.replace("\r\n", " ").replace(['\r', '\n'], " ")
@@ -435,13 +474,61 @@ async fn send(
     let Some(session) = s.session_for(&file, &id) else {
         return error(StatusCode::NOT_FOUND, "not_found");
     };
+    send_reply(&s, &id, &device, &session, &req.text, None).await
+}
+
+async fn send_screenshot(State(s): AppState, Path(id): Path<String>, request: Request) -> Response {
+    let (device, file) = match authed(&s, request.headers()) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    if device.read_only {
+        return error(StatusCode::FORBIDDEN, "read_only");
+    }
+    let Some((session, kind)) = s.screenshot_target(&file, &id) else {
+        return error(StatusCode::NOT_FOUND, "not_found");
+    };
+    let Ok(body) = axum::body::to_bytes(request.into_body(), MAX_SCREENSHOT_BODY).await else {
+        return error(StatusCode::PAYLOAD_TOO_LARGE, "too_large");
+    };
+    let Ok(req) = serde_json::from_slice::<ScreenshotReq<'_>>(&body) else {
+        return error(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    if req.image.len() > MAX_ENCODED_SCREENSHOT || req.text.len() > MAX_SEND_TEXT {
+        return error(StatusCode::PAYLOAD_TOO_LARGE, "too_large");
+    }
+    let Ok(bytes) = STANDARD.decode(req.image) else {
+        return error(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    if bytes.len() > MAX_SCREENSHOT_BYTES {
+        return error(StatusCode::PAYLOAD_TOO_LARGE, "too_large");
+    }
+    let Some(extension) = screenshot_extension(&bytes) else {
+        return error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_image");
+    };
+    let screenshot = Screenshot {
+        bytes,
+        extension,
+        native_image: kind == "codex",
+    };
+    send_reply(&s, &id, &device, &session, &req.text, Some(screenshot)).await
+}
+
+async fn send_reply(
+    s: &Shared,
+    id: &str,
+    device: &Device,
+    session: &str,
+    text: &str,
+    screenshot: Option<Screenshot>,
+) -> Response {
     if !crate::tmux_bridge::live_sessions(&s.tmux)
         .await
-        .contains(&session)
+        .contains(session)
     {
         return error(StatusCode::CONFLICT, "stopped");
     }
-    let hub = match tokio::time::timeout(HUB_OPEN_TIMEOUT, s.hubs.get(&session)).await {
+    let hub = match tokio::time::timeout(HUB_OPEN_TIMEOUT, s.hubs.get(session)).await {
         Ok(Ok(hub)) => hub,
         Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
             return error(StatusCode::CONFLICT, "stopped")
@@ -460,27 +547,332 @@ async fn send(
     }
     // Opening the hub can take seconds: the mark must still map to this
     // session (and the device still be allowed) right before typing.
-    if !still_allowed(&s, &device.id, &id, &session) {
+    if !still_allowed(s, &device.id, id, session) {
         return error(StatusCode::NOT_FOUND, "not_found");
     }
-    // Text, then Enter as a separate write (see `tmux_bridge::line_keys`).
-    match hub.send_line(flatten_newlines(&req.text).as_bytes()).await {
+    let text = flatten_newlines(text);
+    let result = if let Some(screenshot) = screenshot {
+        send_screenshot_reply(s, &hub, device, id, session, &text, screenshot).await
+    } else {
+        hub.send_line(text.as_bytes()).await.map_err(|err| {
+            eprintln!("oo-remote: send failed: {err}");
+            error(StatusCode::SERVICE_UNAVAILABLE, "unavailable")
+        })
+    };
+    match result {
         Ok(()) => {
-            s.input.record(&session, &device.name, SystemTime::now());
+            s.input.record(session, &device.name, SystemTime::now());
             StatusCode::NO_CONTENT.into_response()
         }
-        Err(e) => {
-            eprintln!("oo-remote: send failed: {e}");
-            error(StatusCode::SERVICE_UNAVAILABLE, "unavailable")
-        }
+        Err(response) => response,
     }
+}
+
+async fn send_screenshot_reply(
+    s: &Shared,
+    hub: &crate::tmux_bridge::SessionHub,
+    device: &Device,
+    id: &str,
+    session: &str,
+    text: &str,
+    screenshot: Screenshot,
+) -> Result<(), Response> {
+    let native_image = screenshot.native_image;
+    let state_dir = s.state_dir.clone();
+    // The path is sent as terminal input, so reject terminal control characters.
+    if !state_dir.is_absolute()
+        || state_dir
+            .to_str()
+            .is_none_or(|path| path.chars().any(char::is_control))
+    {
+        return Err(error(StatusCode::SERVICE_UNAVAILABLE, "unavailable"));
+    }
+    let path = match tokio::task::spawn_blocking(move || {
+        crate::store::save_screenshot(&state_dir, screenshot.extension, &screenshot.bytes)
+    })
+    .await
+    {
+        Ok(Ok(path)) => path,
+        Ok(Err(e)) if e.kind() == io::ErrorKind::StorageFull => {
+            return Err(error(
+                StatusCode::INSUFFICIENT_STORAGE,
+                "screenshot_storage_full",
+            ));
+        }
+        _ => return Err(error(StatusCode::SERVICE_UNAVAILABLE, "unavailable")),
+    };
+    if !still_allowed(s, &device.id, id, session) {
+        let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(path)).await;
+        return Err(error(StatusCode::NOT_FOUND, "not_found"));
+    }
+    let path = path.to_string_lossy();
+    let text = if text.trim().is_empty() {
+        "Please inspect the attached screenshot."
+    } else {
+        text
+    };
+    let result = if native_image {
+        hub.send_line_with_image(format!(" {text}").as_bytes(), &path)
+            .await
+    } else {
+        let prompt = format!("{text} Screenshot file: {path:?}");
+        hub.send_line(prompt.as_bytes()).await
+    };
+    result.map_err(|_| error(StatusCode::SERVICE_UNAVAILABLE, "unavailable"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::body::Body;
+    use std::path::Path as FsPath;
     use tower::ServiceExt;
+
+    const TEST_PNG: &str =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN0sAAAAASUVORK5CYII=";
+
+    fn paired_fixture(dir: &FsPath, tmux: crate::Tmux) -> (Shared, String, String, String) {
+        use crate::{certs, snapshot_channel, AgentInfo, ServerConfig, Snapshot, Store};
+
+        let store = Store::new(dir);
+        let now = SystemTime::now();
+        let pair = || {
+            let code = auth::issue_code(&store, now).unwrap();
+            auth::redeem_code(&store, &code, "test phone", "localhost", now).unwrap()
+        };
+        let (_, writer) = pair();
+        let (dev, reader) = pair();
+        auth::set_read_only(&store, &dev.id, true).unwrap();
+        let id = store.mark("test", 1).unwrap();
+        let shell_id = store.mark("test", 2).unwrap();
+        let agent = AgentInfo {
+            id: id.clone(),
+            title: "Codex".into(),
+            agent_kind: Some("codex".into()),
+            project: "test".into(),
+            worktree: "main".into(),
+            status: "idle".into(),
+            status_since: None,
+            tool: None,
+            branch: None,
+            has_conversation: false,
+            session: "s_codex".into(),
+            transcript: None,
+        };
+        let (snap, rx) = snapshot_channel();
+        snap.send_replace(Snapshot {
+            agents: vec![
+                AgentInfo {
+                    id: shell_id,
+                    agent_kind: None,
+                    ..agent.clone()
+                },
+                agent,
+            ],
+        });
+        let cfg = ServerConfig {
+            state_dir: dir.to_path_buf(),
+            port: 0,
+            setup_port: 0,
+            tmux,
+            bind_ip: "127.0.0.1".parse().unwrap(),
+            hosts_override: None,
+        };
+        let ca = certs::load_or_create_ca(&dir.join("remote"), "Test Mac", &[], &[]).unwrap();
+        let s = Shared::new(&cfg, rx, 0, &ca, "Test Mac".into(), Duration::from_secs(60));
+        (s, id, writer, reader)
+    }
+
+    async fn upload(app: &Router, id: &str, token: Option<&str>, image: &str) -> StatusCode {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(format!("/api/agents/{id}/send-screenshot"))
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(token) = token {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let mut request = builder
+            .body(Body::from(json!({"image": image, "text": ""}).to_string()))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo("127.0.0.1:1234".parse::<SocketAddr>().unwrap()));
+        app.clone().oneshot(request).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn screenshot_requires_write_access_and_an_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let no_tmux = crate::Tmux {
+            socket: Some(crate::store::new_id("oo-unstarted-test-").unwrap()),
+        };
+        let (shared, id, writer, reader) = paired_fixture(dir.path(), no_tmux);
+        let app = router(Arc::new(shared));
+        assert_eq!(upload(&app, &id, None, TEST_PNG).await, 401);
+        assert_eq!(upload(&app, &id, Some(&reader), TEST_PNG).await, 403);
+        let store = crate::Store::new(dir.path());
+        let shell = store.mark("test", 2).unwrap();
+        assert_eq!(upload(&app, &shell, Some(&writer), TEST_PNG).await, 404);
+        assert_eq!(upload(&app, &id, Some(&writer), "aGVsbG8=").await, 415);
+        let large_image = "A".repeat(MAX_SCREENSHOT_BODY);
+        assert_eq!(upload(&app, &id, Some(&writer), &large_image).await, 413);
+        store.unmark("test", Some(1)).unwrap();
+        assert_eq!(upload(&app, &id, Some(&writer), TEST_PNG).await, 404);
+        assert!(!dir.path().join("remote/screenshots").exists());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires tmux"]
+    async fn screenshot_upload_delivers_image_path_and_caption_to_codex() {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct PrivateTmux(crate::Tmux);
+        impl Drop for PrivateTmux {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("tmux")
+                    .args(["-L", self.0.socket.as_deref().unwrap(), "kill-server"])
+                    .output();
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let tmux = PrivateTmux(crate::Tmux {
+            socket: Some(crate::store::new_id("oo-screenshot-test-").unwrap()),
+        });
+        let capture = dir.path().join("input");
+        let quoted = capture.to_str().unwrap().replace('\'', "'\\''");
+        let status = tmux
+            .0
+            .command()
+            .args(["-f", "/dev/null", "new-session", "-d", "-s", "s_codex"])
+            .arg(format!("stty raw -echo && exec cat > '{quoted}'"))
+            .status()
+            .await
+            .unwrap();
+        assert!(status.success());
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !capture.exists() {
+            assert!(Instant::now() < deadline, "pane didn't start");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let (shared, id, writer, _) = paired_fixture(dir.path(), tmux.0.clone());
+        let app = router(Arc::new(shared));
+        assert_eq!(upload(&app, &id, Some(&writer), TEST_PNG).await, 204);
+        let image = std::fs::read_dir(dir.path().join("remote/screenshots"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "png"))
+            .expect("screenshot saved as PNG");
+        assert_eq!(
+            std::fs::read(&image).unwrap(),
+            STANDARD.decode(TEST_PNG).unwrap()
+        );
+        assert_eq!(
+            std::fs::metadata(&image).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let expected = format!(
+            "\x1b[200~{}\x1b[201~ Please inspect the attached screenshot.\r",
+            image.display()
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let received = std::fs::read(&capture).unwrap();
+            if received.ends_with(b"\r") {
+                assert_eq!(received, expected.as_bytes());
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "pane didn't receive the full reply: {received:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    fn voice_fixture(probe_status: u8) -> (tempfile::TempDir, Router, String, String) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut shared, _, writer, reader) = paired_fixture(dir.path(), crate::Tmux::default());
+        let helper = dir.path().join("voice-test");
+        std::fs::write(
+            &helper,
+            format!("#!/bin/sh\ncase \"$1\" in --available) exit {probe_status};; esac\ntest -r \"$1\" || exit 3\nprintf 'test dictated draft\\n'\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        shared.voice.use_test_helper(helper);
+        (dir, router(Arc::new(shared)), writer, reader)
+    }
+
+    async fn device_capabilities(app: &Router, token: &str) -> serde_json::Value {
+        let mut request = Request::builder()
+            .uri("/api/me")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo("127.0.0.1:1234".parse::<SocketAddr>().unwrap()));
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 200);
+        let body = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn voice_is_not_advertised_for_an_unsupported_locale() {
+        let (_dir, app, writer, _) = voice_fixture(4);
+        assert!(device_capabilities(&app, &writer).await.get("voice_input").is_none());
+
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/api/voice")
+            .header(header::AUTHORIZATION, format!("Bearer {writer}"))
+            .header(header::CONTENT_TYPE, "audio/wav")
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo("127.0.0.1:1234".parse::<SocketAddr>().unwrap()));
+        assert_eq!(app.oneshot(request).await.unwrap().status(), 503);
+    }
+
+    #[tokio::test]
+    async fn voice_requires_write_permission_and_returns_an_uncached_draft() {
+        const WAV: &[u8] = b"RIFF\x26\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x80\x3e\0\0\0\x7d\0\0\x02\0\x10\0data\x02\0\0\0\0\0";
+        let (_dir, app, writer, reader) = voice_fixture(0);
+        assert_eq!(device_capabilities(&app, &writer).await["voice_input"], true);
+        assert!(device_capabilities(&app, &reader).await.get("voice_input").is_none());
+        async fn post(app: &Router, token: Option<&str>, audio: &'static [u8]) -> Response {
+            let mut builder = Request::builder()
+                .method("POST")
+                .uri("/api/voice")
+                .header(header::CONTENT_TYPE, "audio/wav");
+            if let Some(token) = token {
+                builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+            }
+            let mut request = builder.body(Body::from(audio)).unwrap();
+            request
+                .extensions_mut()
+                .insert(ConnectInfo("127.0.0.1:1234".parse::<SocketAddr>().unwrap()));
+            app.clone().oneshot(request).await.unwrap()
+        }
+        assert_eq!(post(&app, None, WAV).await.status(), 401);
+        assert_eq!(post(&app, Some(&reader), WAV).await.status(), 403);
+        assert_eq!(post(&app, Some(&writer), b"bad audio").await.status(), 422);
+        let response = post(&app, Some(&writer), WAV).await;
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let body = axum::body::to_bytes(response.into_body(), 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            json!({"text": "test dictated draft"})
+        );
+    }
 
     #[test]
     fn flattens_each_newline_kind_to_one_space() {

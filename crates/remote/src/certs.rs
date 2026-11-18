@@ -217,9 +217,8 @@ pub fn load_or_create_ca(
                 return Ca::from_parts(cert_pem, cert_der, key_pem);
             }
             eprintln!(
-                "oo-remote: replacing the remote CA in {} with one limited to this Mac \
-                 (the old one is kept as ca.crt.bak; re-add the app on devices that trusted it)",
-                dir.display()
+                "oo-remote: replacing the remote CA with one limited to this Mac \
+                 (the old one is kept as ca.crt.bak; re-add the app on devices that trusted it)"
             );
             retire_ca(dir)?;
         }

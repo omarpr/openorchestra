@@ -23,6 +23,7 @@
 //! [`classify`] is written to degrade — an unrecognized event means "the agent
 //! is doing something", never a false `Waiting`.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -43,11 +44,15 @@ pub const DEFAULT_PORT: u16 = 4096;
 /// derive from these two consts.
 pub(crate) const PROGRAM: &str = "opencode";
 pub(crate) const DEFAULT_ARGS: &[&str] = &[];
+const LAUNCHER: &str = include_str!("../shims/opencode-remote-launch.mjs");
+const TUI_PLUGIN: &str = include_str!("../shims/opencode-remote-tui.js");
+const TUI_PACKAGE: &str = r#"{"name":"openorchestra-remote","private":true,"type":"module","exports":{"./tui":"./tui.js"}}"#;
 
 pub struct OpenCodeRuntime {
     worktree_root: PathBuf,
     host: String,
     port: u16,
+    state_dir: Option<PathBuf>,
     /// Set on drop so the subscription thread stops reconnecting.
     stopped: Arc<AtomicBool>,
 }
@@ -63,9 +68,16 @@ impl OpenCodeRuntime {
             worktree_root: worktree_root.into(),
             host: host.to_string(),
             port,
+            state_dir: None,
             stopped: Arc::new(AtomicBool::new(false)),
         }
     }
+
+    pub fn with_state_dir(mut self, state_dir: impl Into<PathBuf>) -> Self {
+        self.state_dir = Some(state_dir.into());
+        self
+    }
+
 }
 
 impl Drop for OpenCodeRuntime {
@@ -89,8 +101,22 @@ impl AgentRuntime for OpenCodeRuntime {
     }
 
     fn on_spawn(&self, _worktree_root: &Path) -> std::io::Result<()> {
-        // Nothing to drop in: the server comes up alongside the TUI, so the
-        // baseline "just run the CLI" path already enables the enhancement.
+        if let Some(dir) = &self.state_dir {
+            let shims = dir.join("shims");
+            fs::create_dir_all(shims.join("opencode-remote"))?;
+            for (name, content) in [
+                ("opencode-remote/package.json", TUI_PACKAGE),
+                ("opencode-remote/tui.js", TUI_PLUGIN),
+                ("opencode-remote-launch.mjs", LAUNCHER),
+            ] {
+                let file = shims.join(name);
+                if fs::read_to_string(&file).ok().as_deref() != Some(content) {
+                    let tmp = file.with_extension("tmp");
+                    fs::write(&tmp, content)?;
+                    fs::rename(tmp, file)?;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -101,6 +127,23 @@ impl AgentRuntime for OpenCodeRuntime {
             env: Vec::new(),
             label: PROGRAM.to_string(),
         })
+    }
+
+    fn prepare_launch(&self, mut command: AgentCommand) -> AgentCommand {
+        let Some(dir) = &self.state_dir else {
+            return command;
+        };
+        let launcher = dir.join("shims/opencode-remote-launch.mjs");
+        if let (Some(node), true, Some(launcher), Some(program)) = (
+            resolve_on_path("node"),
+            launcher.is_file(),
+            launcher.to_str(),
+            command.program.to_str(),
+        ) {
+            command.args.splice(..0, [launcher.to_owned(), program.to_owned()]);
+            command.program = node;
+        }
+        command
     }
 
     fn subscribe(&self) -> Option<Receiver<AgentSignal>> {

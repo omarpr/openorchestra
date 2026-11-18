@@ -12,6 +12,27 @@ Unreleased is empty.
 
 ## Unreleased
 
+### Changed
+
+- The phone web app shows one live Thinking indicator, hides empty reasoning history, shows what Codex exec calls ran, and aligns tool rows across agents and shells.
+- The phone agent list puts elapsed time next to the status badge and aligns agent and shell icons.
+
+### Added
+
+- Shared OpenCode 2.x tabs can show the active session in the phone web app’s Conversation view.
+- Attach and send screenshots from the phone web app’s agent composer.
+- Dictate editable phone replies with on-device transcription on supported Macs running macOS 26 or newer.
+
+### Fixed
+
+- The phone web app keeps its controls visible if a view fails to load, and renders basic Markdown on browsers without regex lookbehind.
+- Long web app drafts wrap and scroll in the composer.
+- The phone offers dictation when the Mac supports its current language and can retry a failed transcription from the same recording.
+
+### Security
+
+- Phone setup diagnostics omit the local listener details and certificate directory from app logs.
+
 ## 1.1.0 - 2026-11-18
 
 ### Added

@@ -16,6 +16,10 @@ export interface ConvEntry {
   at?: string;
 }
 
+/** A reasoning event with nothing to show in the transcript history. */
+export const isThinkingMarker = (entry: ConvEntry | undefined) =>
+  entry?.kind === "thinking" && entry.duration_ms == null && !entry.text?.trim();
+
 /** replace → incoming; otherwise upsert by id (known id replaced in place, unknown appended). Last 200 kept. */
 export function mergeEntries(list: ConvEntry[], incoming: ConvEntry[], replace: boolean): ConvEntry[] {
   let out: ConvEntry[];

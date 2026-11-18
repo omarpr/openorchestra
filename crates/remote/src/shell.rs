@@ -166,33 +166,11 @@ fn flag_path(state_dir: &Path, session: &str) -> PathBuf {
 }
 
 const LOG_SUFFIX: &str = ".jsonl";
-const FLAG_SUFFIX: &str = ".jsonl.on";
 
 /// Let exactly the shell tabs in `shared` (tmux session names) record
 /// commands; every other tab's hook goes quiet. An empty set turns all off.
 pub fn sync_flags(state_dir: &Path, shared: &HashSet<String>) -> io::Result<()> {
-    let dir = shell_dir(state_dir);
-    private_dir(&dir)?;
-    for entry in fs::read_dir(&dir)? {
-        let name = entry?.file_name().to_string_lossy().into_owned();
-        if let Some(session) = name.strip_suffix(FLAG_SUFFIX) {
-            if !shared.contains(session) {
-                fs::remove_file(dir.join(&name))?;
-            }
-        }
-    }
-    for session in shared {
-        let flag = flag_path(state_dir, session);
-        if !flag.exists() {
-            fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .write(true)
-                .mode(0o600)
-                .open(flag)?;
-        }
-    }
-    Ok(())
+    crate::transcript::sync_log_flags(&shell_dir(state_dir), shared, false)
 }
 
 /// A log is trimmed once past this size...
@@ -473,6 +451,7 @@ pub fn tool_result(text: &str, tool_id: &str) -> Option<ToolResult> {
         },
         is_error: exit != 0,
         truncated: false,
+        input: None,
     })
 }
 

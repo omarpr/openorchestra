@@ -3,7 +3,7 @@ import { AgentIcon } from "@/components/AgentIcon";
 import { StatusPill } from "@/components/StatusPill";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { agentName } from "@/lib/agents";
+import { agentName, tabTitle } from "@/lib/agents";
 import type { Agent } from "@/lib/api";
 import { navigate } from "@/lib/router";
 
@@ -27,10 +27,10 @@ export function AgentHeader({
           <ChevronLeft />
         </Button>
       )}
-      {agent?.agent_kind && <AgentIcon kind={agent.agent_kind} className={isTablet ? "ml-4" : ""} />}
+      {agent && <AgentIcon kind={agent.agent_kind} className={isTablet ? "ml-4" : ""} />}
       <h2
         className={`flex min-w-0 flex-1 items-baseline font-semibold ${isTablet && !agent ? "pl-4" : "pl-1"}`}
-        title={agent?.title ?? id}
+        title={agent ? tabTitle(agent) : id}
       >
         {agent ? <Where agent={agent} /> : <span className="truncate">{id}</span>}
       </h2>
@@ -64,7 +64,7 @@ function Where({ agent }: { agent: Agent }) {
       <span className="min-w-0 truncate">{agent.branch ?? agent.worktree}</span>
       {sep}
       <span className="min-w-0 max-w-[35%] shrink-0 truncate whitespace-pre">
-        {agentName(agent.agent_kind) || agent.title}
+        {agentName(agent.agent_kind) || tabTitle(agent)}
       </span>
     </>
   );

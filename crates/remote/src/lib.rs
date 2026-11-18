@@ -18,6 +18,7 @@ pub mod store;
 mod tls;
 pub mod tmux_bridge;
 pub mod transcript;
+mod voice;
 mod ws;
 
 pub use api::flatten_newlines;

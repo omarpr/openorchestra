@@ -21,14 +21,14 @@ describe("PendingMessages", () => {
     expect(screen.getByText("run the tests")).toBeInTheDocument();
     expect(screen.getByText("Sending…")).toBeInTheDocument();
     act(() => updatePending(id, { state: "sent" }));
-    expect(screen.getByText(/queued, Claude reads it after the current step/)).toBeInTheDocument();
+    expect(screen.getByText(/queued, the agent reads it after the current step/)).toBeInTheDocument();
   });
 
   it("disappears once the transcript shows the message", () => {
     const id = addPending("a1", "ship it", false);
     act(() => updatePending(id, { state: "sent", at: 1000 }));
     const { rerender } = render(<PendingMessages agentId="a1" entries={[]} shell={false} />);
-    expect(screen.getByText(/Sent · waiting for Claude/)).toBeInTheDocument();
+    expect(screen.getByText(/Sent · waiting for the agent/)).toBeInTheDocument();
     const read: ConvEntry = { id: "u1", kind: "user", text: "ship it", at: new Date(2000).toISOString() };
     rerender(<PendingMessages agentId="a1" entries={[read]} shell={false} />);
     expect(screen.queryByText("ship it")).not.toBeInTheDocument();
@@ -43,7 +43,7 @@ describe("PendingMessages", () => {
     sendText.mockResolvedValue(5000);
     await userEvent.click(screen.getByRole("button", { name: /Retry/ }));
     expect(sendText).toHaveBeenCalledWith("a1", "hello");
-    expect(await screen.findByText(/Sent · waiting for Claude/)).toBeInTheDocument();
+    expect(await screen.findByText(/Sent · waiting for the agent/)).toBeInTheDocument();
 
     act(() => updatePending(id, { state: "failed", error: "x" }));
     await userEvent.click(screen.getByRole("button", { name: /Discard/ }));

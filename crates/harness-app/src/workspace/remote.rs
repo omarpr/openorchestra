@@ -1428,7 +1428,7 @@ mod tests {
         while std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_err() {
             assert!(
                 std::time::Instant::now() < deadline,
-                "port {port} never released"
+                "remote server did not release its listen socket"
             );
             std::thread::sleep(Duration::from_millis(20));
         }

@@ -85,7 +85,7 @@ function Status({
   onOpenTerminal?: () => void;
 }) {
   const line = "flex items-center gap-1 text-xs text-muted-foreground";
-  const who = shell ? "the shell" : "Claude";
+  const who = shell ? "the shell" : "the agent";
   if (m.state === "sending") {
     return (
       <p role="status" className={line}>

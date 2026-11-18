@@ -29,6 +29,11 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 ln -f "$CRATE/target/debug/harness-app" "$APP/Contents/MacOS/$EXE_NAME"
 cp "$ROOT/assets/openOrchestra.icns" "$APP/Contents/Resources/openOrchestra.icns"
 cp "$CRATE"/sounds/*.wav "$APP/Contents/Resources/"
+VOICE_HELPER="$APP/Contents/Helpers/oo-voice"
+bash "$ROOT/script/build-voice-helper.sh" "$VOICE_HELPER"
+if [ -f "$VOICE_HELPER" ]; then
+  codesign --force --sign - "$VOICE_HELPER"
+fi
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

@@ -162,7 +162,11 @@ impl Harness {
         let port = server.port();
         assert_ne!(port, 0);
         let client = reqwest::Client::builder()
+            .https_only(true)
+            .no_proxy()
             .use_preconfigured_tls(tls_config(&dir))
+            // Keep the ephemeral socket port in the resolver. The request
+            // URLs use localhost without an explicit port so this applies.
             .resolve("localhost", SocketAddr::from(([127, 0, 0, 1], port)))
             .build()
             .unwrap();
@@ -191,8 +195,8 @@ impl Harness {
         Store::new(&self.dir)
     }
 
-    fn url(&self, path: &str) -> String {
-        format!("https://localhost:{}{path}", self.port)
+    fn url(path: &str) -> String {
+        format!("https://localhost{path}")
     }
 
     /// A paired device's token (created through the store, like the app).
@@ -212,7 +216,7 @@ impl Harness {
     }
 
     async fn get(&self, path: &str, token: Option<&str>) -> reqwest::Response {
-        let mut req = self.client.get(self.url(path));
+        let mut req = self.client.get(Self::url(path));
         if let Some(t) = token {
             req = req.bearer_auth(t);
         }
@@ -221,7 +225,7 @@ impl Harness {
 
     async fn send_text(&self, id: &str, token: &str, text: &str) -> reqwest::StatusCode {
         self.client
-            .post(self.url(&format!("/api/agents/{id}/send")))
+            .post(Self::url(&format!("/api/agents/{id}/send")))
             .bearer_auth(token)
             .json(&serde_json::json!({ "text": text }))
             .send()
@@ -346,7 +350,7 @@ async fn pair_then_list_only_marked() {
     let code = auth::issue_code(&store, SystemTime::now()).unwrap();
     let r = h
         .client
-        .post(h.url("/api/pair"))
+        .post(Harness::url("/api/pair"))
         .json(&serde_json::json!({ "code": code.to_lowercase(), "device_name": "My Phone" }))
         .send()
         .await
@@ -386,7 +390,7 @@ async fn pair_rate_limited() {
     for i in 0..5 {
         let r = h
             .client
-            .post(h.url("/api/pair"))
+            .post(Harness::url("/api/pair"))
             .json(&serde_json::json!({ "code": "2222-2222", "device_name": "x" }))
             .send()
             .await
@@ -396,7 +400,7 @@ async fn pair_rate_limited() {
     }
     let r = h
         .client
-        .post(h.url("/api/pair"))
+        .post(Harness::url("/api/pair"))
         .json(&serde_json::json!({ "code": "2222-2222", "device_name": "x" }))
         .send()
         .await
@@ -1431,6 +1435,55 @@ mod conversation {
         assert_eq!(r.status(), 200);
         let body: serde_json::Value = r.json().await.unwrap();
         assert_eq!(body["text"], "a.txt");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn opencode_conversation_uses_only_the_shared_tabs_export() {
+        let h = Harness::start(Harness::unused_tmux());
+        let token = h.device(false);
+        let id = h.store().mark("k", 1).unwrap();
+        let mut tab = agent(&id, "harness_k_1", "OpenCode");
+        tab.agent_kind = Some("opencode".into());
+        h.set_agents(vec![tab]);
+
+        let dir = h.dir.join("remote/opencode");
+        let log = dir.join("harness_k_1.jsonl");
+        let flag = log.with_extension("jsonl.on");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !flag.is_file() {
+            assert!(
+                Instant::now() < deadline,
+                "shared OpenCode export was not enabled"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(h.agents(&token).await[0]["has_conversation"], false);
+        std::fs::write(&log, concat!(
+            r#"{"id":"m1","kind":"user","text":"list files"}"#, "\n",
+            r#"{"id":"t1","kind":"tool","tool":{"id":"t1","name":"bash","summary":"ls","status":"ok"},"result":{"text":"a.txt","input":"ls","is_error":false,"truncated":false}}"#, "\n",
+        )).unwrap();
+
+        assert_eq!(h.agents(&token).await[0]["has_conversation"], true);
+        let mut sse = open(&h, &id, &token).await;
+        let (_, entries) = sse.entries().await;
+        assert_eq!(entries[0]["text"], "list files");
+        assert_eq!(entries[1]["tool"]["summary"], "ls");
+        assert!(
+            entries[1].get("result").is_none(),
+            "full results are fetched on demand"
+        );
+        let details = format!("/api/agents/{id}/conversation/tool/t1");
+        let result: serde_json::Value = h.get(&details, Some(&token)).await.json().await.unwrap();
+        assert_eq!(result["input"], "ls");
+        assert_eq!(result["text"], "a.txt");
+
+        h.store().unmark("k", Some(1)).unwrap();
+        assert_eq!(h.get(&details, Some(&token)).await.status(), 404);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while flag.exists() || log.exists() {
+            assert!(Instant::now() < deadline, "unshared export was not removed");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

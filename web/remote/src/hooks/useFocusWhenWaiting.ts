@@ -5,7 +5,7 @@ import type { AgentStatus } from "@/lib/api";
 export function useFocusWhenWaiting(
   status: AgentStatus | undefined,
   active: boolean,
-  input: RefObject<HTMLInputElement>,
+  input: RefObject<HTMLTextAreaElement>,
 ) {
   const focused = useRef(false);
   useEffect(() => {

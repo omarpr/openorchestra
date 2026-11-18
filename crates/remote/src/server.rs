@@ -193,6 +193,7 @@ pub(crate) struct Shared {
     pub hubs: Hubs,
     /// Transcript tailers shared by conversation viewers.
     pub transcripts: Transcripts,
+    pub(crate) voice: crate::voice::Voice,
     pub port: u16,
     pub snapshot: watch::Receiver<Snapshot>,
     /// Latest remote.json (pushed to open sockets on change).
@@ -238,6 +239,58 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
+    pub(crate) fn new(
+        cfg: &ServerConfig,
+        snapshot: watch::Receiver<Snapshot>,
+        port: u16,
+        ca: &certs::Ca,
+        host_name: String,
+        cert_check: Duration,
+    ) -> Self {
+        let store = Store::new(&cfg.state_dir);
+        let file0 = store.load();
+        let nets = crate::network::local_networks();
+        migrate_trust(&cfg.state_dir, !file0.devices.is_empty(), &nets);
+
+        let shared = Self {
+            state_dir: cfg.state_dir.clone(),
+            tmux: cfg.tmux.clone(),
+            hubs: Hubs::new(cfg.tmux.clone()),
+            transcripts: Transcripts::new(),
+            voice: crate::voice::Voice::new(),
+            port,
+            snapshot,
+            file: watch::channel(Arc::new(file0)).0,
+            live: watch::channel(Arc::new(HashSet::new())).0,
+            agents: watch::channel(Arc::new(Vec::new())).0,
+            shutdown: watch::channel(false).0,
+            sans: RwLock::new((Vec::new(), Vec::new())),
+            ca: CaInfo {
+                pem: ca.cert_pem.clone(),
+                fingerprint: certs::fingerprint_sha256(&ca.cert_der),
+                mobileconfig: certs::mobileconfig(ca),
+            },
+            host_name,
+            status: RwLock::new(ServerStatus::default()),
+            open_streams: Arc::new(()),
+            pair_attempts: Mutex::new(HashMap::new()),
+            pair_failures: Mutex::new(AddressLocks::default()),
+            input: crate::activity::InputActivity::new(&cfg.state_dir),
+            networks: RwLock::new(nets),
+            trusted: RwLock::new(HashSet::new()),
+            hosts_override: Mutex::new(cfg.hosts_override.clone()),
+            cert_wake: Notify::new(),
+            cert_check,
+            test_send_delay_ms: AtomicU64::new(0),
+            ws_ping_ms: AtomicU64::new(WS_PING.as_millis() as u64),
+            ws_idle_ms: AtomicU64::new(WS_IDLE.as_millis() as u64),
+            bad_file_logged: AtomicBool::new(false),
+        };
+        shared.status.write().unwrap().ca_fingerprint = shared.ca.fingerprint.clone();
+        shared.set_networks(None);
+        shared
+    }
+
     /// (ping period, idle limit) for terminal sockets.
     pub(crate) fn ws_keepalive(&self) -> (Duration, Duration) {
         (
@@ -286,6 +339,18 @@ impl Shared {
             .iter()
             .find(|a| a.id == id)
             .map(|a| a.session.clone())
+    }
+
+    /// Only marked agent tabs accept screenshots.
+    pub(crate) fn screenshot_target(
+        &self,
+        file: &RemoteFile,
+        id: &str,
+    ) -> Option<(String, String)> {
+        file.mark_by_id(id)?;
+        let snapshot = self.snapshot.borrow();
+        let agent = snapshot.agents.iter().find(|agent| agent.id == id)?;
+        Some((agent.session.clone(), agent.agent_kind.clone()?))
     }
 
     /// Transcript behind `id`, only if `id` is currently marked in `file`
@@ -363,7 +428,7 @@ impl Shared {
 
     fn refresh_agents(&self) {
         let list = self.agents_for(&self.file.borrow());
-        self.sync_shell_flags(&list);
+        self.sync_transcript_flags(&list);
         self.agents.send_if_modified(|cur| {
             if **cur == list {
                 false
@@ -436,15 +501,23 @@ impl Shared {
             .networks = list;
     }
 
-    /// Let exactly the shared shell tabs record commands (`crate::shell`).
-    fn sync_shell_flags(&self, list: &[AgentInfo]) {
-        let shared: HashSet<String> = list
-            .iter()
-            .filter(|a| a.agent_kind.is_none())
-            .map(|a| a.session.clone())
-            .collect();
-        if let Err(e) = crate::shell::sync_flags(&self.state_dir, &shared) {
-            eprintln!("oo-remote: shell logging switches: {e}");
+    /// Only shared tmux tabs may write phone transcripts.
+    fn sync_transcript_flags(&self, list: &[AgentInfo]) {
+        let shared = |kind| {
+            list.iter()
+                .filter(|a| a.agent_kind.as_deref() == kind)
+                .map(|a| a.session.clone())
+                .collect()
+        };
+        if crate::shell::sync_flags(&self.state_dir, &shared(None)).is_err() {
+            eprintln!("oo-remote: could not update shell transcript sharing");
+        }
+        let dir = opencode_transcripts(&self.state_dir);
+        let opencode = shared(Some("opencode"));
+        if (!opencode.is_empty() || dir.is_dir())
+            && crate::transcript::sync_log_flags(&dir, &opencode, true).is_err()
+        {
+            eprintln!("oo-remote: could not update OpenCode transcript sharing");
         }
     }
 
@@ -555,12 +628,18 @@ fn rfc3339_now() -> String {
         .unwrap_or_default()
 }
 
-/// `a`'s transcript: the one the app found, or for a shell tab its command
-/// log (named after its tmux session; see `crate::shell`).
+fn opencode_transcripts(state_dir: &Path) -> PathBuf {
+    state_dir.join("remote/opencode")
+}
+
+/// The agent transcript or the export made by a hook for this tmux tab.
 fn transcript_path(a: &AgentInfo, state_dir: &Path) -> Option<PathBuf> {
     match (&a.transcript, a.agent_kind.as_deref()) {
         (Some(t), _) => Some(t.clone()),
         (None, None) => Some(crate::shell::log_path(state_dir, &a.session)),
+        (None, Some("opencode")) => {
+            Some(opencode_transcripts(state_dir).join(format!("{}.jsonl", a.session)))
+        }
         (None, Some(_)) => None,
     }
 }
@@ -581,9 +660,8 @@ pub fn compute_agents(
             let mut a = a.clone();
             a.transcript = transcript_path(&a, state_dir);
             a.has_conversation = match (&a.transcript, transcript_kind(&a)) {
-                // A shell's log exists only once its hook ran (zsh tabs
-                // started by this build); otherwise it is Terminal-only.
-                (Some(t), Some(TranscriptKind::Shell)) => t.is_file(),
+                // Local exports become available when the tab's hook runs.
+                (Some(t), Some(TranscriptKind::Shell | TranscriptKind::OpenCode)) => t.is_file(),
                 (Some(_), Some(_)) => true,
                 _ => false,
             };
@@ -643,46 +721,9 @@ impl RemoteServer {
         let ca = Arc::new(
             certs::load_or_create_ca(&cert_dir, &host_name, &hosts0, &ips0).map_err(other)?,
         );
-        let store = Store::new(&cfg.state_dir);
-        let file0 = store.load();
-        let nets = crate::network::local_networks();
-        migrate_trust(&cfg.state_dir, !file0.devices.is_empty(), &nets);
-
-        let shared = Arc::new(Shared {
-            state_dir: cfg.state_dir.clone(),
-            tmux: cfg.tmux.clone(),
-            hubs: Hubs::new(cfg.tmux.clone()),
-            transcripts: Transcripts::new(),
-            port,
-            snapshot,
-            file: watch::channel(Arc::new(file0)).0,
-            live: watch::channel(Arc::new(HashSet::new())).0,
-            agents: watch::channel(Arc::new(Vec::new())).0,
-            shutdown: watch::channel(false).0,
-            sans: RwLock::new((Vec::new(), Vec::new())),
-            ca: CaInfo {
-                pem: ca.cert_pem.clone(),
-                fingerprint: certs::fingerprint_sha256(&ca.cert_der),
-                mobileconfig: certs::mobileconfig(&ca),
-            },
-            host_name,
-            status: RwLock::new(ServerStatus::default()),
-            open_streams: Arc::new(()),
-            pair_attempts: Mutex::new(HashMap::new()),
-            pair_failures: Mutex::new(AddressLocks::default()),
-            input: crate::activity::InputActivity::new(&cfg.state_dir),
-            networks: RwLock::new(nets),
-            trusted: RwLock::new(HashSet::new()),
-            hosts_override: Mutex::new(cfg.hosts_override.clone()),
-            cert_wake: Notify::new(),
-            cert_check,
-            test_send_delay_ms: AtomicU64::new(0),
-            ws_ping_ms: AtomicU64::new(WS_PING.as_millis() as u64),
-            ws_idle_ms: AtomicU64::new(WS_IDLE.as_millis() as u64),
-            bad_file_logged: AtomicBool::new(false),
-        });
-        shared.status.write().unwrap().ca_fingerprint = shared.ca.fingerprint.clone();
-        shared.set_networks(None);
+        let shared = Arc::new(Shared::new(
+            &cfg, snapshot, port, &ca, host_name, cert_check,
+        ));
 
         let (want_hosts, ips) = shared.desired_sans();
         shared.status.write().unwrap().ca_outdated = shared.ca_outdated(&ca, &want_hosts, &ips);
@@ -722,7 +763,7 @@ impl RemoteServer {
         }
         let _ = ready_rx.recv_timeout(Duration::from_secs(5));
 
-        let (watcher, file_events) = match store.watch() {
+        let (watcher, file_events) = match shared.store().watch() {
             Ok((w, rx)) => (Some(w), Some(rx)),
             Err(e) => {
                 eprintln!("oo-remote: watching remote.json failed ({e}); polling only");
@@ -822,8 +863,8 @@ impl RemoteServer {
         let Some(rt) = &self.rt else { return };
         let listener = match StdListener::bind((self.bind_ip, self.setup_port)) {
             Ok(l) => l,
-            Err(e) => {
-                eprintln!("oo-remote: setup port {}: {e}", self.setup_port);
+            Err(_) => {
+                eprintln!("oo-remote: could not open the phone setup listener");
                 self.set_setup_error(Some(format!(
                     "Couldn't open port {} for phone setup \u{2014} is another app using it?",
                     self.setup_port
@@ -961,10 +1002,7 @@ impl RemoteServer {
     fn shutdown_now(&mut self) {
         let Some(rt) = self.rt.take() else { return };
         self.shared.shutdown.send_replace(true);
-        // Remote is off: no shell tab records commands any more.
-        if let Err(e) = crate::shell::sync_flags(&self.shared.state_dir, &HashSet::new()) {
-            eprintln!("oo-remote: shell logging switches: {e}");
-        }
+        self.shared.sync_transcript_flags(&[]);
         let deadline = Instant::now() + STOP_FLUSH;
         while Arc::strong_count(&self.shared.open_streams) > 1 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));

@@ -54,6 +54,13 @@ export function ToolSheet({
             <p className="text-sm text-muted-foreground">Loading…</p>
           ) : (
             <>
+              {res.input && (
+                <>
+                  <p className="mb-1 text-xs font-medium text-muted-foreground">Executed</p>
+                  <pre className="mb-3 whitespace-pre-wrap break-words font-mono text-xs">{res.input}</pre>
+                  <p className="mb-1 text-xs font-medium text-muted-foreground">Output</p>
+                </>
+              )}
               <pre
                 className={`whitespace-pre-wrap break-words font-mono text-xs ${res.is_error ? "text-destructive" : ""}`}
               >

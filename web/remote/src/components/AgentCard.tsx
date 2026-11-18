@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { tabTitle } from "@/lib/agents";
 import type { Agent } from "@/lib/api";
 import { agentHref } from "@/lib/router";
 import { timeSince } from "@/lib/time";
@@ -21,7 +22,7 @@ export function AgentCard({
     const t = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(t);
   }, []);
-  const since = timeSince(agent.status_since, now);
+  const since = agent.status === "running" || agent.status === "waiting" ? timeSince(agent.status_since, now) : "";
   const where = showWhere ? [agent.project, agent.worktree].filter(Boolean).join(" · ") : "";
   return (
     <a
@@ -35,19 +36,27 @@ export function AgentCard({
       )}
     >
       <div className="flex items-center justify-between gap-2">
-        <span className="flex min-w-0 items-center gap-1.5">
-          {agent.agent_kind && <AgentIcon kind={agent.agent_kind} />}
-          <span className="truncate font-medium">{agent.title}</span>
+        <span className="flex min-w-0 items-center gap-2">
+          <AgentIcon kind={agent.agent_kind} />
+          <span className="truncate font-medium">{tabTitle(agent)}</span>
         </span>
-        <StatusPill status={agent.status} />
+        <span className="flex shrink-0 items-center gap-1.5 whitespace-nowrap">
+          <StatusPill status={agent.status} />
+          {since && (
+            <time
+              dateTime={agent.status_since ?? undefined}
+              title="Time in this state"
+              className="text-xs text-muted-foreground tabular-nums"
+            >
+              {since}
+            </time>
+          )}
+        </span>
       </div>
-      {(where || agent.tool || since) && (
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span className="truncate">{where}</span>
-          <span className="ml-auto flex shrink-0 items-center gap-2">
-            {agent.tool && <span className="max-w-28 truncate font-mono">{agent.tool}</span>}
-            {since && <span>{since}</span>}
-          </span>
+      {(where || agent.tool) && (
+        <div className="flex items-center gap-2 pl-8 text-xs text-muted-foreground">
+          {where && <span className="truncate">{where}</span>}
+          {agent.tool && <span className="ml-auto max-w-28 shrink-0 truncate font-mono">{agent.tool}</span>}
         </div>
       )}
     </a>
