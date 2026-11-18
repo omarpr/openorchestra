@@ -134,13 +134,16 @@ impl HarnessWorkspace {
             .hover(|d| d.bg(hx.surface))
             .child(current)
             .child(div().text_color(hx.tx2).child("▾"))
-            .on_click(cx.listener(move |ws, _, _, cx| {
-                // The click that closed this menu from outside lands here too.
-                let just_closed = ws
+            .on_click(cx.listener(move |ws, ev: &gpui::ClickEvent, _, cx| {
+                let dismissed_at = ws
                     .ports_sort_menu_closed
                     .take()
-                    .is_some_and(|(m, at)| m == menu && at.elapsed() < Duration::from_millis(400));
-                ws.ports_sort_menu = if open || just_closed { None } else { Some(menu) };
+                    .and_then(|(m, at)| (m == menu).then_some(at));
+                let pressed_at = match ev {
+                    gpui::ClickEvent::Mouse(m) => Some(m.down.position),
+                    _ => None,
+                };
+                ws.ports_sort_menu = toggled(open, dismissed_at, pressed_at).then_some(menu);
                 cx.notify();
             }));
         let mut col = div().flex().flex_col().child(button);
@@ -155,9 +158,9 @@ impl HarnessWorkspace {
                 .border_color(hx.border2)
                 .flex()
                 .flex_col()
-                .on_mouse_down_out(cx.listener(move |ws, _, _, cx| {
+                .on_mouse_down_out(cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
                     ws.ports_sort_menu = None;
-                    ws.ports_sort_menu_closed = Some((menu, std::time::Instant::now()));
+                    ws.ports_sort_menu_closed = Some((menu, ev.position));
                     cx.notify();
                 }));
             for (label, selected, choice) in items {
@@ -422,4 +425,43 @@ fn small_button(hx: &HarnessTheme, id: String, label: &'static str) -> gpui::Sta
         .cursor_pointer()
         .hover(|d| d.bg(hx.surface_hover))
         .child(label)
+}
+
+/// What a click on a sort dropdown's button does to its menu. `dismissed_at`
+/// is where the mouse-down that last closed this menu from outside landed;
+/// `pressed_at` is where this click's mouse-down landed (`None` for a
+/// keyboard click).
+///
+/// A press on the button of an open menu reaches the menu's outside handler
+/// first, which closes it; the click then lands on the button. That is the
+/// one click to swallow, recognised by sharing the dismissing press's
+/// position. A time window instead also swallowed a genuine quick click on
+/// the button after closing the menu elsewhere.
+fn toggled(open: bool, dismissed_at: Option<gpui::Point<Pixels>>, pressed_at: Option<gpui::Point<Pixels>>) -> bool {
+    let same_press = dismissed_at.is_some() && dismissed_at == pressed_at;
+    !open && !same_press
+}
+
+#[cfg(test)]
+mod tests {
+    use super::toggled;
+    use gpui::{point, px};
+
+    #[test]
+    fn the_press_that_dismissed_a_menu_does_not_reopen_it() {
+        let at = Some(point(px(40.), px(12.)));
+        // Clicking the button of an open menu: its mouse-down closed the menu
+        // from outside first, then the click lands on the button.
+        assert!(!toggled(false, at, at));
+    }
+
+    #[test]
+    fn any_other_click_on_the_button_toggles_it() {
+        let dismissed = Some(point(px(300.), px(500.)));
+        let here = Some(point(px(40.), px(12.)));
+        assert!(toggled(false, dismissed, here), "a quick new click after an outside dismissal opens it");
+        assert!(toggled(false, None, here));
+        assert!(!toggled(true, None, here));
+        assert!(toggled(false, dismissed, None), "keyboard click");
+    }
 }
