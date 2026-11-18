@@ -29,6 +29,8 @@ Unreleased is empty.
 - Ports tab rows can be sorted by port or name, ascending or descending, from
   two dropdowns; the choice is remembered. Its "This task" and "Other on this
   Mac" lists collapse like the sidebar's sections and remember their state.
+- File tabs show the editor's `{ }` mark, so it's clear they are the zed
+  editor.
 
 ### Fixed
 
