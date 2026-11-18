@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 
-use crate::api::{peer_filter, trusted_filter, AppState};
+use crate::api::{peer_filter, security_headers, trusted_filter, AppState};
 use crate::server::Shared;
 
 pub(crate) fn router(shared: Arc<Shared>) -> Router {
@@ -26,6 +26,7 @@ pub(crate) fn router(shared: Arc<Shared>) -> Router {
             trusted_filter,
         ))
         .layer(middleware::from_fn(peer_filter))
+        .layer(middleware::from_fn(security_headers))
         .with_state(shared)
 }
 

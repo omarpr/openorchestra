@@ -85,6 +85,9 @@ VERSION="$(sed -n '/^\[package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p;}' "$CRATE/
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
   || die "version in $CRATE/Cargo.toml must be MAJOR.MINOR.PATCH (got: $VERSION)"
 BUILD="$(git -C "$ROOT" rev-list --count HEAD)"
+# The commit this run builds. Publishing tags it and cuts the notes from it,
+# not whatever HEAD is by then: the build takes long enough for that to move.
+BUILD_SHA="$(git -C "$ROOT" rev-parse HEAD)"
 TAG="v$VERSION"
 
 # ---------------------------------------------------------------------------
@@ -367,10 +370,21 @@ release_notes() {
   local prev range sha subject author handle
   local -a handles=()
 
-  prev="$(git -C "$ROOT" describe --tags --abbrev=0 HEAD 2>/dev/null || true)"
-  range="${prev:+$prev..}HEAD"
+  prev="$(git -C "$ROOT" describe --tags --abbrev=0 "$BUILD_SHA" 2>/dev/null || true)"
+  range="${prev:+$prev..}$BUILD_SHA"
 
   printf '%s\n\n' "$INSTALL_NOTE"
+  # This version's CHANGELOG.md section (cut by release-version.sh) leads:
+  # it says what changed for users. The commit list below stays for detail.
+  local notes
+  notes="$(awk -v v="$VERSION" '
+    index($0, "## " v " - ") == 1 { on = 1; next }
+    on && /^## / { exit }
+    on { print }
+  ' "$ROOT/CHANGELOG.md" 2>/dev/null | sed -e '/./,$!d')"
+  if [ -n "$notes" ]; then
+    printf '%s\n\n' "$notes"
+  fi
   printf "## What's Changed\n"
   while IFS=$'\x1f' read -r sha subject author; do
     handle="$(gh api "repos/$REPO/commits/$sha" --jq '.author.login // empty' 2>/dev/null || true)"
@@ -394,8 +408,17 @@ release_notes() {
 }
 
 if ((publish)); then
+  # The DMG must be exactly BUILD_SHA. Stop if the checkout moved or changed
+  # during the build rather than publish a tag that names other code.
+  [ "$(git -C "$ROOT" rev-parse HEAD)" = "$BUILD_SHA" ] \
+    || die "HEAD moved during the build (built ${BUILD_SHA:0:7}, now $(git -C "$ROOT" rev-parse --short HEAD)); not publishing"
+  [ -z "$(git -C "$ROOT" status --porcelain --untracked-files=no)" ] \
+    || die "tracked files changed during the build; not publishing"
   say "publishing GitHub Release $TAG"
+  # --target: tag the commit that was built. Without it gh tags the default
+  # branch's tip on GitHub, which need not be this commit.
   gh release create "$TAG" "$DMG" \
+    --target "$BUILD_SHA" \
     --title "$APP_NAME $VERSION ($BUILD)" \
     --notes "$(release_notes)"
   say "published: $(gh release view "$TAG" --json url --jq .url)"

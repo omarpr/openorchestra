@@ -7,12 +7,16 @@ on:
       - "**/Cargo.lock"
       # Editing the documented advisory exceptions should re-run the audit.
       - "**/.cargo/audit.toml"
+      - "web/remote/package.json"
+      - "web/remote/pnpm-lock.yaml"
       - ".github/workflows/security-audit.yml"
   pull_request:
     paths:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
       - "**/.cargo/audit.toml"
+      - "web/remote/package.json"
+      - "web/remote/pnpm-lock.yaml"
   schedule:
     # Weekly, so new RustSec advisories are caught without a code change.
     - cron: "0 6 * * 1"
@@ -41,3 +45,24 @@ jobs:
       - name: Audit harness-app lockfile
         working-directory: crates/harness-app
         run: cargo audit --file Cargo.lock
+
+  # The phone client (web/remote) is embedded in the app. Audit the whole
+  # graph, dev tooling included: `--prod` would miss code that ships through
+  # a devDependency, such as the Workbox runtime (workbox-precaching,
+  # workbox-routing) that vite-plugin-pwa's generateSW bundles into sw.js.
+  #
+  # Accepted advisories, each build-time only and with no patched release.
+  # Remove an entry once a fix exists; any other advisory fails the job.
+  #   GHSA-fc5q-39xc-vjpf  picomatch 4.0.7 ReDoS (vite/rollup file matching
+  #                        over our own globs at build time)
+  pnpm-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Audit phone client dependencies
+        working-directory: web/remote
+        # Reads pnpm-lock.yaml; no install needed. Same pnpm as packageManager.
+        run: npx --yes pnpm@12.21.0 audit --ignore GHSA-fc5q-39xc-vjpf

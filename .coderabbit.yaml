@@ -1,0 +1,146 @@
+# CodeRabbit review settings. Schema: https://coderabbit.ai/integrations/schema.v2.json
+# Reviews run on every PR into master and again on each push. To review a
+# PR that predates a change here, comment `@coderabbitai review`.
+
+language: en-US
+tone_instructions: >-
+  Be direct and specific. Lead with correctness and security problems; skip
+  praise and restating the diff. Say what breaks and how.
+
+reviews:
+  profile: chill
+  high_level_summary: true
+  poem: false
+  in_progress_fortune: false
+  review_status: true
+
+  auto_review:
+    enabled: true
+    drafts: false
+
+  # CodeRabbit approves a PR once its review covers the latest commit, every
+  # blocking thread is resolved, the pre-merge checks pass, and the PR's merge
+  # risk is within the limit below; until then it requests changes. The
+  # security- and release-critical paths get a stricter limit.
+  auto_approvals:
+    enabled: true
+    approve_on_skipped_review: false
+    # Lets the author comment `@coderabbitai approve` (risk limits still apply).
+    allow_author_approval: true
+    max_merge_risk: moderate
+    overrides:
+      - paths:
+          - "crates/remote/**"
+          - "crates/a2a-broker/**"
+          - ".github/workflows/**"
+          - "script/package-mac.sh"
+          - "script/notarize-mac.sh"
+          - "script/release-version.sh"
+          - "script/update-homebrew-cask.sh"
+          - "crates/harness-app/resources/*.entitlements"
+        max_merge_risk: low
+
+  merge_risk_instructions: >-
+    High risk: the LAN-exposed phone remote server (crates/remote: auth,
+    pairing, certificates, anything that types into terminals); the localhost
+    A2A broker's auth; signing, notarization, entitlements and the release and
+    Homebrew scripts; CI workflows; anything that changes or migrates state
+    under ~/.openorchestra (older builds share it and may not read it). Moderate:
+    app features in crates/harness-app, the phone PWA, dependency upgrades.
+    Low: docs, CHANGELOG, tests, comments, and refactors with no behavior change.
+
+  # Generated or vendored files: nothing to review by hand.
+  path_filters:
+    - "!**/Cargo.lock"
+    - "!**/pnpm-lock.yaml"
+    - "!**/package-lock.json"
+    - "!**/target/**"
+    - "!**/node_modules/**"
+    - "!web/remote/dist/**"
+    - "!crates/remote/tests/fixtures/**"
+    - "!assets/*.iconset/**"
+
+  path_instructions:
+    - path: "**/*"
+      instructions: >-
+        Every user-visible change needs a line under "## Unreleased" in
+        CHANGELOG.md (Added / Changed / Fixed / Security). Pure refactors,
+        tests and internal docs don't. Never suggest hand-editing a version
+        section: `make release` cuts it.
+
+    - path: "crates/remote/**"
+      instructions: >-
+        The phone remote server, reachable from the LAN, and it can type into
+        terminals: review as security-critical. Check that every new route
+        sits behind the peer filter, the trusted-network filter and bearer
+        auth (pairing is the only unauthenticated route); that `read_only`
+        devices are refused on every write path (HTTP send and the terminal
+        socket); that text reaches tmux only hex-encoded through
+        `tmux_bridge::hex_keys`, never interpolated into a command; that
+        request bodies and fields stay bounded; that tokens and codes are
+        stored only as SHA-256 hashes and compared in constant time; and that
+        nothing logs a token, code or transcript. HSTS is deliberately absent
+        (it would break the plain-HTTP setup page on the same host); don't
+        suggest adding it.
+
+    - path: "crates/a2a-broker/**"
+      instructions: >-
+        Localhost-only agent-to-agent broker; any local process can connect.
+        Everything read before the API-key check must be bounded (line length,
+        header count, body size, time). Keep the bind loopback-only, the key
+        file 0600 in a 0700 directory, and key comparison constant-time.
+
+    - path: "crates/harness-app/**"
+      instructions: >-
+        GPUI app that embeds zed's crates. The crate is not `cargo fmt`-clean
+        on purpose: never flag formatting. CI runs
+        `cargo clippy --all-targets -- -D warnings`, so flag anything clippy
+        would. Keep zed's collab and telemetry inert (`BlockedHttpClient`): the
+        app makes no network request the user didn't ask for, and adds no
+        background network activity. Blocking work (git, file I/O, process
+        spawns) stays off the main thread. AppKit calls through objc2 run on
+        the main thread; check the selector, argument types and that
+        NSTextAlignment uses per-architecture values.
+
+    - path: "web/remote/**"
+      instructions: >-
+        The phone PWA, served by crates/remote. The device token lives in
+        localStorage, so XSS means account takeover: no
+        `dangerouslySetInnerHTML`, no raw-HTML markdown (`rehype-raw`), no
+        `javascript:` URLs, nothing that would need loosening the CSP in
+        crates/remote/src/assets.rs. The token travels only in the
+        Authorization header or the socket's first message, never in a URL.
+        Use pnpm, never npm or yarn. Formatting is enforced by Biome; don't
+        restate its findings.
+
+    - path: "script/**"
+      instructions: >-
+        Bash run on macOS: keep it working on the system bash 3.2 (no
+        `mapfile`, `${var,,}` or associative arrays) and with BSD tools
+        (`sed -i ''`). Scripts use `set -euo pipefail`. The release scripts
+        must fail before the long build, not after it, and must never publish
+        from a dirty tree.
+
+    - path: ".github/workflows/**"
+      instructions: >-
+        Check for least-privilege permissions, no secrets echoed to logs, no
+        untrusted PR input interpolated into `run:` steps, and that audit jobs
+        keep failing on new advisories.
+
+  pre_merge_checks:
+    custom_checks:
+      - name: "Changelog entry"
+        mode: warning
+        instructions: >-
+          Pass if the PR adds or edits a line under "## Unreleased" in
+          CHANGELOG.md, or if it changes nothing a user of the app, the phone
+          client or `make release` would notice (only tests, refactors,
+          comments, CI or internal docs). Fail otherwise, naming the
+          user-visible change that lacks an entry.
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "CONTRIBUTING.md"
+      - "SECURITY.md"

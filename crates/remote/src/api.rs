@@ -66,7 +66,30 @@ pub(crate) fn router(shared: Arc<Shared>) -> Router {
             trusted_filter,
         ))
         .layer(middleware::from_fn(peer_filter))
+        .layer(middleware::from_fn(security_headers))
         .with_state(shared)
+}
+
+/// Headers every response carries, errors and JSON included (`assets.rs`
+/// adds the CSP to HTML). `insert`, so a route's own value is replaced by
+/// the same one rather than doubled. No HSTS: it binds the whole host, and
+/// the plain-HTTP setup page on port 7080 shares it.
+pub(crate) async fn security_headers(req: Request, next: Next) -> Response {
+    let mut resp = next.run(req).await;
+    let h = resp.headers_mut();
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::HeaderValue::from_static("nosniff"),
+    );
+    h.insert(
+        header::REFERRER_POLICY,
+        header::HeaderValue::from_static("no-referrer"),
+    );
+    h.insert(
+        header::X_FRAME_OPTIONS,
+        header::HeaderValue::from_static("DENY"),
+    );
+    resp
 }
 
 /// 403 `untrusted_network` for a peer that isn't on a network the user
@@ -195,6 +218,7 @@ async fn pair(
         return error(StatusCode::LOCKED, "address_locked");
     }
     let origin_host = host_without_port(&headers, &uri);
+    let logged_name = name.clone();
     let s2 = s.clone();
     let result = tokio::task::spawn_blocking(move || {
         auth::redeem_code(
@@ -207,15 +231,28 @@ async fn pair(
     })
     .await;
     match result {
+        // Pairing outcomes go to the app log, so a guessing attempt leaves a
+        // trace (`{:?}` keeps a device-chosen name on one quoted line).
         Ok(Ok((_, token))) => {
             s.pair_result(peer.ip(), true, Instant::now());
+            eprintln!("oo-remote: paired {logged_name:?} from {}", peer.ip());
             Json(json!({ "token": token })).into_response()
         }
         Ok(Err(PairError::Invalid)) => {
             s.pair_result(peer.ip(), false, Instant::now());
+            eprintln!("oo-remote: wrong pairing code from {}", peer.ip());
+            if s.pair_locked(peer.ip(), Instant::now()) {
+                eprintln!("oo-remote: {} locked out of pairing after repeated wrong codes", peer.ip());
+            }
             error(StatusCode::UNAUTHORIZED, "invalid")
         }
-        Ok(Err(PairError::Locked)) => error(StatusCode::LOCKED, "locked"),
+        Ok(Err(PairError::Locked)) => {
+            eprintln!(
+                "oo-remote: pairing codes voided after too many wrong codes (last from {})",
+                peer.ip()
+            );
+            error(StatusCode::LOCKED, "locked")
+        }
         Ok(Err(PairError::Io(e))) => {
             eprintln!("oo-remote: pairing failed: {e}");
             error(StatusCode::INTERNAL_SERVER_ERROR, "internal")
@@ -472,6 +509,28 @@ mod tests {
         assert_eq!(bearer(&h), None);
         h.insert(header::AUTHORIZATION, "Bearer ".parse().unwrap());
         assert_eq!(bearer(&h), None);
+    }
+
+    #[tokio::test]
+    async fn every_response_carries_security_headers() {
+        // Outside the peer filter, like the real routers: a refused peer's
+        // 403 gets them too.
+        let app = Router::new()
+            .fallback(|| async { "ok" })
+            .layer(middleware::from_fn(peer_filter))
+            .layer(middleware::from_fn(security_headers));
+        for ip in ["8.8.8.8:1234", "192.168.1.9:1234"] {
+            let mut req = Request::builder().uri("/x").body(Body::empty()).unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo(ip.parse::<SocketAddr>().unwrap()));
+            let resp = app.clone().oneshot(req).await.unwrap();
+            let h = resp.headers();
+            assert_eq!(h[header::X_CONTENT_TYPE_OPTIONS], "nosniff", "{ip}");
+            assert_eq!(h[header::REFERRER_POLICY], "no-referrer", "{ip}");
+            assert_eq!(h[header::X_FRAME_OPTIONS], "DENY", "{ip}");
+            assert!(h.get(header::STRICT_TRANSPORT_SECURITY).is_none());
+            assert_eq!(h.get_all(header::X_CONTENT_TYPE_OPTIONS).iter().count(), 1);
+        }
     }
 
     #[tokio::test]

@@ -153,6 +153,12 @@ impl Render for HarnessWorkspace {
                 };
                 ws.request_close_tab(active, window, cx);
             }))
+            .on_action(cx.listener(|_, _: &crate::About, window, cx| {
+                crate::update_check::show_about(window, cx);
+            }))
+            .on_action(cx.listener(|_, _: &crate::CheckForUpdates, window, cx| {
+                crate::update_check::check_for_updates(window, cx);
+            }))
             .on_action(cx.listener(|ws, _: &crate::FirstTimeChecks, _, cx| {
                 // Always re-probe on open: the point of reaching for it is
                 // usually that something changed since startup.

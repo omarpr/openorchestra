@@ -143,6 +143,11 @@ cargo test --bin harness-app   # it is a binary crate, so --bin, not --lib
 
 - Conventional commit subjects with a scope, matching the existing history:
   `feat(diff): …`, `fix(editor): …`, `perf(diff): …`, `docs(readme): …`.
+- **Update [`CHANGELOG.md`](CHANGELOG.md) in the same commit.** Add a line under
+  **Unreleased** in the right group (Added, Changed, Fixed, Security) for
+  anything a user would notice. Pure refactors, tests and internal docs can
+  skip it. `make release` turns Unreleased into the version's section and uses
+  it for the release notes.
 - The body should explain **why** the change is right, not restate the diff. Say
   what was broken, what you measured, and what you decided against.
 - Keep PRs small and single-purpose.
