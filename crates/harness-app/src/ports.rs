@@ -339,11 +339,22 @@ pub fn classify(s: &PortsSample, scopes: &[Scope]) -> PortsView {
     }
 
     let agents: HashSet<&str> = crate::preflight::AGENTS.iter().copied().collect();
-    // host port -> (container, port inside it)
-    let published: std::collections::HashMap<u16, (&Container, u16)> = s
-        .containers
-        .iter()
-        .flat_map(|c| c.published.iter().map(move |&(h, i)| (h, (c, i))))
+    // host port -> (container, port inside it), only for a port exactly one
+    // container publishes. Two containers can publish one port number on
+    // different host addresses, and the single engine process holding both
+    // sockets can't say which is which: naming either would be a guess.
+    let mut by_port: std::collections::HashMap<u16, Vec<(&Container, u16)>> = Default::default();
+    for c in &s.containers {
+        for &(h, i) in &c.published {
+            by_port.entry(h).or_default().push((c, i));
+        }
+    }
+    let published: std::collections::HashMap<u16, (&Container, u16)> = by_port
+        .into_iter()
+        .filter_map(|(h, owners)| match owners.as_slice() {
+            [only] => Some((h, *only)),
+            _ => None,
+        })
         .collect();
     let mut view = PortsView::default();
     for ((port, pid), mut addrs) in grouped {
@@ -710,6 +721,19 @@ quiet-1\tbusybox\t\t\t\t\n";
         assert_eq!(node.container, None, "node is not the container");
         let engine = v.other.iter().find(|r| r.pid == 41084).unwrap();
         assert!(engine.container.is_some());
+    }
+
+    #[test]
+    fn a_port_two_containers_publish_is_not_given_either_name() {
+        // a on 127.0.0.1:8080 and b on 192.168.1.5:8080: one engine holds
+        // both sockets, so the port can't say which container it is.
+        let s = engine_sample(
+            vec![container("a-1", 8080, 80, None), container("b-1", 8080, 81, None)],
+            &[8080],
+        );
+        let v = classify(&s, &[]);
+        assert_eq!(v.other.len(), 1);
+        assert_eq!(v.other[0].container, None);
     }
 
     #[test]
