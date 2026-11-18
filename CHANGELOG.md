@@ -12,6 +12,12 @@ Unreleased is empty.
 
 ## Unreleased
 
+### Added
+
+- **Ports tab** in the tools panel: the servers a task is running, with Open in
+  browser and Copy URL, plus the rest of the Mac's listening ports under
+  "Other on this Mac".
+
 ## 1.0.1 - 2026-11-17
 
 ### Added

@@ -262,6 +262,8 @@ impl HarnessWorkspace {
             diff_surface_focus: cx.focus_handle(),
             resource: None,
             resource_history: crate::resource_monitor::History::new(RESOURCE_HISTORY),
+            ports_sample: None,
+            ports_other_open: false,
             archived_repos,
             archived_path,
             confirm_removal: None,
@@ -618,6 +620,27 @@ impl HarnessWorkspace {
                     .update(cx, |ws, cx| ws.apply_resource(raw, cx))
                     .is_err()
                 {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        // Listening ports for the Ports tool tab. Polls only while that tab is
+        // on screen; `set_tool_tab` takes an immediate sample when it opens.
+        cx.spawn(async move |view, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(3)).await;
+                let Ok(visible) = view.read_with(cx, |ws, _| ws.ports_visible()) else {
+                    break;
+                };
+                if !visible {
+                    continue;
+                }
+                let sample = cx
+                    .background_spawn(async move { crate::ports::sample(sampler_has_tmux) })
+                    .await;
+                if view.update(cx, |ws, cx| ws.apply_ports(sample, cx)).is_err() {
                     break;
                 }
             }

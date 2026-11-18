@@ -310,6 +310,33 @@ mod tests {
         assert_eq!(v.other[0].name, "OrbStack");
     }
 
+    /// Live: a real child listener shows up under "other" via lsof + ps.
+    /// Ignored by default (needs lsof and python3 on the machine).
+    #[test]
+    #[ignore]
+    fn live_sample_finds_a_child_server() {
+        let mut child = std::process::Command::new("python3")
+            .args(["-m", "http.server", "18765", "--bind", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut found = None;
+        for _ in 0..30 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let v = classify(&sample(false), &[]);
+            if let Some(r) = v.other.iter().find(|r| r.port == 18765) {
+                found = Some(r.clone());
+                break;
+            }
+        }
+        let _ = child.kill();
+        let row = found.expect("port 18765 not found");
+        assert_eq!(row.pid, child.id());
+        assert_eq!(row.addrs, vec!["127.0.0.1".to_string()]);
+        assert!(row.name.to_ascii_lowercase().starts_with("python"), "{}", row.name);
+    }
+
     #[test]
     fn classify_labels_members_only_for_multi_scope() {
         let s = PortsSample {

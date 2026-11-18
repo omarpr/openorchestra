@@ -35,6 +35,7 @@ pub(crate) enum ToolTab {
     Git,
     #[default]
     Review,
+    Ports,
 }
 
 /// Sub-tab inside the Files tools surface: tree vs. project search.

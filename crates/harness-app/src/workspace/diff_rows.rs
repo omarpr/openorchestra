@@ -949,6 +949,19 @@ diff --git a/y.rs b/y.rs\n@@ -1,1 +1,2 @@\n other\n+new\n",
     }
 
     #[test]
+    fn the_ports_tool_tab_survives_a_save_load_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        let prefs = Prefs {
+            tool_tab: ToolTab::Ports,
+            ..Prefs::default()
+        };
+        save_prefs_to(&path, &prefs);
+        assert!(std::fs::read_to_string(&path).unwrap().contains(r#""tool_tab": "ports""#));
+        assert_eq!(load_prefs(&path).tool_tab, ToolTab::Ports);
+    }
+
+    #[test]
     fn a_prefs_file_without_a_tool_tab_loads_as_review() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("prefs.json");
