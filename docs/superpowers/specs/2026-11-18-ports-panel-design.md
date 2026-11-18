@@ -112,6 +112,15 @@ Decision (proposed): **both, in two sections.**
    OrbStack/Docker, not under the task, and that is exactly the kind of server
    that receives webhooks. Sharing works on these rows too.
 
+**Containers (added 2026-11-18).** A container's published port is held by
+the engine (OrbStack, Docker Desktop, Colima…), so the process name says
+nothing useful. When an engine process is listening, run `docker ps` (2 s
+timeout, active context only) and label those rows with the Docker icon
+(zed's `icons/file_icons/docker.svg`), `service · project` (or the container
+name) and the port inside the container. A Compose container whose
+`com.docker.compose.project.working_dir` is inside a scope's folder is listed
+under This task. No `docker` CLI or a stopped daemon: rows stay plain.
+
 Each row: port, bind address (`*`, `127.0.0.1`, `::1`), process name, PID
 (on hover), and its share state.
 

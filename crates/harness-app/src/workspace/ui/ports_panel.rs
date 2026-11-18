@@ -12,11 +12,13 @@ impl HarnessWorkspace {
     }
 
     /// The tmux session prefixes whose processes count as "this task", using
-    /// the same keys the footprint monitor attributes by (`apply_resource`).
+    /// the same keys the footprint monitor attributes by (`apply_resource`),
+    /// plus each one's folder so Compose containers started there count too.
     pub(crate) fn ports_scopes(&self) -> Vec<Scope> {
-        let scope = |label: &str, key: &str| Scope {
+        let scope = |label: &str, key: &str, path: Option<&std::path::Path>| Scope {
             label: label.to_string(),
             session_prefix: crate::tmux::session_prefix(key),
+            path: path.map(|p| p.to_path_buf()),
         };
         let task_scopes = |task_id: &str| -> Vec<Scope> {
             let Some(task) = self.task_store.get(task_id) else {
@@ -26,16 +28,20 @@ impl HarnessWorkspace {
                 .members
                 .iter()
                 .map(|m| {
-                    scope(&m.repo, &a2a_broker::task_member_pane_key(&task.id, &m.worktree_id))
+                    let key = a2a_broker::task_member_pane_key(&task.id, &m.worktree_id);
+                    scope(&m.repo, &key, Some(&m.path))
                 })
                 .collect();
             if super::super::coordinator::has_coordinator(task) {
-                out.push(scope("coordinator", &a2a_broker::coordinator_pane_key(&task.id)));
+                out.push(scope("coordinator", &a2a_broker::coordinator_pane_key(&task.id), None));
             }
             out
         };
         match &self.selection {
-            Selection::Main(repo) => vec![scope(repo, &format!("main:{repo}"))],
+            Selection::Main(repo) => {
+                let root = self.data.repos.iter().find(|r| &r.name == repo).map(|r| r.repo_root.as_path());
+                vec![scope(repo, &format!("main:{repo}"), root)]
+            }
             Selection::Task { task_id, .. } => task_scopes(task_id),
             Selection::Worktree(id) => match self
                 .manager
@@ -44,7 +50,16 @@ impl HarnessWorkspace {
                 .and_then(|e| e.task_id.clone())
             {
                 Some(tid) => task_scopes(&tid),
-                None => vec![scope(id, id)],
+                None => {
+                    let path = self
+                        .data
+                        .repos
+                        .iter()
+                        .flat_map(|r| &r.worktrees)
+                        .find(|w| &w.id == id)
+                        .map(|w| w.path.as_path());
+                    vec![scope(id, id, path)]
+                }
             },
         }
     }
@@ -161,10 +176,21 @@ impl HarnessWorkspace {
             .iter()
             .all(|a| a == "127.0.0.1" || a == "::1" || a == "localhost");
         let reach = if loopback_only { "localhost only".to_string() } else { row.addrs.join(", ") };
-        let detail = match &row.member {
-            Some(m) => format!("{} · {m} · {reach}", row.name),
+        // A container port reads as the container ("db · urbital · → 5432"),
+        // not as the engine process that happens to hold the socket.
+        let what = match &row.container {
+            Some(c) => format!("{} · → {}", c.label, c.container_port),
             None => format!("{} · {reach}", row.name),
         };
+        let detail = match &row.member {
+            Some(m) => format!("{what} · {m}"),
+            None => what,
+        };
+        let hover = match &row.container {
+            Some(c) => format!("container {} · image {} · via {} (pid {})", c.name, c.image, row.name, row.pid),
+            None => format!("{} (pid {})", row.name, row.pid),
+        };
+        let is_container = row.container.is_some();
         let id = format!("port-{section}-{}-{}", row.pid, port);
         div()
             .id(gpui::SharedString::from(id))
@@ -174,7 +200,18 @@ impl HarnessWorkspace {
             .px_3()
             .py_1()
             .hover(|d| d.bg(hx.surface))
-            .tooltip(tip(format!("{} (pid {})", row.name, row.pid)))
+            .tooltip(tip(hover))
+            // Fixed slot so ports line up whether or not a row has the icon.
+            .child(
+                div().flex_none().size(px(14.0)).when(is_container, |d| {
+                    d.child(
+                        gpui::svg()
+                            .size(px(14.0))
+                            .path("icons/file_icons/docker.svg")
+                            .text_color(hx.tx1),
+                    )
+                }),
+            )
             .child(
                 div()
                     .flex_none()

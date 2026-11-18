@@ -17,6 +17,9 @@ Unreleased is empty.
 - **Ports tab** in the tools panel: the servers a task is running, with Open in
   browser and Copy URL, plus the rest of the Mac's listening ports under
   "Other on this Mac".
+- Ports published by Docker containers show the container (Compose service and
+  project, or the container name) with a Docker icon and the port inside it.
+  Compose containers started from a task's folder appear under that task.
 
 ## 1.0.1 - 2026-11-17
 

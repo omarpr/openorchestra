@@ -7,6 +7,7 @@
 //! the attribution is testable without a live machine.
 
 use std::collections::{BTreeMap, HashSet};
+use std::path::PathBuf;
 
 /// One listening socket as `lsof` reports it.
 #[derive(Clone, Debug, PartialEq)]
@@ -32,6 +33,7 @@ pub struct PortsSample {
     pub listeners: Vec<Listener>,
     pub procs: Vec<ProcPath>,
     pub session_panes: Vec<(String, u32)>,
+    pub containers: Vec<Container>,
 }
 
 /// A worktree (or coordinator) whose tmux sessions count as "this task".
@@ -39,6 +41,32 @@ pub struct PortsSample {
 pub struct Scope {
     pub label: String,
     pub session_prefix: String,
+    /// The worktree (or checkout) folder; a Compose container started from
+    /// inside it belongs to this scope.
+    pub path: Option<PathBuf>,
+}
+
+/// A running container with its published ports, from `docker ps`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Container {
+    pub name: String,
+    pub image: String,
+    /// `(host_port, container_port)`, TCP only.
+    pub published: Vec<(u16, u16)>,
+    pub compose_project: Option<String>,
+    pub compose_service: Option<String>,
+    /// Where `docker compose up` ran.
+    pub working_dir: Option<PathBuf>,
+}
+
+/// What a port row knows about the container behind it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContainerInfo {
+    /// Compose service and project (`db · urbital`), or the container name.
+    pub label: String,
+    pub container_port: u16,
+    pub name: String,
+    pub image: String,
 }
 
 /// One port shown in the tab: a process listening on a port, on one or more
@@ -51,6 +79,8 @@ pub struct PortRow {
     pub name: String,
     /// The task member it runs in, only when the task has several.
     pub member: Option<String>,
+    /// Set when the port is published by a container.
+    pub container: Option<ContainerInfo>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -100,6 +130,70 @@ pub fn parse_ps_paths(out: &str) -> Vec<ProcPath> {
         .collect()
 }
 
+/// The `docker ps --format` template [`parse_docker_ps`] reads: tab-separated
+/// name, image, ports, compose project, compose service, compose working dir.
+pub const DOCKER_PS_FORMAT: &str = "{{.Names}}\t{{.Image}}\t{{.Ports}}\t{{.Label \"com.docker.compose.project\"}}\t{{.Label \"com.docker.compose.service\"}}\t{{.Label \"com.docker.compose.project.working_dir\"}}";
+
+/// Parse `docker ps --format DOCKER_PS_FORMAT` output.
+pub fn parse_docker_ps(out: &str) -> Vec<Container> {
+    let opt = |v: Option<&str>| v.map(str::trim).filter(|v| !v.is_empty()).map(str::to_string);
+    out.lines()
+        .filter_map(|line| {
+            let mut f = line.split('\t');
+            let name = f.next()?.trim().to_string();
+            if name.is_empty() {
+                return None;
+            }
+            let image = f.next().unwrap_or("").trim().to_string();
+            let mut published: Vec<(u16, u16)> = Vec::new();
+            for mapping in f.next().unwrap_or("").split(", ").filter_map(parse_published) {
+                for pair in mapping {
+                    if !published.contains(&pair) {
+                        published.push(pair);
+                    }
+                }
+            }
+            Some(Container {
+                name,
+                image,
+                published,
+                compose_project: opt(f.next()),
+                compose_service: opt(f.next()),
+                working_dir: opt(f.next()).map(PathBuf::from),
+            })
+        })
+        .collect()
+}
+
+/// One `docker ps` port entry: `0.0.0.0:5433->5432/tcp`, `[::]:80->80/tcp`,
+/// `0.0.0.0:8000-8002->9000-9002/tcp`. Unpublished (`6667/tcp`) and UDP
+/// entries give `None`.
+fn parse_published(entry: &str) -> Option<Vec<(u16, u16)>> {
+    let entry = entry.trim().strip_suffix("/tcp")?;
+    let (host, inner) = entry.split_once("->")?;
+    let (_, host) = host.rsplit_once(':')?;
+    let range = |r: &str| -> Option<(u16, u16)> {
+        match r.split_once('-') {
+            Some((a, b)) => Some((a.parse().ok()?, b.parse().ok()?)),
+            None => {
+                let p = r.parse().ok()?;
+                Some((p, p))
+            }
+        }
+    };
+    let (h0, h1) = range(host)?;
+    let (i0, _) = range(inner)?;
+    if h1 < h0 {
+        return None;
+    }
+    Some((h0..=h1).map(|h| (h, i0 + (h - h0))).collect())
+}
+
+/// Path fragments of the processes that publish container ports on the host
+/// (OrbStack, Docker Desktop, Colima/Lima, Podman, Rancher Desktop). `docker
+/// ps` only runs when one of them is listening.
+const ENGINE_HINTS: &[&str] = &["OrbStack", "Docker.app", "com.docker", "colima", "lima", "podman", "Rancher"];
+
 /// Executables under these belong to macOS itself (AirPlay receiver,
 /// rapportd, …), never to something the user would share.
 const SYSTEM_PREFIXES: &[&str] = &["/System/", "/usr/libexec/"];
@@ -137,6 +231,12 @@ pub fn classify(s: &PortsSample, scopes: &[Scope]) -> PortsView {
     }
 
     let agents: HashSet<&str> = crate::preflight::AGENTS.iter().copied().collect();
+    // host port -> (container, port inside it)
+    let published: std::collections::HashMap<u16, (&Container, u16)> = s
+        .containers
+        .iter()
+        .flat_map(|c| c.published.iter().map(move |&(h, i)| (h, (c, i))))
+        .collect();
     let mut view = PortsView::default();
     for ((port, pid), mut addrs) in grouped {
         addrs.sort();
@@ -147,17 +247,41 @@ pub fn classify(s: &PortsSample, scopes: &[Scope]) -> PortsView {
         if agents.contains(name.to_ascii_lowercase().as_str()) {
             continue;
         }
-        match owner.get(&pid) {
-            Some(label) => {
-                let member = (scopes.len() > 1).then(|| label.to_string());
-                view.task.push(PortRow { port, addrs, pid, name, member });
+        let member_of = |label: &str| (scopes.len() > 1).then(|| label.to_string());
+        if let Some(label) = owner.get(&pid) {
+            let member = member_of(label);
+            view.task.push(PortRow { port, addrs, pid, name, member, container: None });
+            continue;
+        }
+        if pid == s.app_pid || SYSTEM_PREFIXES.iter().any(|p| path.starts_with(p)) {
+            continue;
+        }
+        let Some(&(c, container_port)) = published.get(&port) else {
+            view.other.push(PortRow { port, addrs, pid, name, member: None, container: None });
+            continue;
+        };
+        let label = match (&c.compose_service, &c.compose_project) {
+            (Some(svc), Some(proj)) => format!("{svc} · {proj}"),
+            _ => c.name.clone(),
+        };
+        let container = Some(ContainerInfo {
+            label,
+            container_port,
+            name: c.name.clone(),
+            image: c.image.clone(),
+        });
+        // Path::starts_with is per component: `feat-xy` is not inside `feat-x`.
+        let scope = c.working_dir.as_ref().and_then(|wd| {
+            scopes
+                .iter()
+                .find(|sc| sc.path.as_ref().is_some_and(|p| wd.starts_with(p)))
+        });
+        match scope {
+            Some(sc) => {
+                let member = member_of(&sc.label);
+                view.task.push(PortRow { port, addrs, pid, name, member, container });
             }
-            None => {
-                if pid == s.app_pid || SYSTEM_PREFIXES.iter().any(|p| path.starts_with(p)) {
-                    continue;
-                }
-                view.other.push(PortRow { port, addrs, pid, name, member: None });
-            }
+            None => view.other.push(PortRow { port, addrs, pid, name, member: None, container }),
         }
     }
     view
@@ -194,7 +318,59 @@ pub fn sample(has_tmux: bool) -> PortsSample {
     let listeners = parse_lsof(&stdout("lsof", &["-nP", "-w", "-iTCP", "-sTCP:LISTEN", "-F", "pcn"]));
     let procs = parse_ps_paths(&stdout("ps", &["-axo", "pid=,ppid=,comm="]));
     let session_panes = if has_tmux { crate::tmux::list_session_panes() } else { Vec::new() };
-    PortsSample { app_pid: std::process::id(), listeners, procs, session_panes }
+    let engine_listening = listeners.iter().any(|l| {
+        procs
+            .iter()
+            .find(|p| p.pid == l.pid)
+            .is_some_and(|p| ENGINE_HINTS.iter().any(|h| p.path.contains(h)))
+    });
+    let containers = if engine_listening {
+        run_bounded("docker", &["ps", "--format", DOCKER_PS_FORMAT], std::time::Duration::from_secs(2))
+            .map(|out| parse_docker_ps(&out))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    PortsSample { app_pid: std::process::id(), listeners, procs, session_panes, containers }
+}
+
+/// Run a command and return its stdout, giving up (and killing it) after
+/// `timeout`: a stopped Docker daemon can leave `docker ps` waiting.
+fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration) -> Option<String> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = std::process::Command::new(cmd)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    // Drain stdout on its own thread so a large output can't fill the pipe
+    // while we wait.
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = stdout.read_to_string(&mut buf);
+        buf
+    });
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let out = reader.join().ok()?;
+                return status.success().then_some(out);
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -210,7 +386,7 @@ mod tests {
     }
 
     fn scope(prefix: &str, label: &str) -> Scope {
-        Scope { label: label.into(), session_prefix: prefix.into() }
+        Scope { label: label.into(), session_prefix: prefix.into(), path: None }
     }
 
     #[test]
@@ -225,6 +401,80 @@ mod tests {
                 l(5, "::1", 5173),
             ]
         );
+    }
+
+    const DOCKER_PS: &str = "urbital-db-1\tpostgres:16\t0.0.0.0:5433->5432/tcp, [::]:5433->5432/tcp\turbital\tdb\t/wt/urbital/feat-x\n\
+comicchat-ergo\tergo:latest\t6667/tcp, 127.0.0.1:8067->8067/tcp, 6697/tcp, 127.0.0.1:8089->8089/tcp\t\t\t\n\
+ranges-1\tapp\t0.0.0.0:8000-8002->9000-9002/tcp, 0.0.0.0:53->53/udp\t\t\t\n\
+quiet-1\tbusybox\t\t\t\t\n";
+
+    fn container(name: &str, host: u16, inner: u16, wd: Option<&str>) -> Container {
+        Container {
+            name: name.into(),
+            image: "img".into(),
+            published: vec![(host, inner)],
+            compose_project: wd.map(|_| "urbital".into()),
+            compose_service: wd.map(|_| "db".into()),
+            working_dir: wd.map(PathBuf::from),
+        }
+    }
+
+    #[test]
+    fn parse_docker_ps_reads_compose_labels_and_published_ports() {
+        let cs = parse_docker_ps(DOCKER_PS);
+        assert_eq!(cs.len(), 4);
+        assert_eq!(cs[0].name, "urbital-db-1");
+        assert_eq!(cs[0].image, "postgres:16");
+        assert_eq!(cs[0].published, vec![(5433, 5432)], "v4 and v6 bindings are one mapping");
+        assert_eq!(cs[0].compose_project.as_deref(), Some("urbital"));
+        assert_eq!(cs[0].compose_service.as_deref(), Some("db"));
+        assert_eq!(cs[0].working_dir, Some(PathBuf::from("/wt/urbital/feat-x")));
+        assert_eq!(cs[1].published, vec![(8067, 8067), (8089, 8089)], "unpublished ports skipped");
+        assert_eq!(cs[1].compose_project, None, "empty label is None");
+        assert_eq!(cs[2].published, vec![(8000, 9000), (8001, 9001), (8002, 9002)], "ranges expand, udp skipped");
+        assert!(cs[3].published.is_empty());
+    }
+
+    #[test]
+    fn classify_names_the_container_behind_an_engine_port() {
+        let s = PortsSample {
+            app_pid: 1,
+            listeners: vec![l(41084, "*", 8067), l(41084, "127.0.0.1", 32222)],
+            procs: vec![p(41084, 0, "/Applications/OrbStack.app/Contents/MacOS/OrbStack")],
+            session_panes: vec![],
+            containers: vec![container("comicchat-ergo", 8067, 6667, None)],
+        };
+        let v = classify(&s, &[]);
+        assert_eq!(v.other.len(), 2);
+        let c = v.other[0].container.as_ref().expect("8067 is a container port");
+        assert_eq!(c.label, "comicchat-ergo");
+        assert_eq!(c.container_port, 6667);
+        assert_eq!(v.other[1].container, None, "engine's own port stays plain");
+    }
+
+    #[test]
+    fn classify_moves_a_compose_container_into_its_task() {
+        let s = PortsSample {
+            app_pid: 1,
+            listeners: vec![l(41084, "*", 5433), l(41084, "*", 8081)],
+            procs: vec![p(41084, 0, "/Applications/OrbStack.app/Contents/MacOS/OrbStack")],
+            session_panes: vec![],
+            containers: vec![
+                container("urbital-db-1", 5433, 5432, Some("/wt/urbital/feat-x")),
+                container("other-db-1", 8081, 8080, Some("/wt/urbital/feat-xy")),
+            ],
+        };
+        let sc = Scope {
+            label: "urbital".into(),
+            session_prefix: "oo-x".into(),
+            path: Some(PathBuf::from("/wt/urbital/feat-x")),
+        };
+        let v = classify(&s, &[sc]);
+        assert_eq!(v.task.len(), 1);
+        assert_eq!(v.task[0].port, 5433);
+        assert_eq!(v.task[0].container.as_ref().unwrap().label, "db · urbital");
+        assert_eq!(v.other.len(), 1, "a sibling folder with a shared name prefix is not inside");
+        assert_eq!(v.other[0].port, 8081);
     }
 
     #[test]
@@ -258,6 +508,7 @@ mod tests {
             listeners: vec![l(10, "::1", 5173), l(10, "*", 5173), l(10, "*", 5173)],
             procs: vec![p(10, 0, "/opt/homebrew/bin/node")],
             session_panes: vec![],
+            containers: vec![],
         };
         let v = classify(&s, &[]);
         assert_eq!(
@@ -268,6 +519,7 @@ mod tests {
                 pid: 10,
                 name: "node".into(),
                 member: None,
+                container: None,
             }]
         );
     }
@@ -284,6 +536,7 @@ mod tests {
                 p(103, 102, "/opt/homebrew/bin/node"),
             ],
             session_panes: vec![("oo-abc-1".into(), 100)],
+            containers: vec![],
         };
         let v = classify(&s, &[scope("oo-abc", "web")]);
         assert_eq!(v.task.len(), 1);
@@ -299,6 +552,7 @@ mod tests {
             listeners: vec![l(101, "127.0.0.1", 54000)],
             procs: vec![p(100, 50, "/bin/zsh"), p(101, 100, "/x/claude.app/Contents/MacOS/claude")],
             session_panes: vec![("oo-abc-1".into(), 100)],
+            containers: vec![],
         };
         let v = classify(&s, &[scope("oo-abc", "web")]);
         assert!(v.task.is_empty());
@@ -313,6 +567,7 @@ mod tests {
             listeners: vec![l(900, "127.0.0.1", 50465), l(901, "*", 9000)],
             procs: vec![p(900, 0, "/x/claude.app/Contents/MacOS/claude"), p(901, 0, "/x/node")],
             session_panes: vec![],
+            containers: vec![],
         };
         let v = classify(&s, &[]);
         let ports: Vec<u16> = v.other.iter().map(|r| r.port).collect();
@@ -336,6 +591,7 @@ mod tests {
                 p(1741, 0, "/Applications/OrbStack.app/Contents/MacOS/OrbStack"),
             ],
             session_panes: vec![],
+            containers: vec![],
         };
         let v = classify(&s, &[]);
         assert_eq!(v.other.len(), 1);
@@ -370,6 +626,25 @@ mod tests {
         assert!(row.name.to_ascii_lowercase().starts_with("python"), "{}", row.name);
     }
 
+    /// Live: every published container port on this machine is labelled.
+    /// Ignored by default (needs a running Docker engine with containers).
+    #[test]
+    #[ignore]
+    fn live_sample_labels_running_containers() {
+        let s = sample(false);
+        assert!(!s.containers.is_empty(), "no containers seen; is an engine running?");
+        let v = classify(&s, &[]);
+        for c in &s.containers {
+            for (host, inner) in &c.published {
+                let row = v.other.iter().find(|r| r.port == *host);
+                let row = row.unwrap_or_else(|| panic!("{}:{host} not listed", c.name));
+                let info = row.container.as_ref().unwrap_or_else(|| panic!(":{host} unlabelled"));
+                assert_eq!(info.container_port, *inner);
+                eprintln!(":{host} -> {} (→ {inner}) via {}", info.label, row.name);
+            }
+        }
+    }
+
     #[test]
     fn classify_labels_members_only_for_multi_scope() {
         let s = PortsSample {
@@ -377,6 +652,7 @@ mod tests {
             listeners: vec![l(201, "*", 4000), l(301, "*", 3000)],
             procs: vec![p(200, 0, "/bin/zsh"), p(201, 200, "/x/node"), p(300, 0, "/bin/zsh"), p(301, 300, "/x/node")],
             session_panes: vec![("oo-api-1".into(), 200), ("oo-web-1".into(), 300)],
+            containers: vec![],
         };
         let v = classify(&s, &[scope("oo-api", "api"), scope("oo-web", "web")]);
         let members: Vec<_> = v.task.iter().map(|r| (r.port, r.member.clone())).collect();
