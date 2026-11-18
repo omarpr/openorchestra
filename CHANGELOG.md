@@ -19,6 +19,10 @@ Unreleased is empty.
   page (the web pages already had a Content-Security-Policy).
 - Pairing results are logged: each successful pairing, each wrong code, and
   each address locked out after repeated wrong codes.
+- Updated the phone client's build tools (vite 6.4.6, vitest 4.1.12), clearing
+  21 advisories that affected only development, not the shipped app.
+- CI audits the phone client's shipped dependencies on every lockfile change and
+  weekly, alongside the existing Rust dependency audit.
 
 ## 1.0.0 - 2026-11-17
 
