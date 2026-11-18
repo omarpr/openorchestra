@@ -196,6 +196,12 @@ impl HarnessWorkspace {
 
     /// Count for the tab label: ports in this task.
     pub(crate) fn ports_task_count(&self) -> usize {
+        // The label shows a count only while Ports is visible (`tab_label`);
+        // don't classify and sort on every Files/Git/Review render for a
+        // number that would be thrown away.
+        if !self.ports_visible() {
+            return 0;
+        }
         self.ports_view().map(|v| v.task.len()).unwrap_or(0)
     }
 
