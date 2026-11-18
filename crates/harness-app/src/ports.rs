@@ -533,7 +533,16 @@ pub fn sample_using(
             .map(|out| parse_lsof_cwd(&out))
             .unwrap_or_default()
     };
-    let containers = if engine_listening {
+    // A local engine listening says nothing about where `docker` connects:
+    // the active context (or DOCKER_HOST, which `context inspect` reflects)
+    // can name a remote daemon over ssh or tcp. Polling that every few
+    // seconds would be background network traffic, so containers are listed
+    // only through a local socket; otherwise rows stay plain engine rows.
+    let local_docker = || {
+        run("docker", &["context", "inspect", "--format", "{{.Endpoints.docker.Host}}"])
+            .is_some_and(|host| is_local_docker_endpoint(host.trim()))
+    };
+    let containers = if engine_listening && local_docker() {
         run("docker", &["ps", "--no-trunc", "--format", DOCKER_PS_FORMAT])
             .map(|out| parse_docker_ps(&out))
             .unwrap_or_default()
@@ -541,6 +550,12 @@ pub fn sample_using(
         Vec::new()
     };
     Some(PortsSample { app_pid: std::process::id(), listeners, procs, session_panes, containers, cwds })
+}
+
+/// A Docker endpoint that stays on this machine: a Unix socket (or a Windows
+/// named pipe). `ssh://`, `tcp://` and anything unrecognised are not.
+fn is_local_docker_endpoint(host: &str) -> bool {
+    host.starts_with("unix://") || host.starts_with("npipe://")
 }
 
 /// Run a command and return its stdout whatever its exit status, giving up
@@ -895,6 +910,36 @@ quiet-1\tbusybox\t\t\t\t\n";
         // A command that finishes in time still returns its output.
         let ok = run_bounded("sh", &["-c", "echo hi"], std::time::Duration::from_secs(2));
         assert_eq!(ok.as_deref(), Some("hi\n"));
+    }
+
+    /// A fake runner: an OrbStack listener, and `endpoint` as the active
+    /// Docker context's endpoint. Records every command it was asked to run.
+    fn engine_runner<'a>(
+        endpoint: &'static str,
+        calls: &'a std::cell::RefCell<Vec<String>>,
+    ) -> impl Fn(&str, &[&str]) -> Option<String> + 'a {
+        move |cmd: &str, args: &[&str]| {
+            calls.borrow_mut().push(format!("{cmd} {}", args.first().copied().unwrap_or("")));
+            Some(match (cmd, args.first().copied()) {
+                ("lsof", Some("-nP")) => "p41084\nf9\nn*:5433\n".to_string(),
+                ("ps", _) => "41084 1 /Applications/OrbStack.app/Contents/MacOS/OrbStack\n".to_string(),
+                ("docker", Some("context")) => format!("{endpoint}\n"),
+                ("docker", Some("ps")) => "db-1\tpg\t0.0.0.0:5433->5432/tcp\t\t\t\t\n".to_string(),
+                _ => String::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn containers_are_listed_only_from_a_local_docker_endpoint() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let s = sample_using(engine_runner("ssh://me@build-box", &calls), false).unwrap();
+        assert!(s.containers.is_empty());
+        assert!(!calls.borrow().iter().any(|c| c == "docker ps"), "{:?}", calls.borrow());
+
+        let calls = std::cell::RefCell::new(Vec::new());
+        let s = sample_using(engine_runner("unix:///Users/me/.orbstack/run/docker.sock", &calls), false).unwrap();
+        assert_eq!(s.containers.len(), 1);
     }
 
     #[test]
