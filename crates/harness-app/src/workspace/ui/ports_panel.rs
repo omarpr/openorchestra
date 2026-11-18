@@ -199,16 +199,26 @@ impl HarnessWorkspace {
     /// Take one sample now, off the UI thread.
     pub(crate) fn refresh_ports(&mut self, cx: &mut Context<Self>) {
         let has_tmux = self.has_tmux;
+        let seq = self.next_ports_seq();
         cx.spawn(async move |view, cx| {
             // `None`: the scan timed out; keep what's shown, the poll retries.
             if let Some(sample) = cx.background_spawn(async move { ports::sample(has_tmux) }).await {
-                let _ = view.update(cx, |ws, cx| ws.apply_ports(sample, cx));
+                let _ = view.update(cx, |ws, cx| ws.apply_ports(seq, sample, cx));
             }
         })
         .detach();
     }
 
-    pub(crate) fn apply_ports(&mut self, sample: ports::PortsSample, cx: &mut Context<Self>) {
+    /// Number a scan as it starts, for [`ports::accept_scan`].
+    pub(crate) fn next_ports_seq(&mut self) -> u64 {
+        self.ports_seq_issued += 1;
+        self.ports_seq_issued
+    }
+
+    pub(crate) fn apply_ports(&mut self, seq: u64, sample: ports::PortsSample, cx: &mut Context<Self>) {
+        if !ports::accept_scan(&mut self.ports_seq_applied, seq) {
+            return;
+        }
         self.ports_sample = Some(sample);
         cx.notify();
     }

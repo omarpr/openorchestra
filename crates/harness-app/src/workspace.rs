@@ -767,6 +767,10 @@ pub struct HarnessWorkspace {
     /// Latest listening-ports sample for the Ports tool tab; `None` until the
     /// tab is first shown. Sampled only while the tab is visible.
     ports_sample: Option<crate::ports::PortsSample>,
+    /// Ports scans are numbered as they start; `ports_seq_applied` is the
+    /// newest one shown, so an older scan finishing late is dropped.
+    ports_seq_issued: u64,
+    ports_seq_applied: u64,
     /// Which Ports sort dropdown is open, if any.
     ports_sort_menu: Option<crate::workspace::ui::ports_panel::SortMenu>,
     /// The dropdown a click outside just closed, and when. The same click

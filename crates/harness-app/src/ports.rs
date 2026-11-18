@@ -463,6 +463,19 @@ fn in_scope(session: &str, prefix: &str) -> bool {
         .is_some_and(|tab| !tab.is_empty() && tab.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// Whether a finished scan, numbered `seq` when it started, may replace what
+/// is shown. Scans overlap (the poll, and the immediate one when the tab
+/// opens), and a slow older one landing last would bring back rows for a
+/// server that has since stopped. Records `seq` when accepted.
+pub fn accept_scan(applied: &mut u64, seq: u64) -> bool {
+    if seq > *applied {
+        *applied = seq;
+        true
+    } else {
+        false
+    }
+}
+
 /// The tab label: the count only while the tab is visible, since sampling
 /// stops when it isn't and a hidden tab's count would be stale.
 pub fn tab_label(task_count: usize, visible: bool) -> String {
@@ -940,6 +953,17 @@ quiet-1\tbusybox\t\t\t\t\n";
         let calls = std::cell::RefCell::new(Vec::new());
         let s = sample_using(engine_runner("unix:///Users/me/.orbstack/run/docker.sock", &calls), false).unwrap();
         assert_eq!(s.containers.len(), 1);
+    }
+
+    #[test]
+    fn an_older_scan_never_replaces_a_newer_one() {
+        let mut applied = 0;
+        assert!(accept_scan(&mut applied, 1), "a lone scan applies");
+        // Scan 2 (the poll) started first but scan 3 (tab reopened) landed
+        // first; when 2 finally lands it is stale.
+        assert!(accept_scan(&mut applied, 3));
+        assert!(!accept_scan(&mut applied, 2));
+        assert_eq!(applied, 3);
     }
 
     #[test]

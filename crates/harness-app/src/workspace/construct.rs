@@ -263,6 +263,8 @@ impl HarnessWorkspace {
             resource: None,
             resource_history: crate::resource_monitor::History::new(RESOURCE_HISTORY),
             ports_sample: None,
+            ports_seq_issued: 0,
+            ports_seq_applied: 0,
             ports_sort_menu: None,
             ports_sort_menu_closed: None,
             archived_repos,
@@ -643,12 +645,15 @@ impl HarnessWorkspace {
                 if !visible {
                     continue;
                 }
+                let Ok(seq) = view.update(cx, |ws, _| ws.next_ports_seq()) else {
+                    break;
+                };
                 let sample = cx
                     .background_spawn(async move { crate::ports::sample(sampler_has_tmux) })
                     .await;
                 // `None`: the scan timed out; keep the last sample, retry next tick.
                 let Some(sample) = sample else { continue };
-                if view.update(cx, |ws, cx| ws.apply_ports(sample, cx)).is_err() {
+                if view.update(cx, |ws, cx| ws.apply_ports(seq, sample, cx)).is_err() {
                     break;
                 }
             }
