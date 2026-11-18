@@ -69,9 +69,18 @@ impl MarkdownPreviewButton {
         item: Option<&dyn ItemHandle>,
         cx: &mut Context<Self>,
     ) -> Option<Entity<editor::Editor>> {
+        use ::markdown_preview::markdown_preview_view::MarkdownPreviewView;
+        let item = item?;
+        // A preview answers `act_as::<Editor>` with the editor it renders (zed
+        // `markdown_preview_view.rs`, `act_as_type`), so without this the eye
+        // showed on the preview itself, where a click only re-selects it.
+        // Zed's own quick-action button has the same blind spot.
+        if item.act_as::<MarkdownPreviewView>(cx).is_some() {
+            return None;
+        }
         // Resolve the editor first so the `&App` borrow ends before
         // `is_markdown_file` takes `cx` mutably.
-        let editor = item.and_then(|item| item.act_as::<editor::Editor>(cx))?;
+        let editor = item.act_as::<editor::Editor>(cx)?;
         ::markdown_preview::markdown_preview_view::MarkdownPreviewView::is_markdown_file(
             &editor, cx,
         )
