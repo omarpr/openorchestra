@@ -38,7 +38,6 @@ settings = { git = "https://github.com/zed-industries/zed.git", rev = "e8bc16ace
 theme = { git = "https://github.com/zed-industries/zed.git", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 theme_settings = { git = "https://github.com/zed-industries/zed.git", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 release_channel = { git = "https://github.com/zed-industries/zed.git", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
-task = { git = "https://github.com/zed-industries/zed.git", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 # `debug-embed`: since v1.2x zed's debug builds read their embedded assets
 # (default settings, keymaps, icons, grammars' queries) from "the checkout that
 # built this binary", found by walking up to the first `.git`. For us that is
@@ -80,11 +79,10 @@ tree-sitter-bash = "=0.25.1"
 # Spike 4: the headless worktree manager + registry (git worktree lifecycle,
 # status, merge-base diff). Path dep — light (serde only), no zed cone.
 worktrees = { path = "../worktrees" }
-# Live sidebar data: forge poller (PR/CI badges via `gh`) + status watcher
-# (agent pill via .harness/status.json). Path deps; degrade gracefully when gh
-# or pi are absent.
+# Live sidebar data: forge poller (PR/CI badges via `gh`). Path dep; degrades
+# gracefully when gh is absent. (The agent pill's status watcher arrives
+# through agent-runtime.)
 forge = { path = "../forge" }
-status-watch = { path = "../status-watch" }
 # The agent-agnostic layer (§4.5-4.6): picks the CLI per worktree, drops in the
 # per-agent config, and normalizes every adapter's signal onto one bus.
 agent-runtime = { path = "../agent-runtime" }
