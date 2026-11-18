@@ -1155,7 +1155,10 @@ quiet-1\tbusybox\t\t\t\t\n";
         let mut found = None;
         for _ in 0..30 {
             std::thread::sleep(std::time::Duration::from_millis(100));
-            let v = classify(&sample(false).expect("scan finished"), &[]);
+            // A scan that timed out or failed is retried, never `expect`ed:
+            // panicking here would skip the cleanup below and leak the server.
+            let Some(scan) = sample(false) else { continue };
+            let v = classify(&scan, &[]);
             if let Some(r) = v.other.iter().find(|r| r.port == 18765) {
                 found = Some(r.clone());
                 break;
