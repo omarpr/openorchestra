@@ -321,7 +321,7 @@ pub fn classify(s: &PortsSample, scopes: &[Scope]) -> PortsView {
         let roots: Vec<u32> = s
             .session_panes
             .iter()
-            .filter(|(name, _)| name.starts_with(&sc.session_prefix))
+            .filter(|(name, _)| in_scope(name, &sc.session_prefix))
             .map(|(_, pid)| *pid)
             .collect();
         for pid in crate::resource_monitor::descendants(edges.iter().copied(), &roots) {
@@ -436,6 +436,16 @@ const MIN_NAME_MATCH: usize = 4;
 /// Lowercase alphanumerics only, so `comic-chat` and `comicchat` compare equal.
 fn squash(s: &str) -> String {
     s.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_lowercase()).collect()
+}
+
+/// Whether a tmux session belongs to the scope with this prefix. Session
+/// names are `prefix` + a numeric tab id (`tmux::session_name`); a bare
+/// `starts_with` also claimed a longer key's sessions (`main:api` took
+/// `main:api_admin`'s, both slugging to `harness_main-api_…`).
+fn in_scope(session: &str, prefix: &str) -> bool {
+    session
+        .strip_prefix(prefix)
+        .is_some_and(|tab| !tab.is_empty() && tab.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// The tab label: the count only while the tab is visible, since sampling
@@ -868,11 +878,11 @@ quiet-1\tbusybox\t\t\t\t\n";
                 p(102, 101, "/opt/homebrew/bin/npm"),
                 p(103, 102, "/opt/homebrew/bin/node"),
             ],
-            session_panes: vec![("oo-abc-1".into(), 100)],
+            session_panes: vec![("oo-abc_1".into(), 100)],
             containers: vec![],
             cwds: Default::default(),
         };
-        let v = classify(&s, &[scope("oo-abc", "web")]);
+        let v = classify(&s, &[scope("oo-abc_", "web")]);
         assert_eq!(v.task.len(), 1);
         assert_eq!(v.task[0].port, 3000);
         assert_eq!(v.task[0].member, None, "one scope: no member label");
@@ -885,11 +895,11 @@ quiet-1\tbusybox\t\t\t\t\n";
             app_pid: 1,
             listeners: vec![l(101, "127.0.0.1", 54000)],
             procs: vec![p(100, 50, "/bin/zsh"), p(101, 100, "/x/claude.app/Contents/MacOS/claude")],
-            session_panes: vec![("oo-abc-1".into(), 100)],
+            session_panes: vec![("oo-abc_1".into(), 100)],
             containers: vec![],
             cwds: Default::default(),
         };
-        let v = classify(&s, &[scope("oo-abc", "web")]);
+        let v = classify(&s, &[scope("oo-abc_", "web")]);
         assert!(v.task.is_empty());
         assert!(v.other.is_empty());
     }
@@ -986,16 +996,33 @@ quiet-1\tbusybox\t\t\t\t\n";
     }
 
     #[test]
+    fn a_session_of_a_longer_key_is_not_this_scopes() {
+        // `main:api` and `main:api_admin` share the stem `harness_main-api_`;
+        // only a numeric tab id may follow a scope's own prefix.
+        let s = PortsSample {
+            app_pid: 1,
+            listeners: vec![l(11, "*", 3000), l(21, "*", 4000)],
+            procs: vec![p(10, 0, "/bin/zsh"), p(11, 10, "/x/node"), p(20, 0, "/bin/zsh"), p(21, 20, "/x/node")],
+            session_panes: vec![("harness_main-api_7".into(), 10), ("harness_main-api_admin_7".into(), 20)],
+            containers: vec![],
+            cwds: Default::default(),
+        };
+        let v = classify(&s, &[scope("harness_main-api_", "api")]);
+        assert_eq!(ports(&v.task), vec![3000]);
+        assert_eq!(ports(&v.other), vec![4000]);
+    }
+
+    #[test]
     fn classify_labels_members_only_for_multi_scope() {
         let s = PortsSample {
             app_pid: 1,
             listeners: vec![l(201, "*", 4000), l(301, "*", 3000)],
             procs: vec![p(200, 0, "/bin/zsh"), p(201, 200, "/x/node"), p(300, 0, "/bin/zsh"), p(301, 300, "/x/node")],
-            session_panes: vec![("oo-api-1".into(), 200), ("oo-web-1".into(), 300)],
+            session_panes: vec![("oo-api_1".into(), 200), ("oo-web_1".into(), 300)],
             containers: vec![],
             cwds: Default::default(),
         };
-        let v = classify(&s, &[scope("oo-api", "api"), scope("oo-web", "web")]);
+        let v = classify(&s, &[scope("oo-api_", "api"), scope("oo-web_", "web")]);
         let members: Vec<_> = v.task.iter().map(|r| (r.port, r.member.clone())).collect();
         assert_eq!(members, vec![(3000, Some("web".into())), (4000, Some("api".into()))]);
     }
