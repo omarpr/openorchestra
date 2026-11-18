@@ -445,4 +445,14 @@ mod collapsed_prefs_tests {
         assert!(Archived.collapsed_by_default());
         assert!(![Stats, Tasks, Projects].iter().any(|s| s.collapsed_by_default()));
     }
+
+    #[test]
+    fn ports_sections_share_the_sidebar_header_keys() {
+        // The Ports tab's two lists use the same collapsible header as the
+        // sidebar, so their collapse state persists the same way.
+        use crate::workspace::ui::sidebar::SidebarSection::*;
+        assert_eq!([PortsTask.label(), PortsOther.label()], ["THIS TASK", "OTHER ON THIS MAC"]);
+        assert!(PortsOther.collapsed_by_default(), "the rest of the Mac starts folded away");
+        assert!(!PortsTask.collapsed_by_default());
+    }
 }

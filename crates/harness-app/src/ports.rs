@@ -91,24 +91,52 @@ pub struct PortRow {
     pub container: Option<ContainerInfo>,
 }
 
-/// How the Ports tab orders its rows. Persisted in prefs.
+/// Which column the Ports tab sorts by.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PortSort {
+pub enum SortField {
     #[default]
-    PortAsc,
-    PortDesc,
+    Port,
     Name,
 }
 
-impl PortSort {
-    pub const ALL: [PortSort; 3] = [PortSort::PortAsc, PortSort::PortDesc, PortSort::Name];
+/// Ascending or descending.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SortOrder {
+    #[default]
+    Asc,
+    Desc,
+}
+
+/// How the Ports tab orders its rows. Persisted in prefs; either half absent
+/// falls back to its default (port, ascending).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PortSort {
+    #[serde(default)]
+    pub field: SortField,
+    #[serde(default)]
+    pub order: SortOrder,
+}
+
+impl SortField {
+    pub const ALL: [SortField; 2] = [SortField::Port, SortField::Name];
 
     pub fn label(self) -> &'static str {
         match self {
-            PortSort::PortAsc => "Port ↑",
-            PortSort::PortDesc => "Port ↓",
-            PortSort::Name => "Name",
+            SortField::Port => "Port",
+            SortField::Name => "Name",
+        }
+    }
+}
+
+impl SortOrder {
+    pub const ALL: [SortOrder; 2] = [SortOrder::Asc, SortOrder::Desc];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SortOrder::Asc => "Ascending",
+            SortOrder::Desc => "Descending",
         }
     }
 }
@@ -123,11 +151,15 @@ impl PortRow {
 
 /// Order rows in place.
 pub fn sort_rows(rows: &mut [PortRow], by: PortSort) {
-    match by {
-        PortSort::PortAsc => rows.sort_by_key(|r| (r.port, r.pid)),
-        PortSort::PortDesc => rows.sort_by_key(|r| std::cmp::Reverse((r.port, r.pid))),
-        // Port breaks ties, so several `node` rows keep a stable order.
-        PortSort::Name => rows.sort_by_cached_key(|r| (r.display_name().to_lowercase(), r.port, r.pid)),
+    let flip = |o: std::cmp::Ordering| if by.order == SortOrder::Desc { o.reverse() } else { o };
+    let tiebreak = |a: &PortRow, b: &PortRow| (a.port, a.pid).cmp(&(b.port, b.pid));
+    match by.field {
+        SortField::Port => rows.sort_by(|a, b| flip(tiebreak(a, b))),
+        // Equal names (several `node` servers) read low port first either way.
+        SortField::Name => rows.sort_by(|a, b| {
+            let (x, y) = (a.display_name().to_lowercase(), b.display_name().to_lowercase());
+            flip(x.cmp(&y)).then_with(|| tiebreak(a, b))
+        }),
     }
 }
 
@@ -644,12 +676,16 @@ quiet-1\tbusybox\t\t\t\t\n";
         rows.iter().map(|r| r.port).collect()
     }
 
+    fn by(field: SortField, order: SortOrder) -> PortSort {
+        PortSort { field, order }
+    }
+
     #[test]
     fn sort_rows_by_port_both_ways() {
         let mut rows = vec![row(5173, "node", None), row(3000, "node", None), row(8080, "ruby", None)];
-        sort_rows(&mut rows, PortSort::PortDesc);
+        sort_rows(&mut rows, by(SortField::Port, SortOrder::Desc));
         assert_eq!(ports(&rows), vec![8080, 5173, 3000]);
-        sort_rows(&mut rows, PortSort::PortAsc);
+        sort_rows(&mut rows, by(SortField::Port, SortOrder::Asc));
         assert_eq!(ports(&rows), vec![3000, 5173, 8080]);
     }
 
@@ -661,16 +697,21 @@ quiet-1\tbusybox\t\t\t\t\n";
             row(4000, "node", None),
             row(3000, "node", None),
         ];
-        sort_rows(&mut rows, PortSort::Name);
+        sort_rows(&mut rows, by(SortField::Name, SortOrder::Asc));
         // db (container) < node (3000, then 4000: port breaks ties) < Zeta
         assert_eq!(ports(&rows), vec![5433, 3000, 4000, 9000]);
+        sort_rows(&mut rows, by(SortField::Name, SortOrder::Desc));
+        // Names reverse; equal names still read low port first.
+        assert_eq!(ports(&rows), vec![9000, 3000, 4000, 5433]);
     }
 
     #[test]
-    fn port_sort_persists_as_snake_case_and_defaults_to_port_asc() {
-        assert_eq!(serde_json::to_string(&PortSort::PortDesc).unwrap(), r#""port_desc""#);
-        assert_eq!(serde_json::from_str::<PortSort>(r#""name""#).unwrap(), PortSort::Name);
-        assert_eq!(PortSort::default(), PortSort::PortAsc);
+    fn port_sort_persists_and_defaults_to_port_ascending() {
+        let json = serde_json::to_string(&by(SortField::Name, SortOrder::Desc)).unwrap();
+        assert_eq!(json, r#"{"field":"name","order":"desc"}"#);
+        assert_eq!(serde_json::from_str::<PortSort>(&json).unwrap(), by(SortField::Name, SortOrder::Desc));
+        assert_eq!(serde_json::from_str::<PortSort>(r#"{"field":"name"}"#).unwrap().order, SortOrder::Asc);
+        assert_eq!(PortSort::default(), by(SortField::Port, SortOrder::Asc));
     }
 
     #[test]

@@ -23,8 +23,9 @@ Unreleased is empty.
   do containers with a folder from the task mounted in. A plain `docker run`
   container whose name starts with the project's (`comicchat-ergo` for
   `comic-chat`) is listed there too, marked "matched by name".
-- Ports tab rows can be sorted by port (ascending or descending) or by name;
-  the choice is remembered.
+- Ports tab rows can be sorted by port or name, ascending or descending, from
+  two dropdowns; the choice is remembered. Its "This task" and "Other on this
+  Mac" lists collapse like the sidebar's sections and remember their state.
 
 ## 1.0.1 - 2026-11-17
 

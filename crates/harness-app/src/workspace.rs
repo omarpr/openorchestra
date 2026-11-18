@@ -767,8 +767,11 @@ pub struct HarnessWorkspace {
     /// Latest listening-ports sample for the Ports tool tab; `None` until the
     /// tab is first shown. Sampled only while the tab is visible.
     ports_sample: Option<crate::ports::PortsSample>,
-    /// Whether the Ports tab's "Other on this Mac" section is expanded.
-    ports_other_open: bool,
+    /// Which Ports sort dropdown is open, if any.
+    ports_sort_menu: Option<crate::workspace::ui::ports_panel::SortMenu>,
+    /// The dropdown a click outside just closed, and when. The same click
+    /// lands on that dropdown's button a moment later and would reopen it.
+    ports_sort_menu_closed: Option<(crate::workspace::ui::ports_panel::SortMenu, std::time::Instant)>,
     /// Project roots the user archived — hidden from the active list but kept so
     /// they can be restored. Persisted to `archived.json`; never deletes files.
     archived_repos: Vec<PathBuf>,

@@ -3,7 +3,15 @@
 //! file decides which sessions count as "this task" and draws the rows.
 
 use super::super::*;
-use crate::ports::{self, PortRow, PortSort, PortsView, Scope};
+use crate::ports::{self, PortRow, PortSort, PortsView, Scope, SortField, SortOrder};
+use super::sidebar::SidebarSection;
+
+/// The two sort dropdowns in the Ports tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SortMenu {
+    Field,
+    Order,
+}
 
 impl HarnessWorkspace {
     /// Whether the Ports tab is on screen, which is the only time it samples.
@@ -73,42 +81,114 @@ impl HarnessWorkspace {
         Some(view)
     }
 
-    /// "Sort: Port ↑ · Port ↓ · Name" above the lists.
+    /// "Sort [Port ▾] [Ascending ▾]" above the lists.
     fn render_ports_sort_bar(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
-        let current = self.prefs.ports_sort;
-        let mut bar = div()
+        let sort = self.prefs.ports_sort;
+        let field_items: Vec<(&'static str, bool, PortSort)> = SortField::ALL
+            .iter()
+            .map(|&f| (f.label(), f == sort.field, PortSort { field: f, ..sort }))
+            .collect();
+        let order_items: Vec<(&'static str, bool, PortSort)> = SortOrder::ALL
+            .iter()
+            .map(|&o| (o.label(), o == sort.order, PortSort { order: o, ..sort }))
+            .collect();
+        div()
             .flex()
             .flex_none()
             .items_center()
             .gap_1()
             .px_3()
             .py_1()
-            .border_b_1()
+            // No bottom rule: THIS TASK's header draws the line below.
+            .child(div().text_xs().text_color(hx.tx2).mr_1().child("Sort"))
+            .child(self.render_sort_dropdown(hx, SortMenu::Field, sort.field.label(), field_items, cx))
+            .child(self.render_sort_dropdown(hx, SortMenu::Order, sort.order.label(), order_items, cx))
+            .into_any_element()
+    }
+
+    /// One dropdown: a button showing the current choice, and when open a
+    /// floating list of choices below it.
+    fn render_sort_dropdown(
+        &self,
+        hx: &HarnessTheme,
+        menu: SortMenu,
+        current: &'static str,
+        items: Vec<(&'static str, bool, PortSort)>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let open = self.ports_sort_menu == Some(menu);
+        let button = div()
+            .id(gpui::SharedString::from(format!("ports-sort-{menu:?}")))
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py(px(2.0))
+            .rounded_md()
+            .border_1()
             .border_color(hx.border)
-            .child(div().text_xs().text_color(hx.tx2).mr_1().child("Sort"));
-        for sort in PortSort::ALL {
-            let selected = sort == current;
-            bar = bar.child(
-                div()
-                    .id(gpui::SharedString::from(format!("ports-sort-{sort:?}")))
-                    .px_2()
-                    .py(px(2.0))
-                    .rounded_md()
-                    .text_xs()
-                    .cursor_pointer()
-                    .when(selected, |d| d.bg(hx.surface2).text_color(hx.tx0))
-                    .when(!selected, |d| {
-                        d.text_color(hx.tx2).hover(|h| h.bg(hx.surface).text_color(hx.tx1))
-                    })
-                    .child(sort.label())
-                    .on_click(cx.listener(move |ws, _, _, cx| {
-                        ws.prefs.ports_sort = sort;
-                        ws.save_prefs(cx);
-                        cx.notify();
-                    })),
-            );
+            .text_xs()
+            .text_color(hx.tx0)
+            .cursor_pointer()
+            .when(open, |d| d.bg(hx.surface2))
+            .hover(|d| d.bg(hx.surface))
+            .child(current)
+            .child(div().text_color(hx.tx2).child("▾"))
+            .on_click(cx.listener(move |ws, _, _, cx| {
+                // The click that closed this menu from outside lands here too.
+                let just_closed = ws
+                    .ports_sort_menu_closed
+                    .take()
+                    .is_some_and(|(m, at)| m == menu && at.elapsed() < Duration::from_millis(400));
+                ws.ports_sort_menu = if open || just_closed { None } else { Some(menu) };
+                cx.notify();
+            }));
+        let mut col = div().flex().flex_col().child(button);
+        if open {
+            let mut list = div()
+                .mt_1()
+                .min_w(px(120.0))
+                .p(px(4.0))
+                .rounded_md()
+                .bg(hx.surface2)
+                .border_1()
+                .border_color(hx.border2)
+                .flex()
+                .flex_col()
+                .on_mouse_down_out(cx.listener(move |ws, _, _, cx| {
+                    ws.ports_sort_menu = None;
+                    ws.ports_sort_menu_closed = Some((menu, std::time::Instant::now()));
+                    cx.notify();
+                }));
+            for (label, selected, choice) in items {
+                list = list.child(
+                    div()
+                        .id(gpui::SharedString::from(format!("ports-sort-{menu:?}-{label}")))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .text_xs()
+                        .text_color(if selected { hx.tx0 } else { hx.tx1 })
+                        .cursor_pointer()
+                        .hover(|d| d.bg(hx.surface_hover))
+                        .child(div().w(px(10.0)).child(if selected { "✓" } else { "" }))
+                        .child(label)
+                        .on_click(cx.listener(move |ws, _, _, cx| {
+                            ws.prefs.ports_sort = choice;
+                            ws.ports_sort_menu = None;
+                            ws.save_prefs(cx);
+                            cx.notify();
+                        })),
+                );
+            }
+            // Deferred + anchored: drawn above the lists instead of pushing
+            // them down, and kept inside the window.
+            col = col.child(gpui::deferred(gpui::anchored().snap_to_window().child(list)));
         }
-        bar.into_any_element()
+        col.into_any_element()
     }
 
     /// Count for the tab label: ports in this task.
@@ -152,10 +232,16 @@ impl HarnessWorkspace {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .py_1()
-            .child(section_header(hx, "This task", view.task.len()));
+            .child(self.section_header(
+                hx,
+                SidebarSection::PortsTask,
+                Some(count_badge(hx, view.task.len())),
+                cx,
+            ));
 
-        if view.task.is_empty() {
+        if self.section_collapsed(SidebarSection::PortsTask) {
+            // Folded: header only.
+        } else if view.task.is_empty() {
             body = body.child(
                 div()
                     .flex()
@@ -179,24 +265,13 @@ impl HarnessWorkspace {
             }
         }
 
-        let open = self.ports_other_open;
-        body = body.child(
-            div()
-                .id("ports-other-toggle")
-                .mt_2()
-                .cursor_pointer()
-                .hover(|d| d.bg(hx.surface))
-                .child(section_header(
-                    hx,
-                    if open { "▾ Other on this Mac" } else { "▸ Other on this Mac" },
-                    view.other.len(),
-                ))
-                .on_click(cx.listener(|ws, _, _, cx| {
-                    ws.ports_other_open = !ws.ports_other_open;
-                    cx.notify();
-                })),
-        );
-        if open {
+        body = body.child(self.section_header(
+            hx,
+            SidebarSection::PortsOther,
+            Some(count_badge(hx, view.other.len())),
+            cx,
+        ));
+        if !self.section_collapsed(SidebarSection::PortsOther) {
             for row in &view.other {
                 body = body.child(self.render_port_row(hx, "other", row, cx));
             }
@@ -305,18 +380,15 @@ impl HarnessWorkspace {
     }
 }
 
-fn section_header(hx: &HarnessTheme, title: &str, count: usize) -> impl IntoElement {
+/// The count at the right of a section header, styled like ARCHIVED's.
+fn count_badge(hx: &HarnessTheme, n: usize) -> AnyElement {
     div()
-        .flex()
-        .items_center()
-        .gap_1()
-        .px_3()
-        .py_1()
+        .flex_none()
         .text_xs()
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(hx.tx1)
-        .child(title.to_string())
-        .child(div().text_color(hx.tx2).child(format!("· {count}")))
+        .font_family(hx.font_mono)
+        .text_color(hx.tx2)
+        .child(n.to_string())
+        .into_any_element()
 }
 
 fn small_button(hx: &HarnessTheme, id: String, label: &'static str) -> gpui::Stateful<gpui::Div> {

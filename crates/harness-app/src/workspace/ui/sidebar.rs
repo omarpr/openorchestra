@@ -18,6 +18,10 @@ pub(crate) enum SidebarSection {
     Tasks,
     Projects,
     Archived,
+    /// The Ports tool tab's two lists. Not sidebar sections, but they use the
+    /// same header so collapsing looks and persists the same everywhere.
+    PortsTask,
+    PortsOther,
 }
 
 impl SidebarSection {
@@ -28,6 +32,8 @@ impl SidebarSection {
             Self::Tasks => "TASKS",
             Self::Projects => "PROJECTS",
             Self::Archived => "ARCHIVED",
+            Self::PortsTask => "THIS TASK",
+            Self::PortsOther => "OTHER ON THIS MAC",
         }
     }
 
@@ -35,7 +41,7 @@ impl SidebarSection {
     /// reach into now and then, and open by default it grows with every
     /// archive and eats the height PROJECTS scrolls in.
     pub(crate) fn collapsed_by_default(self) -> bool {
-        matches!(self, Self::Archived)
+        matches!(self, Self::Archived | Self::PortsOther)
     }
 }
 
@@ -100,7 +106,7 @@ impl HarnessWorkspace {
     /// Only a collapsed header draws a bottom rule. An open section's content
     /// hangs straight off its header: a rule between them made PROJECTS read
     /// as an empty band with the projects in some unlabelled section below.
-    fn section_header(
+    pub(crate) fn section_header(
         &self,
         hx: &HarnessTheme,
         section: SidebarSection,
