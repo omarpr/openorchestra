@@ -839,6 +839,47 @@ async fn send_reply(
     }
 }
 
+struct TempScreenshot(Option<std::path::PathBuf>);
+
+impl TempScreenshot {
+    fn take(&mut self) -> std::path::PathBuf {
+        self.0.take().expect("screenshot path already taken")
+    }
+
+    async fn remove(mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(path)).await;
+        }
+    }
+}
+
+impl Drop for TempScreenshot {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+async fn save_temp_screenshot(
+    state_dir: std::path::PathBuf,
+    extension: &'static str,
+    bytes: Vec<u8>,
+) -> Result<TempScreenshot, (StatusCode, &'static str)> {
+    match tokio::task::spawn_blocking(move || {
+        crate::store::save_screenshot(&state_dir, extension, &bytes)
+            .map(|path| TempScreenshot(Some(path)))
+    })
+    .await
+    {
+        Ok(Ok(saved)) => Ok(saved),
+        Ok(Err(e)) if e.kind() == io::ErrorKind::StorageFull => {
+            Err((StatusCode::INSUFFICIENT_STORAGE, "screenshot_storage_full"))
+        }
+        _ => Err((StatusCode::SERVICE_UNAVAILABLE, "unavailable")),
+    }
+}
+
 async fn send_screenshot_reply(
     s: &Arc<Shared>,
     hub: &crate::tmux_bridge::SessionHub,
@@ -860,22 +901,13 @@ async fn send_screenshot_reply(
     {
         return Err((StatusCode::SERVICE_UNAVAILABLE, "unavailable"));
     }
-    let path = match tokio::task::spawn_blocking(move || {
-        crate::store::save_screenshot(&state_dir, screenshot.extension, &screenshot.bytes)
-    })
-    .await
-    {
-        Ok(Ok(path)) => path,
-        Ok(Err(e)) if e.kind() == io::ErrorKind::StorageFull => {
-            return Err((StatusCode::INSUFFICIENT_STORAGE, "screenshot_storage_full"));
-        }
-        _ => return Err((StatusCode::SERVICE_UNAVAILABLE, "unavailable")),
-    };
+    let mut saved = save_temp_screenshot(state_dir, screenshot.extension, screenshot.bytes).await?;
     let Some(native_image) = screenshot_still_allowed(s, &device.id, id, session, &expected_kind)
     else {
-        let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(path)).await;
+        saved.remove().await;
         return Err((StatusCode::NOT_FOUND, "not_found"));
     };
+    let path = saved.take();
     let path_str = path.to_string_lossy().into_owned();
     let text = if text.trim().is_empty() {
         "Please inspect the attached screenshot."
@@ -910,7 +942,11 @@ async fn send_screenshot_reply(
             let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(path)).await;
             Err((StatusCode::NOT_FOUND, "not_found"))
         }
-        Err(SendLineError::NotWritten(_) | SendLineError::PartialOrUnknown(_)) => {
+        Err(SendLineError::NotWritten(_)) => {
+            let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(path)).await;
+            Err((StatusCode::SERVICE_UNAVAILABLE, "unavailable"))
+        }
+        Err(SendLineError::PartialOrUnknown(_)) => {
             Err((StatusCode::SERVICE_UNAVAILABLE, "unavailable"))
         }
     }
@@ -1094,6 +1130,25 @@ mod tests {
             screenshot_still_allowed(&shared, &writer_id, &id, "s_codex", "codex"),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn cancelled_save_cleans_up_screenshot_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = STANDARD.decode(TEST_PNG).unwrap();
+        let fut = save_temp_screenshot(dir.path().to_path_buf(), "png", bytes);
+        drop(fut);
+        // Yield to let the blocking task finish if it had started; either way no file remains.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let screenshots = dir.path().join("remote/screenshots");
+        if screenshots.exists() {
+            let remaining = std::fs::read_dir(&screenshots)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|e| e.file_name() != ".lock")
+                .count();
+            assert_eq!(remaining, 0);
+        }
     }
 
     #[tokio::test]
