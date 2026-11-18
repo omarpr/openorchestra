@@ -564,16 +564,19 @@ pub fn sample_using(
     // can name a remote daemon over ssh or tcp. Polling that every few
     // seconds would be background network traffic, so containers are listed
     // only through a local socket; otherwise rows stay plain engine rows.
-    let local_docker = || {
+    let local_endpoint = || {
         run("docker", &["context", "inspect", "--format", "{{.Endpoints.docker.Host}}"])
-            .is_some_and(|host| is_local_docker_endpoint(host.trim()))
+            .map(|host| host.trim().to_string())
+            .filter(|host| is_local_docker_endpoint(host))
     };
-    let containers = if engine_listening && local_docker() {
-        run("docker", &["ps", "--no-trunc", "--format", DOCKER_PS_FORMAT])
+    // `-H` pins the listing to the endpoint just checked: the two commands
+    // are separate processes, and without it `docker ps` would resolve the
+    // active context again, which may have switched to a remote one since.
+    let containers = match engine_listening.then(local_endpoint).flatten() {
+        Some(host) => run("docker", &["-H", &host, "ps", "--no-trunc", "--format", DOCKER_PS_FORMAT])
             .map(|out| parse_docker_ps(&out))
-            .unwrap_or_default()
-    } else {
-        Vec::new()
+            .unwrap_or_default(),
+        None => Vec::new(),
     };
     Some(PortsSample { app_pid: std::process::id(), listeners, procs, session_panes, containers, cwds })
 }
@@ -974,12 +977,13 @@ quiet-1\tbusybox\t\t\t\t\n";
         calls: &'a std::cell::RefCell<Vec<String>>,
     ) -> impl Fn(&str, &[&str]) -> Option<String> + 'a {
         move |cmd: &str, args: &[&str]| {
-            calls.borrow_mut().push(format!("{cmd} {}", args.first().copied().unwrap_or("")));
-            Some(match (cmd, args.first().copied()) {
-                ("lsof", Some("-nP")) => "p41084\nf9\nn*:5433\n".to_string(),
+            calls.borrow_mut().push(format!("{cmd} {}", args.join(" ")));
+            let listing = "db-1\tpg\t0.0.0.0:5433->5432/tcp\t\t\t\t\n".to_string();
+            Some(match (cmd, args) {
+                ("lsof", ["-nP", ..]) => "p41084\nf9\nn*:5433\n".to_string(),
                 ("ps", _) => "41084 1 /Applications/OrbStack.app/Contents/MacOS/OrbStack\n".to_string(),
-                ("docker", Some("context")) => format!("{endpoint}\n"),
-                ("docker", Some("ps")) => "db-1\tpg\t0.0.0.0:5433->5432/tcp\t\t\t\t\n".to_string(),
+                ("docker", ["context", ..]) => format!("{endpoint}\n"),
+                ("docker", ["ps", ..]) | ("docker", ["-H", _, "ps", ..]) => listing,
                 _ => String::new(),
             })
         }
@@ -990,11 +994,22 @@ quiet-1\tbusybox\t\t\t\t\n";
         let calls = std::cell::RefCell::new(Vec::new());
         let s = sample_using(engine_runner("ssh://me@build-box", &calls), false).unwrap();
         assert!(s.containers.is_empty());
-        assert!(!calls.borrow().iter().any(|c| c == "docker ps"), "{:?}", calls.borrow());
+        assert!(!calls.borrow().iter().any(|c| c.contains(" ps ")), "{:?}", calls.borrow());
 
         let calls = std::cell::RefCell::new(Vec::new());
         let s = sample_using(engine_runner("unix:///Users/me/.orbstack/run/docker.sock", &calls), false).unwrap();
         assert_eq!(s.containers.len(), 1);
+    }
+
+    #[test]
+    fn docker_ps_is_pinned_to_the_endpoint_that_was_checked() {
+        // If the active context changed between the two docker processes, an
+        // unpinned `docker ps` would resolve the new one. With -H it can't.
+        let calls = std::cell::RefCell::new(Vec::new());
+        sample_using(engine_runner("unix:///Users/me/.orbstack/run/docker.sock", &calls), false).unwrap();
+        let ps: Vec<String> = calls.borrow().iter().filter(|c| c.contains(" ps ")).cloned().collect();
+        assert_eq!(ps.len(), 1, "{ps:?}");
+        assert!(ps[0].starts_with("docker -H unix:///Users/me/.orbstack/run/docker.sock ps "), "{}", ps[0]);
     }
 
     #[test]
