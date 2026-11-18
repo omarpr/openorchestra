@@ -548,39 +548,57 @@ pub fn sample_using(
 /// `timeout`: a stopped Docker daemon can leave `docker ps` waiting.
 fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration) -> Option<String> {
     use std::io::Read;
+    use std::os::unix::process::CommandExt;
     use std::process::Stdio;
     let mut child = std::process::Command::new(cmd)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        // Its own process group, so a timeout can kill helpers it started
+        // too: one that inherited stdout would otherwise hold the pipe open.
+        .process_group(0)
         .spawn()
         .ok()?;
     // Drain stdout on its own thread so a large output can't fill the pipe
-    // while we wait.
+    // while we wait; the deadline covers this read as well as the exit.
     let mut stdout = child.stdout.take()?;
-    let reader = std::thread::spawn(move || {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut buf = String::new();
         let _ = stdout.read_to_string(&mut buf);
-        buf
+        let _ = tx.send(buf);
     });
     let deadline = std::time::Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            // Exit status is ignored: lsof exits 1 when one of the pids has
-            // gone, yet still prints the rest; a failed `docker ps` prints
-            // nothing, which parses to nothing.
-            Ok(Some(_)) => return reader.join().ok(),
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
+    let mut exited = false;
+    let mut output = None;
+    while std::time::Instant::now() < deadline {
+        if !exited {
+            exited = matches!(child.try_wait(), Ok(Some(_)) | Err(_));
         }
+        if output.is_none() {
+            output = rx.try_recv().ok();
+        }
+        // Exit status is ignored: lsof exits 1 when one of the pids has
+        // gone, yet still prints the rest; a failed `docker ps` prints
+        // nothing, which parses to nothing.
+        if exited && output.is_some() {
+            return output;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
+    // Out of time: kill the whole group, which closes the pipe and lets the
+    // reader thread finish, then reap the child.
+    // SAFETY: killpg only sends a signal. The group id is our child's pid.
+    // If the child is unreaped, the id is still ours; if it already exited
+    // and was reaped, the id lives on as long as any group member (the
+    // helper holding the pipe) does, and POSIX doesn't reuse a pid while a
+    // process group with that id exists. With no members left, it's ESRCH.
+    unsafe {
+        libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+    }
+    let _ = child.wait();
+    None
 }
 
 #[cfg(test)]
@@ -865,6 +883,18 @@ quiet-1\tbusybox\t\t\t\t\n";
         let empty = |_: &str, _: &[&str]| Some(String::new());
         let s = sample_using(empty, false).expect("an empty scan is a real answer");
         assert!(s.listeners.is_empty());
+    }
+
+    #[test]
+    fn run_bounded_does_not_wait_on_a_helper_holding_stdout() {
+        // The shell exits at once; its background sleep keeps stdout open.
+        let t0 = std::time::Instant::now();
+        let out = run_bounded("sh", &["-c", "sleep 3 & echo hi"], std::time::Duration::from_millis(300));
+        assert!(t0.elapsed() < std::time::Duration::from_millis(1500), "{:?}", t0.elapsed());
+        assert_eq!(out, None, "output never completed within the deadline");
+        // A command that finishes in time still returns its output.
+        let ok = run_bounded("sh", &["-c", "echo hi"], std::time::Duration::from_secs(2));
+        assert_eq!(ok.as_deref(), Some("hi\n"));
     }
 
     #[test]
