@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or discussion
+    url: https://github.com/omarpr/openorchestra/discussions
+    about: Ask questions and talk through ideas before opening an issue.
+  - name: Security vulnerability
+    url: https://github.com/omarpr/openorchestra/security/advisories/new
+    about: Report privately, not as a public issue.

@@ -242,7 +242,7 @@ Safari, so a token obtained in Safari would not carry over.
   "enabled": true,
   "port": 7443,
   "keep_awake": true,
-  "marked": [{ "worktree_key": "main:comic-chat", "tab_id": 177, "id": "r_x7…" }],
+  "marked": [{ "worktree_key": "main:demo", "tab_id": 177, "id": "r_x7…" }],
   "devices": [{ "id": "d_…", "name": "Omar's iPhone", "token_sha256": "…",
                 "created": "…", "last_seen": "…", "read_only": false }]
 }

@@ -402,8 +402,8 @@ fn claude_conversation_lookup_matches_its_folder_naming() {
     use agent_runtime::{AgentKind, claude_project_slug, has_conversation};
     use std::path::Path;
     assert_eq!(
-        claude_project_slug(Path::new("/Users/omar/.openorchestra/worktrees/lithepg/test12")),
-        "-Users-omar--openorchestra-worktrees-lithepg-test12"
+        claude_project_slug(Path::new("/Users/example/.openorchestra/worktrees/demo/test12")),
+        "-Users-example--openorchestra-worktrees-demo-test12"
     );
     let cfg = tempfile::tempdir().unwrap();
     let work = Path::new("/w/repo.x/t1");
