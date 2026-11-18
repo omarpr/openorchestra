@@ -84,6 +84,13 @@ case "$choice" in
   *) die "OO_RELEASE_BUMP must be patch, minor, major or keep (got: $choice)" ;;
 esac
 
+# A bump can land on a version already released from another branch (a
+# maintenance line at 1.0.0 picking 1.0.1 after v1.0.1 shipped). Refuse it
+# before anything changes, rather than commit and push a duplicate version.
+if [ "$new" != "$current" ] && git -C "$ROOT" rev-parse -q --verify "refs/tags/v$new" >/dev/null; then
+  die "v$new is already released: choose a higher version (latest release: ${latest:-none})"
+fi
+
 # The release notes start from the changelog, so a release with nothing under
 # Unreleased would ship without saying what changed.
 [ -f "$CHANGELOG" ] || die "$CHANGELOG is missing"
