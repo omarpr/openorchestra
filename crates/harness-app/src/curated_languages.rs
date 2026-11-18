@@ -60,9 +60,12 @@ mod tests {
     }
 
     #[test]
-    fn the_curated_set_is_exactly_zeds_builtin_languages() {
-        // Every config in zed's `grammars` crate at the pinned rev, except its
-        // internal `zed-keybind-context`. Exact, so dropping one fails too.
+    fn curated_set_matches_the_pinned_zed_snapshot() {
+        // A snapshot of every config in zed's `grammars` crate at the pinned
+        // rev, except its internal `zed-keybind-context`. Exact, so dropping
+        // one fails. It can't see a language a newer zed adds: when the zed
+        // pin moves, compare `want` with the upstream directories
+        // (crates/grammars/src/*/config.toml) and update both lists.
         let mut want = vec![
             "bash", "c", "cpp", "css", "diff", "env", "gitcommit", "go", "gomod", "gowork",
             "javascript", "jsdoc", "json", "jsonc", "markdown", "markdown-inline", "python",
