@@ -1,4 +1,17 @@
-# openOrchestra
+<p align="center">
+  <img src="assets/openorchestra_1024.png" width="128" height="128" alt="openOrchestra app icon">
+</p>
+
+<h1 align="center">openOrchestra</h1>
+
+<p align="center">
+  <a href="https://github.com/omarpr/openorchestra/actions/workflows/ci.yml"><img src="https://github.com/omarpr/openorchestra/actions/workflows/ci.yml/badge.svg?branch=master" alt="CI"></a>
+  <a href="https://github.com/omarpr/openorchestra/releases/latest"><img src="https://img.shields.io/github/v/release/omarpr/openorchestra?sort=semver&label=release" alt="Latest release"></a>
+  <a href="packaging/homebrew/README.md"><img src="https://img.shields.io/badge/brew-omarpr%2Ftap%2Fopenorchestra-orange?logo=homebrew&logoColor=white" alt="Homebrew: brew install --cask omarpr/tap/openorchestra"></a>
+  <img src="https://img.shields.io/badge/macOS-12%2B-black?logo=apple&logoColor=white" alt="macOS 12 or later">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue" alt="License: GPL-3.0-or-later"></a>
+  <img src="https://img.shields.io/badge/built%20with-Rust%20%2B%20GPUI-dea584?logo=rust&logoColor=white" alt="Built with Rust and GPUI">
+</p>
 
 A native macOS workspace for running coding agents (pi, Claude Code, Codex,
 OpenCode and Kimi) in parallel, each in its own git worktree, next to a real
