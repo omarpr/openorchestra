@@ -142,11 +142,13 @@ pub fn classify(s: &PortsSample, scopes: &[Scope]) -> PortsView {
         addrs.sort();
         let path = path_of(pid).unwrap_or("");
         let name = if path.is_empty() { "?".to_string() } else { basename(path).to_string() };
+        // An agent CLI's own listener (Claude Code's IDE bridge, …) is never the
+        // user's app, in this task or any other session.
+        if agents.contains(name.to_ascii_lowercase().as_str()) {
+            continue;
+        }
         match owner.get(&pid) {
             Some(label) => {
-                if agents.contains(name.to_ascii_lowercase().as_str()) {
-                    continue;
-                }
                 let member = (scopes.len() > 1).then(|| label.to_string());
                 view.task.push(PortRow { port, addrs, pid, name, member });
             }
@@ -159,6 +161,16 @@ pub fn classify(s: &PortsSample, scopes: &[Scope]) -> PortsView {
         }
     }
     view
+}
+
+/// The tab label: the count only while the tab is visible, since sampling
+/// stops when it isn't and a hidden tab's count would be stale.
+pub fn tab_label(task_count: usize, visible: bool) -> String {
+    if visible && task_count > 0 {
+        format!("Ports · {task_count}")
+    } else {
+        "Ports".to_string()
+    }
 }
 
 /// The browser URL for a local port.
@@ -213,6 +225,13 @@ mod tests {
                 l(5, "::1", 5173),
             ]
         );
+    }
+
+    #[test]
+    fn tab_label_counts_only_while_visible() {
+        assert_eq!(tab_label(2, true), "Ports · 2");
+        assert_eq!(tab_label(2, false), "Ports", "a hidden tab's sample is stale");
+        assert_eq!(tab_label(0, true), "Ports");
     }
 
     #[test]
@@ -284,6 +303,20 @@ mod tests {
         let v = classify(&s, &[scope("oo-abc", "web")]);
         assert!(v.task.is_empty());
         assert!(v.other.is_empty());
+    }
+
+    #[test]
+    fn classify_hides_agent_ports_outside_the_task_too() {
+        // Other sessions' Claude Code listeners would otherwise fill "Other".
+        let s = PortsSample {
+            app_pid: 1,
+            listeners: vec![l(900, "127.0.0.1", 50465), l(901, "*", 9000)],
+            procs: vec![p(900, 0, "/x/claude.app/Contents/MacOS/claude"), p(901, 0, "/x/node")],
+            session_panes: vec![],
+        };
+        let v = classify(&s, &[]);
+        let ports: Vec<u16> = v.other.iter().map(|r| r.port).collect();
+        assert_eq!(ports, vec![9000]);
     }
 
     #[test]

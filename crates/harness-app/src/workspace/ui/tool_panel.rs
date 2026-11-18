@@ -65,8 +65,7 @@ impl HarnessWorkspace {
                 ToolTab::Git => "Git".to_string(),
                 ToolTab::Review if review_count > 0 => format!("Review · {review_count}"),
                 ToolTab::Review => "Review".to_string(),
-                ToolTab::Ports if ports > 0 => format!("Ports · {ports}"),
-                ToolTab::Ports => "Ports".to_string(),
+                ToolTab::Ports => crate::ports::tab_label(ports, self.ports_visible()),
             };
             strip = strip.child(
                 div()

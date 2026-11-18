@@ -105,7 +105,8 @@ Decision (proposed): **both, in two sections.**
      ticks "Show agent ports" (not persisted; builder's call whether to add it
      at all).
 2. **Other on this Mac** (collapsed by default): every other TCP listener,
-   minus openOrchestra itself and processes whose executable is under
+   minus openOrchestra itself, the agent CLIs' own listeners (other Claude
+   Code sessions alone add several), and processes whose executable is under
    `/System/` or `/usr/libexec/` (AirPlay, rapportd and friends).
    Why keep it: an agent's `docker compose up` shows up under
    OrbStack/Docker, not under the task, and that is exactly the kind of server
