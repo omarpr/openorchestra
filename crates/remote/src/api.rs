@@ -556,7 +556,7 @@ async fn send_reply(
     } else {
         hub.send_line(text.as_bytes()).await.map_err(|err| {
             eprintln!("oo-remote: send failed: {err}");
-            error(StatusCode::SERVICE_UNAVAILABLE, "unavailable")
+            (StatusCode::SERVICE_UNAVAILABLE, "unavailable")
         })
     };
     match result {
@@ -564,7 +564,7 @@ async fn send_reply(
             s.input.record(session, &device.name, SystemTime::now());
             StatusCode::NO_CONTENT.into_response()
         }
-        Err(response) => response,
+        Err((status, code)) => error(status, code),
     }
 }
 
@@ -576,7 +576,7 @@ async fn send_screenshot_reply(
     session: &str,
     text: &str,
     screenshot: Screenshot,
-) -> Result<(), Response> {
+) -> Result<(), (StatusCode, &'static str)> {
     let native_image = screenshot.native_image;
     let state_dir = s.state_dir.clone();
     // The path is sent as terminal input, so reject terminal control characters.
@@ -585,7 +585,7 @@ async fn send_screenshot_reply(
             .to_str()
             .is_none_or(|path| path.chars().any(char::is_control))
     {
-        return Err(error(StatusCode::SERVICE_UNAVAILABLE, "unavailable"));
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "unavailable"));
     }
     let path = match tokio::task::spawn_blocking(move || {
         crate::store::save_screenshot(&state_dir, screenshot.extension, &screenshot.bytes)
@@ -594,16 +594,13 @@ async fn send_screenshot_reply(
     {
         Ok(Ok(path)) => path,
         Ok(Err(e)) if e.kind() == io::ErrorKind::StorageFull => {
-            return Err(error(
-                StatusCode::INSUFFICIENT_STORAGE,
-                "screenshot_storage_full",
-            ));
+            return Err((StatusCode::INSUFFICIENT_STORAGE, "screenshot_storage_full"));
         }
-        _ => return Err(error(StatusCode::SERVICE_UNAVAILABLE, "unavailable")),
+        _ => return Err((StatusCode::SERVICE_UNAVAILABLE, "unavailable")),
     };
     if !still_allowed(s, &device.id, id, session) {
         let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(path)).await;
-        return Err(error(StatusCode::NOT_FOUND, "not_found"));
+        return Err((StatusCode::NOT_FOUND, "not_found"));
     }
     let path = path.to_string_lossy();
     let text = if text.trim().is_empty() {
@@ -618,7 +615,7 @@ async fn send_screenshot_reply(
         let prompt = format!("{text} Screenshot file: {path:?}");
         hub.send_line(prompt.as_bytes()).await
     };
-    result.map_err(|_| error(StatusCode::SERVICE_UNAVAILABLE, "unavailable"))
+    result.map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "unavailable"))
 }
 
 #[cfg(test)]
