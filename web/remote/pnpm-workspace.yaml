@@ -1,3 +1,9 @@
 allowBuilds:
   "@tailwindcss/oxide": true
   esbuild: true
+overrides:
+  # workbox-build 7.4.1 (latest) still asks for glob ^11, which carries
+  # GHSA advisories fixed in glob 14.0.2+ (and its minimatch 11.0.1+).
+  # Build-time only; `pnpm build` exercises it via vite-plugin-pwa's
+  # precache globbing. Drop this once workbox-build moves past glob 11.
+  "workbox-build>glob": "14.0.6"
