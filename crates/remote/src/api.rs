@@ -39,6 +39,8 @@ const MAX_SCREENSHOT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_ENCODED_SCREENSHOT: usize = MAX_SCREENSHOT_BYTES.div_ceil(3) * 4;
 // Base64 for the image, room for JSON escaping of the caption and the wrapper.
 const MAX_SCREENSHOT_BODY: usize = MAX_ENCODED_SCREENSHOT + MAX_SEND_TEXT * 6 + 128;
+const MAX_SCREENSHOT_DIMENSION: u32 = 16_384;
+const MAX_SCREENSHOT_DECODED_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_DEVICE_NAME: usize = 64;
 const MAX_CODE: usize = 32;
 /// Upper bound on opening a session's control client.
@@ -436,15 +438,247 @@ struct Screenshot {
 }
 
 fn screenshot_extension(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+    if validate_png(bytes) {
         Some("png")
-    } else if bytes.starts_with(b"\xff\xd8\xff") {
+    } else if validate_jpeg(bytes) {
         Some("jpg")
-    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+    } else if validate_webp(bytes) {
         Some("webp")
     } else {
         None
     }
+}
+
+fn screenshot_dimensions_ok(width: u32, height: u32, bytes_per_pixel: u64) -> bool {
+    width > 0
+        && height > 0
+        && width <= MAX_SCREENSHOT_DIMENSION
+        && height <= MAX_SCREENSHOT_DIMENSION
+        && (width as u64)
+            .checked_mul(height as u64)
+            .and_then(|pixels| pixels.checked_mul(bytes_per_pixel))
+            .is_some_and(|bytes| bytes <= MAX_SCREENSHOT_DECODED_BYTES)
+}
+
+fn crc32_ieee(bytes: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+    for &b in bytes {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+fn validate_png(bytes: &[u8]) -> bool {
+    if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return false;
+    }
+    let mut pos = 8usize;
+    let mut saw_ihdr = false;
+    let mut saw_idat = false;
+    let mut saw_iend = false;
+    while let Some(header) = bytes.get(pos..pos + 8) {
+        let len = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        let ctype = &header[4..8];
+        let Some(data_end) = pos.checked_add(8).and_then(|n| n.checked_add(len)) else {
+            return false;
+        };
+        let Some(chunk_end) = data_end.checked_add(4) else {
+            return false;
+        };
+        let Some(crc_bytes) = bytes.get(data_end..chunk_end) else {
+            return false;
+        };
+        let expected_crc =
+            u32::from_be_bytes([crc_bytes[0], crc_bytes[1], crc_bytes[2], crc_bytes[3]]);
+        if crc32_ieee(&bytes[pos + 4..data_end]) != expected_crc {
+            return false;
+        }
+        let data = &bytes[pos + 8..data_end];
+        if !saw_ihdr {
+            if ctype != b"IHDR" || len != 13 {
+                return false;
+            }
+            let width = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+            let height = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+            let bit_depth = data[8];
+            let color_type = data[9];
+            let valid_format = match color_type {
+                0 => matches!(bit_depth, 1 | 2 | 4 | 8 | 16),
+                2 | 4 | 6 => matches!(bit_depth, 8 | 16),
+                3 => matches!(bit_depth, 1 | 2 | 4 | 8),
+                _ => false,
+            };
+            let bpp = if bit_depth == 16 { 8 } else { 4 };
+            if !valid_format || !screenshot_dimensions_ok(width, height, bpp) {
+                return false;
+            }
+            saw_ihdr = true;
+        } else if ctype == b"IDAT" {
+            if len > 0 {
+                saw_idat = true;
+            }
+        } else if ctype == b"IEND" {
+            if len != 0 || chunk_end != bytes.len() {
+                return false;
+            }
+            saw_iend = true;
+            break;
+        }
+        pos = chunk_end;
+    }
+    saw_ihdr && saw_idat && saw_iend
+}
+
+fn validate_jpeg(bytes: &[u8]) -> bool {
+    if !bytes.starts_with(b"\xff\xd8") {
+        return false;
+    }
+    let mut pos = 2usize;
+    let mut saw_sof = false;
+    while pos < bytes.len() {
+        while bytes.get(pos) == Some(&0xff) {
+            pos += 1;
+        }
+        let Some(&marker) = bytes.get(pos) else {
+            return false;
+        };
+        pos += 1;
+        if marker == 0xd9 {
+            return saw_sof && pos == bytes.len();
+        }
+        if marker == 0x00 || marker == 0xd8 {
+            return false;
+        }
+        if marker == 0x01 || (0xd0..=0xd7).contains(&marker) {
+            continue;
+        }
+        let Some(len_bytes) = bytes.get(pos..pos + 2) else {
+            return false;
+        };
+        let seg_len = u16::from_be_bytes([len_bytes[0], len_bytes[1]]) as usize;
+        if seg_len < 2 {
+            return false;
+        }
+        let Some(seg_end) = pos.checked_add(seg_len) else {
+            return false;
+        };
+        let Some(seg) = bytes.get(pos + 2..seg_end) else {
+            return false;
+        };
+        if matches!(
+            marker,
+            0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf
+        ) {
+            if seg.len() < 5 {
+                return false;
+            }
+            let height = u16::from_be_bytes([seg[1], seg[2]]) as u32;
+            let width = u16::from_be_bytes([seg[3], seg[4]]) as u32;
+            if !screenshot_dimensions_ok(width, height, 4) {
+                return false;
+            }
+            saw_sof = true;
+        }
+        pos = seg_end;
+        if marker == 0xda {
+            if !saw_sof {
+                return false;
+            }
+            while pos < bytes.len() {
+                if bytes[pos] != 0xff {
+                    pos += 1;
+                    continue;
+                }
+                while bytes.get(pos) == Some(&0xff) {
+                    pos += 1;
+                }
+                let Some(&next) = bytes.get(pos) else {
+                    return false;
+                };
+                if next == 0x00 || (0xd0..=0xd7).contains(&next) {
+                    pos += 1;
+                    continue;
+                }
+                if next == 0xd9 {
+                    return pos + 1 == bytes.len();
+                }
+                // Next marker segment (e.g., progressive JPEG scans): rewind onto
+                // the `0xFF` prefix so the outer loop parses it normally.
+                pos -= 1;
+                break;
+            }
+        }
+    }
+    false
+}
+
+fn validate_webp(bytes: &[u8]) -> bool {
+    if bytes.len() < 12 || !bytes.starts_with(b"RIFF") || bytes.get(8..12) != Some(b"WEBP") {
+        return false;
+    }
+    let riff_size = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+    if riff_size.checked_add(8) != Some(bytes.len()) {
+        return false;
+    }
+    let mut pos = 12usize;
+    let mut saw_dims = false;
+    while let Some(header) = bytes.get(pos..pos + 8) {
+        let fourcc = &header[0..4];
+        let chunk_len = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
+        let Some(data_end) = pos.checked_add(8).and_then(|n| n.checked_add(chunk_len)) else {
+            return false;
+        };
+        let Some(padded_end) = data_end.checked_add(chunk_len & 1) else {
+            return false;
+        };
+        if padded_end > bytes.len() {
+            return false;
+        }
+        let data = &bytes[pos + 8..data_end];
+        if !saw_dims {
+            if fourcc == b"VP8 " {
+                if data.len() < 10
+                    || (data[0] & 1) != 0
+                    || data[3..6] != [0x9d, 0x01, 0x2a]
+                {
+                    return false;
+                }
+                let width = (u16::from_le_bytes([data[6], data[7]]) & 0x3fff) as u32;
+                let height = (u16::from_le_bytes([data[8], data[9]]) & 0x3fff) as u32;
+                if !screenshot_dimensions_ok(width, height, 4) {
+                    return false;
+                }
+                saw_dims = true;
+            } else if fourcc == b"VP8L" {
+                if data.len() < 5 || data[0] != 0x2f {
+                    return false;
+                }
+                let bits = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
+                let width = (bits & 0x3fff) + 1;
+                let height = ((bits >> 14) & 0x3fff) + 1;
+                if !screenshot_dimensions_ok(width, height, 4) {
+                    return false;
+                }
+                saw_dims = true;
+            } else if fourcc == b"VP8X" {
+                if data.len() < 10 {
+                    return false;
+                }
+                let width = u32::from_le_bytes([data[4], data[5], data[6], 0]) + 1;
+                let height = u32::from_le_bytes([data[7], data[8], data[9], 0]) + 1;
+                if !screenshot_dimensions_ok(width, height, 4) {
+                    return false;
+                }
+                saw_dims = true;
+            }
+        }
+        pos = padded_end;
+    }
+    saw_dims && pos == bytes.len()
 }
 
 /// `\r\n`, `\r` and `\n` each become one space.
@@ -731,6 +965,56 @@ mod tests {
         store.unmark("test", Some(1)).unwrap();
         assert_eq!(upload(&app, &id, Some(&writer), TEST_PNG).await, 404);
         assert!(!dir.path().join("remote/screenshots").exists());
+    }
+
+    #[tokio::test]
+    async fn screenshot_rejects_truncated_and_oversized_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let no_tmux = crate::Tmux {
+            socket: Some(crate::store::new_id("oo-unstarted-test-").unwrap()),
+        };
+        let (shared, id, writer, _) = paired_fixture(dir.path(), no_tmux);
+        let app = router(Arc::new(shared));
+
+        // Signature-only PNG and truncated PNG must be rejected with 415 before saving.
+        let sig_only = STANDARD.encode(b"\x89PNG\r\n\x1a\n");
+        assert_eq!(upload(&app, &id, Some(&writer), &sig_only).await, 415);
+        let mut raw_png = STANDARD.decode(TEST_PNG).unwrap();
+        raw_png.truncate(raw_png.len() - 4);
+        let truncated_png = STANDARD.encode(&raw_png);
+        assert_eq!(upload(&app, &id, Some(&writer), &truncated_png).await, 415);
+
+        // Oversized dimensions in IHDR (valid CRC) must be rejected with 415.
+        let mut huge_png = STANDARD.decode(TEST_PNG).unwrap();
+        huge_png[16..20].copy_from_slice(&20_000u32.to_be_bytes());
+        huge_png[20..24].copy_from_slice(&20_000u32.to_be_bytes());
+        let ihdr_crc = crc32_ieee(&huge_png[12..29]);
+        huge_png[29..33].copy_from_slice(&ihdr_crc.to_be_bytes());
+        assert_eq!(
+            upload(&app, &id, Some(&writer), &STANDARD.encode(&huge_png)).await,
+            415
+        );
+        assert!(!dir.path().join("remote/screenshots").exists());
+    }
+
+    #[test]
+    fn screenshot_validates_jpeg_and_webp_containers() {
+        let valid_jpeg = [
+            0xff, 0xd8, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x02, 0x00, 0x03, 0x01, 0x01, 0x11,
+            0x00, 0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00, 0x00, 0xff, 0xd9,
+        ];
+        assert_eq!(screenshot_extension(&valid_jpeg), Some("jpg"));
+        assert_eq!(screenshot_extension(&valid_jpeg[..valid_jpeg.len() - 2]), None);
+
+        let valid_webp_vp8l = [
+            b'R', b'I', b'F', b'F', 18, 0, 0, 0, b'W', b'E', b'B', b'P', b'V', b'P', b'8', b'L',
+            5, 0, 0, 0, 0x2f, 0, 0, 0, 0, 0,
+        ];
+        assert_eq!(screenshot_extension(&valid_webp_vp8l), Some("webp"));
+        assert_eq!(
+            screenshot_extension(&valid_webp_vp8l[..valid_webp_vp8l.len() - 2]),
+            None
+        );
     }
 
     #[tokio::test]
