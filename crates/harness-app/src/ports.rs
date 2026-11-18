@@ -34,6 +34,8 @@ pub struct PortsSample {
     pub procs: Vec<ProcPath>,
     pub session_panes: Vec<(String, u32)>,
     pub containers: Vec<Container>,
+    /// Each listener's working folder (`lsof -d cwd`).
+    pub cwds: std::collections::HashMap<u32, PathBuf>,
 }
 
 /// A worktree (or coordinator) whose tmux sessions count as "this task".
@@ -89,6 +91,8 @@ pub struct PortRow {
     pub member: Option<String>,
     /// Set when the port is published by a container.
     pub container: Option<ContainerInfo>,
+    /// The process's working folder, when known.
+    pub cwd: Option<PathBuf>,
 }
 
 /// Which column the Ports tab sorts by.
@@ -284,6 +288,20 @@ fn parse_published(entry: &str) -> Option<Vec<(u16, u16)>> {
 /// ps` only runs when one of them is listening.
 const ENGINE_HINTS: &[&str] = &["OrbStack", "Docker.app", "com.docker", "colima", "lima", "podman", "Rancher"];
 
+/// Parse `lsof -a -p <pids> -d cwd -Fpn` output into pid → working folder.
+pub fn parse_lsof_cwd(out: &str) -> std::collections::HashMap<u32, PathBuf> {
+    let mut pid: Option<u32> = None;
+    let mut cwds = std::collections::HashMap::new();
+    for line in out.lines() {
+        if let Some(rest) = line.strip_prefix('p') {
+            pid = rest.parse().ok();
+        } else if let (Some(rest), Some(p)) = (line.strip_prefix('n'), pid) {
+            cwds.insert(p, PathBuf::from(rest));
+        }
+    }
+    cwds
+}
+
 /// Executables under these belong to macOS itself (AirPlay receiver,
 /// rapportd, …), never to something the user would share.
 const SYSTEM_PREFIXES: &[&str] = &["/System/", "/usr/libexec/"];
@@ -338,36 +356,49 @@ pub fn classify(s: &PortsSample, scopes: &[Scope]) -> PortsView {
             continue;
         }
         let member_of = |label: &str| (scopes.len() > 1).then(|| label.to_string());
+        let cwd = s.cwds.get(&pid).cloned();
         if let Some(label) = owner.get(&pid) {
             let member = member_of(label);
-            view.task.push(PortRow { port, addrs, pid, name, member, container: None });
+            view.task.push(PortRow { port, addrs, pid, name, member, container: None, cwd });
             continue;
         }
         if pid == s.app_pid || SYSTEM_PREFIXES.iter().any(|p| path.starts_with(p)) {
             continue;
         }
-        let Some(&(c, container_port)) = published.get(&port) else {
-            view.other.push(PortRow { port, addrs, pid, name, member: None, container: None });
-            continue;
+        let (container, scope) = match published.get(&port) {
+            Some(&(c, container_port)) => {
+                let label = match (&c.compose_service, &c.compose_project) {
+                    (Some(svc), Some(proj)) => format!("{svc} · {proj}"),
+                    _ => c.name.clone(),
+                };
+                let (scope, matched_by_name) = container_scope(c, scopes);
+                let info = ContainerInfo {
+                    label,
+                    container_port,
+                    name: c.name.clone(),
+                    image: c.image.clone(),
+                    matched_by_name,
+                };
+                (Some(info), scope)
+            }
+            // Not in a pane's tree (started in the background, its parent
+            // gone), but running from inside a scope's folder. An engine's
+            // folder says nothing about its containers, so engines never
+            // match this way.
+            None if !ENGINE_HINTS.iter().any(|h| path.contains(h)) => {
+                let scope = cwd.as_ref().and_then(|d| {
+                    scopes.iter().find(|sc| sc.path.as_ref().is_some_and(|p| d.starts_with(p)))
+                });
+                (None, scope)
+            }
+            None => (None, None),
         };
-        let label = match (&c.compose_service, &c.compose_project) {
-            (Some(svc), Some(proj)) => format!("{svc} · {proj}"),
-            _ => c.name.clone(),
-        };
-        let (scope, matched_by_name) = container_scope(c, scopes);
-        let container = Some(ContainerInfo {
-            label,
-            container_port,
-            name: c.name.clone(),
-            image: c.image.clone(),
-            matched_by_name,
-        });
         match scope {
             Some(sc) => {
                 let member = member_of(&sc.label);
-                view.task.push(PortRow { port, addrs, pid, name, member, container });
+                view.task.push(PortRow { port, addrs, pid, name, member, container, cwd });
             }
-            None => view.other.push(PortRow { port, addrs, pid, name, member: None, container }),
+            None => view.other.push(PortRow { port, addrs, pid, name, member: None, container, cwd }),
         }
     }
     view
@@ -444,6 +475,18 @@ pub fn sample(has_tmux: bool) -> PortsSample {
             .find(|p| p.pid == l.pid)
             .is_some_and(|p| ENGINE_HINTS.iter().any(|h| p.path.contains(h)))
     });
+    // Every listener's working folder, in one call.
+    let mut pids: Vec<String> = listeners.iter().map(|l| l.pid.to_string()).collect();
+    pids.sort();
+    pids.dedup();
+    let cwds = if pids.is_empty() {
+        Default::default()
+    } else {
+        let list = pids.join(",");
+        run_bounded("lsof", &["-a", "-w", "-p", &list, "-d", "cwd", "-Fpn"], std::time::Duration::from_secs(2))
+            .map(|out| parse_lsof_cwd(&out))
+            .unwrap_or_default()
+    };
     let containers = if engine_listening {
         run_bounded("docker", &["ps", "--no-trunc", "--format", DOCKER_PS_FORMAT], std::time::Duration::from_secs(2))
             .map(|out| parse_docker_ps(&out))
@@ -451,10 +494,11 @@ pub fn sample(has_tmux: bool) -> PortsSample {
     } else {
         Vec::new()
     };
-    PortsSample { app_pid: std::process::id(), listeners, procs, session_panes, containers }
+    PortsSample { app_pid: std::process::id(), listeners, procs, session_panes, containers, cwds }
 }
 
-/// Run a command and return its stdout, giving up (and killing it) after
+/// Run a command and return its stdout whatever its exit status, giving up
+/// (and killing it) after
 /// `timeout`: a stopped Docker daemon can leave `docker ps` waiting.
 fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration) -> Option<String> {
     use std::io::Read;
@@ -477,10 +521,10 @@ fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration) -> Option
     let deadline = std::time::Instant::now() + timeout;
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => {
-                let out = reader.join().ok()?;
-                return status.success().then_some(out);
-            }
+            // Exit status is ignored: lsof exits 1 when one of the pids has
+            // gone, yet still prints the rest; a failed `docker ps` prints
+            // nothing, which parses to nothing.
+            Ok(Some(_)) => return reader.join().ok(),
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
@@ -547,6 +591,7 @@ quiet-1\tbusybox\t\t\t\t\n";
             procs: vec![p(41084, 0, "/Applications/OrbStack.app/Contents/MacOS/OrbStack")],
             session_panes: vec![],
             containers,
+            cwds: Default::default(),
         }
     }
 
@@ -620,6 +665,7 @@ quiet-1\tbusybox\t\t\t\t\n";
             procs: vec![p(41084, 0, "/Applications/OrbStack.app/Contents/MacOS/OrbStack")],
             session_panes: vec![],
             containers: vec![container("comicchat-ergo", 8067, 6667, None)],
+            cwds: Default::default(),
         };
         let v = classify(&s, &[]);
         assert_eq!(v.other.len(), 2);
@@ -640,6 +686,7 @@ quiet-1\tbusybox\t\t\t\t\n";
                 container("urbital-db-1", 5433, 5432, Some("/wt/urbital/feat-x")),
                 container("other-db-1", 8081, 8080, Some("/wt/urbital/feat-xy")),
             ],
+            cwds: Default::default(),
         };
         let sc = Scope {
             label: "urbital".into(),
@@ -669,6 +716,7 @@ quiet-1\tbusybox\t\t\t\t\n";
                 image: "img".into(),
                 matched_by_name: false,
             }),
+            cwd: None,
         }
     }
 
@@ -722,6 +770,52 @@ quiet-1\tbusybox\t\t\t\t\n";
     }
 
     #[test]
+    fn parse_lsof_cwd_maps_pid_to_folder() {
+        let out = "p93830\nfcwd\nn/Users/omar/projects/comic-chat\np1260\nfcwd\nn/\np7\nfcwd\nn/a folder/with spaces\n";
+        let m = parse_lsof_cwd(out);
+        assert_eq!(m.get(&93830), Some(&PathBuf::from("/Users/omar/projects/comic-chat")));
+        assert_eq!(m.get(&1260), Some(&PathBuf::from("/")));
+        assert_eq!(m.get(&7), Some(&PathBuf::from("/a folder/with spaces")));
+    }
+
+    fn cwd_sample(pid: u32, path: &str, cwd: &str, port: u16) -> PortsSample {
+        PortsSample {
+            app_pid: 1,
+            listeners: vec![l(pid, "*", port)],
+            // Parent 1: orphaned to launchd, so no pane tree reaches it.
+            procs: vec![p(pid, 1, path)],
+            session_panes: vec![],
+            containers: vec![],
+            cwds: [(pid, PathBuf::from(cwd))].into_iter().collect(),
+        }
+    }
+
+    #[test]
+    fn classify_puts_an_orphaned_server_in_the_task_its_folder_is_in() {
+        let s = cwd_sample(93830, "/opt/homebrew/bin/bun", "/Users/omar/projects/comic-chat/apps/web", 3000);
+        let v = classify(&s, &[repo_scope("comic-chat", "/Users/omar/projects/comic-chat")]);
+        assert_eq!(v.task.len(), 1, "{v:?}");
+        assert_eq!(v.task[0].cwd, Some(PathBuf::from("/Users/omar/projects/comic-chat/apps/web")));
+    }
+
+    #[test]
+    fn classify_ignores_an_engine_s_working_folder() {
+        // OrbStack happens to run from some project folder; that says nothing.
+        let s = cwd_sample(41084, "/Applications/OrbStack.app/Contents/MacOS/OrbStack", "/Users/omar/projects/comic-chat/ios", 32222);
+        let v = classify(&s, &[repo_scope("comic-chat", "/Users/omar/projects/comic-chat")]);
+        assert!(v.task.is_empty());
+        assert_eq!(v.other.len(), 1);
+    }
+
+    #[test]
+    fn classify_keeps_a_server_from_a_sibling_folder_out() {
+        let s = cwd_sample(5, "/x/node", "/Users/omar/projects/comic-chat-old", 4000);
+        let v = classify(&s, &[repo_scope("comic-chat", "/Users/omar/projects/comic-chat")]);
+        assert!(v.task.is_empty());
+        assert_eq!(v.other[0].cwd, Some(PathBuf::from("/Users/omar/projects/comic-chat-old")));
+    }
+
+    #[test]
     fn parse_lsof_ignores_garbage() {
         assert!(parse_lsof("n*:x\nhello\np\n").is_empty());
         assert!(parse_lsof("n*:80\n").is_empty(), "a name before any pid has no owner");
@@ -746,6 +840,7 @@ quiet-1\tbusybox\t\t\t\t\n";
             procs: vec![p(10, 0, "/opt/homebrew/bin/node")],
             session_panes: vec![],
             containers: vec![],
+            cwds: Default::default(),
         };
         let v = classify(&s, &[]);
         assert_eq!(
@@ -757,6 +852,7 @@ quiet-1\tbusybox\t\t\t\t\n";
                 name: "node".into(),
                 member: None,
                 container: None,
+                cwd: None,
             }]
         );
     }
@@ -774,6 +870,7 @@ quiet-1\tbusybox\t\t\t\t\n";
             ],
             session_panes: vec![("oo-abc-1".into(), 100)],
             containers: vec![],
+            cwds: Default::default(),
         };
         let v = classify(&s, &[scope("oo-abc", "web")]);
         assert_eq!(v.task.len(), 1);
@@ -790,6 +887,7 @@ quiet-1\tbusybox\t\t\t\t\n";
             procs: vec![p(100, 50, "/bin/zsh"), p(101, 100, "/x/claude.app/Contents/MacOS/claude")],
             session_panes: vec![("oo-abc-1".into(), 100)],
             containers: vec![],
+            cwds: Default::default(),
         };
         let v = classify(&s, &[scope("oo-abc", "web")]);
         assert!(v.task.is_empty());
@@ -805,6 +903,7 @@ quiet-1\tbusybox\t\t\t\t\n";
             procs: vec![p(900, 0, "/x/claude.app/Contents/MacOS/claude"), p(901, 0, "/x/node")],
             session_panes: vec![],
             containers: vec![],
+            cwds: Default::default(),
         };
         let v = classify(&s, &[]);
         let ports: Vec<u16> = v.other.iter().map(|r| r.port).collect();
@@ -829,6 +928,7 @@ quiet-1\tbusybox\t\t\t\t\n";
             ],
             session_panes: vec![],
             containers: vec![],
+            cwds: Default::default(),
         };
         let v = classify(&s, &[]);
         assert_eq!(v.other.len(), 1);
@@ -890,6 +990,7 @@ quiet-1\tbusybox\t\t\t\t\n";
             procs: vec![p(200, 0, "/bin/zsh"), p(201, 200, "/x/node"), p(300, 0, "/bin/zsh"), p(301, 300, "/x/node")],
             session_panes: vec![("oo-api-1".into(), 200), ("oo-web-1".into(), 300)],
             containers: vec![],
+            cwds: Default::default(),
         };
         let v = classify(&s, &[scope("oo-api", "api"), scope("oo-web", "web")]);
         let members: Vec<_> = v.task.iter().map(|r| (r.port, r.member.clone())).collect();

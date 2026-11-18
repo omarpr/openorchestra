@@ -323,6 +323,10 @@ impl HarnessWorkspace {
             }
             None => format!("{} (pid {})", row.name, row.pid),
         };
+        let hover = match &row.cwd {
+            Some(dir) if row.container.is_none() => format!("{hover} · in {}", dir.display()),
+            _ => hover,
+        };
         let is_container = row.container.is_some();
         let id = format!("port-{section}-{}-{}", row.pid, port);
         div()

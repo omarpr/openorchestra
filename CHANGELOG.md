@@ -23,6 +23,9 @@ Unreleased is empty.
   do containers with a folder from the task mounted in. A plain `docker run`
   container whose name starts with the project's (`comicchat-ergo` for
   `comic-chat`) is listed there too, marked "matched by name".
+- A server that's no longer under the task's terminals (started in the
+  background, its shell gone) is still listed under the task when it runs from
+  inside the task's folder. Hovering a row shows its folder.
 - Ports tab rows can be sorted by port or name, ascending or descending, from
   two dropdowns; the choice is remembered. Its "This task" and "Other on this
   Mac" lists collapse like the sidebar's sections and remember their state.
