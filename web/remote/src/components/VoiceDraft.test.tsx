@@ -96,3 +96,18 @@ it("lets the user discard a failed clip without sending another request", async 
   expect(screen.getByRole("button", { name: "Dictate message" })).toBeEnabled();
   expect(fetch).toHaveBeenCalledTimes(1);
 });
+
+it("keeps Stop enabled when disabled becomes true during recording", async () => {
+  const clip = new Blob(["recording"], { type: "audio/wav" });
+  recordVoice.mockImplementation((_signal, onRecording) => new Promise((resolve) => onRecording(() => resolve(clip))));
+  const fetch = vi.fn().mockResolvedValueOnce(Response.json({ text: "hello" }));
+  vi.stubGlobal("fetch", fetch);
+  const user = userEvent.setup();
+  const view = render(<QuickReply id="a1" disabled={false} name="Codex" voiceInput />);
+  await user.click(screen.getByRole("button", { name: "Dictate message" }));
+  view.rerender(<QuickReply id="a1" disabled name="Codex" voiceInput />);
+  const stop = screen.getByRole("button", { name: "Stop recording" });
+  expect(stop).toBeEnabled();
+  await user.click(stop);
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "Message Codex" })).toHaveValue("hello"));
+});

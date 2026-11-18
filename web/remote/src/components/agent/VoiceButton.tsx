@@ -54,7 +54,7 @@ export function VoiceButton({ voice, disabled }: { voice: ReturnType<typeof useV
       variant="outline"
       size="icon"
       aria-label={action.text}
-      disabled={disabled || Boolean(voice.failure)}
+      disabled={phase === "idle" && (disabled || Boolean(voice.failure))}
       className={phase === "recording" ? "size-11 shrink-0 text-destructive" : "size-11 shrink-0"}
       onClick={action.run}
     >
