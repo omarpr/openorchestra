@@ -260,6 +260,27 @@ type Pending = Arc<StdMutex<VecDeque<oneshot::Sender<bool>>>>;
 /// (see [`Hubs::restore_fits_blocking`]).
 type FitRegistry = Arc<StdMutex<HashMap<String, (u16, u16)>>>;
 
+pub(crate) type AuthorizeSend = Box<dyn FnOnce() -> bool + Send>;
+
+#[derive(Debug)]
+pub(crate) enum SendLineError {
+    /// Dequeued authorization check failed before any bytes were written.
+    Unauthorized,
+    /// Delivery failed before any bytes were written to tmux.
+    NotWritten(io::Error),
+    /// Delivery failed during or after writing to tmux.
+    PartialOrUnknown(io::Error),
+}
+
+impl SendLineError {
+    fn into_io(self) -> io::Error {
+        match self {
+            Self::Unauthorized => io::Error::new(io::ErrorKind::PermissionDenied, "unauthorized"),
+            Self::NotWritten(e) | Self::PartialOrUnknown(e) => e,
+        }
+    }
+}
+
 enum Cmd {
     Send {
         lines: Vec<String>,
@@ -269,7 +290,8 @@ enum Cmd {
     /// One command keeps other input from landing in between.
     SendLine {
         batches: [Vec<String>; 3],
-        done: oneshot::Sender<io::Result<()>>,
+        authorize: Option<AuthorizeSend>,
+        done: oneshot::Sender<Result<(), SendLineError>>,
     },
     Fit {
         cols: u16,
@@ -463,24 +485,57 @@ impl SessionHub {
 
     /// Type `text` and then press Enter as a separate write (quick reply).
     pub async fn send_line(&self, text: &[u8]) -> io::Result<()> {
-        self.send_line_batches(text, &[]).await
+        self.send_line_batches(text, &[], None)
+            .await
+            .map_err(SendLineError::into_io)
     }
 
-    /// Paste the image path on its own so Codex can recognize and attach it.
-    pub(crate) async fn send_line_with_image(&self, text: &[u8], path: &str) -> io::Result<()> {
+    /// Type `text` and press Enter, rechecking `authorize` right before the first write.
+    pub(crate) async fn send_line_checked(
+        &self,
+        text: &[u8],
+        authorize: impl FnOnce() -> bool + Send + 'static,
+    ) -> Result<(), SendLineError> {
+        self.send_line_batches(text, &[], Some(Box::new(authorize)))
+            .await
+    }
+
+    /// Paste the image path on its own so Codex can recognize and attach it,
+    /// rechecking `authorize` right before the first write.
+    pub(crate) async fn send_line_with_image_checked(
+        &self,
+        text: &[u8],
+        path: &str,
+        authorize: impl FnOnce() -> bool + Send + 'static,
+    ) -> Result<(), SendLineError> {
         let paste = format!("\x1b[200~{path}\x1b[201~");
-        self.send_line_batches(text, paste.as_bytes()).await
+        self.send_line_batches(text, paste.as_bytes(), Some(Box::new(authorize)))
+            .await
     }
 
-    async fn send_line_batches(&self, text: &[u8], paste: &[u8]) -> io::Result<()> {
+    async fn send_line_batches(
+        &self,
+        text: &[u8],
+        paste: &[u8],
+        authorize: Option<AuthorizeSend>,
+    ) -> Result<(), SendLineError> {
         let (text, enter) = line_keys(&self.pane, text);
         if enter.is_empty() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "bad pane"));
+            return Err(SendLineError::NotWritten(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "bad pane",
+            )));
         }
         let (done, rx) = oneshot::channel();
         let batches = [hex_keys(&self.pane, paste), text, enter];
-        self.request(Cmd::SendLine { batches, done })?;
-        rx.await.map_err(|_| hub_gone())?
+        self.request(Cmd::SendLine {
+            batches,
+            authorize,
+            done,
+        })
+        .map_err(SendLineError::NotWritten)?;
+        rx.await
+            .map_err(|_| SendLineError::PartialOrUnknown(hub_gone()))?
     }
 
     /// Resize the window to `cols`x`rows` until the returned guard (and every
@@ -626,12 +681,35 @@ struct Actor {
 }
 
 impl Actor {
-    async fn send_line(&mut self, [paste, text, enter]: [Vec<String>; 3]) -> io::Result<()> {
+    async fn send_line(
+        &mut self,
+        [paste, text, enter]: [Vec<String>; 3],
+        authorize: Option<AuthorizeSend>,
+    ) -> Result<(), SendLineError> {
+        if authorize.is_some_and(|check| !check()) {
+            return Err(SendLineError::Unauthorized);
+        }
+        let mut wrote_any = false;
         for batch in [paste, text].iter().filter(|batch| !batch.is_empty()) {
-            self.exec(batch).await?;
+            match self.exec_tracking_write(batch).await {
+                Ok(()) => wrote_any = true,
+                Err((wrote, e)) => {
+                    return Err(if wrote_any || wrote {
+                        SendLineError::PartialOrUnknown(e)
+                    } else {
+                        SendLineError::NotWritten(e)
+                    });
+                }
+            }
             tokio::time::sleep(ENTER_DELAY).await;
         }
-        self.exec(&enter).await
+        self.exec_tracking_write(&enter).await.map_err(|(wrote, e)| {
+            if wrote_any || wrote {
+                SendLineError::PartialOrUnknown(e)
+            } else {
+                SendLineError::NotWritten(e)
+            }
+        })
     }
 
     async fn run(mut self, mut rx: mpsc::UnboundedReceiver<Cmd>) {
@@ -640,8 +718,12 @@ impl Actor {
                 Cmd::Send { lines, done } => {
                     let _ = done.send(self.exec(&lines).await);
                 }
-                Cmd::SendLine { batches, done } => {
-                    let _ = done.send(self.send_line(batches).await);
+                Cmd::SendLine {
+                    batches,
+                    authorize,
+                    done,
+                } => {
+                    let _ = done.send(self.send_line(batches, authorize).await);
                 }
                 Cmd::Fit { cols, rows, done } => {
                     let res = match self.fit(cols, rows).await {
@@ -761,7 +843,12 @@ impl Actor {
 
     /// Write control lines and wait for tmux to acknowledge each.
     async fn exec(&mut self, lines: &[String]) -> io::Result<()> {
-        let stdin = self.stdin.as_mut().ok_or_else(hub_gone)?;
+        self.exec_tracking_write(lines).await.map_err(|(_, e)| e)
+    }
+
+    /// Write control lines, reporting whether any bytes were written on error.
+    async fn exec_tracking_write(&mut self, lines: &[String]) -> Result<(), (bool, io::Error)> {
+        let stdin = self.stdin.as_mut().ok_or_else(|| (false, hub_gone()))?;
         let mut acks = Vec::with_capacity(lines.len());
         let mut payload = Vec::new();
         for line in lines {
@@ -774,27 +861,30 @@ impl Actor {
         // `pending`, so either the ack sender is dropped or we see it here.
         if self.closed.load(Ordering::SeqCst) {
             self.pending.lock().unwrap().clear();
-            return Err(hub_gone());
+            return Err((false, hub_gone()));
         }
         for line in lines {
             payload.extend_from_slice(line.as_bytes());
             payload.push(b'\n');
         }
-        stdin.write_all(&payload).await?;
-        stdin.flush().await?;
+        stdin
+            .write_all(&payload)
+            .await
+            .map_err(|e| (true, e))?;
+        stdin.flush().await.map_err(|e| (true, e))?;
         let mut ok = true;
         for ack in acks {
             match tokio::time::timeout(ACK_TIMEOUT, ack).await {
                 Ok(Ok(true)) => {}
                 Ok(Ok(false)) => ok = false,
-                Ok(Err(_)) => return Err(hub_gone()),
-                Err(_) => return Err(io::Error::new(io::ErrorKind::TimedOut, "tmux ack")),
+                Ok(Err(_)) => return Err((true, hub_gone())),
+                Err(_) => return Err((true, io::Error::new(io::ErrorKind::TimedOut, "tmux ack"))),
             }
         }
         if ok {
             Ok(())
         } else {
-            Err(io::Error::other("tmux rejected command"))
+            Err((true, io::Error::other("tmux rejected command")))
         }
     }
 }
@@ -1043,5 +1133,68 @@ mod tests {
         let lines = hex_keys("%3", &[0u8; 256]);
         assert_eq!(lines.len(), 1);
         assert_eq!(hex_keys("%3", &[0u8; 257]).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn queued_checked_send_rechecks_auth_and_distinguishes_no_write() {
+        use std::sync::atomic::AtomicBool;
+        use tokio::io::AsyncReadExt;
+
+        let mut child = tokio::process::Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let closed = Arc::new(AtomicBool::new(false));
+        let (cmds, cmd_rx) = mpsc::unbounded_channel();
+        let (events, _) = broadcast::channel(8);
+        let hub = SessionHub {
+            session: "s_test".into(),
+            tmux: Tmux::default(),
+            pane: "%1".into(),
+            events,
+            cmds: cmds.clone(),
+            closed: closed.clone(),
+        };
+        tokio::spawn(
+            Actor {
+                tmux: Tmux::default(),
+                pane: "%1".into(),
+                child,
+                stdin: Some(stdin),
+                pending: Pending::default(),
+                closed: closed.clone(),
+                cmds: cmds.downgrade(),
+                fits: 0,
+                saved: None,
+                registry: FitRegistry::default(),
+            }
+            .run(cmd_rx),
+        );
+
+        let allowed = Arc::new(AtomicBool::new(true));
+        let check_flag = allowed.clone();
+        // Flip authorization off before the actor processes the command.
+        allowed.store(false, Ordering::SeqCst);
+        let res = hub
+            .send_line_with_image_checked(b"hi", "/tmp/shot.png", move || {
+                check_flag.load(Ordering::SeqCst)
+            })
+            .await;
+        assert!(matches!(res, Err(SendLineError::Unauthorized)));
+
+        // Closed hub before write reports NotWritten.
+        closed.store(true, Ordering::SeqCst);
+        let res = hub
+            .send_line_with_image_checked(b"hi", "/tmp/shot.png", || true)
+            .await;
+        assert!(matches!(res, Err(SendLineError::NotWritten(_))));
+
+        hub.shutdown().await;
+        let mut received = Vec::new();
+        stdout.read_to_end(&mut received).await.unwrap();
+        assert!(received.is_empty(), "expected zero bytes written: {received:?}");
     }
 }

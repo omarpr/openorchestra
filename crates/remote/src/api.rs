@@ -786,7 +786,7 @@ async fn send_screenshot(State(s): AppState, Path(id): Path<String>, request: Re
 }
 
 async fn send_reply(
-    s: &Shared,
+    s: &Arc<Shared>,
     id: &str,
     device: &Device,
     session: &str,
@@ -840,7 +840,7 @@ async fn send_reply(
 }
 
 async fn send_screenshot_reply(
-    s: &Shared,
+    s: &Arc<Shared>,
     hub: &crate::tmux_bridge::SessionHub,
     device: &Device,
     id: &str,
@@ -848,6 +848,8 @@ async fn send_screenshot_reply(
     text: &str,
     screenshot: Screenshot,
 ) -> Result<(), (StatusCode, &'static str)> {
+    use crate::tmux_bridge::SendLineError;
+
     let expected_kind = screenshot.kind;
     let state_dir = s.state_dir.clone();
     // The path is sent as terminal input, so reject terminal control characters.
@@ -874,20 +876,44 @@ async fn send_screenshot_reply(
         let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(path)).await;
         return Err((StatusCode::NOT_FOUND, "not_found"));
     };
-    let path = path.to_string_lossy();
+    let path_str = path.to_string_lossy().into_owned();
     let text = if text.trim().is_empty() {
         "Please inspect the attached screenshot."
     } else {
         text
     };
+    let auth_shared = s.clone();
+    let auth_device = device.id.clone();
+    let auth_id = id.to_string();
+    let auth_session = session.to_string();
+    let auth_kind = expected_kind;
+    let authorize = move || {
+        screenshot_still_allowed(
+            &auth_shared,
+            &auth_device,
+            &auth_id,
+            &auth_session,
+            &auth_kind,
+        )
+        .is_some()
+    };
     let result = if native_image {
-        hub.send_line_with_image(format!(" {text}").as_bytes(), &path)
+        hub.send_line_with_image_checked(format!(" {text}").as_bytes(), &path_str, authorize)
             .await
     } else {
-        let prompt = format!("{text} Screenshot file: {path:?}");
-        hub.send_line(prompt.as_bytes()).await
+        let prompt = format!("{text} Screenshot file: {path_str:?}");
+        hub.send_line_checked(prompt.as_bytes(), authorize).await
     };
-    result.map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "unavailable"))
+    match result {
+        Ok(()) => Ok(()),
+        Err(SendLineError::Unauthorized) => {
+            let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(path)).await;
+            Err((StatusCode::NOT_FOUND, "not_found"))
+        }
+        Err(SendLineError::NotWritten(_) | SendLineError::PartialOrUnknown(_)) => {
+            Err((StatusCode::SERVICE_UNAVAILABLE, "unavailable"))
+        }
+    }
 }
 
 #[cfg(test)]
