@@ -9,7 +9,6 @@ tone_instructions: >-
 
 reviews:
   profile: chill
-  request_changes_workflow: false
   high_level_summary: true
   poem: false
   in_progress_fortune: false
@@ -18,6 +17,37 @@ reviews:
   auto_review:
     enabled: true
     drafts: false
+
+  # CodeRabbit approves a PR once its review covers the latest commit, every
+  # blocking thread is resolved, the pre-merge checks pass, and the PR's merge
+  # risk is within the limit below; until then it requests changes. The
+  # security- and release-critical paths get a stricter limit.
+  auto_approvals:
+    enabled: true
+    approve_on_skipped_review: false
+    # Lets the author comment `@coderabbitai approve` (risk limits still apply).
+    allow_author_approval: true
+    max_merge_risk: moderate
+    overrides:
+      - paths:
+          - "crates/remote/**"
+          - "crates/a2a-broker/**"
+          - ".github/workflows/**"
+          - "script/package-mac.sh"
+          - "script/notarize-mac.sh"
+          - "script/release-version.sh"
+          - "script/update-homebrew-cask.sh"
+          - "crates/harness-app/resources/*.entitlements"
+        max_merge_risk: low
+
+  merge_risk_instructions: >-
+    High risk: the LAN-exposed phone remote server (crates/remote: auth,
+    pairing, certificates, anything that types into terminals); the localhost
+    A2A broker's auth; signing, notarization, entitlements and the release and
+    Homebrew scripts; CI workflows; anything that changes or migrates state
+    under ~/.openorchestra (older builds share it and may not read it). Moderate:
+    app features in crates/harness-app, the phone PWA, dependency upgrades.
+    Low: docs, CHANGELOG, tests, comments, and refactors with no behavior change.
 
   # Generated or vendored files: nothing to review by hand.
   path_filters:
