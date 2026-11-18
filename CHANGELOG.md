@@ -30,6 +30,12 @@ Unreleased is empty.
   two dropdowns; the choice is remembered. Its "This task" and "Other on this
   Mac" lists collapse like the sidebar's sections and remember their state.
 
+### Fixed
+
+- The Review base menu on a project's main checkout read "vs HEAD" and showed
+  the same files as Uncommitted. It now reads "vs origin/<default branch>" and
+  shows everything the checked-out branch changes.
+
 ## 1.0.1 - 2026-11-17
 
 ### Added
