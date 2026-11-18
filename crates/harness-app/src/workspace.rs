@@ -771,6 +771,8 @@ pub struct HarnessWorkspace {
     /// newest one shown, so an older scan finishing late is dropped.
     ports_seq_issued: u64,
     ports_seq_applied: u64,
+    /// One Ports scan at a time (`ports::ScanGate`).
+    ports_gate: crate::ports::ScanGate,
     /// Which Ports sort dropdown is open, if any.
     ports_sort_menu: Option<crate::workspace::ui::ports_panel::SortMenu>,
     /// The last press on a sort dropdown's button (which menu, where), so the

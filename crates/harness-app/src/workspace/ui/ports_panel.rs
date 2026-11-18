@@ -205,15 +205,34 @@ impl HarnessWorkspace {
 
     /// Take one sample now, off the UI thread.
     pub(crate) fn refresh_ports(&mut self, cx: &mut Context<Self>) {
+        // A scan is already running: it's queued to run once that one ends.
+        if !self.ports_gate.try_start(true) {
+            return;
+        }
         let has_tmux = self.has_tmux;
         let seq = self.next_ports_seq();
         cx.spawn(async move |view, cx| {
-            // `None`: the scan timed out; keep what's shown, the poll retries.
-            if let Some(sample) = cx.background_spawn(async move { ports::sample(has_tmux) }).await {
-                let _ = view.update(cx, |ws, cx| ws.apply_ports(seq, sample, cx));
-            }
+            let sample = cx.background_spawn(async move { ports::sample(has_tmux) }).await;
+            let _ = view.update(cx, |ws, cx| ws.finish_ports_scan(seq, sample, cx));
         })
         .detach();
+    }
+
+    /// A scan ended: show its sample (`None`: it timed out; keep what's
+    /// shown, the poll retries), then run the refresh queued meanwhile, if
+    /// Ports is still on screen.
+    pub(crate) fn finish_ports_scan(
+        &mut self,
+        seq: u64,
+        sample: Option<ports::PortsSample>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(sample) = sample {
+            self.apply_ports(seq, sample, cx);
+        }
+        if self.ports_gate.finish() && self.ports_visible() {
+            self.refresh_ports(cx);
+        }
     }
 
     /// Number a scan as it starts, for [`ports::accept_scan`].

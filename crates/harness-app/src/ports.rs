@@ -489,6 +489,36 @@ pub fn accept_scan(applied: &mut u64, seq: u64) -> bool {
     }
 }
 
+/// Keeps Ports scans from overlapping: each one runs lsof, ps and maybe
+/// docker, and clicking the Ports tab (or reopening the panel) asks for one
+/// whether or not the last is still waiting on lsof.
+#[derive(Debug, Default)]
+pub struct ScanGate {
+    in_flight: bool,
+    /// A refresh asked for while a scan ran; at most one is kept.
+    pending: bool,
+}
+
+impl ScanGate {
+    /// Start a scan if none is running. When one is, a refresh
+    /// (`queue_if_busy`) is kept to run after it; a poll tick is just skipped.
+    pub fn try_start(&mut self, queue_if_busy: bool) -> bool {
+        if self.in_flight {
+            self.pending |= queue_if_busy;
+            return false;
+        }
+        self.in_flight = true;
+        true
+    }
+
+    /// The running scan ended, with a sample or a timeout alike. `true` when a
+    /// queued refresh should start now.
+    pub fn finish(&mut self) -> bool {
+        self.in_flight = false;
+        std::mem::take(&mut self.pending)
+    }
+}
+
 /// The tab label: the count only while the tab is visible, since sampling
 /// stops when it isn't and a hidden tab's count would be stale.
 pub fn tab_label(task_count: usize, visible: bool) -> String {
@@ -1125,6 +1155,20 @@ quiet-1\tbusybox\t\t\t\t\n";
         assert_eq!(accepted("lsof", ran(None, "", "")), None);
         assert_eq!(accepted("ps", ran(Some(1), "", "")), None, "status 1 is only lsof's no-match");
         assert_eq!(accepted("docker", ran(Some(1), "", "Cannot connect to the Docker daemon\n")), None);
+    }
+
+    #[test]
+    fn one_scan_at_a_time_with_one_follow_up_kept() {
+        let mut gate = ScanGate::default();
+        assert!(gate.try_start(true), "idle: start");
+        assert!(!gate.try_start(true), "busy: a refresh is queued, not started");
+        assert!(!gate.try_start(true), "still just one queued");
+        assert!(!gate.try_start(false), "a poll tick while busy is skipped");
+        assert!(gate.finish(), "the queued refresh runs next");
+        assert!(gate.try_start(true));
+        assert!(!gate.finish(), "nothing queued");
+        assert!(gate.try_start(false), "idle again");
+        assert!(!gate.finish());
     }
 
     #[test]
