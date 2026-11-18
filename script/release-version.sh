@@ -37,11 +37,39 @@ next_patch="$major.$minor.$((patch + 1))"
 next_minor="$major.$((minor + 1)).0"
 next_major="$((major + 1)).0.0"
 
+[ -f "$CHANGELOG" ] || die "$CHANGELOG is missing"
+grep -q '^## Unreleased$' "$CHANGELOG" || die "$CHANGELOG has no '## Unreleased' section"
+unreleased="$(awk '/^## Unreleased$/ {on = 1; next} on && /^## / {exit} on && !/^### / && NF' "$CHANGELOG")"
+
+# Prepared: an earlier run already cut this version's changelog section and
+# committed it, but no tag exists, because packaging or publishing stopped
+# afterwards (missing `gh` login, a failed notarization, …).
+prepared=0
+if ((!released)) && grep -q "^## $current - " "$CHANGELOG"; then
+  prepared=1
+fi
+
 echo
 printf '  Current version:  \033[1m%s\033[0m' "$current"
 ((released)) && printf '  (already released as v%s)' "$current"
+((prepared)) && printf '  (prepared, not yet released)'
 echo
 printf '  Latest release:   %s\n\n' "${latest:-none}"
+
+# Resume a prepared release: its version and changelog section are already
+# committed, so publish it as is (no bump, no second cut). Only when nothing
+# new is under Unreleased; otherwise the usual choice below applies.
+if ((prepared)) && [ -z "$unreleased" ] && [ -z "${OO_RELEASE_BUMP:-}" ]; then
+  [ -z "$(git -C "$ROOT" status --porcelain)" ] \
+    || die "working tree is dirty: commit or stash first"
+  branch="$(git -C "$ROOT" symbolic-ref --quiet --short HEAD)" \
+    || die "not on a branch (detached HEAD)"
+  say "v$current was prepared but never published: resuming it (no bump, no changelog cut)"
+  # The earlier push may be what failed; publishing needs the commit on GitHub.
+  git -C "$ROOT" push --quiet origin "$branch" \
+    || die "push failed: the release commit must be on GitHub before publishing"
+  exit 0
+fi
 
 choice="${OO_RELEASE_BUMP:-}"
 if [ -z "$choice" ]; then
@@ -79,6 +107,7 @@ case "$choice" in
   major) new="$next_major" ;;
   keep)
     ((released)) && die "v$current is already released: pick patch, minor or major"
+    ((prepared)) && die "v$current already has its changelog section: move the Unreleased lines into it and commit, or pick a bump"
     new="$current"
     ;;
   *) die "OO_RELEASE_BUMP must be patch, minor, major or keep (got: $choice)" ;;
@@ -93,9 +122,6 @@ fi
 
 # The release notes start from the changelog, so a release with nothing under
 # Unreleased would ship without saying what changed.
-[ -f "$CHANGELOG" ] || die "$CHANGELOG is missing"
-grep -q '^## Unreleased$' "$CHANGELOG" || die "$CHANGELOG has no '## Unreleased' section"
-unreleased="$(awk '/^## Unreleased$/ {on = 1; next} on && /^## / {exit} on && !/^### / && NF' "$CHANGELOG")"
 [ -n "$unreleased" ] \
   || die "nothing under '## Unreleased' in CHANGELOG.md: add what changed since ${latest:-the last release} first"
 
