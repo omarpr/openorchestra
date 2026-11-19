@@ -12,6 +12,8 @@ Unreleased is empty.
 
 ## Unreleased
 
+## 1.3.0 - 2026-11-19
+
 ### Added
 
 - Open **Overview** from the Review panel to generate a review with Codex,
