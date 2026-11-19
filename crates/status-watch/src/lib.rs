@@ -25,7 +25,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
-use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::event::{AccessKind, AccessMode};
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
 
 /// Agent lifecycle state as surfaced in the sidebar pill.
@@ -257,9 +258,11 @@ impl StatusWatcher {
 
         // Watch the directory (not the file): atomic temp+rename replaces the
         // inode, which would silently detach a file-level watch.
-        let mut registry = self.registry.lock().unwrap();
+        // On Linux, watch() waits for the same thread that delivers callbacks.
+        // Let those callbacks acquire the registry lock while it registers.
         self.watcher
             .watch(&harness_dir, RecursiveMode::NonRecursive)?;
+        let mut registry = self.registry.lock().unwrap();
         let mut entry = WatchEntry {
             worktree_root: root,
             last_emitted: HashMap::new(),
@@ -313,6 +316,12 @@ fn read_status(path: &Path) -> ReadOutcome {
 }
 
 fn handle_fs_event(registry: &Registry, tx: &Sender<StatusEvent>, event: &Event) {
+    // inotify reports our own reads as access events. Reading again in response
+    // keeps its event loop busy, so only handle access events that close a write.
+    if matches!(event.kind, EventKind::Access(kind) if kind != AccessKind::Close(AccessMode::Write))
+    {
+        return;
+    }
     let mut registry = registry.lock().unwrap();
     if event.paths.is_empty() {
         for (dir, entry) in registry.iter_mut() {

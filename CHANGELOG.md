@@ -53,6 +53,7 @@ Unreleased is empty.
 - Agent status, alerts, and waiting-tab navigation follow the tab that produced
   them when several agents share a worktree. The collapsed Conductor badge
   counts running agent tabs.
+- Starting to watch several worktrees no longer blocks status updates on Linux.
 - Notifications can arrive while another agent tab is selected, the app window
   is inactive, or a maximized tools panel covers the center pane.
 - A closed or exited agent clears its own activity. Running agents keep their
