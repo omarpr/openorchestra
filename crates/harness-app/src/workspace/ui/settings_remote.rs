@@ -315,7 +315,11 @@ impl HarnessWorkspace {
                                             .text_ellipsis()
                                             .whitespace_nowrap()
                                             .text_color(hx.tx2)
-                                            .child(format!("{} \u{00B7} {}", row.project, row.worktree)),
+                                            .child(if row.worktree.is_empty() {
+                                                row.project.clone()
+                                            } else {
+                                                format!("{} · {}", row.project, row.worktree)
+                                            }),
                                     ),
                             ),
                     )

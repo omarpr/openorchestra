@@ -188,6 +188,12 @@ cp "$ROOT/assets/openOrchestra.icns" "$APP/Contents/Resources/$APP_NAME.icns"
 # All of them, not a named one: the settings picker offers every bundled sound,
 # and one left out of the bundle is a choice that silently plays nothing.
 cp "$ROOT"/crates/harness-app/sounds/*.wav "$APP/Contents/Resources/"
+VOICE_HELPER="$APP/Contents/Helpers/oo-voice"
+if ((universal)); then
+  bash "$ROOT/script/build-voice-helper.sh" "$VOICE_HELPER" arm64 x86_64
+else
+  bash "$ROOT/script/build-voice-helper.sh" "$VOICE_HELPER" "$ARCH_TAG"
+fi
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -222,13 +228,14 @@ touch "$APP"
 #   otherwise    ad-hoc, which carries no identity at all: fine on the machine
 #                that built it, quarantined everywhere else.
 #
-# No --deep in either path. Apple deprecated it, and it pushes entitlements onto
-# nested code; this bundle holds exactly one Mach-O, so signing it directly is
-# both correct and sufficient.
+# Sign nested code separately so the helper does not inherit app entitlements.
 # ---------------------------------------------------------------------------
 if ((notarize)); then
   "$ROOT/script/notarize-mac.sh" "$APP"
 elif command -v codesign >/dev/null 2>&1; then
+  if [ -f "$VOICE_HELPER" ]; then
+    codesign --force --sign - "$VOICE_HELPER"
+  fi
   say "ad-hoc signing"
   codesign --force --sign - "$APP" || echo "(codesign failed; app still runnable via right-click → Open)"
 fi

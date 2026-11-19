@@ -143,6 +143,7 @@ dependencies = [
  "serde",
  "serde_json",
  "status-watch",
+ "tempfile",
  "toml_edit 0.25.19+spec-1.1.0",
  "worktrees",
 ]
@@ -6959,10 +6960,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "time",
  "tokio",
  "x509-parser",
  "zstd",
+ "zune-jpeg",
 ]
 
 [[package]]

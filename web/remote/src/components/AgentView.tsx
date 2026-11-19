@@ -4,13 +4,14 @@ import { AgentHeader } from "@/components/agent/AgentHeader";
 import { AgentToolbar } from "@/components/agent/AgentToolbar";
 import { ConnectionState } from "@/components/agent/ConnectionState";
 import { NotShared } from "@/components/agent/NotShared";
+import { ViewErrorBoundary } from "@/components/agent/ViewErrorBoundary";
 import { ConversationView, TerminalView } from "@/components/lazyViews";
 import { StatusBar } from "@/components/StatusBar";
 import type { TerminalHandle } from "@/components/TerminalView";
 import { useClosures } from "@/hooks/useClosures";
+import { useDevice } from "@/hooks/useDevice";
 import { useFocusWhenWaiting } from "@/hooks/useFocusWhenWaiting";
 import { useIsTablet } from "@/hooks/useMedia";
-import { useReadOnly } from "@/hooks/useReadOnly";
 import { useTerminalPrefs } from "@/hooks/useTerminalPrefs";
 import { useViewChoice, type View } from "@/hooks/useViewChoice";
 import { agentName, isShell } from "@/lib/agents";
@@ -31,18 +32,19 @@ export function AgentView({
 }) {
   const isTablet = useIsTablet();
   const term = useRef<TerminalHandle>(null);
-  const replyInput = useRef<HTMLInputElement>(null);
+  const replyInput = useRef<HTMLTextAreaElement>(null);
   const [ctrl, setCtrl] = useState(false);
   const [initReadOnly, setInitReadOnly] = useState(false);
-  const meReadOnly = useReadOnly();
+  const device = useDevice();
   const prefs = useTerminalPrefs(id);
   const { view, pick, hasConv, canPick, notFound, loading } = useViewChoice(id, agent, agentsLoaded);
   const { closed, connected, setConnected, report, retry, attempt } = useClosures(view, remoteUp);
+  const activity = closed ? undefined : agent;
 
   const shell = agent ? isShell(agent) : false;
   const stopped = closed === "stopped" || agent?.status === "stopped";
   // Controls stay hidden until /api/me confirms the device may type.
-  const readOnly = meReadOnly !== false || initReadOnly;
+  const readOnly = device?.read_only !== false || initReadOnly;
   const canType = !readOnly && !stopped && !closed && !loading && !notFound;
   useFocusWhenWaiting(agent?.status, view === "conversation" && canType, replyInput);
 
@@ -65,49 +67,49 @@ export function AgentView({
         canPick={canPick}
         fontSize={prefs.fontSize}
         onStepFont={prefs.stepFont}
-        watchOnly={meReadOnly !== null && readOnly}
+        watchOnly={device !== null && readOnly}
       />
 
       <ConnectionState closed={closed} connected={connected} shell={shell} onRetry={retry} />
 
       <div className="min-h-0 flex-1">
-        <Suspense fallback={<ViewLoading />}>
-          {notFound ? (
-            <NotShared showBack={!isTablet} />
-          ) : loading ? null : view === "conversation" ? (
-            <AgentConversation
-              ready={hasConv}
-              key={attempt}
-              id={id}
-              onClosed={report}
-              onConnection={setConnected}
-              shell={shell}
-              onOpenTerminal={() => pickView("terminal")}
-            />
-          ) : (
-            <TerminalView
-              key={attempt}
-              ref={term}
-              id={id}
-              fit={prefs.fit}
-              fontSize={prefs.fontSize}
-              ctrl={ctrl}
-              onCtrlUsed={() => setCtrl(false)}
-              onInit={setInitReadOnly}
-              onClosed={report}
-              onConnection={setConnected}
-            />
-          )}
-        </Suspense>
+        <ViewErrorBoundary key={`${view}:${attempt}`}>
+          <Suspense fallback={<ViewLoading />}>
+            {notFound ? (
+              <NotShared showBack={!isTablet} />
+            ) : loading ? null : view === "conversation" ? (
+              <AgentConversation
+                ready={hasConv}
+                id={id}
+                onClosed={report}
+                onConnection={setConnected}
+                shell={shell}
+                activity={activity}
+                onOpenTerminal={() => pickView("terminal")}
+              />
+            ) : (
+              <TerminalView
+                ref={term}
+                id={id}
+                fit={prefs.fit}
+                fontSize={prefs.fontSize}
+                ctrl={ctrl}
+                onCtrlUsed={() => setCtrl(false)}
+                onInit={setInitReadOnly}
+                onClosed={report}
+                onConnection={setConnected}
+              />
+            )}
+          </Suspense>
+        </ViewErrorBoundary>
       </div>
-
-      {agent && view === "conversation" && !closed && <StatusBar status={agent.status} tool={agent.tool} />}
 
       {canType && (
         <AgentComposer
           id={id}
           name={shell ? null : agentName(agent?.agent_kind ?? null)}
           stopped={stopped}
+          voiceInput={device?.voice_input}
           inputRef={replyInput}
           track={hasConv ? { queued: agent?.status === "running" } : undefined}
           terminal={
@@ -127,14 +129,21 @@ export function AgentView({
   );
 }
 
-function AgentConversation({ ready, ...props }: React.ComponentProps<typeof ConversationView> & { ready: boolean }) {
-  if (ready) return <ConversationView {...props} />;
+function AgentConversation({
+  ready,
+  activity,
+  ...props
+}: React.ComponentProps<typeof ConversationView> & { ready: boolean }) {
+  if (ready) return <ConversationView {...props} activity={activity} />;
   return (
-    <div
-      role="status"
-      className="flex h-full items-center justify-center px-4 text-center text-sm text-muted-foreground"
-    >
-      Waiting for a transcript for this tab. You can use Terminal in the meantime.
+    <div className="flex h-full flex-col">
+      <div
+        role="status"
+        className="flex flex-1 items-center justify-center px-4 text-center text-sm text-muted-foreground"
+      >
+        Waiting for a transcript for this tab. You can use Terminal in the meantime.
+      </div>
+      {activity && <StatusBar status={activity.status} tool={activity.tool} />}
     </div>
   );
 }

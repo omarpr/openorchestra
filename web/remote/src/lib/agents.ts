@@ -1,18 +1,27 @@
 import type { Agent } from "./api";
 
-const AGENT_NAMES: Record<string, string> = {
-  "claude-code": "Claude Code",
-  pi: "pi",
-  codex: "Codex",
-  kimi: "Kimi",
-  opencode: "OpenCode",
+const AGENTS: Record<string, { name: string; conversationWhilePending?: boolean }> = {
+  "claude-code": { name: "Claude Code", conversationWhilePending: true },
+  pi: { name: "pi" },
+  codex: { name: "Codex", conversationWhilePending: true },
+  kimi: { name: "Kimi" },
+  opencode: { name: "OpenCode", conversationWhilePending: true },
 };
 
 /** Display name for an agent kind; "" for a shell. */
-export const agentName = (kind: string | null) => (kind ? (AGENT_NAMES[kind] ?? kind) : "");
+export const agentName = (kind: string | null) => (kind ? (AGENTS[kind]?.name ?? kind) : "");
+
+/** Whether the switch is available before an agent publishes its first transcript. */
+export const canOpenConversation = (agent: Agent | undefined) =>
+  agent?.has_conversation === true || AGENTS[agent?.agent_kind ?? ""]?.conversationWhilePending === true;
 
 /** A shell tab: no agent runs there. */
 export const isShell = (agent: Pick<Agent, "agent_kind">) => agent.agent_kind === null;
+
+/** The desktop shell title includes a prompt glyph; the web app has its own icon. */
+export function tabTitle(agent: Pick<Agent, "agent_kind" | "title">): string {
+  return isShell(agent) ? agent.title.replace(/^❯_\s*/, "") || "Shell" : agent.title;
+}
 
 /** Why a conversation/terminal stream ended, as the server names it. */
 export type Closure = "stopped" | "no_conversation" | "unmarked" | "disabled" | "revoked" | (string & {});

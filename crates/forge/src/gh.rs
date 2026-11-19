@@ -63,7 +63,7 @@ impl<R: CommandRunner> GhCli<R> {
 }
 
 /// Wire shape of one element of
-/// `gh pr list --head <branch> --state all --json number,state,isDraft,title`.
+/// `gh pr list --head <branch> --state all --json number,state,isDraft,title,url`.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GhPrView {
@@ -74,6 +74,7 @@ struct GhPrView {
     is_draft: bool,
     #[serde(default)]
     title: String,
+    url: Option<String>,
 }
 
 /// Wire shape of one element of `gh pr checks --json name,state,bucket`.
@@ -159,7 +160,7 @@ impl<R: CommandRunner> Forge for GhCli<R> {
                 "--state",
                 "all",
                 "--json",
-                "number,state,isDraft,title",
+                "number,state,isDraft,title,url",
             ],
         )?;
 
@@ -196,6 +197,7 @@ impl<R: CommandRunner> Forge for GhCli<R> {
             number: chosen.number,
             state: map_pr_state(&chosen.state, chosen.is_draft)?,
             title: chosen.title.clone(),
+            url: chosen.url.clone().filter(|url| url.starts_with("https://") || url.starts_with("http://")),
         }))
     }
 

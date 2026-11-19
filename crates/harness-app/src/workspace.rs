@@ -24,11 +24,11 @@ use gpui::{
 use editor::Editor;
 
 use agent_runtime::{AgentKind, AgentSignal, AgentState, Bus, StatusFileSource, WaitFidelity};
-use forge::{BranchKey, BranchStatus, CheckStatus, ForgeUpdate, GhCli, Poller, PollerConfig};
+use forge::{BranchStatus, CheckStatus, ForgeUpdate, GhCli, Poller, PollerConfig};
 use worktrees::{
     Change, CreateTaskMember, CreateTaskRequest, GitWorktrees, HookEnv, HookLayer, HookScriptPhase,
     HooksConfig, Manager, Registry, SystemRunner, TaskHooks, TaskStore, clear_local_hooks,
-    create_task, ensure_hook_script, local_hooks_base, migrate_worktrees_to_tasks,
+    create_task, ensure_hook_script, local_hooks_base, migrate_worktrees_to_tasks, task_name_slug,
     visible_setup_shell_line, write_task_agent_context, write_task_brief, write_visible_setup_runner,
 };
 
@@ -442,8 +442,10 @@ impl DiffBase {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct CardMenu {
-    id: String,
+    id: Option<String>,
+    pr: Option<(u64, String)>,
     x: Pixels,
     y: Pixels,
 }
@@ -623,6 +625,8 @@ pub struct HarnessWorkspace {
     diff_pending: bool,
     /// Monotonic tick for pane LRU ordering.
     pane_clock: u64,
+    /// Agent tabs whose terminal or tmux session is still starting.
+    pending_agent_launches: std::collections::HashSet<u64>,
     /// Persisted open-tab records for reattaching tmux sessions on reopen.
     panes_state: crate::panes_state::PanesState,
     panes_path: PathBuf,
@@ -683,7 +687,7 @@ pub struct HarnessWorkspace {
     /// as a toast until [`NOTE_TTL`] after `note_at`. Set it with `set_note`.
     note: String,
     note_at: Option<std::time::Instant>,
-    forge_status: HashMap<String, BranchStatus>,
+    forge_status: HashMap<PathBuf, HashMap<String, BranchStatus>>,
     agent_status: HashMap<PathBuf, AgentState>,
     /// When each worktree's status last changed, and the tool its latest
     /// signal reported — the phone's "waiting since" and tool chip.
@@ -862,26 +866,6 @@ struct ProjectSearchUi {
     status: String,
 }
 
-fn slugify(name: &str) -> String {
-    let mut slug = String::new();
-    let mut last_dash = true;
-    for ch in name.chars() {
-        if ch.is_ascii_alphanumeric() {
-            slug.push(ch.to_ascii_lowercase());
-            last_dash = false;
-        } else if !last_dash {
-            slug.push('-');
-            last_dash = true;
-        }
-    }
-    let slug = slug.trim_matches('-').to_string();
-    if slug.is_empty() {
-        "task".to_string()
-    } else {
-        slug
-    }
-}
-
 fn now_stamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
@@ -929,13 +913,13 @@ fn tip(
 
 #[cfg(test)]
 mod slugify_tests {
-    use super::slugify;
+    use super::task_name_slug;
 
     #[test]
     fn slugify_makes_feat_branch_placeholders() {
-        assert_eq!(slugify("fix login bug"), "fix-login-bug");
-        assert_eq!(slugify(""), "task");
-        assert_eq!(slugify("  Hello, World!  "), "hello-world");
+        assert_eq!(task_name_slug("fix login bug"), "fix-login-bug");
+        assert_eq!(task_name_slug(""), "task");
+        assert_eq!(task_name_slug("  Hello, World!  "), "hello-world");
     }
 }
 

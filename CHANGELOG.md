@@ -12,6 +12,70 @@ Unreleased is empty.
 
 ## Unreleased
 
+### Added
+
+- Attach PNG, JPEG, or WebP screenshots up to 8 MiB from the phone agent
+  composer, with an optional caption. Codex receives an image attachment and
+  other agents receive the file path on the Mac.
+- Dictate editable phone replies with on-device transcription on supported Macs
+  running macOS 26 or newer. Development and release builds compile the helper
+  with the macOS 26 SDK or later, and app bundles include and sign it.
+- Shared OpenCode 2.x tabs show the active session in the phone web app’s
+  Conversation view. The view becomes available when the first export arrives.
+- Desktop project and worktree rows show clickable pull request numbers and CI
+  chips. The right-click menu opens the pull request, and the CI chip opens its
+  Checks tab.
+
+### Changed
+
+- Settings → Agents defaults to `codex --sandbox workspace-write --ask-for-approval on-request`
+  for new Codex launches. Codex uses its normal hook trust prompts.
+- Desktop project and worktree rows have equal padding and a consistent height
+  with or without status badges and Git details. Chips show commits ahead or
+  behind and the number of changed files.
+- Desktop and phone checkout rows show the checked-out branch. The default
+  branch appears only while it is checked out.
+- The phone Conversation view shows one live Thinking indicator, hides empty
+  reasoning history, and aligns tool rows across agents and shells. Codex command
+  details show the executed command and its output.
+- The phone agent list puts elapsed time next to the status badge, aligns agent
+  and shell icons, and removes the duplicate shell prompt glyph.
+- Desktop agent launch preparation runs in the background to keep the app
+  responsive while hooks and terminals are set up.
+
+### Fixed
+
+- Reuse the same task or worktree name and Git branch across projects, including
+  standalone projects. New slugs include the task, home project, and branch.
+- Pull request and CI status follow the checked-out branch in each repository,
+  even when multiple projects use the same branch name. Repositories awaiting
+  their first commit display the current branch name.
+- Starting multiple specialists keeps their panes open until their tmux sessions
+  are ready and delivers queued messages after startup.
+- Concurrent OpenCode launches can install the phone integration safely. The
+  export recreates missing transcripts and preserves Unicode when truncating
+  long entries.
+- The phone web app keeps its controls available if a view fails to load, renders
+  basic Markdown on older browsers, and retries temporary device lookup failures.
+- Long phone drafts wrap and scroll. Dictation is available on supported
+  languages, can retry transcription from the same recording, and keeps Stop and
+  Cancel available during an active recording.
+- Canceled or failed screenshot sends clean up files that never reached the
+  agent. A file stays available once its path may have reached the agent.
+- Address Rust lint warnings in headless remote builds without web assets.
+
+### Security
+
+- Screenshot uploads validate image structure and dimensions, limit concurrent
+  uploads, and time out slow requests. Delivery rechecks device write access,
+  session sharing, and the target agent before sending. Dictation also rechecks
+  write access before starting the transcription helper.
+- Disabling phone remote stops shell and OpenCode transcript exports, even if the
+  agent list is refreshing. OpenCode exports are cleared when a tab is unshared.
+- Phone setup diagnostics omit local listener details and the certificate
+  directory from app logs.
+- The CI and dependency audit workflows use read-only repository access.
+
 ## 1.1.0 - 2026-11-18
 
 ### Added

@@ -28,6 +28,7 @@ run: setup web
 
 build: setup web
 	cd $(APP_DIR) && cargo build
+	bash ./script/build-voice-helper.sh "$(APP_DIR)/target/debug/oo-voice"
 
 check: web
 	cd $(APP_DIR) && cargo check

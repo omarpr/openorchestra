@@ -36,7 +36,7 @@ use agent_runtime::AgentCommand;
 
 use gpui::{
     App, AppContext, Context, Entity, ExternalPaths, FocusHandle, Focusable, IntoElement,
-    KeyDownEvent, Keystroke, MouseDownEvent, Render, ScrollEvent, Styled, WeakEntity, Window,
+    KeyDownEvent, Keystroke, MouseDownEvent, Render, ScrollEvent, Styled, Task, WeakEntity, Window,
     div, prelude::*, px,
 };
 use settings::Settings;
@@ -113,8 +113,50 @@ impl TerminalPane {
             held_keys: Vec::new(),
             cancelling_copy_mode: false,
         };
-        this.spawn(agent, session, window, cx);
+        this.spawn(agent, session, window, cx).detach();
         this
+    }
+
+    /// Construct a pane in its spawning state without launching the process yet,
+    /// for async command preparation off the UI thread.
+    pub fn new_pending(
+        worktree_root: PathBuf,
+        label: String,
+        session_name: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let window_id = window.window_handle().window_id().as_u64();
+        Self {
+            view: None,
+            spawned: label,
+            error: None,
+            worktree_root,
+            window_id,
+            respawn_pending: false,
+            tmux_backed: session_name.is_some(),
+            focus_handle: cx.focus_handle(),
+            tmux_session: session_name,
+            copy_mode: false,
+            watching_copy_mode: false,
+            held_keys: Vec::new(),
+            cancelling_copy_mode: false,
+        }
+    }
+
+    /// Launch the resolved command in a pane created with [`Self::new_pending`].
+    pub fn launch(
+        &mut self,
+        agent: Option<AgentCommand>,
+        session: Option<TerminalSession>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<bool> {
+        self.tmux_backed = session.is_some();
+        self.tmux_session = session.as_ref().map(|s| s.name.clone());
+        let task = self.spawn(agent, session, window, cx);
+        cx.notify();
+        task
     }
 
     fn spawn(
@@ -123,7 +165,7 @@ impl TerminalPane {
         session: Option<TerminalSession>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Task<bool> {
         // No pty-level env on any path: every agent invocation is a shell line
         // with its env inlined as a command prefix, which both survives the trip
         // through tmux and takes precedence over the user's rc files.
@@ -208,8 +250,9 @@ impl TerminalPane {
 
         cx.spawn_in(window, async move |pane, cx| {
             let built = builder_task.await;
-            let _ = pane.update_in(cx, |pane, window, cx| match built {
+            pane.update_in(cx, |pane, window, cx| match built {
                 Ok(builder) => {
+                    let had_focus = pane.focus_handle(cx).is_focused(window);
                     let terminal = cx.new(|cx| builder.subscribe(cx));
                     // Respawn a shell when the process exits (don't leave a dead pane).
                     cx.subscribe(&terminal, |pane, _term, event: &TerminalEvent, cx| {
@@ -232,16 +275,20 @@ impl TerminalPane {
                     });
                     let handle = view.focus_handle(cx);
                     pane.view = Some(view);
-                    window.focus(&handle, cx);
+                    if had_focus {
+                        window.focus(&handle, cx);
+                    }
                     cx.notify();
+                    true
                 }
                 Err(error) => {
                     pane.error = Some(format!("failed to spawn terminal: {error:#}"));
                     cx.notify();
+                    false
                 }
-            });
+            })
+            .unwrap_or(false)
         })
-        .detach();
     }
 
     /// After a scroll or click, follow tmux's copy-mode state until the pane
@@ -353,7 +400,7 @@ impl Render for TerminalPane {
             self.respawn_pending = false;
             // Respawn a plain shell, not the agent: quitting the agent is a
             // deliberate act, and relaunching it would trap the user in a loop.
-            self.spawn(None, None, window, cx);
+            self.spawn(None, None, window, cx).detach();
         }
         let hx = theme(cx).clone();
         match &self.view {
@@ -418,6 +465,7 @@ impl Render for TerminalPane {
                     })
             }
             None => div()
+                .track_focus(&self.focus_handle)
                 .size_full()
                 .bg(hx.bg0)
                 .p_2()

@@ -58,4 +58,14 @@ describe("AgentList", () => {
     expect(screen.queryByRole("region")).not.toBeInTheDocument();
     expect(screen.getByText("web · login")).toBeInTheDocument();
   });
+
+  it.each(["feat/settings", "main", null])("shows the checkout's current branch %s", (branch) => {
+    render(
+      <AgentList agents={[{ ...agent("a", "web", "", "Claude"), branch }, agent("b", "api", "login", "Codex")]} />,
+    );
+    const checkout = screen.getByRole("region", { name: "web" });
+    expect(within(checkout).getByText("Claude")).toBeInTheDocument();
+    if (branch) expect(within(checkout).getByText(branch)).toBeInTheDocument();
+    if (branch !== "main") expect(within(checkout).queryByText("main")).not.toBeInTheDocument();
+  });
 });

@@ -20,6 +20,7 @@ impl HarnessWorkspace {
 
         let tab_id = self.next_tab_id();
 
+        let mut pending_agent_launch = None;
         let (content, title) = match kind {
             TabKind::Shell => {
                 let session = self.has_tmux.then(|| {
@@ -42,22 +43,24 @@ impl HarnessWorkspace {
                 )
             }
             TabKind::Agent(ref agent) => {
-                let command = self.agent_command_for(agent, &r);
-                let label = command
-                    .as_ref()
-                    .map(|c| c.label.clone())
-                    .unwrap_or_else(|| "shell".to_string());
+                let prep = self.prepare_agent_launch(agent, &r);
                 let session = self.has_tmux.then(|| crate::terminal_pane::TerminalSession {
                     name: crate::tmux::session_name(&r.key, tab_id),
                     attach_only: false,
                     env: self.pane_env(&r),
                 });
-                (
-                    TabContent::Terminal(cx.new(|cx| {
-                        TerminalPane::new(r.path.clone(), command, session, window, cx)
-                    })),
-                    label,
-                )
+                let label = agent.as_str().to_string();
+                let term_pane = cx.new(|cx| {
+                    TerminalPane::new_pending(
+                        r.path.clone(),
+                        label.clone(),
+                        session.as_ref().map(|s| s.name.clone()),
+                        window,
+                        cx,
+                    )
+                });
+                pending_agent_launch = Some((prep, session));
+                (TabContent::Terminal(term_pane), label)
             }
             // Nothing to construct: the surface reads state the view already
             // holds, so the tab is a marker saying where to draw it.
@@ -108,23 +111,63 @@ impl HarnessWorkspace {
         pane.last_used = self.pane_clock;
         pane.tabs.push(Tab { id: tab_id, title, content, agent: agent_of_kind });
         pane.active = tab_id;
-        let opened_agent_key = matches!(kind, TabKind::Agent(_)).then(|| r.key.clone());
         if let TabKind::Agent(a) = &kind {
             // The transcript on record is an earlier session's, not this tab's.
             self.remote.forget_session(&r.path, a.as_str());
         }
         self.focus_active_pane(window, cx);
         self.save_panes();
-        if let Some(key) = opened_agent_key {
-            self.flush_a2a_inbox_for_pane(&key);
-            // New tmux sessions are not always listed instantly; retry shortly.
-            let retry_key = key.clone();
-            cx.spawn(async move |view, cx| {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(750))
+        if let Some((prep, session)) = pending_agent_launch {
+            self.pending_agent_launches.insert(tab_id);
+            let key = r.key.clone();
+            let session_name = session.as_ref().map(|session| session.name.clone());
+            cx.spawn_in(window, async move |view, cx| {
+                let command = cx
+                    .background_executor()
+                    .spawn(async move { prep.resolve() })
                     .await;
-                let _ = view.update(cx, |ws, _cx| {
-                    ws.flush_a2a_inbox_for_pane(&retry_key);
+                let launch = view
+                    .update_in(cx, |ws, window, cx| {
+                        let pane = ws.panes.get_mut(&key)?;
+                        let tab = pane.tabs.iter_mut().find(|t| t.id == tab_id)?;
+                        let TabContent::Terminal(term_pane) = &tab.content else {
+                            return None;
+                        };
+                        let term_pane = term_pane.clone();
+                        let label = command
+                            .as_ref()
+                            .map(|c| c.label.clone())
+                            .unwrap_or_else(|| "shell".to_string());
+                        if tab.title != label {
+                            tab.title = label;
+                            ws.save_panes();
+                        }
+                        let launch = term_pane.update(cx, |pane, cx| {
+                            pane.launch(command, session, window, cx)
+                        });
+                        cx.notify();
+                        Some(launch)
+                    })
+                    .ok()
+                    .flatten();
+                let started = match launch {
+                    Some(launch) => launch.await,
+                    None => false,
+                };
+                if started && let Some(name) = session_name {
+                    // A spawned client can still be creating its detached session.
+                    cx.background_executor()
+                        .spawn(async move { crate::tmux::wait_for_session(&name) })
+                        .await;
+                }
+                let _ = view.update(cx, |ws, cx| {
+                    ws.pending_agent_launches.remove(&tab_id);
+                    if started {
+                        ws.flush_a2a_inbox_for_pane(&key);
+                    }
+                    let active = ws.resolve().map(|r| r.key).unwrap_or_default();
+                    ws.evict_stale_panes(&active);
+                    cx.notify();
                 });
             })
             .detach();
@@ -336,21 +379,15 @@ impl HarnessWorkspace {
     }
 
     /// Drop the least-recently-used pane sets beyond [`MAX_LIVE_PANES`],
-    /// never the one just created (M5b).
+    /// keeping the active pane and any panes still starting agents.
     pub(crate) fn evict_stale_panes(&mut self, keep: &str) {
         while self.panes.len() > MAX_LIVE_PANES {
-            let Some(victim) = self
-                .panes
-                .iter()
-                .filter(|(key, _)| key.as_str() != keep)
-                .min_by_key(|(_, pane)| pane.last_used)
-                .map(|(key, _)| key.clone())
-            else {
+            let Some(victim) = pane_to_evict(&self.panes, keep, &self.pending_agent_launches) else {
                 break;
             };
+            let victim = victim.to_owned();
             log::info!("evicting pane {victim} (over the {MAX_LIVE_PANES}-pane cap)");
-            // Dropping the PaneSet drops the terminal entity, which closes the
-            // pty and terminates the agent process with it.
+            // Dropping the terminal closes its pty and detaches the tmux client.
             self.panes.remove(&victim);
         }
     }
@@ -592,5 +629,56 @@ impl HarnessWorkspace {
         pane.last_used = self.pane_clock;
         pane.tabs.push(Tab { id, title: title.to_string(), content, agent: mark });
         pane.active = id;
+    }
+}
+
+fn pane_to_evict<'a>(
+    panes: &'a HashMap<String, PaneSet>,
+    active: &str,
+    pending_launches: &std::collections::HashSet<u64>,
+) -> Option<&'a str> {
+    panes
+        .iter()
+        .filter(|(key, pane)| {
+            key.as_str() != active && !pane.tabs.iter().any(|tab| pending_launches.contains(&tab.id))
+        })
+        .min_by_key(|(_, pane)| pane.last_used)
+        .map(|(key, _)| key.as_str())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn bulk_agent_launches_can_exceed_the_pane_cap_until_startup_finishes() {
+        let mut pending = HashSet::new();
+        let mut panes = HashMap::new();
+        for id in 0..=MAX_LIVE_PANES as u64 {
+            pending.insert(id);
+            panes.insert(
+                id.to_string(),
+                PaneSet {
+                    tabs: vec![Tab {
+                        id,
+                        title: String::new(),
+                        content: TabContent::Diff,
+                        agent: Some(AgentKind::OpenCode),
+                    }],
+                    active: id,
+                    last_used: id,
+                },
+            );
+        }
+
+        assert!(panes.len() > MAX_LIVE_PANES);
+        assert_eq!(pane_to_evict(&panes, "2", &pending), None);
+        pending.remove(&2);
+        assert_eq!(pane_to_evict(&panes, "2", &pending), None);
+        pending.remove(&1);
+        assert_eq!(pane_to_evict(&panes, "2", &pending), Some("1"));
+        pending.remove(&0);
+        assert_eq!(pane_to_evict(&panes, "2", &pending), Some("0"));
     }
 }

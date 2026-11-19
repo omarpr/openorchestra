@@ -231,11 +231,56 @@ pub struct CreateTaskMember {
 #[derive(Debug, Clone)]
 pub struct CreateTaskRequest {
     pub name: String,
+    /// Name portion of the slug. Creation adds the home project and its branch.
     pub slug: String,
     pub home_repo: String,
     pub members: Vec<CreateTaskMember>,
     pub created_at: String,
     pub agent_kind: AgentKind,
+}
+
+/// The task name as a path component and as the suffix of its default branch.
+pub fn task_name_slug(name: &str) -> String {
+    slug_component(name, "task")
+}
+
+fn slug_component(value: &str, fallback: &str) -> String {
+    let mut slug = String::new();
+    let mut last_dash = true;
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash {
+            slug.push('-');
+            last_dash = true;
+        }
+    }
+    let slug = slug.trim_end_matches('-');
+    if slug.is_empty() {
+        fallback.to_owned()
+    } else {
+        slug.to_owned()
+    }
+}
+
+fn scoped_task_slug(name: &str, project: &str, branch: &str) -> String {
+    // A member's tmux session name includes the slug twice and can become a filename.
+    const MAX_SLUG_BYTES: usize = 96;
+    let parts = [
+        task_name_slug(name),
+        slug_component(project, "project"),
+        slug_component(branch, "branch"),
+    ];
+    let slug = parts.join("-");
+    if slug.len() <= MAX_SLUG_BYTES {
+        return slug;
+    }
+    let part_limit = (MAX_SLUG_BYTES - 2) / parts.len();
+    parts
+        .each_ref()
+        .map(|part| part[..part.len().min(part_limit)].trim_end_matches('-'))
+        .join("-")
 }
 
 /// Create git worktrees for each member, register them, and add the task.
@@ -247,56 +292,97 @@ pub fn create_task<R: CommandRunner>(
     if req.members.is_empty() {
         return Err(TaskError::NoMembers);
     }
-    if !req.members.iter().any(|m| m.repo == req.home_repo) {
+    let Some(home) = req.members.iter().find(|m| m.repo == req.home_repo) else {
         return Err(TaskError::HomeNotInMembers(req.home_repo));
+    };
+    let base_slug = scoped_task_slug(&req.slug, &home.repo, &home.branch);
+    let mut slug = base_slug.clone();
+    let mut suffix = 2;
+    // Normalization can make distinct names equal. A legacy task can also have
+    // separate id and slug values, so reserve both before writing any state.
+    while store
+        .tasks()
+        .iter()
+        .any(|task| task.id == slug || task.slug.eq_ignore_ascii_case(&slug))
+        || manager
+            .registry
+            .entries()
+            .iter()
+            .any(|entry| entry.task_slug.eq_ignore_ascii_case(&slug))
+    {
+        slug = format!("{base_slug}-{suffix}");
+        suffix += 1;
     }
-    let task_id = Task::id_for(&req.slug);
-    if store.get(&task_id).is_some() {
-        return Err(TaskError::Duplicate(task_id));
+    let task_id = Task::id_for(&slug);
+
+    for m in &req.members {
+        if manager.git().ref_exists(&m.repo_root, &format!("refs/heads/{}", m.branch)) {
+            return Err(TaskError::Worktree(format!("branch {:?} already exists in {}", m.branch, m.repo)));
+        }
     }
 
-    let mut members = Vec::new();
-    for m in &req.members {
-        let wt_req = CreateRequest {
-            repo: m.repo.clone(),
-            repo_root: m.repo_root.clone(),
-            task_slug: req.slug.clone(),
-            branch: m.branch.clone(),
-            base_ref: m.base_ref.clone(),
-            created_at: req.created_at.clone(),
-            agent_kind: req.agent_kind.clone(),
-        };
-        let worktree_id = manager.create(wt_req)?;
-        // Attach task_id on the registry entry.
-        if let Some(entry) = manager.registry.get_mut(&worktree_id) {
+    let mut created = Vec::new();
+    let mut registry_saved = false;
+    let result = (|| -> Result<(), TaskError> {
+        let mut members = Vec::new();
+        for m in &req.members {
+            let worktree_id = manager.register_worktree(CreateRequest {
+                repo: m.repo.clone(),
+                repo_root: m.repo_root.clone(),
+                task_slug: slug.clone(),
+                branch: m.branch.clone(),
+                base_ref: m.base_ref.clone(),
+                created_at: req.created_at.clone(),
+                agent_kind: req.agent_kind.clone(),
+            })?;
+            created.push(worktree_id.clone());
+            let entry = manager.registry.get_mut(&worktree_id)
+                .ok_or_else(|| TaskError::Worktree(format!("missing {worktree_id}")))?;
             entry.task_id = Some(task_id.clone());
             entry.name = req.name.clone();
+            members.push(TaskMember {
+                repo: m.repo.clone(),
+                worktree_id,
+                path: entry.path.clone(),
+                branch: m.branch.clone(),
+            });
         }
-        let entry = manager
-            .registry
-            .get(&worktree_id)
-            .ok_or_else(|| TaskError::Worktree(format!("missing {worktree_id}")))?;
-        members.push(TaskMember {
-            repo: m.repo.clone(),
-            worktree_id: worktree_id.clone(),
-            path: entry.path.clone(),
-            branch: m.branch.clone(),
-        });
-    }
-    manager.registry.save()?;
+        manager.registry.save()?;
+        registry_saved = true;
 
-    let task = Task {
-        id: task_id.clone(),
-        name: req.name,
-        slug: req.slug,
-        home_repo: req.home_repo,
-        members,
-        agent_kind: req.agent_kind,
-        created_at: req.created_at,
-        archived: false,
-    };
-    store.add(task)?;
-    store.save()?;
+        store.add(Task {
+            id: task_id.clone(),
+            name: req.name,
+            slug,
+            home_repo: req.home_repo,
+            members,
+            agent_kind: req.agent_kind,
+            created_at: req.created_at,
+            archived: false,
+        })?;
+        if let Err(error) = store.save() {
+            store.remove(&task_id);
+            return Err(error.into());
+        }
+        Ok(())
+    })();
+
+    if let Err(error) = result {
+        let mut failures = Vec::new();
+        for id in created.iter().rev() {
+            if let Err(cleanup) = manager.remove_registered_worktree(id) {
+                failures.push(format!("{id}: {cleanup}"));
+            }
+        }
+        if registry_saved || !failures.is_empty() {
+            failures.extend(manager.registry.save().err().map(|error| format!("saving registry: {error}")));
+        }
+        return if failures.is_empty() {
+            Err(error)
+        } else {
+            Err(TaskError::Worktree(format!("{error}; rollback failed: {}", failures.join("; "))))
+        };
+    }
     Ok(task_id)
 }
 

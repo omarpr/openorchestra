@@ -198,10 +198,19 @@
 .oo-bounce {
   animation: oo-bounce 1.2s ease-in-out infinite;
 }
+@keyframes oo-thinking {
+  to {
+    transform: translateX(0.875rem);
+  }
+}
+.oo-thinking-dot {
+  animation: oo-thinking 0.9s ease-in-out infinite alternate;
+}
 @media (prefers-reduced-motion: reduce) {
   .oo-spin,
   .oo-breathe,
-  .oo-bounce {
+  .oo-bounce,
+  .oo-thinking-dot {
     animation: none;
   }
 }

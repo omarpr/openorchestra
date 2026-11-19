@@ -1,4 +1,4 @@
-//! Transcript readers: Claude Code JSONL and pi session JSONL -> display entries.
+//! Normalize agent transcripts and shell logs into entries for the web app.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -15,6 +15,7 @@ const MARKER: &str = "…[truncated]";
 pub enum TranscriptKind {
     ClaudeCode,
     Codex,
+    OpenCode,
     Pi,
     /// A shell tab's command log (see `crate::shell`).
     Shell,
@@ -24,6 +25,7 @@ impl TranscriptKind {
     pub fn from_agent_kind(kind: &str) -> Option<TranscriptKind> {
         match kind {
             "codex" => Some(TranscriptKind::Codex),
+            "opencode" => Some(TranscriptKind::OpenCode),
             "claude-code" => Some(TranscriptKind::ClaudeCode),
             "pi" => Some(TranscriptKind::Pi),
             _ => None,
@@ -76,6 +78,8 @@ pub struct ToolResult {
     pub text: String,
     pub is_error: bool,
     pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<String>,
 }
 
 /// Cut `s` to at most `max` bytes on a char boundary.
@@ -150,6 +154,10 @@ pub fn parse_entries(kind: TranscriptKind, text: &str, cwd: Option<&Path>) -> Ve
     match kind {
         TranscriptKind::ClaudeCode => claude_entries(&records, cwd),
         TranscriptKind::Codex => codex_entries(&records, cwd),
+        TranscriptKind::OpenCode => records
+            .into_iter()
+            .filter_map(|record| serde_json::from_value(record).ok())
+            .collect(),
         TranscriptKind::Pi => pi_entries(&records, cwd),
         TranscriptKind::Shell => unreachable!("handled above"),
     }
@@ -492,17 +500,17 @@ fn codex_entries(records: &[Value], cwd: Option<&Path>) -> Vec<Entry> {
                 let (Some(tid), Some(name)) = (p["call_id"].as_str(), p["name"].as_str()) else {
                     continue;
                 };
-                let args = p["arguments"]
-                    .as_str()
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or(Value::Null);
+                let summary = match codex_exec_input(p) {
+                    Some(input) => clip(input.trim_start().lines().next().unwrap_or_default()),
+                    None => tool_summary(name, &codex_tool_arguments(p), cwd),
+                };
                 tools.insert(tid, out.len());
                 out.push(tool_entry(
                     tid.into(),
                     ToolLine {
                         id: tid.into(),
                         name: name.into(),
-                        summary: tool_summary(name, &args, cwd),
+                        summary,
                         status: ToolStatus::Pending,
                     },
                     at,
@@ -529,6 +537,34 @@ fn pi_blocks(message: &Value) -> Vec<Value> {
         Value::Array(a) => a.clone(),
         _ => Vec::new(),
     }
+}
+
+fn codex_tool_arguments(call: &Value) -> Value {
+    call["arguments"]
+        .as_str()
+        .and_then(|args| serde_json::from_str(args).ok())
+        .unwrap_or(Value::Null)
+}
+
+fn codex_exec_input(call: &Value) -> Option<String> {
+    let name = call["name"].as_str()?;
+    let name = name.strip_prefix("functions.").unwrap_or(name);
+    if !matches!(name, "exec" | "exec_command") {
+        return None;
+    }
+    let input = match call["type"].as_str()? {
+        "custom_tool_call" => call["input"].as_str()?.to_owned(),
+        "function_call" => {
+            let args = codex_tool_arguments(call);
+            ["cmd", "command", "code"]
+                .iter()
+                .filter_map(|key| args[*key].as_str())
+                .find(|input| !input.trim().is_empty())?
+                .to_owned()
+        }
+        _ => return None,
+    };
+    (!input.trim().is_empty()).then_some(input)
 }
 
 fn pi_entries(records: &[Value], cwd: Option<&Path>) -> Vec<Entry> {
@@ -600,22 +636,30 @@ fn pi_entries(records: &[Value], cwd: Option<&Path>) -> Vec<Entry> {
     out
 }
 
-/// Full result text for one tool call, capped at 64 KiB.
+/// Full result text and, where available, the executed input, capped separately.
 pub fn tool_result(kind: TranscriptKind, text: &str, tool_id: &str) -> Option<ToolResult> {
     if kind == TranscriptKind::Shell {
         return crate::shell::tool_result(text, tool_id);
     }
+    let mut input = None;
     for r in parse_lines(text) {
         let (content, is_error) = match kind {
+            TranscriptKind::OpenCode => {
+                if r["tool"]["id"] == tool_id {
+                    return serde_json::from_value(r["result"].clone()).ok();
+                }
+                continue;
+            }
             TranscriptKind::Codex => {
                 let p = &r["payload"];
-                if r["type"] != "response_item"
-                    || p["call_id"] != tool_id
-                    || !matches!(
-                        p["type"].as_str(),
-                        Some("function_call_output" | "custom_tool_call_output")
-                    )
-                {
+                if r["type"] != "response_item" || p["call_id"] != tool_id {
+                    continue;
+                }
+                if !matches!(
+                    p["type"].as_str(),
+                    Some("function_call_output" | "custom_tool_call_output")
+                ) {
+                    input = codex_exec_input(p).map(|input| capped(&input, RESULT_CAP));
                     continue;
                 }
                 (p["output"].clone(), false)
@@ -655,6 +699,7 @@ pub fn tool_result(kind: TranscriptKind, text: &str, tool_id: &str) -> Option<To
             text: cut(&full, RESULT_CAP).to_string(),
             is_error,
             truncated,
+            input,
         });
     }
     None
@@ -1015,6 +1060,26 @@ mod tests {
                 .text,
             "passed"
         );
+    }
+
+    #[test]
+    fn codex_exec_calls_show_the_input_and_the_result() {
+        let log = r#"{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"code","name":"exec","input":"\nconst x = 1;\ntext(x);"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"code","output":"1"}}
+{"type":"response_item","payload":{"type":"function_call","call_id":"shell","name":"exec_command","arguments":"{\"workdir\":\"/tmp\",\"cmd\":\"cargo test\"}"}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"shell","output":"passed"}}"#;
+        let entries = parse_entries(TranscriptKind::Codex, log, None);
+        for (index, id, preview, input, output) in [
+            (0, "code", "const x = 1;", "\nconst x = 1;\ntext(x);", "1"),
+            (1, "shell", "cargo test", "cargo test", "passed"),
+        ] {
+            let tool = entries[index].tool.as_ref().unwrap();
+            assert_eq!(tool.status, ToolStatus::Ok);
+            assert_eq!(tool.summary, preview);
+            let detail = tool_result(TranscriptKind::Codex, log, id).unwrap();
+            assert_eq!(detail.input.as_deref(), Some(input));
+            assert_eq!(detail.text, output);
+        }
     }
 
     #[test]

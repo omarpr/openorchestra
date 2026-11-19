@@ -65,24 +65,11 @@ impl HarnessWorkspace {
         let manager = Manager::new(registry, git, data_dir.join("worktrees"));
         let data = WorkspaceData::build(manager.git(), &manager.registry, &task_store, &repo_roots, None);
 
-        let mut branches: Vec<BranchKey> = manager
-            .registry
-            .active()
-            .map(|e| BranchKey {
-                repo_dir: e.repo_root.clone(),
-                branch: e.branch.clone(),
-            })
-            .collect();
-        // Main-checkout CI: poll each repo's default branch too (main is
-        // first-class). PRs don't apply to a default branch, but its CI does.
-        for repo in &data.repos {
-            branches.push(BranchKey {
-                repo_dir: repo.repo_root.clone(),
-                branch: repo.default_branch.clone(),
-            });
-        }
-        let (poller, forge_rx) =
-            Poller::spawn(Arc::new(GhCli::new()), branches, PollerConfig::default());
+        let (poller, forge_rx) = Poller::spawn(
+            Arc::new(GhCli::new()),
+            data.forge_branches(),
+            PollerConfig::default(),
+        );
 
         // One bus for every adapter's signal (§4.6). The sidebar pill, the
         // status bar, and the notifier each take their own subscription, so it
@@ -207,6 +194,7 @@ impl HarnessWorkspace {
             diff_gen: 0,
             diff_pending: false,
             pane_clock: 0,
+            pending_agent_launches: Default::default(),
             panes_state,
             panes_path,
             has_tmux,
@@ -493,8 +481,14 @@ impl HarnessWorkspace {
         cx.spawn(async move |view, cx| loop {
             match git_moved_rx.try_recv() {
                 Ok(path) => {
-                    while git_moved_rx.try_recv().is_ok() {}
                     log::debug!("git moved: {}", path.display());
+                    let remote_updates: std::collections::HashSet<_> =
+                        std::iter::once(path)
+                            .chain(git_moved_rx.try_iter())
+                            .filter_map(|path| {
+                                crate::git_watch::remote_tracking_repo(&path).map(Path::to_owned)
+                            })
+                            .collect();
                     if view
                         .update(cx, |ws, cx| {
                             // Cheap when nothing changed (it compares first).
@@ -502,6 +496,16 @@ impl HarnessWorkspace {
                             // `.git/worktrees`, which needs a watch of its own.
                             let roots = ws.repo_roots.clone();
                             ws.git_watch.watch_repos(&roots);
+                            if !remote_updates.is_empty() {
+                                for root in roots.iter().filter(|root| {
+                                    remote_updates.contains(*root)
+                                        || std::fs::canonicalize(root)
+                                            .is_ok_and(|path| remote_updates.contains(&path))
+                                }) {
+                                    ws.refresh_forge_repo(root);
+                                }
+                                cx.notify();
+                            }
                             ws.refresh_status_live(cx);
                             // A commit or a push moves what the push control
                             // offers, and both land here.

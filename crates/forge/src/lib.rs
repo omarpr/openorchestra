@@ -3,13 +3,13 @@
 //! GitHub CLI:
 //!
 //! ```text
-//! gh pr view  <branch> --json number,state,isDraft,title
+//! gh pr list --head <branch> --state all --json number,state,isDraft,title,url
 //! gh pr checks <branch> --json name,state,bucket
 //! ```
 //!
 //! Field names verified against the gh manual (cli.github.com/manual):
-//! - `gh pr view --json` exposes `number`, `state` (`OPEN`/`CLOSED`/`MERGED`),
-//!   `isDraft`, `title` (among others).
+//! - `gh pr list --json` exposes `number`, `state` (`OPEN`/`CLOSED`/`MERGED`),
+//!   `isDraft`, `title`, and `url`.
 //! - `gh pr checks --json` exposes `bucket`, `completedAt`, `description`,
 //!   `event`, `link`, `name`, `startedAt`, `state`, `workflow`; `bucket`
 //!   "categorizes the state field into pass, fail, pending, skipping, or
@@ -45,6 +45,7 @@ pub struct PrInfo {
     pub number: u64,
     pub state: PrState,
     pub title: String,
+    pub url: Option<String>,
 }
 
 /// Status of a single CI check, as shown on the sidebar CI indicator.

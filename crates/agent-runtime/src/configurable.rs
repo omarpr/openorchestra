@@ -1,6 +1,6 @@
 //! Configurable signal profile for custom (`Other`) agents.
 //!
-//! Rather than a Cursor-/aider-specific adapter, a custom agent declares a
+//! A custom agent declares a
 //! [`SignalProfile`]: how much to trust its waiting signal, and optionally
 //! which known hook dialect to install so a universal shim writes the shared
 //! `.harness/status.json`. Any terminal agent that can invoke a command on
@@ -28,6 +28,8 @@ pub enum HookInstall {
     /// User wires hooks themselves; settings UI shows the shim path.
     #[default]
     None,
+    /// Inject status hooks for supported agent identities at launch.
+    Auto,
     /// Merge Claude-compatible hooks into `<wt>/.claude/settings.local.json`.
     ClaudeLocalSettings,
     /// Merge Claude-compatible hooks into `~/.codex/hooks.json` (UserPromptSubmit + Stop).
@@ -35,6 +37,22 @@ pub enum HookInstall {
     /// Each entry is gated on `$HARNESS_AGENT` matching this custom agent so the
     /// shared global file does not fire for built-in Codex (or other customs).
     CodexUserHooks,
+    /// Merge Cursor lifecycle hooks into the user's `~/.cursor/hooks.json`.
+    CursorUserHooks,
+}
+
+impl HookInstall {
+    pub fn effective(self, agent: &str) -> Self {
+        if self != Self::Auto {
+            return self;
+        }
+        match agent {
+            "claude" | "claude-code" => Self::ClaudeLocalSettings,
+            "codex" => Self::CodexUserHooks,
+            "cursor" | "cursor-agent" => Self::CursorUserHooks,
+            _ => Self::None,
+        }
+    }
 }
 
 /// Per-custom-agent signal configuration (persisted in prefs).
@@ -71,14 +89,7 @@ pub fn harness_status_shim_path(state_dir: &Path) -> PathBuf {
 /// Write (or refresh) the universal status shim under `state_dir/shims/`.
 pub fn materialize_harness_status_shim(state_dir: &Path) -> io::Result<PathBuf> {
     let path = harness_status_shim_path(state_dir);
-    if fs::read_to_string(&path).is_ok_and(|existing| existing == SHIM) {
-        return Ok(path);
-    }
-    let dir = path.parent().expect("shim path always has a parent");
-    fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!(".{SHIM_FILENAME}.tmp"));
-    fs::write(&tmp, SHIM)?;
-    fs::rename(&tmp, &path)?;
+    crate::install_shim(&path, SHIM)?;
     Ok(path)
 }
 
@@ -191,9 +202,7 @@ impl ConfigurableRuntime {
     /// matches this custom agent. Built-in Codex only sets `HARNESS_MANAGED`, so
     /// leftover entries here never write status (or race the codex-hook shim).
     ///
-    /// The agent slug is left unquoted: prefs only allow `[A-Za-z0-9_-]`, and a
-    /// quoted value would become `\"…\"` inside `Value::to_string`, breaking the
-    /// substring marker used for idempotent reinstalls.
+    /// Custom agent slugs from preferences use `[A-Za-z0-9_-]`.
     fn codex_hook_command(shim: &Path, agent: &str) -> String {
         format!(
             "[ \"$HARNESS_AGENT\" = {agent} ] && node {:?}",
@@ -202,63 +211,41 @@ impl ConfigurableRuntime {
     }
 
     fn install_codex_hooks(&self, shim: &Path) -> io::Result<()> {
-        let dir = Self::codex_home();
-        let path = dir.join("hooks.json");
-
-        let existing = fs::read_to_string(&path).unwrap_or_default();
-        let mut root: Value = if existing.trim().is_empty() {
-            json!({})
-        } else {
-            serde_json::from_str(&existing).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("codex hooks.json does not parse; refusing to edit it: {e}"),
-                )
-            })?
-        };
-        if !root.is_object() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "codex hooks.json is not a JSON object; refusing to edit it",
-            ));
-        }
-
         let agent = self.kind.as_str();
-        // Marker is per-agent (not just the shared shim path) so two customs
-        // and the built-in `codex-hook.mjs` entry can coexist without clobbering.
         let marker = format!("= {agent} ] && node");
         let command = Self::codex_hook_command(shim, agent);
-        for event in ["UserPromptSubmit", "Stop"] {
-            ensure_hook_group(&mut root, event, &marker, &command);
-        }
+        crate::codex::install_status_hooks(&Self::codex_home(), &marker, &command)
+    }
 
-        fs::create_dir_all(&dir)?;
-        let tmp = dir.join(".hooks.json.tmp");
-        fs::write(&tmp, serde_json::to_string_pretty(&root)? + "\n")?;
-        fs::rename(&tmp, &path)
+    fn install_cursor_hooks(&self, shim: &Path) -> io::Result<()> {
+        let home = std::env::var_os("HARNESS_CURSOR_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cursor")))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Cursor config directory is unavailable"))?;
+        let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+        let marker = format!("if [ \"$HARNESS_AGENT\" = {} ]; then node ", quote(self.kind.as_str()));
+        let command = format!("{marker}{}; fi", quote(&shim.to_string_lossy()));
+        crate::update_agent_hooks(&home, |root| {
+            let root = root.as_object_mut().expect("validated hooks object");
+            root.entry("version").or_insert(json!(1));
+            let hooks = root.entry("hooks").or_insert_with(|| json!({}))
+                .as_object_mut()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Cursor hooks must be an object"))?;
+            for event in ["beforeSubmitPrompt", "stop"] {
+                let handlers = hooks.entry(event).or_insert_with(|| json!([]))
+                    .as_array_mut()
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("Cursor {event} hooks must be an array")))?;
+                if let Some(handler) = handlers.iter_mut().find(|handler| {
+                    handler["command"].as_str().is_some_and(|text| text.starts_with(&marker))
+                }) {
+                    handler["command"] = json!(command);
+                } else {
+                    handlers.push(json!({ "command": command }));
+                }
+            }
+            Ok(())
+        })
     }
-}
-
-fn ensure_hook_group(root: &mut Value, event: &str, marker: &str, command: &str) {
-    let hooks = root
-        .as_object_mut()
-        .expect("caller verified root is an object")
-        .entry("hooks")
-        .or_insert_with(|| json!({}));
-    if !hooks.is_object() {
-        *hooks = json!({});
-    }
-    let arr = hooks
-        .as_object_mut()
-        .unwrap()
-        .entry(event)
-        .or_insert_with(|| json!([]));
-    if !arr.is_array() {
-        *arr = json!([]);
-    }
-    let arr = arr.as_array_mut().unwrap();
-    arr.retain(|group| !group.to_string().contains(marker));
-    arr.push(json!({ "hooks": [ { "type": "command", "command": command } ] }));
 }
 
 impl AgentRuntime for ConfigurableRuntime {
@@ -275,8 +262,8 @@ impl AgentRuntime for ConfigurableRuntime {
     }
 
     fn ignored_paths(&self) -> &'static [&'static str] {
-        match self.profile.install {
-            HookInstall::None => &[".harness/"],
+        match self.profile.install.effective(self.kind.as_str()) {
+            HookInstall::None | HookInstall::Auto | HookInstall::CursorUserHooks => &[".harness/"],
             HookInstall::ClaudeLocalSettings => &[".harness/", ".claude/settings.local.json"],
             HookInstall::CodexUserHooks => &[".harness/", ".codex/"],
         }
@@ -284,10 +271,11 @@ impl AgentRuntime for ConfigurableRuntime {
 
     fn on_spawn(&self, worktree_root: &Path) -> io::Result<()> {
         let shim = materialize_harness_status_shim(&self.state_dir)?;
-        match self.profile.install {
-            HookInstall::None => Ok(()),
+        match self.profile.install.effective(self.kind.as_str()) {
+            HookInstall::None | HookInstall::Auto => Ok(()),
             HookInstall::ClaudeLocalSettings => self.install_claude_local(worktree_root, &shim),
             HookInstall::CodexUserHooks => self.install_codex_hooks(&shim),
+            HookInstall::CursorUserHooks => self.install_cursor_hooks(&shim),
         }
     }
 

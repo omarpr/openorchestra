@@ -180,9 +180,16 @@ pub fn is_relevant_change(path: &Path) -> bool {
         && path.file_name().is_none_or(|n| n != "COMMIT_EDITMSG")
 }
 
+/// Root of the repository whose remote-tracking ref changed.
+pub fn remote_tracking_repo(path: &Path) -> Option<&Path> {
+    let git_dir = path.ancestors().find(|p| p.file_name().is_some_and(|n| n == ".git"))?;
+    path.strip_prefix(git_dir.join("refs/remotes")).ok()?.components().nth(1)?;
+    git_dir.parent()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_relevant_change;
+    use super::{is_relevant_change, remote_tracking_repo};
     use std::path::Path;
 
     #[test]
@@ -200,6 +207,16 @@ mod tests {
         assert!(is_relevant_change(Path::new(
             "/repo/.git/worktrees/feat-x/HEAD"
         )));
+    }
+
+    #[test]
+    fn identifies_the_repository_for_remote_branch_updates() {
+        assert_eq!(
+            remote_tracking_repo(Path::new("/repo/.git/refs/remotes/origin/feat/sidebar")),
+            Some(Path::new("/repo")),
+        );
+        assert_eq!(remote_tracking_repo(Path::new("/repo/.git/refs/heads/main")), None);
+        assert_eq!(remote_tracking_repo(Path::new("/repo/.git/index")), None);
     }
 
     #[test]

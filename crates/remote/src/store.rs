@@ -9,6 +9,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use crossbeam_channel::{unbounded, Receiver};
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
@@ -168,6 +169,71 @@ pub(crate) fn new_id(prefix: &str) -> io::Result<String> {
     let mut id = String::from(prefix);
     id.extend(buf.iter().map(|b| BASE32[(*b & 31) as usize] as char));
     Ok(id)
+}
+
+/// Remove a stored screenshot unless delivery may have made its path visible to the agent.
+pub(crate) struct PendingScreenshot {
+    path: PathBuf,
+    pub(crate) retain: bool,
+}
+
+impl PendingScreenshot {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for PendingScreenshot {
+    fn drop(&mut self) {
+        if !self.retain {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+pub(crate) fn save_screenshot(
+    state_dir: &Path,
+    extension: &str,
+    bytes: &[u8],
+) -> io::Result<PendingScreenshot> {
+    const MAX_STORAGE: u64 = 256 * 1024 * 1024;
+    const MAX_FILES: usize = 512;
+    const RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+    let dir = state_dir.join("remote/screenshots");
+    ensure_private_dir(&dir)?;
+    let _lock = LockGuard::acquire(&dir.join(".lock"))?;
+    let now = SystemTime::now();
+    let mut used = 0u64;
+    let mut files = 0;
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == ".lock" {
+            continue;
+        }
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        };
+        let old = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= RETENTION);
+        if old && fs::remove_file(entry.path()).is_ok() {
+            continue;
+        }
+        used = used.saturating_add(metadata.len());
+        files += 1;
+    }
+    if files >= MAX_FILES || used.saturating_add(bytes.len() as u64) > MAX_STORAGE {
+        return Err(io::ErrorKind::StorageFull.into());
+    }
+    let path = dir.join(new_id("screenshot_")?).with_extension(extension);
+    write_atomic_private(&path, bytes)?;
+    Ok(PendingScreenshot { path, retain: false })
 }
 
 impl Store {

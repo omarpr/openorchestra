@@ -14,11 +14,9 @@
 //! `.harness/status.json` every other adapter uses, so `StatusFileSource`
 //! consumes it unchanged.
 //!
-//! Fidelity stays [`WaitFidelity::BestEffort`]: we now know running vs idle
-//! reliably, but codex (running with `--ask-for-approval never`) exposes no
-//! out-of-band "blocked on you" event, so `should_notify` still refuses to
-//! raise a "needs input" notification — dressing turn state up as "input
-//! needed" is exactly the lie R11 exists to prevent.
+//! Fidelity stays [`WaitFidelity::BestEffort`]. The hooks we install track
+//! turn boundaries. An approval prompt can appear during a turn without
+//! changing the reported status.
 
 use std::fs;
 use std::io;
@@ -45,20 +43,8 @@ const HOOK_EVENTS: &[&str] = &["UserPromptSubmit", "Stop"];
 /// below and the settings UI (via [`crate::default_command_display`]) both
 /// derive from these two consts.
 pub(crate) const PROGRAM: &str = "codex";
-// No `--sandbox` flag: the workspace-write sandbox blocked too much (network,
-// paths outside the worktree) and, paired with `--ask-for-approval never`,
-// those blocks became silent hard failures instead of prompts. Dropping it
-// lets Codex fall back to its own default sandbox from `~/.codex/config.toml`,
-// so policy lives where the user controls it. Approvals stay off — the harness
-// runs Codex unattended.
-//
-// `--dangerously-bypass-hook-trust` runs the status hook we install without a
-// per-launch trust prompt. It only affects harness-spawned codex, and the
-// hooks it trusts are the user's own (~/.codex/hooks.json) — but codex would
-// otherwise block the first launch waiting for a trust decision the harness
-// cannot answer.
 pub(crate) const DEFAULT_ARGS: &[&str] =
-    &["--ask-for-approval", "never", "--dangerously-bypass-hook-trust"];
+    &["--sandbox", "workspace-write", "--ask-for-approval", "on-request"];
 
 pub struct CodexRuntime {
     state_dir: PathBuf,
@@ -78,14 +64,7 @@ impl CodexRuntime {
     pub fn materialize_shim(&self) -> io::Result<PathBuf> {
         crate::install_remote_tab_helper(&self.state_dir)?;
         let path = self.shim_path();
-        if fs::read_to_string(&path).is_ok_and(|existing| existing == SHIM) {
-            return Ok(path);
-        }
-        let dir = path.parent().expect("shim path always has a parent");
-        fs::create_dir_all(dir)?;
-        let tmp = dir.join(format!(".{SHIM_FILENAME}.tmp"));
-        fs::write(&tmp, SHIM)?;
-        fs::rename(&tmp, &path)?;
+        crate::install_shim(&path, SHIM)?;
         Ok(path)
     }
 
@@ -112,50 +91,8 @@ impl CodexRuntime {
         format!("node {:?}", shim.display().to_string())
     }
 
-    /// Install our status hook into `~/.codex/hooks.json` under every event in
-    /// [`HOOK_EVENTS`], merging with whatever hooks the user already has.
-    ///
-    /// hooks.json shape (Claude-Code compatible):
-    /// `{ "hooks": { "<Event>": [ { "hooks": [ {"type":"command","command":".."} ] } ] } }`
-    ///
-    /// Idempotent and non-clobbering: [`ensure_hook`] drops any prior group
-    /// that referenced *our* shim before re-adding one, so re-runs don't
-    /// accumulate and the user's own hooks (a different command) are untouched.
     fn install_hook(&self, shim: &Path) -> io::Result<()> {
-        let dir = self.codex_home();
-        let path = dir.join("hooks.json");
-
-        let existing = fs::read_to_string(&path).unwrap_or_default();
-        let mut root: Value = if existing.trim().is_empty() {
-            json!({})
-        } else {
-            serde_json::from_str(&existing).map_err(|e| {
-                // A hooks file we cannot parse is one we must not rewrite. The
-                // caller only logs this, so codex still launches — just without
-                // the status hook.
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("codex hooks.json does not parse; refusing to edit it: {e}"),
-                )
-            })?
-        };
-        if !root.is_object() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "codex hooks.json is not a JSON object; refusing to edit it",
-            ));
-        }
-
-        let marker = shim.display().to_string();
-        let command = Self::hook_command(shim);
-        for event in HOOK_EVENTS {
-            ensure_hook(&mut root, event, &marker, &command);
-        }
-
-        fs::create_dir_all(&dir)?;
-        let tmp = dir.join(".hooks.json.tmp");
-        fs::write(&tmp, serde_json::to_string_pretty(&root)? + "\n")?;
-        fs::rename(&tmp, &path)
+        install_status_hooks(&self.codex_home(), &shim.display().to_string(), &Self::hook_command(shim))
     }
 
     /// Best-effort removal of the pre-hooks `notify` line from `config.toml`,
@@ -222,9 +159,17 @@ fn remove_stray_notify(table: &mut toml_edit::Table, marker: &str) -> bool {
     changed
 }
 
-/// Ensure `root["hooks"][event]` contains exactly one hook group that runs
-/// `command`, keyed for idempotency by `marker` (the shim path). Existing
-/// groups that mention the marker are replaced; foreign groups are preserved.
+/// Merge status hooks without changing the positions Codex uses to track trust.
+pub(crate) fn install_status_hooks(dir: &Path, marker: &str, command: &str) -> io::Result<()> {
+    crate::update_agent_hooks(dir, |root| {
+        for event in HOOK_EVENTS {
+            ensure_hook(root, event, marker, command);
+        }
+        Ok(())
+    })
+}
+
+/// Update our first existing command at its current index and remove duplicates.
 fn ensure_hook(root: &mut Value, event: &str, marker: &str, command: &str) {
     let hooks = root
         .as_object_mut()
@@ -243,10 +188,29 @@ fn ensure_hook(root: &mut Value, event: &str, marker: &str, command: &str) {
         *arr = json!([]);
     }
     let arr = arr.as_array_mut().unwrap();
-    // Drop any earlier copy of OUR hook (matched by the shim path) so re-runs
-    // stay flat; leave the user's own hooks alone.
-    arr.retain(|group| !group.to_string().contains(marker));
-    arr.push(json!({ "hooks": [ { "type": "command", "command": command } ] }));
+    let mut found = false;
+    arr.retain_mut(|group| {
+        let Some(handlers) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+            return true;
+        };
+        let was_empty = handlers.is_empty();
+        handlers.retain_mut(|handler| {
+            let belongs_to_us = handler["command"].as_str().is_some_and(|cmd| cmd.contains(marker));
+            if !belongs_to_us {
+                return true;
+            }
+            if found {
+                return false;
+            }
+            found = true;
+            handler["command"] = json!(command);
+            true
+        });
+        was_empty || !handlers.is_empty()
+    });
+    if !found {
+        arr.push(json!({ "hooks": [ { "type": "command", "command": command } ] }));
+    }
 }
 
 impl AgentRuntime for CodexRuntime {
@@ -255,9 +219,9 @@ impl AgentRuntime for CodexRuntime {
     }
 
     fn fidelity(&self) -> WaitFidelity {
-        // Running/idle is now reliable (UserPromptSubmit / Stop hooks), but
-        // codex exposes no "blocked on you" event — so it stays BestEffort and
-        // never claims "input needed" (R11).
+        // Trusted turn hooks report running and idle. PermissionRequest runs
+        // before approval routing and does not prove that a user prompt opened,
+        // so the adapter does not send a waiting notification from it.
         WaitFidelity::BestEffort
     }
 

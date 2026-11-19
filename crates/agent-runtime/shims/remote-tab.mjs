@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,7 +16,9 @@ export function recordTab(payload, agentSessionId) {
 		if (!/^harness_[A-Za-z0-9_-]+_\d+$/.test(session)) return;
 		const dir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../remote/tabs");
 		fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-		const target = path.join(dir, session + ".json");
+		// Match oo_remote::session_file_stem for long tmux session names.
+		const stem = session.length <= 230 ? session : `long-${createHash("sha256").update(session).digest("hex")}`;
+		const target = path.join(dir, stem + ".json");
 		const next = JSON.parse(payload);
 		next.agentSessionId = agentSessionId;
 		next.statusSince = next.timestamp;

@@ -13,7 +13,8 @@
 //!   every 15 s.
 //!   404 for an unknown/unmarked id or one without a supported transcript.
 //! - `GET /api/agents/{id}/conversation/tool/{tool_id}`:
-//!   `{"text","is_error","truncated"}` (text capped at 64 KiB); 404 when
+//!   `{"text","is_error","truncated"}` with optional executed `input` (each
+//!   capped at 64 KiB); 404 when
 //!   unknown.
 //!
 //! The transcript path comes only from the app's snapshot for a currently

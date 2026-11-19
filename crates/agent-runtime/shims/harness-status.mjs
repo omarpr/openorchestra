@@ -54,6 +54,8 @@ export function resolveCwd(payload) {
 		process.env.CLAUDE_PROJECT_DIR ||
 		pick(payload ?? {}, "cwd") ||
 		process.env.CODEX_PROJECT_DIR ||
+		process.env.CURSOR_PROJECT_DIR ||
+		pick(payload ?? {}, "workspace_roots.0") ||
 		process.cwd()
 	);
 }

@@ -141,11 +141,11 @@ describe("ConversationView", () => {
     expect(screen.getByText(/<script>alert\(1\)<\/script>/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "✓ Bash cargo test" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "✗ Bash cargo build" })).toBeInTheDocument();
-    expect(screen.getByText(/💭 Thinking…/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Thinking…/ })).toBeInTheDocument();
     expect(screen.getByText(/line one/)).toBeInTheDocument();
     expect(screen.queryByText(/line two/)).not.toBeInTheDocument();
-    expect(screen.getByText("💭 Thought for 12 s")).toBeInTheDocument();
-    expect(screen.getByText("💭 Thinking (not recorded)")).toBeInTheDocument();
+    expect(screen.getByText("Thought for 12 s")).toBeInTheDocument();
+    expect(screen.queryByText("Thinking (not recorded)")).not.toBeInTheDocument();
     expect(screen.getByText("Can't read the conversation right now")).toBeInTheDocument();
   });
 
@@ -187,7 +187,7 @@ describe("ConversationView", () => {
       { id: "1", kind: "thinking", duration_ms: 300 },
       { id: "2", kind: "thinking", duration_ms: 0 },
     ]);
-    expect(screen.getAllByText("💭 Thought for 1 s")).toHaveLength(2);
+    expect(screen.getAllByText("Thought for 1 s")).toHaveLength(2);
   });
 
   it("a pending tool's sheet says Still running and fetches once it finishes", async () => {
@@ -201,6 +201,20 @@ describe("ConversationView", () => {
     push([{ id: "3", kind: "tool", tool: { id: "t1", name: "Bash", summary: "sleep 9", status: "ok" } }]);
     expect(await screen.findByText("done")).toBeInTheDocument();
     expect(fetchToolMock).toHaveBeenCalledWith("a1", "t1");
+  });
+
+  it("shows the completed exec's preview, then its multiline input and output on tap", async () => {
+    const input = 'console.log("first");\nconsole.log("second");';
+    fetchToolMock.mockResolvedValue({ input, text: "first\nsecond", is_error: false, truncated: false });
+    render(<ConversationView id="a1" />);
+    push([
+      { id: "1", kind: "tool", tool: { id: "exec-1", name: "exec", summary: input.split("\n")[0], status: "ok" } },
+    ]);
+    await userEvent.click(screen.getByRole("button", { name: /✓ exec console\.log/ }));
+    expect(await screen.findByText("Executed")).toBeInTheDocument();
+    expect(screen.getByText(/console\.log.*console\.log/)).toHaveTextContent("second");
+    expect(screen.getByText("first second")).toBeInTheDocument();
+    expect(fetchToolMock).toHaveBeenCalledWith("a1", "exec-1");
   });
 
   it("stays at the bottom when the list area resizes while stuck", () => {
@@ -329,6 +343,26 @@ describe("ConversationView", () => {
 });
 
 describe("AgentView conversation switch", () => {
+  it("animates only the current turn's trailing placeholder and stops on a reply or idle", () => {
+    const codex = agent({ agent_kind: "codex", status_since: "2026-11-18T17:00:00Z" });
+    const { container, rerender } = render(<AgentView id="a1" agent={codex} />);
+    const dots = () => container.querySelectorAll(".oo-thinking-dot");
+    push([{ id: "old", kind: "thinking", at: "2026-11-18T16:59:00Z" }]);
+    expect(dots()).toHaveLength(0);
+    push([{ id: "live", kind: "thinking", at: "2026-11-18T17:00:01Z" }]);
+    expect(dots()).toHaveLength(1);
+    expect(screen.queryByText("Working…")).not.toBeInTheDocument();
+    expect(screen.queryByText("Thinking (not recorded)")).not.toBeInTheDocument();
+    push([{ id: "reply", kind: "assistant", text: "Ready" }]);
+    expect(dots()).toHaveLength(0);
+    expect(screen.getByText("Working…")).toBeInTheDocument();
+    push([{ id: "next", kind: "thinking", at: "2026-11-18T17:00:02Z" }]);
+    expect(dots()).toHaveLength(1);
+    rerender(<AgentView id="a1" agent={{ ...codex, status: "idle" }} />);
+    expect(dots()).toHaveLength(0);
+    expect(screen.queryByText(/Thinking/)).not.toBeInTheDocument();
+  });
+
   it("agent header shows repo · branch · agent", () => {
     render(<AgentView id="a1" agent={agent()} />);
     const h = screen.getByRole("heading", { level: 2 });
@@ -418,14 +452,17 @@ describe("AgentView conversation switch", () => {
     expect(localStorage.getItem("oo.view.a1")).toBeNull();
   });
 
-  it.each(["claude-code", "codex"])("offers Conversation for %s while its transcript is pending", async (kind) => {
-    const { rerender } = render(<AgentView id="a1" agent={agent({ agent_kind: kind, has_conversation: false })} />);
-    await userEvent.click(screen.getByRole("tab", { name: "Conversation" }));
-    expect(screen.getByText(/Waiting for a transcript/)).toBeInTheDocument();
-    expect(stream.urls).toHaveLength(0);
-    rerender(<AgentView id="a1" agent={agent({ agent_kind: kind })} />);
-    expect(stream.urls).toEqual(["/api/agents/a1/conversation"]);
-  });
+  it.each(["claude-code", "codex", "opencode"])(
+    "offers Conversation for %s while its transcript is pending",
+    async (kind) => {
+      const { rerender } = render(<AgentView id="a1" agent={agent({ agent_kind: kind, has_conversation: false })} />);
+      await userEvent.click(screen.getByRole("tab", { name: "Conversation" }));
+      expect(screen.getByText(/Waiting for a transcript/)).toBeInTheDocument();
+      expect(stream.urls).toHaveLength(0);
+      rerender(<AgentView id="a1" agent={agent({ agent_kind: kind })} />);
+      expect(stream.urls).toEqual(["/api/agents/a1/conversation"]);
+    },
+  );
 
   it("unsupported agent: Terminal and no switch", () => {
     render(<AgentView id="a1" agent={agent({ agent_kind: "kimi", has_conversation: false })} />);

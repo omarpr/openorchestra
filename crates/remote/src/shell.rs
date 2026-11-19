@@ -119,10 +119,8 @@ __oo_write "{\"t\":\"hello\",\"at\":$REPLY}"
 
 /// Where the shell tab running in tmux session `session` logs its commands.
 pub fn log_path(state_dir: &Path, session: &str) -> PathBuf {
-    state_dir
-        .join("remote")
-        .join("shell")
-        .join(format!("{session}.jsonl"))
+    let stem = crate::session_file_stem(session);
+    shell_dir(state_dir).join(format!("{stem}.jsonl"))
 }
 
 /// Write the zsh startup files (idempotent) and return the `ZDOTDIR` to
@@ -166,33 +164,11 @@ fn flag_path(state_dir: &Path, session: &str) -> PathBuf {
 }
 
 const LOG_SUFFIX: &str = ".jsonl";
-const FLAG_SUFFIX: &str = ".jsonl.on";
 
 /// Let exactly the shell tabs in `shared` (tmux session names) record
 /// commands; every other tab's hook goes quiet. An empty set turns all off.
 pub fn sync_flags(state_dir: &Path, shared: &HashSet<String>) -> io::Result<()> {
-    let dir = shell_dir(state_dir);
-    private_dir(&dir)?;
-    for entry in fs::read_dir(&dir)? {
-        let name = entry?.file_name().to_string_lossy().into_owned();
-        if let Some(session) = name.strip_suffix(FLAG_SUFFIX) {
-            if !shared.contains(session) {
-                fs::remove_file(dir.join(&name))?;
-            }
-        }
-    }
-    for session in shared {
-        let flag = flag_path(state_dir, session);
-        if !flag.exists() {
-            fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .write(true)
-                .mode(0o600)
-                .open(flag)?;
-        }
-    }
-    Ok(())
+    crate::transcript::sync_log_flags(&shell_dir(state_dir), shared, false)
 }
 
 /// A log is trimmed once past this size...
@@ -211,6 +187,7 @@ pub fn collect(state_dir: &Path, live: &HashSet<String>, now: SystemTime) -> io:
     if !dir.is_dir() {
         return Ok(());
     }
+    let live: HashSet<_> = live.iter().map(|session| crate::session_file_stem(session)).collect();
     for entry in fs::read_dir(&dir)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -473,6 +450,7 @@ pub fn tool_result(text: &str, tool_id: &str) -> Option<ToolResult> {
         },
         is_error: exit != 0,
         truncated: false,
+        input: None,
     })
 }
 
@@ -628,6 +606,22 @@ mod housekeeping {
         assert!(!flag_path(st, "a").exists() && flag_path(st, "b").exists());
         sync_flags(st, &HashSet::new()).unwrap();
         assert!(!flag_path(st, "b").exists());
+    }
+
+    #[test]
+    fn long_session_names_share_and_retain_the_same_bounded_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = format!("harness_{}_1", "member".repeat(50));
+        let live = HashSet::from([session.clone()]);
+        sync_flags(dir.path(), &live).unwrap();
+        assert!(flag_path(dir.path(), &session).is_file());
+        let log = log_path(dir.path(), &session);
+        fs::write(&log, "test").unwrap();
+        let after_grace = SystemTime::now() + CLOSED_GRACE + Duration::from_secs(1);
+        collect(dir.path(), &live, after_grace).unwrap();
+        assert!(log.is_file());
+        sync_flags(dir.path(), &HashSet::new()).unwrap();
+        assert!(!flag_path(dir.path(), &session).exists());
     }
 
     #[test]

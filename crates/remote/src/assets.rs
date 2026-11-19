@@ -6,6 +6,9 @@
 use axum::extract::State;
 use axum::http::{header, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
+// Keep `rust-embed` referenced in headless builds without `web/remote/dist`.
+#[cfg(oo_remote_no_web)]
+use rust_embed as _;
 
 /// Content-Security-Policy for every HTML response.
 pub const CSP: &str = "default-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'";

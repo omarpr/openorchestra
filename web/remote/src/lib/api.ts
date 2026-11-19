@@ -80,8 +80,25 @@ export async function pair(code: string, deviceName: string): Promise<string> {
   return token;
 }
 
-export async function me(): Promise<{ name: string; read_only: boolean }> {
+export interface Device {
+  name: string;
+  read_only: boolean;
+  voice_input?: boolean;
+}
+
+export async function me(): Promise<Device> {
   return (await request("/api/me")).json();
+}
+
+export async function transcribeVoice(audio: Blob, signal: AbortSignal): Promise<string> {
+  const response = await request("/api/voice", {
+    method: "POST",
+    headers: { "Content-Type": "audio/wav" },
+    body: audio,
+    signal,
+  });
+  const { text } = (await response.json()) as { text: string };
+  return text;
 }
 
 export async function listAgents(): Promise<Agent[]> {
@@ -102,9 +119,33 @@ export async function sendText(id: string, text: string): Promise<number> {
   return Number.isNaN(date) ? Date.now() : date;
 }
 
+export const MAX_SCREENSHOT_BYTES = 8 * 1024 * 1024;
+
+function readScreenshot(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const url = String(reader.result);
+      resolve(url.slice(url.indexOf(",") + 1));
+    };
+    reader.onerror = () => reject(new ApiError(0, "unreadable_image"));
+    reader.readAsDataURL(file);
+  });
+}
+
+export async function sendScreenshot(id: string, text: string, file: File): Promise<void> {
+  const image = await readScreenshot(file);
+  await request(`/api/agents/${encodeURIComponent(id)}/send-screenshot`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, image }),
+  });
+}
+
 export interface ToolResult {
   text: string;
   is_error: boolean;
+  input?: string;
   /** Output was cut at the server's cap; the UI shows the `…[truncated]` note. */
   truncated: boolean;
 }

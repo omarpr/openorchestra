@@ -159,7 +159,7 @@ impl HarnessWorkspace {
     }
 
     /// Create a task from a name, optional brief, and optional branch override.
-    /// Empty branch → `feat/{slug}` from the name.
+    /// An empty branch uses `feat/{name_slug}`.
     pub(crate) fn create_named(
         &mut self,
         name: &str,
@@ -188,12 +188,12 @@ impl HarnessWorkspace {
             home = member_names[0].clone();
         }
 
-        let slug = slugify(name);
+        let name_slug = task_name_slug(name);
         let branch = branch
             .map(str::trim)
             .filter(|b| !b.is_empty())
             .map(|b| b.to_string())
-            .unwrap_or_else(|| format!("feat/{slug}"));
+            .unwrap_or_else(|| format!("feat/{name_slug}"));
         let created_at = now_stamp();
 
         let members: Vec<CreateTaskMember> = member_names
@@ -215,7 +215,7 @@ impl HarnessWorkspace {
 
         let req = CreateTaskRequest {
             name: name.to_string(),
-            slug: slug.clone(),
+            slug: name_slug,
             home_repo: home.clone(),
             members,
             created_at,
@@ -225,22 +225,23 @@ impl HarnessWorkspace {
         match create_task(&mut self.manager, &mut self.task_store, req) {
             Ok(task_id) => {
                 let tasks_root = self.data_dir.join("tasks");
-                if let Err(e) = write_task_brief(&tasks_root, &slug, brief) {
-                    log::warn!("could not write task brief: {e}");
-                }
                 // Multi-member coordination (+ optional brief) lives under
                 // harness state (not project AGENTS.md). Setup runs visibly
                 // in the shell after select so the user can see script output.
-                let task = self.task_store.get(&task_id).cloned();
-                if let Some(task) = &task
-                    && let Err(e) = write_task_agent_context(task, &tasks_root) {
+                let task = self.task_store.get(&task_id);
+                if let Some(task) = task {
+                    if let Err(e) = write_task_brief(&tasks_root, &task.slug, brief) {
+                        log::warn!("could not write task brief: {e}");
+                    }
+                    if let Err(e) = write_task_agent_context(task, &tasks_root) {
                         log::warn!("could not write task agent context: {e}");
                     }
-                let multi = task.as_ref().map(|t| t.members.len() >= 2).unwrap_or(false);
+                }
+                let multi = task.is_some_and(|t| t.members.len() >= 2);
                 if multi {
                     self.ensure_task_broker(&task_id);
                 }
-                self.set_note(format!("created task {task_id}"));
+                self.set_note(format!("created task {name}"));
                 self.refresh(window, cx);
                 self.select(
                     Selection::Task {

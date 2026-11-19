@@ -8,13 +8,36 @@ impl HarnessWorkspace {
     pub(crate) fn apply_forge(&mut self, update: ForgeUpdate, cx: &mut Context<Self>) {
         match update.result {
             Ok(status) => {
-                self.forge_status.insert(update.key.branch, status);
+                self.forge_status.entry(update.key.repo_dir).or_default().insert(update.key.branch, status);
             }
             Err(_) => {
-                self.forge_status.remove(&update.key.branch);
+                if let Some(branches) = self.forge_status.get_mut(&update.key.repo_dir) {
+                    branches.remove(&update.key.branch);
+                }
             }
         }
         cx.notify();
+    }
+
+    pub(crate) fn branch_status(&self, repo: &Path, branch: &str) -> Option<&BranchStatus> {
+        self.forge_status.get(repo)?.get(branch)
+    }
+
+    pub(crate) fn sync_forge_branches(&self) {
+        if let Some(poller) = &self._poller {
+            poller.set_branches(self.data.forge_branches());
+        }
+    }
+
+    pub(crate) fn refresh_forge_repo(&mut self, repo: &Path) {
+        if let Some(poller) = &self._poller {
+            if let Some(branches) = self.forge_status.get_mut(repo) {
+                for status in branches.values_mut() {
+                    status.checks.clear();
+                }
+            }
+            poller.refresh_repo(repo);
+        }
     }
 
     /// Drop any `Running`/`Waiting` pill whose agent process is gone.

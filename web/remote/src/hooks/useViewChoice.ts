@@ -1,4 +1,5 @@
 import { useCallback, useState } from "react";
+import { canOpenConversation } from "@/lib/agents";
 import type { Agent } from "@/lib/api";
 import { readPref, writePref } from "@/lib/storage";
 
@@ -9,7 +10,7 @@ export type View = "conversation" | "terminal";
  */
 export function useViewChoice(id: string, agent: Agent | undefined, agentsLoaded: boolean) {
   const hasConv = agent?.has_conversation === true;
-  const canPick = hasConv || agent?.agent_kind === "claude-code" || agent?.agent_kind === "codex";
+  const canPick = canOpenConversation(agent);
   const [saved, setSaved] = useState<View | null>(() => {
     const v = readPref(`oo.view.${id}`);
     return v === "conversation" || v === "terminal" ? v : null;

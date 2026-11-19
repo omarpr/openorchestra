@@ -38,10 +38,8 @@ function readStdin() {
  *
  * Only `Stop` means the turn ended. Every other event we install for
  * (`UserPromptSubmit`) — or any future one we happen to receive — means codex
- * is alive and working. We deliberately never return "waiting": codex runs
- * here with `--ask-for-approval never`, so it does not block on the user, and
- * inventing a "needs input" state would be exactly the R11 lie the codex
- * adapter's BestEffort fidelity exists to prevent.
+ * is alive and working. The installed hooks report turn boundaries, so an
+ * approval prompt within a turn leaves the status as "running".
  *
  * Exported for the test harness.
  */

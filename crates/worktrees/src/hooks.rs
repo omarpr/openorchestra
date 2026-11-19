@@ -1198,7 +1198,7 @@ mod trust_tests {
             Err(HooksError::Untrusted { scripts, .. }) => {
                 assert_eq!(scripts, vec![repo_scripts_dir(&repo).join("setup.sh")]);
             }
-            other => panic!("expected Untrusted, got {other:?}"),
+            _ => panic!("expected committed hooks to require approval"),
         }
         HookTrust::trust(&data, &repo).unwrap();
         assert_eq!(HooksConfig::load_trusted(&repo, &data, "repo").unwrap().setup.len(), 1);

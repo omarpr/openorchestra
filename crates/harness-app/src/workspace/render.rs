@@ -2,6 +2,7 @@
 //! widgets (agent pill, CI summary, tool chips).
 
 use super::*;
+use super::ui::sidebar::SidebarSection;
 
 impl Focusable for HarnessWorkspace {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
@@ -220,11 +221,7 @@ impl Render for HarnessWorkspace {
             );
 
         if let Some(m) = &self.menu {
-            let menu = CardMenu {
-                id: m.id.clone(),
-                x: m.x,
-                y: m.y,
-            };
+            let menu = m.clone();
             root = root.child(
                 div()
                     .id("menu-backdrop")
@@ -453,6 +450,14 @@ pub(crate) const INDICATOR_FRAME: Duration = Duration::from_millis(66);
 /// One full spinner turn, and one breath of the waiting pulse.
 pub(crate) const SPIN_PERIOD: f32 = 1.0;
 pub(crate) const PULSE_PERIOD: f32 = 1.2;
+pub(crate) const DOT_BLINK_PERIOD: f32 = 1.6;
+pub(crate) const DOT_BLINK_DIM: f32 = 0.08;
+
+/// Fade a dot from full opacity to its dimmest point and back.
+pub(crate) fn dot_blink_opacity(t: f32) -> f32 {
+    let phase = (t / DOT_BLINK_PERIOD).fract() * std::f32::consts::TAU;
+    DOT_BLINK_DIM + (1.0 - DOT_BLINK_DIM) * (0.5 + 0.5 * phase.cos())
+}
 
 impl HarnessWorkspace {
     /// Seconds on the indicators' shared clock, so every spinner turns in step.
@@ -460,12 +465,20 @@ impl HarnessWorkspace {
         self.anim_clock.elapsed().as_secs_f32()
     }
 
-    /// Keep the sidebar indicators moving while any agent is running or
-    /// waiting; stop the loop as soon as none is, so an idle app stays idle.
+    /// Keep repainting while a sidebar indicator is animated.
     pub(crate) fn ensure_indicator_ticker(&mut self, cx: &mut Context<Self>) {
         let animating = |ws: &Self| {
             ws.agent_status.values().any(|s| matches!(s, AgentState::Running | AgentState::Waiting))
                 || !ws.ending.is_empty()
+                || (ws.prefs.sidebar_open
+                    && !ws.section_collapsed(SidebarSection::Projects)
+                    && ws.data.repos.iter().any(|repo| {
+                        !ws.prefs.collapsed.contains(&repo.name)
+                            && std::iter::once(&repo.head_branch)
+                                .chain(repo.worktrees.iter().map(|wt| &wt.branch))
+                                .any(|branch| ws.branch_status(&repo.repo_root, branch)
+                                    .is_some_and(|status| ci_summary(&status.checks) == Some(CheckStatus::Running)))
+                    }))
                 // The sidebar's A2A connectors: a message dot or flash in
                 // flight, or a delegation pulsing while it is worked on.
                 || ws.a2a_links.is_animating(ws.anim_secs())
@@ -657,30 +670,55 @@ pub(crate) fn row_hover_bg(hx: &HarnessTheme, selected: bool) -> Rgba {
     tint(hx.accent, if selected { 0.26 } else { 0.09 })
 }
 
-/// A row's git counts — `↑ahead ↓behind ~dirty`, zeros left out — sized to
-/// sit on the row's subtitle line after its branch. `None` when all are zero.
+/// A compact chip for the row's Git counts. Zero counts take no space.
 pub(crate) fn git_counts(hx: &HarnessTheme, ahead: usize, behind: usize, dirty: usize) -> Option<gpui::Div> {
-    let mut row = div().flex().flex_none().items_center().gap_1().text_xs().font_family(hx.font_mono);
-    let mut any = false;
-    for (n, glyph, color) in [(ahead, "↑", hx.green), (behind, "↓", hx.amber), (dirty, "~", hx.amber)] {
-        if n > 0 {
-            any = true;
-            row = row.child(div().text_color(color).child(format!("{glyph}{n}")));
+    let mut row = sidebar_chip(hx, hx.tx1).gap_1();
+    for (count, icon, color, label) in [
+        (ahead, "icons/arrow_up.svg", hx.green, "Commits ahead"),
+        (behind, "icons/arrow_down.svg", hx.amber, "Commits behind"),
+        (dirty, "icons/file_diff.svg", hx.amber, "Changed files"),
+    ] {
+        if count == 0 {
+            continue;
         }
+        row = row.child(
+            div()
+                .id(label)
+                .flex()
+                .items_center()
+                .gap(px(2.0))
+                .text_color(color)
+                .tooltip(tip(format!("{label} · {count}")))
+                .child(svg().path(icon).size(px(11.0)).text_color(color))
+                .child(count.to_string()),
+        );
     }
-    any.then_some(row)
+    (ahead > 0 || behind > 0 || dirty > 0).then_some(row)
 }
 
-pub(crate) fn ci_summary(hx: &HarnessTheme, checks: &[forge::CheckRun]) -> Option<(Rgba, &'static str)> {
-    if checks.is_empty() {
-        return None;
-    }
+pub(crate) fn sidebar_chip(hx: &HarnessTheme, color: Rgba) -> gpui::Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(2.0))
+        .rounded_md()
+        .px_1p5()
+        .line_height(gpui::rems(0.95))
+        .text_size(gpui::rems(0.68))
+        .font_family(hx.font_mono)
+        .whitespace_nowrap()
+        .text_color(color)
+        .bg(tint(color, 0.13))
+}
+
+pub(crate) fn ci_summary(checks: &[forge::CheckRun]) -> Option<CheckStatus> {
     if checks.iter().any(|c| c.status == CheckStatus::Fail) {
-        Some((hx.red, "ci"))
+        Some(CheckStatus::Fail)
     } else if checks.iter().any(|c| c.status == CheckStatus::Running) {
-        Some((hx.amber, "ci"))
+        Some(CheckStatus::Running)
     } else if checks.iter().any(|c| c.status == CheckStatus::Pass) {
-        Some((hx.green, "ci"))
+        Some(CheckStatus::Pass)
     } else {
         None
     }
@@ -760,8 +798,17 @@ impl HarnessWorkspace {
 }
 
 #[cfg(test)]
-mod toast_tests {
-    use super::is_failure;
+mod tests {
+    use super::{CheckStatus, ci_summary, is_failure};
+
+    #[test]
+    fn ci_remains_running_after_some_checks_pass() {
+        let build = forge::CheckRun { name: "build".into(), status: CheckStatus::Pass };
+        let mut test = forge::CheckRun { name: "test".into(), status: CheckStatus::Running };
+        assert_eq!(ci_summary(&[build.clone(), test.clone()]), Some(CheckStatus::Running));
+        test.status = CheckStatus::Pass;
+        assert_eq!(ci_summary(&[build, test]), Some(CheckStatus::Pass));
+    }
 
     #[test]
     fn failures_are_told_apart_from_progress() {
