@@ -14,11 +14,9 @@
 //! `.harness/status.json` every other adapter uses, so `StatusFileSource`
 //! consumes it unchanged.
 //!
-//! Fidelity stays [`WaitFidelity::BestEffort`]: we now know running vs idle
-//! reliably, but codex (running with `--ask-for-approval never`) exposes no
-//! out-of-band "blocked on you" event, so `should_notify` still refuses to
-//! raise a "needs input" notification — dressing turn state up as "input
-//! needed" is exactly the lie R11 exists to prevent.
+//! Fidelity stays [`WaitFidelity::BestEffort`]. The hooks we install track
+//! turn boundaries. An approval prompt can appear during a turn without
+//! changing the reported status.
 
 use std::fs;
 use std::io;
@@ -45,20 +43,8 @@ const HOOK_EVENTS: &[&str] = &["UserPromptSubmit", "Stop"];
 /// below and the settings UI (via [`crate::default_command_display`]) both
 /// derive from these two consts.
 pub(crate) const PROGRAM: &str = "codex";
-// No `--sandbox` flag: the workspace-write sandbox blocked too much (network,
-// paths outside the worktree) and, paired with `--ask-for-approval never`,
-// those blocks became silent hard failures instead of prompts. Dropping it
-// lets Codex fall back to its own default sandbox from `~/.codex/config.toml`,
-// so policy lives where the user controls it. Approvals stay off — the harness
-// runs Codex unattended.
-//
-// `--dangerously-bypass-hook-trust` runs the status hook we install without a
-// per-launch trust prompt. It only affects harness-spawned codex, and the
-// hooks it trusts are the user's own (~/.codex/hooks.json) — but codex would
-// otherwise block the first launch waiting for a trust decision the harness
-// cannot answer.
 pub(crate) const DEFAULT_ARGS: &[&str] =
-    &["--ask-for-approval", "never", "--dangerously-bypass-hook-trust"];
+    &["--sandbox", "workspace-write", "--ask-for-approval", "on-request"];
 
 pub struct CodexRuntime {
     state_dir: PathBuf,
