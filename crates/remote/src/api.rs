@@ -646,61 +646,103 @@ fn validate_webp(bytes: &[u8]) -> bool {
     if riff_size.checked_add(8) != Some(bytes.len()) {
         return false;
     }
-    let mut pos = 12usize;
-    let mut saw_dims = false;
-    while let Some(header) = bytes.get(pos..pos + 8) {
-        let fourcc = &header[0..4];
-        let chunk_len = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
-        let Some(data_end) = pos.checked_add(8).and_then(|n| n.checked_add(chunk_len)) else {
+    let mut chunks = &bytes[12..];
+    let mut canvas = None;
+    let mut animated = false;
+    let mut saw_animation_header = false;
+    let mut saw_image = false;
+    while !chunks.is_empty() {
+        let first = chunks.len() == bytes.len() - 12;
+        let Some((tag, data)) = webp_chunk(&mut chunks) else {
             return false;
         };
-        let Some(padded_end) = data_end.checked_add(chunk_len & 1) else {
-            return false;
-        };
-        if padded_end > bytes.len() {
-            return false;
-        }
-        let data = &bytes[pos + 8..data_end];
-        if !saw_dims {
-            if fourcc == b"VP8 " {
-                if data.len() < 10
-                    || (data[0] & 1) != 0
-                    || data[3..6] != [0x9d, 0x01, 0x2a]
-                {
-                    return false;
-                }
-                let width = (u16::from_le_bytes([data[6], data[7]]) & 0x3fff) as u32;
-                let height = (u16::from_le_bytes([data[8], data[9]]) & 0x3fff) as u32;
+        match tag {
+            b"VP8X" if first && data.len() == 10 => {
+                let width = webp_u24(&data[4..7]) + 1;
+                let height = webp_u24(&data[7..10]) + 1;
                 if !screenshot_dimensions_ok(width, height, 4) {
                     return false;
                 }
-                saw_dims = true;
-            } else if fourcc == b"VP8L" {
-                if data.len() < 5 || data[0] != 0x2f {
-                    return false;
-                }
-                let bits = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
-                let width = (bits & 0x3fff) + 1;
-                let height = ((bits >> 14) & 0x3fff) + 1;
-                if !screenshot_dimensions_ok(width, height, 4) {
-                    return false;
-                }
-                saw_dims = true;
-            } else if fourcc == b"VP8X" {
-                if data.len() < 10 {
-                    return false;
-                }
-                let width = u32::from_le_bytes([data[4], data[5], data[6], 0]) + 1;
-                let height = u32::from_le_bytes([data[7], data[8], data[9], 0]) + 1;
-                if !screenshot_dimensions_ok(width, height, 4) {
-                    return false;
-                }
-                saw_dims = true;
+                canvas = Some((width, height));
+                animated = data[0] & 0x02 != 0;
             }
+            b"VP8 " | b"VP8L" if !animated && !saw_image => {
+                let Some(dimensions) = webp_image_dimensions(tag, data) else {
+                    return false;
+                };
+                if canvas.is_some_and(|canvas| canvas != dimensions) {
+                    return false;
+                }
+                saw_image = true;
+            }
+            b"ANIM" if animated && !saw_animation_header && data.len() == 6 => {
+                saw_animation_header = true;
+            }
+            b"ANMF" if saw_animation_header && canvas.is_some_and(|c| validate_webp_frame(data, c)) => {
+                saw_image = true;
+            }
+            b"VP8X" | b"VP8 " | b"VP8L" | b"ANIM" | b"ANMF" => return false,
+            _ => {}
         }
-        pos = padded_end;
     }
-    saw_dims && pos == bytes.len()
+    saw_image
+}
+
+/// Read one length-delimited RIFF chunk, including its alignment padding.
+fn webp_chunk<'a>(chunks: &mut &'a [u8]) -> Option<(&'a [u8], &'a [u8])> {
+    let (header, rest) = chunks.split_at_checked(8)?;
+    let len = u32::from_le_bytes(header[4..8].try_into().ok()?) as usize;
+    let (data, rest) = rest.split_at_checked(len)?;
+    *chunks = rest.get(len & 1..)?;
+    Some((&header[..4], data))
+}
+
+fn webp_u24(bytes: &[u8]) -> u32 {
+    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], 0])
+}
+
+fn webp_image_dimensions(tag: &[u8], data: &[u8]) -> Option<(u32, u32)> {
+    // Both bitstreams must contain bytes beyond their dimension headers.
+    let (width, height) = match tag {
+        b"VP8 " if data.len() > 10 && data[0] & 1 == 0 && data[3..6] == [0x9d, 0x01, 0x2a] => {
+            let width = u16::from_le_bytes([data[6], data[7]]) & 0x3fff;
+            let height = u16::from_le_bytes([data[8], data[9]]) & 0x3fff;
+            (u32::from(width), u32::from(height))
+        }
+        b"VP8L" if data.len() > 5 && data[0] == 0x2f && data[4] >> 5 == 0 => {
+            let bits = u32::from_le_bytes(data[1..5].try_into().ok()?);
+            ((bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1)
+        }
+        _ => return None,
+    };
+    screenshot_dimensions_ok(width, height, 4).then_some((width, height))
+}
+
+fn validate_webp_frame(data: &[u8], (canvas_width, canvas_height): (u32, u32)) -> bool {
+    // The stored frame offsets are half their pixel values. RIFF subchunks follow the header.
+    let Some((header, mut chunks)) = data.split_at_checked(16) else {
+        return false;
+    };
+    let width = webp_u24(&header[6..9]) + 1;
+    let height = webp_u24(&header[9..12]) + 1;
+    if webp_u24(&header[..3]) * 2 + width > canvas_width
+        || webp_u24(&header[3..6]) * 2 + height > canvas_height
+    {
+        return false;
+    }
+    let mut saw_image = false;
+    while !chunks.is_empty() {
+        let Some((tag, data)) = webp_chunk(&mut chunks) else {
+            return false;
+        };
+        if matches!(tag, b"VP8 " | b"VP8L") {
+            if saw_image || webp_image_dimensions(tag, data) != Some((width, height)) {
+                return false;
+            }
+            saw_image = true;
+        }
+    }
+    saw_image
 }
 
 /// `\r\n`, `\r` and `\n` each become one space.
@@ -1091,15 +1133,37 @@ mod tests {
         assert_eq!(screenshot_extension(&valid_jpeg), Some("jpg"));
         assert_eq!(screenshot_extension(&valid_jpeg[..valid_jpeg.len() - 2]), None);
 
-        let valid_webp_vp8l = [
-            b'R', b'I', b'F', b'F', 18, 0, 0, 0, b'W', b'E', b'B', b'P', b'V', b'P', b'8', b'L',
-            5, 0, 0, 0, 0x2f, 0, 0, 0, 0, 0,
-        ];
-        assert_eq!(screenshot_extension(&valid_webp_vp8l), Some("webp"));
-        assert_eq!(
-            screenshot_extension(&valid_webp_vp8l[..valid_webp_vp8l.len() - 2]),
-            None
-        );
+        // One-pixel WebP fixtures from cwebp and webpmux.
+        for encoded in [
+            "UklGRiQAAABXRUJQVlA4IBgAAAAwAQCdASoBAAEAAgA0JaQAA3AA/vvfkAA=",
+            "UklGRiAAAABXRUJQVlA4TBQAAAAvAAAAAAdQgVQIIAAKmv7HiIj+Bw==",
+            "UklGRkgAAABXRUJQVlA4WAoAAAAIAAAAAAAAAAAAVlA4TBQAAAAvAAAAAAdQgVQIIAAKmv7HiIj+B0VYSUYOAAAAUDYKMSAxCjI1NQoBAgM=",
+            concat!(
+                "UklGRo4AAABXRUJQVlA4WAoAAAACAAAAAAAAAAAAQU5JTQYAAAD/////AABBTk1GLAAAAAAAAAAAAAAA",
+                "AAAAAGQAAABWUDhMFAAAAC8AAAAAB1CBVAggAAqa/seIiP4HQU5NRi4AAAAAAAAAAAAAAAAAAABkAAAA",
+                "VlA4TBUAAAAvAAAAAAfQAgJJW7ztr0H/44iI/gcA",
+            ),
+        ] {
+            let webp = STANDARD.decode(encoded).unwrap();
+            assert_eq!(screenshot_extension(&webp), Some("webp"));
+            assert_eq!(screenshot_extension(&webp[..webp.len() - 2]), None);
+        }
+    }
+
+    #[test]
+    fn screenshot_rejects_webp_containers_without_image_data() {
+        let extended_header = b"RIFF\x16\0\0\0WEBPVP8X\x0a\0\0\0\0\0\0\0\0\0\0\0\0\0";
+        let lossless_header = b"RIFF\x12\0\0\0WEBPVP8L\x05\0\0\0\x2f\0\0\0\0\0";
+        let mut empty_frame = extended_header.to_vec();
+        empty_frame[20] = 0x02; // Animation flag.
+        empty_frame.extend_from_slice(b"ANIM\x06\0\0\0\0\0\0\0\0\0ANMF\x10\0\0\0");
+        empty_frame.extend_from_slice(&[0; 16]);
+        let riff_size = (empty_frame.len() - 8) as u32;
+        empty_frame[4..8].copy_from_slice(&riff_size.to_le_bytes());
+
+        for webp in [extended_header.as_slice(), lossless_header.as_slice(), &empty_frame] {
+            assert_eq!(screenshot_extension(webp), None);
+        }
     }
 
     #[test]
