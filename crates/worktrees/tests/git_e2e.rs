@@ -6,7 +6,10 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use worktrees::{Change, CreateRequest, GitWorktrees, Manager, Registry, SystemRunner};
+use worktrees::{
+    create_task, read_task_brief, write_task_brief, Change, CreateRequest, CreateTaskMember,
+    CreateTaskRequest, GitWorktrees, Manager, Registry, SystemRunner, TaskStore,
+};
 
 /// Run git for test setup, asserting success.
 fn git(dir: &Path, args: &[&str]) {
@@ -43,6 +46,104 @@ fn init_repo(root: &Path) {
     fs::write(root.join("README.md"), "base\n").unwrap();
     git(root, &["add", "."]);
     git(root, &["commit", "-m", "base"]);
+}
+
+#[test]
+fn projects_can_create_worktrees_with_the_same_name_and_branch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let registry = Registry::new_at(root.join("registry.json"));
+    let mut manager = Manager::new(registry, GitWorktrees::new(SystemRunner), root.join("worktrees"));
+    let mut tasks = TaskStore::new_at(root.join("tasks.json"));
+    let tasks_root = root.join("tasks");
+
+    for (project, expected) in [
+        ("Web App", "settings-web-app-feat-settings"),
+        ("API", "settings-api-feat-settings"),
+        ("Web-App", "settings-web-app-feat-settings-2"),
+    ] {
+        let repo = root.join(project);
+        init_repo(&repo);
+        let id = create_task(
+            &mut manager,
+            &mut tasks,
+            CreateTaskRequest {
+                name: "Settings".into(),
+                slug: "settings".into(),
+                home_repo: project.into(),
+                members: vec![CreateTaskMember {
+                    repo: project.into(),
+                    repo_root: repo,
+                    branch: "feat/settings".into(),
+                    base_ref: Some("main".into()),
+                }],
+                created_at: "2026-11-18T00:00:00Z".into(),
+                agent_kind: Default::default(),
+            },
+        )
+        .unwrap();
+        assert_eq!(id, expected);
+        let task = tasks.get(&id).unwrap();
+        assert_eq!(task.name, "Settings");
+        assert_eq!(task.slug, id);
+        let worktree = &task.members[0];
+        assert_eq!(worktree.path, root.join("worktrees").join(project).join(&id));
+        assert_eq!(git_out(&worktree.path, &["branch", "--show-current"]).trim(), "feat/settings");
+        write_task_brief(&tasks_root, &task.slug, project).unwrap();
+    }
+
+    let tasks = TaskStore::load(root.join("tasks.json")).unwrap();
+    for task in tasks.tasks() {
+        assert_eq!(read_task_brief(&tasks_root, &task.slug).as_deref(), Some(task.home_repo.as_str()));
+    }
+}
+
+#[test]
+fn task_with_multiple_projects_uses_the_home_projects_branch_in_its_slug() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let mut manager = Manager::new(
+        Registry::new_at(root.join("registry.json")),
+        GitWorktrees::new(SystemRunner),
+        root.join("worktrees"),
+    );
+    let mut tasks = TaskStore::new_at(root.join("tasks.json"));
+    let members = [("frontend", "feature/settings-ui"), ("backend", "bugfix/settings")]
+        .into_iter()
+        .map(|(project, branch)| {
+            let repo_root = root.join(project);
+            init_repo(&repo_root);
+            CreateTaskMember {
+                repo: project.into(),
+                repo_root,
+                branch: branch.into(),
+                base_ref: Some("main".into()),
+            }
+        })
+        .collect();
+    let id = create_task(
+        &mut manager,
+        &mut tasks,
+        CreateTaskRequest {
+            name: "Settings".into(),
+            slug: "settings".into(),
+            home_repo: "backend".into(),
+            members,
+            created_at: "2026-11-18T00:00:00Z".into(),
+            agent_kind: Default::default(),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(id, "settings-backend-bugfix-settings");
+    let task = tasks.get(&id).unwrap();
+    assert_eq!(task.members.len(), 2);
+    for member in &task.members {
+        let entry = manager.registry.get(&member.worktree_id).unwrap();
+        assert_eq!(entry.task_id.as_deref(), Some(id.as_str()));
+        assert_eq!(entry.task_slug, id);
+        assert_eq!(git_out(&member.path, &["branch", "--show-current"]).trim(), member.branch);
+    }
 }
 
 #[test]

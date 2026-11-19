@@ -8,7 +8,7 @@ impl HarnessWorkspace {
     pub(crate) fn sync_new_task_branch_placeholder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let auto = self.new_task.as_ref().map(|dialog| {
             let name = dialog.name.read(cx).text(cx);
-            format!("feat/{}", slugify(name.trim()))
+            format!("feat/{}", task_name_slug(name.trim()))
         });
         let Some(auto) = auto else { return };
         let Some(dialog) = self.new_task.as_mut() else { return };

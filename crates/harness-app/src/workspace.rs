@@ -28,7 +28,7 @@ use forge::{BranchKey, BranchStatus, CheckStatus, ForgeUpdate, GhCli, Poller, Po
 use worktrees::{
     Change, CreateTaskMember, CreateTaskRequest, GitWorktrees, HookEnv, HookLayer, HookScriptPhase,
     HooksConfig, Manager, Registry, SystemRunner, TaskHooks, TaskStore, clear_local_hooks,
-    create_task, ensure_hook_script, local_hooks_base, migrate_worktrees_to_tasks,
+    create_task, ensure_hook_script, local_hooks_base, migrate_worktrees_to_tasks, task_name_slug,
     visible_setup_shell_line, write_task_agent_context, write_task_brief, write_visible_setup_runner,
 };
 
@@ -862,26 +862,6 @@ struct ProjectSearchUi {
     status: String,
 }
 
-fn slugify(name: &str) -> String {
-    let mut slug = String::new();
-    let mut last_dash = true;
-    for ch in name.chars() {
-        if ch.is_ascii_alphanumeric() {
-            slug.push(ch.to_ascii_lowercase());
-            last_dash = false;
-        } else if !last_dash {
-            slug.push('-');
-            last_dash = true;
-        }
-    }
-    let slug = slug.trim_matches('-').to_string();
-    if slug.is_empty() {
-        "task".to_string()
-    } else {
-        slug
-    }
-}
-
 fn now_stamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
@@ -929,13 +909,13 @@ fn tip(
 
 #[cfg(test)]
 mod slugify_tests {
-    use super::slugify;
+    use super::task_name_slug;
 
     #[test]
     fn slugify_makes_feat_branch_placeholders() {
-        assert_eq!(slugify("fix login bug"), "fix-login-bug");
-        assert_eq!(slugify(""), "task");
-        assert_eq!(slugify("  Hello, World!  "), "hello-world");
+        assert_eq!(task_name_slug("fix login bug"), "fix-login-bug");
+        assert_eq!(task_name_slug(""), "task");
+        assert_eq!(task_name_slug("  Hello, World!  "), "hello-world");
     }
 }
 
