@@ -155,30 +155,20 @@ impl Render for HarnessWorkspace {
                 ws.request_close_tab(active, window, cx);
             }))
             .on_action(cx.listener(|_, _: &crate::About, window, cx| {
+                cx.stop_propagation();
                 crate::update_check::show_about(window, cx);
             }))
             .on_action(cx.listener(|_, _: &crate::CheckForUpdates, window, cx| {
+                cx.stop_propagation();
                 crate::update_check::check_for_updates(window, cx);
             }))
             .on_action(cx.listener(|ws, _: &crate::FirstTimeChecks, _, cx| {
-                // Always re-probe on open: the point of reaching for it is
-                // usually that something changed since startup.
-                ws.preflight_open = true;
-                ws.rerun_preflight(cx);
-                cx.notify();
+                cx.stop_propagation();
+                ws.open_first_time_checks(cx);
             }))
-            .on_action(cx.listener(|ws, _: &crate::OpenSettings, _, cx| {
-                // Refuse while a required tool is missing: Settings sits behind
-                // the blocking screen, so opening it would only mean a menu
-                // item that visibly does nothing.
-                if crate::preflight::blocked(&ws.preflight) {
-                    return;
-                }
-                ws.settings_open = !ws.settings_open;
-                if !ws.settings_open {
-                    ws.remote_close_setup();
-                }
-                cx.notify();
+            .on_action(cx.listener(|ws, _: &crate::OpenSettings, window, cx| {
+                cx.stop_propagation();
+                ws.toggle_settings(window, cx);
             }))
             .on_action(cx.listener(|ws, _: &crate::ActivateTab1, w, cx| ws.activate_tab_at(Some(0), w, cx)))
             .on_action(cx.listener(|ws, _: &crate::ActivateTab2, w, cx| ws.activate_tab_at(Some(1), w, cx)))
@@ -189,14 +179,38 @@ impl Render for HarnessWorkspace {
             .on_action(cx.listener(|ws, _: &crate::ActivateTab7, w, cx| ws.activate_tab_at(Some(6), w, cx)))
             .on_action(cx.listener(|ws, _: &crate::ActivateTab8, w, cx| ws.activate_tab_at(Some(7), w, cx)))
             .on_action(cx.listener(|ws, _: &crate::ActivateLastTab, w, cx| ws.activate_tab_at(None, w, cx)))
-            .on_action(cx.listener(|ws, _: &crate::NextTab, w, cx| ws.cycle_tab(true, w, cx)))
-            .on_action(cx.listener(|ws, _: &crate::PreviousTab, w, cx| ws.cycle_tab(false, w, cx)))
-            .on_action(cx.listener(|ws, _: &crate::NextWorktree, w, cx| ws.cycle_worktree(true, w, cx)))
-            .on_action(cx.listener(|ws, _: &crate::PreviousWorktree, w, cx| ws.cycle_worktree(false, w, cx)))
-            .on_action(cx.listener(|ws, _: &crate::NextWaitingAgent, w, cx| ws.next_waiting_agent(w, cx)))
-            .on_action(cx.listener(|ws, _: &crate::NewTask, w, cx| ws.open_new_task(w, cx)))
-            .on_action(cx.listener(|ws, _: &crate::ToggleSidebar, _, cx| ws.toggle_sidebar(cx)))
-            .on_action(cx.listener(|ws, _: &crate::ToggleTools, w, cx| ws.toggle_diff(w, cx)))
+            .on_action(cx.listener(|ws, _: &crate::NextTab, w, cx| {
+                cx.stop_propagation();
+                ws.cycle_tab(true, w, cx);
+            }))
+            .on_action(cx.listener(|ws, _: &crate::PreviousTab, w, cx| {
+                cx.stop_propagation();
+                ws.cycle_tab(false, w, cx);
+            }))
+            .on_action(cx.listener(|ws, _: &crate::NextWorktree, w, cx| {
+                cx.stop_propagation();
+                ws.cycle_worktree(true, w, cx);
+            }))
+            .on_action(cx.listener(|ws, _: &crate::PreviousWorktree, w, cx| {
+                cx.stop_propagation();
+                ws.cycle_worktree(false, w, cx);
+            }))
+            .on_action(cx.listener(|ws, _: &crate::NextWaitingAgent, w, cx| {
+                cx.stop_propagation();
+                ws.next_waiting_agent(w, cx);
+            }))
+            .on_action(cx.listener(|ws, _: &crate::NewTask, w, cx| {
+                cx.stop_propagation();
+                ws.open_new_task(w, cx);
+            }))
+            .on_action(cx.listener(|ws, _: &crate::ToggleSidebar, _, cx| {
+                cx.stop_propagation();
+                ws.toggle_sidebar(cx);
+            }))
+            .on_action(cx.listener(|ws, _: &crate::ToggleTools, w, cx| {
+                cx.stop_propagation();
+                ws.toggle_diff(w, cx);
+            }))
             .on_action(cx.listener(|ws, _: &crate::NewChat, window, cx| {
                 ws.open_tab(TabKind::Chat, window, cx)
             }))

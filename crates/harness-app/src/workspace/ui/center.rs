@@ -288,6 +288,7 @@ impl HarnessWorkspace {
 
     pub(crate) fn render_empty_center(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .track_focus(&self.focus_handle)
             .flex()
             .flex_col()
             .flex_1()

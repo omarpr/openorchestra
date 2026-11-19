@@ -393,9 +393,15 @@ impl HarnessWorkspace {
     }
 
     pub(crate) fn focus_active_pane(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(r) = self.resolve() else { return };
+        let Some(r) = self.resolve() else {
+            window.focus(&self.focus_handle, cx);
+            return;
+        };
         if let Some(p) = self.panes.get(&r.key) {
-            let Some(tab) = p.active_tab() else { return };
+            let Some(tab) = p.active_tab() else {
+                window.focus(&self.focus_handle, cx);
+                return;
+            };
             let handle = match &tab.content {
                 TabContent::Terminal(t) => t.read(cx).focus_handle(cx),
                 TabContent::File { item_id, .. } => {
@@ -429,6 +435,8 @@ impl HarnessWorkspace {
                 }
             };
             window.focus(&handle, cx);
+        } else {
+            window.focus(&self.focus_handle, cx);
         }
     }
 

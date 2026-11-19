@@ -166,6 +166,36 @@ impl HarnessWorkspace {
         }
     }
 
+    pub(crate) fn open_first_time_checks(&mut self, cx: &mut Context<Self>) {
+        // Always re-probe on open: the point of reaching for it is
+        // usually that something changed since startup.
+        self.preflight_open = true;
+        self.rerun_preflight(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Refuse while a required tool is missing: Settings sits behind
+        // the blocking screen, so opening it would only mean a menu
+        // item that visibly does nothing.
+        if crate::preflight::blocked(&self.preflight) {
+            return;
+        }
+        self.settings_open = !self.settings_open;
+        if !self.settings_open {
+            self.remote_close_setup();
+            self.focus_active_pane(window, cx);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_open = false;
+        self.remote_close_setup();
+        self.focus_active_pane(window, cx);
+        cx.notify();
+    }
+
     /// Resolve the quit prompt. `keep` leaves the tmux sessions running
     /// (detached); otherwise they're killed. A ticked "remember" persists the
     /// choice so the prompt won't show again.

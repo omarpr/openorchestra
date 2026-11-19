@@ -268,26 +268,38 @@ impl HarnessWorkspace {
         // that reload cannot swap the editor to One Light while chrome is dark.
         this.apply_appearance(cx);
         this.ensure_pane(window, cx);
-        // What this machine can actually do, before the user infers it from an
-        // empty screen. Opens when something Required is missing (and then it
-        // cannot be dismissed), or once on a first ever launch — but never for
-        // an optional gap alone, because a screen that appears every morning
-        // because rust-analyzer is absent is a screen nobody reads.
-        this.preflight = crate::preflight::probe(crate::preflight::version_on_path);
-        let short: Vec<&str> = this
-            .preflight
-            .iter()
-            .filter(|c| c.missing())
-            .map(|c| c.name)
-            .collect();
-        log::info!(
-            "preflight: missing {short:?}, blocked={}, seen_before={}",
-            crate::preflight::blocked(&this.preflight),
-            this.prefs.seen_preflight
-        );
-        if crate::preflight::blocked(&this.preflight) || !this.prefs.seen_preflight {
-            this.preflight_open = true;
-        }
+        // What this machine can actually do, probed off the UI thread so startup
+        // does not stall waiting on up to nine CLI `--version` subprocesses.
+        // Opens when something Required is missing (and then it cannot be
+        // dismissed), or once on a first ever launch — but never for an optional
+        // gap alone, because a screen that appears every morning because
+        // rust-analyzer is absent is a screen nobody reads.
+        cx.spawn(async move |view, cx| {
+            let checks = cx
+                .background_spawn(async move {
+                    crate::preflight::probe(crate::preflight::version_on_path)
+                })
+                .await;
+            view.update(cx, |ws, cx| {
+                let short: Vec<&str> = checks
+                    .iter()
+                    .filter(|c| c.missing())
+                    .map(|c| c.name)
+                    .collect();
+                let blocked = crate::preflight::blocked(&checks);
+                log::info!(
+                    "preflight: missing {short:?}, blocked={blocked}, seen_before={}",
+                    ws.prefs.seen_preflight
+                );
+                ws.preflight = checks;
+                if blocked || !ws.prefs.seen_preflight {
+                    ws.preflight_open = true;
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
         // The restored selection is set directly above, not through `select`,
         // so nothing created its Files/Git host: a window that reopened on the
         // Files or Git tab showed "Open editor" until something else forced it.
@@ -305,6 +317,11 @@ impl HarnessWorkspace {
         this.recompute_diff(cx);
         // Phone remote: watch remote.json and start serving if it's enabled.
         this.remote_init(cx);
+        // If no project/pane claimed focus (e.g. empty startup state), focus the
+        // workspace root so global shortcuts and menu dispatch have an active node.
+        if window.focused(cx).is_none() {
+            window.focus(&this.focus_handle, cx);
+        }
 
         // Route the window's close button (red X) through the same
         // keep-or-close-terminals prompt as ⌘Q. `request_quit` returns whether
