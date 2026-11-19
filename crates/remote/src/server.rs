@@ -232,7 +232,7 @@ pub(crate) struct Shared {
     /// Test hook: pause between opening the hub and typing in `send`.
     pub(crate) test_send_delay_ms: AtomicU64,
     /// Bounded concurrency and read deadline for screenshot uploads.
-    pub(crate) screenshot_slots: tokio::sync::Semaphore,
+    pub(crate) screenshot_slots: Arc<tokio::sync::Semaphore>,
     pub(crate) screenshot_read_timeout: Duration,
     /// Terminal socket ping period / idle limit, in ms (shorter in tests).
     ws_ping_ms: AtomicU64,
@@ -287,7 +287,7 @@ impl Shared {
             cert_wake: Notify::new(),
             cert_check,
             test_send_delay_ms: AtomicU64::new(0),
-            screenshot_slots: tokio::sync::Semaphore::new(crate::api::MAX_CONCURRENT_SCREENSHOTS),
+            screenshot_slots: Arc::new(tokio::sync::Semaphore::new(crate::api::MAX_CONCURRENT_SCREENSHOTS)),
             screenshot_read_timeout: crate::api::SCREENSHOT_READ_TIMEOUT,
             ws_ping_ms: AtomicU64::new(WS_PING.as_millis() as u64),
             ws_idle_ms: AtomicU64::new(WS_IDLE.as_millis() as u64),
@@ -650,7 +650,8 @@ fn transcript_path(a: &AgentInfo, state_dir: &Path) -> Option<PathBuf> {
         (Some(t), _) => Some(t.clone()),
         (None, None) => Some(crate::shell::log_path(state_dir, &a.session)),
         (None, Some("opencode")) => {
-            Some(opencode_transcripts(state_dir).join(format!("{}.jsonl", a.session)))
+            let stem = crate::session_file_stem(&a.session);
+            Some(opencode_transcripts(state_dir).join(format!("{stem}.jsonl")))
         }
         (None, Some(_)) => None,
     }
@@ -1113,7 +1114,7 @@ async fn live_loop(s: Arc<Shared>) {
     }
 }
 
-/// How often `agents_loop` checks whether a pending Shell/OpenCode export appeared.
+/// How often `agents_loop` checks for a change in local export availability.
 const EXPORT_POLL: Duration = Duration::from_millis(250);
 
 /// Recompute the SSE agents list whenever its inputs change.
@@ -1124,11 +1125,15 @@ async fn agents_loop(s: Arc<Shared>) {
     let mut live = s.live.subscribe();
     let mut snap_open = true;
     loop {
-        let pending_export = s
+        let observes_export = |agent: &AgentInfo| {
+            agent.transcript.is_some()
+                && (!agent.has_conversation || agent.agent_kind.as_deref() == Some("opencode"))
+        };
+        let watch_exports = s
             .agents
             .borrow()
             .iter()
-            .any(|a| a.transcript.is_some() && !a.has_conversation);
+            .any(observes_export);
         tokio::select! {
             _ = stopped(&mut stop) => return,
             r = snap.changed(), if snap_open => {
@@ -1137,7 +1142,16 @@ async fn agents_loop(s: Arc<Shared>) {
             }
             _ = file.changed() => {}
             _ = live.changed() => {}
-            _ = tokio::time::sleep(EXPORT_POLL), if pending_export => {}
+            _ = tokio::time::sleep(EXPORT_POLL), if watch_exports => {
+                // Keep observing OpenCode exports after creation. The plugin
+                // removes its file when the tab leaves a session.
+                let changed = s.agents.borrow().iter().filter(|a| observes_export(a)).any(|a| {
+                    a.transcript.as_ref().is_some_and(|path| path.is_file() != a.has_conversation)
+                });
+                if !changed {
+                    continue;
+                }
+            }
         }
         s.refresh_agents();
     }
@@ -1342,7 +1356,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agents_loop_announces_when_opencode_export_appears() {
+    async fn agents_loop_announces_when_opencode_export_appears_and_disappears() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path());
         let id = store.mark("k", 1).unwrap();
@@ -1382,6 +1396,13 @@ mod tests {
             .expect("agents_loop notified export creation")
             .unwrap();
         assert!(rx.borrow()[0].has_conversation);
+
+        std::fs::remove_file(&log).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), rx.changed())
+            .await
+            .expect("agents_loop notified export removal")
+            .unwrap();
+        assert!(!rx.borrow()[0].has_conversation);
 
         shared.shutdown.send_replace(true);
         let _ = task.await;

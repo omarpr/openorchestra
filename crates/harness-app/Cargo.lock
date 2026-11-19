@@ -6965,6 +6965,7 @@ dependencies = [
  "tokio",
  "x509-parser",
  "zstd",
+ "zune-jpeg",
 ]
 
 [[package]]

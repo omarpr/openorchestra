@@ -32,4 +32,4 @@ pub use server::{
 };
 pub use store::{Device, Mark, PendingCode, RemoteFile, Store};
 pub use tmux_bridge::Tmux;
-pub use transcript::{Tail, Transcripts, Update};
+pub use transcript::{session_file_stem, Tail, Transcripts, Update};

@@ -30,6 +30,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rust-embed = { version = "8.11", features = ["debug-embed"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 zstd = "0.13"
+zune-jpeg = { version = "0.5.15", default-features = false, features = ["std"] }
 tempfile = "3"
 
 [dev-dependencies]

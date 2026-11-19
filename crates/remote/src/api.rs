@@ -556,86 +556,26 @@ fn validate_png(bytes: &[u8]) -> bool {
 }
 
 fn validate_jpeg(bytes: &[u8]) -> bool {
-    if !bytes.starts_with(b"\xff\xd8") {
+    use zune_jpeg::zune_core::{bytestream::ZCursor, options::DecoderOptions};
+    use zune_jpeg::JpegDecoder;
+
+    if !bytes.starts_with(b"\xff\xd8") || !bytes.ends_with(b"\xff\xd9") {
         return false;
     }
-    let mut pos = 2usize;
-    let mut saw_sof = false;
-    while pos < bytes.len() {
-        while bytes.get(pos) == Some(&0xff) {
-            pos += 1;
-        }
-        let Some(&marker) = bytes.get(pos) else {
-            return false;
-        };
-        pos += 1;
-        if marker == 0xd9 {
-            return saw_sof && pos == bytes.len();
-        }
-        if marker == 0x00 || marker == 0xd8 {
-            return false;
-        }
-        if marker == 0x01 || (0xd0..=0xd7).contains(&marker) {
-            continue;
-        }
-        let Some(len_bytes) = bytes.get(pos..pos + 2) else {
-            return false;
-        };
-        let seg_len = u16::from_be_bytes([len_bytes[0], len_bytes[1]]) as usize;
-        if seg_len < 2 {
-            return false;
-        }
-        let Some(seg_end) = pos.checked_add(seg_len) else {
-            return false;
-        };
-        let Some(seg) = bytes.get(pos + 2..seg_end) else {
-            return false;
-        };
-        if matches!(
-            marker,
-            0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf
-        ) {
-            if seg.len() < 5 {
-                return false;
-            }
-            let height = u16::from_be_bytes([seg[1], seg[2]]) as u32;
-            let width = u16::from_be_bytes([seg[3], seg[4]]) as u32;
-            if !screenshot_dimensions_ok(width, height, 4) {
-                return false;
-            }
-            saw_sof = true;
-        }
-        pos = seg_end;
-        if marker == 0xda {
-            if !saw_sof {
-                return false;
-            }
-            while pos < bytes.len() {
-                if bytes[pos] != 0xff {
-                    pos += 1;
-                    continue;
-                }
-                while bytes.get(pos) == Some(&0xff) {
-                    pos += 1;
-                }
-                let Some(&next) = bytes.get(pos) else {
-                    return false;
-                };
-                if next == 0x00 || (0xd0..=0xd7).contains(&next) {
-                    pos += 1;
-                    continue;
-                }
-                if next == 0xd9 {
-                    return pos + 1 == bytes.len();
-                }
-                // Next marker segment (e.g., progressive JPEG scans): rewind onto
-                // the `0xFF` prefix so the outer loop parses it normally.
-                pos -= 1;
-                break;
-            }
-        }
+    let options = DecoderOptions::default()
+        .set_max_width(MAX_SCREENSHOT_DIMENSION as usize)
+        .set_max_height(MAX_SCREENSHOT_DIMENSION as usize)
+        .set_strict_mode(true);
+    let mut decoder = JpegDecoder::new_with_options(ZCursor::new(bytes), options);
+    if decoder.decode_headers().is_err() {
+        return false;
     }
-    false
+    let Some(info) = decoder.info() else {
+        return false;
+    };
+    // Enforce the decoded image budget before allocating pixels or decoding scans.
+    screenshot_dimensions_ok(u32::from(info.width), u32::from(info.height), 4)
+        && decoder.decode().is_ok()
 }
 
 fn validate_webp(bytes: &[u8]) -> bool {
@@ -788,7 +728,7 @@ async fn send_screenshot(State(s): AppState, Path(id): Path<String>, request: Re
     let Some((session, kind)) = s.screenshot_target(&file, &id) else {
         return error(StatusCode::NOT_FOUND, "not_found");
     };
-    let Ok(_permit) = s.screenshot_slots.try_acquire() else {
+    let Ok(permit) = s.screenshot_slots.clone().try_acquire_owned() else {
         return error(StatusCode::TOO_MANY_REQUESTS, "screenshot_busy");
     };
     let (text, bytes) = {
@@ -816,8 +756,14 @@ async fn send_screenshot(State(s): AppState, Path(id): Path<String>, request: Re
     if bytes.len() > MAX_SCREENSHOT_BYTES {
         return error(StatusCode::PAYLOAD_TOO_LARGE, "too_large");
     }
-    let Some(extension) = screenshot_extension(&bytes) else {
-        return error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_image");
+    // Keep the slot with the decoder even if the client disconnects.
+    let (_permit, bytes, extension) = match tokio::task::spawn_blocking(move || {
+        let extension = screenshot_extension(&bytes);
+        (permit, bytes, extension)
+    }).await {
+        Ok((permit, bytes, Some(extension))) => (permit, bytes, extension),
+        Ok((_, _, None)) => return error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_image"),
+        Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
     };
     let screenshot = Screenshot {
         bytes,
@@ -835,11 +781,16 @@ async fn send_reply(
     text: &str,
     screenshot: Option<Screenshot>,
 ) -> Response {
-    if !crate::tmux_bridge::live_sessions(&s.tmux)
-        .await
-        .contains(session)
-    {
-        return error(StatusCode::CONFLICT, "stopped");
+    match crate::tmux_bridge::try_live_sessions(&s.tmux).await {
+        Ok(live) if live.contains(session) => {}
+        Ok(_) => return error(StatusCode::CONFLICT, "stopped"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotConnected => {
+            return error(StatusCode::CONFLICT, "stopped");
+        }
+        Err(e) => {
+            eprintln!("oo-remote: list sessions failed: {e}");
+            return error(StatusCode::SERVICE_UNAVAILABLE, "unavailable");
+        }
     }
     let hub = match tokio::time::timeout(HUB_OPEN_TIMEOUT, s.hubs.get(session)).await {
         Ok(Ok(hub)) => hub,
@@ -958,6 +909,7 @@ async fn send_screenshot_reply(
 mod tests {
     use super::*;
     use axum::body::Body;
+    use futures_util::StreamExt;
     use std::path::Path as FsPath;
     use tower::ServiceExt;
 
@@ -1086,12 +1038,17 @@ mod tests {
 
     #[test]
     fn screenshot_validates_jpeg_and_webp_containers() {
-        let valid_jpeg = [
-            0xff, 0xd8, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x02, 0x00, 0x03, 0x01, 0x01, 0x11,
-            0x00, 0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00, 0x00, 0xff, 0xd9,
-        ];
-        assert_eq!(screenshot_extension(&valid_jpeg), Some("jpg"));
-        assert_eq!(screenshot_extension(&valid_jpeg[..valid_jpeg.len() - 2]), None);
+        for jpeg in [
+            include_bytes!("../tests/fixtures/screenshot-baseline.jpg").as_slice(),
+            include_bytes!("../tests/fixtures/screenshot-progressive.jpg").as_slice(),
+        ] {
+            assert_eq!(screenshot_extension(jpeg), Some("jpg"));
+            assert_eq!(screenshot_extension(&jpeg[..jpeg.len() - 2]), None);
+            let scan = jpeg.windows(2).position(|marker| marker == b"\xff\xda").unwrap();
+            let mut no_scan = jpeg[..scan].to_vec();
+            no_scan.extend_from_slice(b"\xff\xd9");
+            assert_eq!(screenshot_extension(&no_scan), None);
+        }
 
         // One-pixel WebP fixtures from cwebp and webpmux.
         for encoded in [
@@ -1391,9 +1348,15 @@ mod tests {
         let shared = Arc::new(shared);
         let app = router(shared.clone());
 
-        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, Infallible>>(2);
-        let body_stream =
-            stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|item| (item, rx)) });
+        let (started, reading) = tokio::sync::oneshot::channel();
+        let (rest, rest_rx) = tokio::sync::oneshot::channel();
+        let body_stream = stream::once(async move {
+            started.send(()).unwrap();
+            Ok::<_, Infallible>(Bytes::from_static(&WAV[..20]))
+        }).chain(stream::once(async move {
+            rest_rx.await.unwrap();
+            Ok(Bytes::from_static(&WAV[20..]))
+        }));
         let mut request = Request::builder()
             .method("POST")
             .uri("/api/voice")
@@ -1406,12 +1369,10 @@ mod tests {
             .insert(ConnectInfo("127.0.0.1:1234".parse::<SocketAddr>().unwrap()));
 
         let resp_task = tokio::spawn(async move { app.oneshot(request).await.unwrap() });
-        tx.send(Ok(Bytes::from_static(&WAV[..20]))).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::timeout(Duration::from_secs(2), reading).await.unwrap().unwrap();
         let writer_id = shared.current_file().devices[0].id.clone();
         auth::revoke(&shared.store(), &writer_id).unwrap();
-        tx.send(Ok(Bytes::from_static(&WAV[20..]))).await.unwrap();
-        drop(tx);
+        rest.send(()).unwrap();
 
         let resp = resp_task.await.unwrap();
         assert_eq!(resp.status(), 401);

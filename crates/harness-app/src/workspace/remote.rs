@@ -534,7 +534,8 @@ fn apply_tab_record(agent: &mut AgentInfo, state_dir: &Path) {
         session_file: Option<PathBuf>,
         tool: Option<agent_runtime::ToolCall>,
     }
-    let path = state_dir.join("remote/tabs").join(format!("{}.json", agent.session));
+    let stem = oo_remote::session_file_stem(&agent.session);
+    let path = state_dir.join("remote/tabs").join(format!("{stem}.json"));
     let Ok(bytes) = std::fs::read(path) else { return };
     let Ok(record) = serde_json::from_slice::<TabRecord>(&bytes) else { return };
     if agent.agent_kind.as_ref() != Some(&record.agent) { return; }

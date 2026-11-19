@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { Plugin } from "@opencode/plugin/tui";
@@ -79,7 +80,9 @@ export default Plugin.define({
     const tab = process.env.HARNESS_REMOTE_SESSION ?? "";
     if (!directory || !/^harness_[A-Za-z0-9_-]+_\d+$/.test(tab)) return;
 
-    const file = path.join(directory, `${tab}.jsonl`);
+    // Match oo_remote::session_file_stem for long tmux session names.
+    const stem = tab.length <= 230 ? tab : `long-${createHash("sha256").update(tab).digest("hex")}`;
+    const file = path.join(directory, `${stem}.jsonl`);
     const flag = `${file}.on`;
     const tmp = `${file}.${process.pid}.tmp`;
     let previous;

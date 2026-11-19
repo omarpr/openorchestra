@@ -33,6 +33,8 @@ const EVENT_CAPACITY: usize = 1024;
 const ENTER_DELAY: Duration = Duration::from_millis(50);
 /// How long to wait for tmux to acknowledge a control command.
 const ACK_TIMEOUT: Duration = Duration::from_secs(5);
+const CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const TMUX_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 /// Reason sent with [`HubEvent::Closed`] when the session/control client ends.
 const STOPPED: &str = "stopped";
 
@@ -64,18 +66,29 @@ impl Tmux {
 
     /// Run a one-shot tmux command (argv only); stdout on success.
     async fn output(&self, args: &[&str]) -> io::Result<Vec<u8>> {
-        let out = self
-            .command()
+        let mut command = self.command();
+        command
             .args(args)
             .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .output()
-            .await?;
+            .kill_on_drop(true);
+        let out = tokio::time::timeout(TMUX_COMMAND_TIMEOUT, command.output())
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "tmux command timed out"))??;
         if !out.status.success() {
-            return Err(io::Error::other(format!(
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let kind = if args.first() == Some(&"list-sessions")
+                && (stderr.starts_with("no server running on ")
+                    || (stderr.starts_with("error connecting to ")
+                        && stderr.trim_end().ends_with("(No such file or directory)")))
+            {
+                io::ErrorKind::NotConnected
+            } else {
+                io::ErrorKind::Other
+            };
+            return Err(io::Error::new(kind, format!(
                 "tmux {}: {}",
                 args.first().copied().unwrap_or(""),
-                String::from_utf8_lossy(&out.stderr).trim()
+                stderr.trim()
             )));
         }
         Ok(out.stdout)
@@ -760,12 +773,16 @@ impl Actor {
                     if let Some(done) = done {
                         let _ = done.send(());
                     }
-                    break;
+                    return;
                 }
             }
+            if self.stdin.is_none() {
+                break;
+            }
         }
-        // Channel closed (hub and all guards gone) or shutdown: stop is
-        // idempotent.
+        // Release replies and screenshot guards for queued commands before
+        // attempting to restore a fitted window.
+        drop(rx);
         self.stop().await;
     }
 
@@ -838,9 +855,6 @@ impl Actor {
     }
 
     async fn stop(&mut self) {
-        if self.stdin.is_none() {
-            return;
-        }
         if self.fits > 0 {
             self.fits = 0;
             self.restore().await;
@@ -858,6 +872,13 @@ impl Actor {
     /// Write control lines and wait for tmux to acknowledge each.
     async fn exec(&mut self, lines: &[String]) -> io::Result<()> {
         self.exec_tracking_write(lines).await.map_err(|(_, e)| e)
+    }
+
+    fn retire_control_client(&mut self) {
+        self.closed.store(true, Ordering::SeqCst);
+        self.pending.lock().unwrap().clear();
+        self.stdin = None;
+        let _ = self.child.start_kill();
     }
 
     /// Write control lines, reporting whether any bytes were written on error.
@@ -881,20 +902,30 @@ impl Actor {
             payload.extend_from_slice(line.as_bytes());
             payload.push(b'\n');
         }
-        stdin
-            .write_all(&payload)
-            .await
-            .map_err(|e| (true, e))?;
-        stdin.flush().await.map_err(|e| (true, e))?;
-        let mut ok = true;
-        for ack in acks {
-            match tokio::time::timeout(ACK_TIMEOUT, ack).await {
-                Ok(Ok(true)) => {}
-                Ok(Ok(false)) => ok = false,
-                Ok(Err(_)) => return Err((true, hub_gone())),
-                Err(_) => return Err((true, io::Error::new(io::ErrorKind::TimedOut, "tmux ack"))),
-            }
+        let write = tokio::time::timeout(CONTROL_WRITE_TIMEOUT, async {
+            stdin.write_all(&payload).await?;
+            stdin.flush().await
+        }).await.unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "tmux control write")));
+        if let Err(error) = write {
+            // A partial line or an unacknowledged write makes the FIFO unsafe
+            // for another command. Close this client and report unknown delivery.
+            self.retire_control_client();
+            return Err((true, error));
         }
+        let acknowledgements = tokio::time::timeout(ACK_TIMEOUT, async {
+            let mut ok = true;
+            for ack in acks {
+                ok &= ack.await.map_err(|_| hub_gone())?;
+            }
+            Ok(ok)
+        }).await.unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "tmux ack")));
+        let ok = match acknowledgements {
+            Ok(ok) => ok,
+            Err(error) => {
+                self.retire_control_client();
+                return Err((true, error));
+            }
+        };
         if ok {
             Ok(())
         } else {
@@ -1147,6 +1178,38 @@ mod tests {
         let lines = hex_keys("%3", &[0u8; 256]);
         assert_eq!(lines.len(), 1);
         assert_eq!(hex_keys("%3", &[0u8; 257]).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn stalled_control_write_retires_the_client_and_reports_unknown_delivery() {
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let (cmds, _rx) = mpsc::unbounded_channel();
+        let mut actor = Actor {
+            tmux: Tmux::default(),
+            pane: "%1".into(),
+            child,
+            stdin: Some(stdin),
+            pending: Pending::default(),
+            closed: Arc::new(AtomicBool::new(false)),
+            cmds: cmds.downgrade(),
+            fits: 0,
+            saved: None,
+            registry: FitRegistry::default(),
+        };
+        let batches = [vec!["x".repeat(1024 * 1024)], Vec::new(), Vec::new()];
+        let result = tokio::time::timeout(CONTROL_WRITE_TIMEOUT + Duration::from_secs(2), actor.send_line(batches))
+            .await.unwrap();
+        assert!(matches!(result, Err(SendLineError::PartialOrUnknown(err)) if err.kind() == io::ErrorKind::TimedOut));
+        assert!(actor.stdin.is_none());
+        assert!(actor.closed.load(Ordering::SeqCst));
+        assert!(actor.pending.lock().unwrap().is_empty());
+        actor.stop().await;
     }
 
     #[tokio::test]

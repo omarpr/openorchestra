@@ -119,10 +119,8 @@ __oo_write "{\"t\":\"hello\",\"at\":$REPLY}"
 
 /// Where the shell tab running in tmux session `session` logs its commands.
 pub fn log_path(state_dir: &Path, session: &str) -> PathBuf {
-    state_dir
-        .join("remote")
-        .join("shell")
-        .join(format!("{session}.jsonl"))
+    let stem = crate::session_file_stem(session);
+    shell_dir(state_dir).join(format!("{stem}.jsonl"))
 }
 
 /// Write the zsh startup files (idempotent) and return the `ZDOTDIR` to
@@ -189,6 +187,7 @@ pub fn collect(state_dir: &Path, live: &HashSet<String>, now: SystemTime) -> io:
     if !dir.is_dir() {
         return Ok(());
     }
+    let live: HashSet<_> = live.iter().map(|session| crate::session_file_stem(session)).collect();
     for entry in fs::read_dir(&dir)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -607,6 +606,22 @@ mod housekeeping {
         assert!(!flag_path(st, "a").exists() && flag_path(st, "b").exists());
         sync_flags(st, &HashSet::new()).unwrap();
         assert!(!flag_path(st, "b").exists());
+    }
+
+    #[test]
+    fn long_session_names_share_and_retain_the_same_bounded_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = format!("harness_{}_1", "member".repeat(50));
+        let live = HashSet::from([session.clone()]);
+        sync_flags(dir.path(), &live).unwrap();
+        assert!(flag_path(dir.path(), &session).is_file());
+        let log = log_path(dir.path(), &session);
+        fs::write(&log, "test").unwrap();
+        let after_grace = SystemTime::now() + CLOSED_GRACE + Duration::from_secs(1);
+        collect(dir.path(), &live, after_grace).unwrap();
+        assert!(log.is_file());
+        sync_flags(dir.path(), &HashSet::new()).unwrap();
+        assert!(!flag_path(dir.path(), &session).exists());
     }
 
     #[test]

@@ -27,6 +27,20 @@ const CHANNEL_CAP: usize = 64;
 const CWD_SCAN_LINES: usize = 20;
 const UNREADABLE: &str = "Can't read the conversation right now";
 
+/// Use the session name unless a transcript/flag plus its atomic-write suffix
+/// would exceed the filesystem's 255-byte filename limit. Agent shims use
+/// the same mapping for their files.
+pub fn session_file_stem(session: &str) -> std::borrow::Cow<'_, str> {
+    use sha2::{Digest, Sha256};
+
+    const MAX_STEM_BYTES: usize = 230;
+    if session.len() <= MAX_STEM_BYTES {
+        session.into()
+    } else {
+        format!("long-{:x}", Sha256::digest(session.as_bytes())).into()
+    }
+}
+
 /// Turn on local transcript writers for exactly the shared tmux tabs.
 pub(crate) fn sync_log_flags(
     dir: &Path,
@@ -34,6 +48,7 @@ pub(crate) fn sync_log_flags(
     remove_unshared: bool,
 ) -> io::Result<()> {
     const FLAG_SUFFIX: &str = ".jsonl.on";
+    let shared: HashSet<_> = shared.iter().map(|session| session_file_stem(session)).collect();
     fs::create_dir_all(dir)?;
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
     for entry in fs::read_dir(dir)? {
