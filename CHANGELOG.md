@@ -12,6 +12,8 @@ Unreleased is empty.
 
 ## Unreleased
 
+## 1.2.0 - 2026-11-18
+
 ### Added
 
 - Attach PNG, JPEG, or WebP screenshots up to 8 MiB from the phone agent
