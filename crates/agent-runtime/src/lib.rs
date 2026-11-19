@@ -302,13 +302,61 @@ pub fn claude_project_slug(dir: &Path) -> String {
 
 fn install_remote_tab_helper(state_dir: &Path) -> std::io::Result<()> {
     const HELPER: &str = include_str!("../shims/remote-tab.mjs");
-    let dir = state_dir.join("shims");
-    let target = dir.join("remote-tab.mjs");
-    if std::fs::read_to_string(&target).is_ok_and(|s| s == HELPER) { return Ok(()); }
-    std::fs::create_dir_all(&dir)?;
-    let tmp = dir.join(format!(".remote-tab-{}.tmp", std::process::id()));
-    std::fs::write(&tmp, HELPER)?;
-    std::fs::rename(tmp, target)
+    install_shim(&state_dir.join("shims/remote-tab.mjs"), HELPER)
+}
+
+fn install_shim(target: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    if std::fs::read_to_string(target).is_ok_and(|text| text == contents) {
+        return Ok(());
+    }
+    let dir = target.parent().expect("shim path has a parent");
+    std::fs::create_dir_all(dir)?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    tmp.write_all(contents.as_bytes())?;
+    tmp.persist(target)?;
+    Ok(())
+}
+
+/// Update a user hooks file atomically, keeping concurrent launches from
+/// replacing each other's registrations.
+fn update_agent_hooks(
+    dir: &Path,
+    update: impl FnOnce(&mut serde_json::Value) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    use std::fs;
+    use std::io;
+
+    fs::create_dir_all(dir)?;
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(".openorchestra-hooks.lock"))?;
+    lock.lock()?;
+    let path = dir.join("hooks.json");
+    let existing = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    let mut root: serde_json::Value = if existing.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(&existing).map_err(|error| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("{} does not parse: {error}", path.display()))
+        })?
+    };
+    if !root.is_object() {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "hooks.json is not an object"));
+    }
+    let previous = root.clone();
+    update(&mut root)?;
+    if root != previous {
+        install_shim(&path, &(serde_json::to_string_pretty(&root)? + "\n"))?;
+    }
+    Ok(())
 }
 
 /// The default launch command for a kind, as one displayable line — e.g.

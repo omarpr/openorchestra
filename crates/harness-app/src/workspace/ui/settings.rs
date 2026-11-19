@@ -742,6 +742,10 @@ impl HarnessWorkspace {
                     .pb_1()
                     .child("Click a command to edit it (runs via $SHELL -lic, so your aliases and ~/.zshrc apply; empty restores the default). Custom agents can enable status hooks for busy/idle notifications. Enter saves, Esc cancels."),
             )
+            .child(
+                div().text_xs().text_color(hx.tx2).pb_1()
+                    .child("Codex uses trusted hooks for Running and Idle. If status is missing, review the openOrchestra hooks in Codex with /hooks. Approval prompts appear in the terminal and do not send an attention notification."),
+            )
             .child(agents);
         // The reset button is always shown for discoverability, but stays
         // greyed out and inert while every built-in agent is already at its
@@ -1039,19 +1043,25 @@ impl HarnessWorkspace {
             Some(WaitFidelity::Exact) => "signal: exact",
             Some(WaitFidelity::TerminalOnly) => "signal: off",
         };
-        let install_label = match pref.signal.as_ref().map(|s| s.install) {
+        let install = pref.signal.as_ref().map(|s| s.install);
+        let effective_install = install.unwrap_or_default().effective(key);
+        let install_label = match install {
             None | Some(HookInstall::None) => "hooks: manual",
+            Some(HookInstall::Auto) => "hooks: auto",
             Some(HookInstall::ClaudeLocalSettings) => "hooks: claude",
             Some(HookInstall::CodexUserHooks) => "hooks: codex",
+            Some(HookInstall::CursorUserHooks) => "hooks: cursor",
+        };
+        let install_detail = match effective_install {
+            HookInstall::Auto | HookInstall::None => "Use the status shim in your own hook config",
+            HookInstall::ClaudeLocalSettings => "Install Claude Code hooks when the agent launches",
+            HookInstall::CodexUserHooks => "Install Codex hooks when the agent launches. Review them with /hooks.",
+            HookInstall::CursorUserHooks => "Install Cursor Agent hooks when the agent launches",
         };
         let signal_on = pref.signal.as_ref().is_some_and(|s| {
             !matches!(s.fidelity, WaitFidelity::TerminalOnly)
         });
-        let show_shim = signal_on
-            && matches!(
-                pref.signal.as_ref().map(|s| s.install),
-                None | Some(HookInstall::None)
-            );
+        let show_shim = signal_on && effective_install == HookInstall::None;
         let shim_cmd = agent_runtime::harness_status_shim_command(&self.state_dir);
 
         let fid_key = key.to_string();
@@ -1114,6 +1124,7 @@ impl HarnessWorkspace {
                     .text_color(if signal_on { hx.tx0 } else { hx.tx2 })
                     .cursor_pointer()
                     .hover(|d| d.bg(hx.surface_hover))
+                    .tooltip(tip(install_detail))
                     .child(install_label)
                     .on_click(cx.listener(move |ws, _, _, cx| {
                         cx.stop_propagation();
@@ -1128,9 +1139,11 @@ impl HarnessWorkspace {
                             .filter(|f| !matches!(f, WaitFidelity::TerminalOnly))
                             .unwrap_or(WaitFidelity::BestEffort);
                         let next_install = match e.signal.as_ref().map(|s| s.install) {
-                            None | Some(HookInstall::None) => HookInstall::ClaudeLocalSettings,
+                            None | Some(HookInstall::None) => HookInstall::Auto,
+                            Some(HookInstall::Auto) => HookInstall::ClaudeLocalSettings,
                             Some(HookInstall::ClaudeLocalSettings) => HookInstall::CodexUserHooks,
-                            Some(HookInstall::CodexUserHooks) => HookInstall::None,
+                            Some(HookInstall::CodexUserHooks) => HookInstall::CursorUserHooks,
+                            Some(HookInstall::CursorUserHooks) => HookInstall::None,
                         };
                         e.signal = Some(SignalProfile {
                             fidelity,

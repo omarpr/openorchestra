@@ -434,6 +434,56 @@ fn codex_installs_status_hooks_and_stays_idempotent() {
 }
 
 #[test]
+fn codex_keeps_the_hook_index_used_for_trust() {
+    let _guard = CODEX_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let codex_home = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("HARNESS_CODEX_HOME", codex_home.path()) };
+    let state = tempfile::tempdir().unwrap();
+    let wt = tempfile::tempdir().unwrap();
+    let rt = CodexRuntime::new(state.path());
+    let cmd = format!("node {:?}", rt.shim_path().to_string_lossy());
+    let hooks = serde_json::json!({
+        "hooks": {
+            "UserPromptSubmit": [
+                { "hooks": [{ "type": "command", "command": cmd }, { "type": "command", "command": "first-user-hook" }] },
+                { "hooks": [{ "type": "command", "command": "later-user-hook" }] },
+            ],
+            "Stop": [{ "hooks": [{ "type": "command", "command": cmd }] }],
+        },
+    });
+    let path = codex_home.path().join("hooks.json");
+    let original = hooks.to_string();
+    std::fs::write(&path, &original).unwrap();
+
+    rt.on_spawn(wt.path()).unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+}
+
+#[test]
+fn auto_injects_cursor_hooks_without_requiring_a_launch_command() {
+    let cursor_home = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let wt = tempfile::tempdir().unwrap();
+    let hooks = cursor_home.path().join("hooks.json");
+    std::fs::write(&hooks, r#"{"version":1,"hooks":{"stop":[{"command":"my-existing-hook"}]}}"#).unwrap();
+    unsafe { std::env::set_var("HARNESS_CURSOR_HOME", cursor_home.path()) };
+    let runtime = ConfigurableRuntime::new(
+        AgentKind::Other("cursor".into()),
+        state.path(),
+        SignalProfile::best_effort(HookInstall::Auto),
+    );
+    runtime.on_spawn(wt.path()).unwrap();
+    runtime.on_spawn(wt.path()).unwrap();
+    unsafe { std::env::remove_var("HARNESS_CURSOR_HOME") };
+    let config: serde_json::Value = serde_json::from_slice(&std::fs::read(hooks).unwrap()).unwrap();
+    assert_eq!(config["hooks"]["stop"][0]["command"], "my-existing-hook");
+    assert_eq!(config["hooks"]["stop"].as_array().unwrap().len(), 2);
+    assert_eq!(config["hooks"]["beforeSubmitPrompt"].as_array().unwrap().len(), 1);
+    assert!(config["hooks"]["beforeSubmitPrompt"][0]["command"].as_str().unwrap().contains("harness-status.mjs"));
+    assert_eq!(HookInstall::Auto.effective("arbitrary-agent"), HookInstall::None);
+}
+
+#[test]
 fn codex_preserves_the_users_own_hooks() {
     let _guard = CODEX_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let codex_home = tempfile::tempdir().unwrap();
