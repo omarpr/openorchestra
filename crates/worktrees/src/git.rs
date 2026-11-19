@@ -397,11 +397,16 @@ impl<R: CommandRunner> GitWorktrees<R> {
         Ok(out.stdout.trim().to_string())
     }
 
-    /// The branch currently checked out in `dir`'s HEAD, e.g. `master` or a
-    /// feature branch. Returns `HEAD` for a detached head — the same string
-    /// `git rev-parse --abbrev-ref HEAD` yields — so callers can render it
-    /// verbatim without a separate detached-state probe.
+    /// The branch currently checked out in `dir`, even before its first commit.
+    /// Returns `HEAD` for a detached checkout.
     pub fn current_branch(&self, dir: &Path) -> Result<String, GitError> {
+        if let Some(branch) = self
+            .git_ro(dir, &["symbolic-ref", "--quiet", "HEAD"])
+            .ok()
+            .and_then(|out| out.stdout.trim().strip_prefix("refs/heads/").map(str::to_owned))
+        {
+            return Ok(branch);
+        }
         let out = self.git_ro(dir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
         Ok(out.stdout.trim().to_string())
     }

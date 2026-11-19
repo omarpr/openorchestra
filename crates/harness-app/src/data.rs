@@ -39,7 +39,6 @@ pub struct TaskView {
 pub struct RepoView {
     pub name: String,
     pub repo_root: PathBuf,
-    pub default_branch: String,
     pub head_branch: String,
     pub compare_ref: String,
     pub ahead: usize,
@@ -57,6 +56,24 @@ pub struct WorkspaceData {
 type Counts = (usize, usize, usize);
 
 impl WorkspaceData {
+    /// Poll a checkout's current branch in its own repository.
+    pub fn forge_branches(&self) -> Vec<forge::BranchKey> {
+        let mut seen = std::collections::HashSet::new();
+        self.repos
+            .iter()
+            .flat_map(|repo| {
+                std::iter::once(&repo.head_branch)
+                    .chain(repo.worktrees.iter().map(|wt| &wt.branch))
+                    .filter(|branch| !branch.is_empty() && branch.as_str() != "HEAD")
+                    .map(|branch| forge::BranchKey {
+                        repo_dir: repo.repo_root.clone(),
+                        branch: branch.clone(),
+                    })
+            })
+            .filter(|key| seen.insert(key.clone()))
+            .collect()
+    }
+
     /// Rebuild the cards from the registry and task store.
     ///
     /// No `git status` here: it runs on the render thread, and status on a
@@ -82,6 +99,14 @@ impl WorkspaceData {
             }
         }
         let counts = |p: &Path| known.get(p).copied().unwrap_or_default();
+        // Rebuilds can run between live Git probes. Keep the last observed
+        // branch on each worktree so its PR and phone label do not jump back.
+        let known_branches: std::collections::HashMap<&Path, &str> = previous
+            .into_iter()
+            .flat_map(|data| &data.repos)
+            .flat_map(|repo| &repo.worktrees)
+            .map(|wt| (wt.path.as_path(), wt.branch.as_str()))
+            .collect();
         let mut repos: Vec<RepoView> = Vec::new();
         for root in repo_roots {
             let name = root
@@ -93,7 +118,7 @@ impl WorkspaceData {
                 rv.worktrees.push(WorktreeView {
                     id: entry.id.clone(),
                     name: entry.name.clone(),
-                    branch: entry.branch.clone(),
+                    branch: known_branches.get(entry.path.as_path()).copied().unwrap_or(&entry.branch).to_owned(),
                     path: entry.path.clone(),
                     task_id: entry.task_id.clone(),
                 });
@@ -117,7 +142,7 @@ impl WorkspaceData {
                 members.push(TaskMemberView {
                     worktree_id: m.worktree_id.clone(),
                     repo: m.repo.clone(),
-                    branch: m.branch.clone(),
+                    branch: known_branches.get(m.path.as_path()).copied().unwrap_or(&m.branch).to_owned(),
                     path: m.path.clone(),
                     ahead,
                     behind,
@@ -146,19 +171,16 @@ fn new_repo_view(git: &GitWorktrees<SystemRunner>, name: &str, root: &Path, (ahe
     let default_branch = git
         .default_branch(root)
         .unwrap_or_else(|_| "main".to_string());
-    let head_branch = git
-        .current_branch(root)
-        .unwrap_or_else(|_| default_branch.clone());
+    let head_branch = git.current_branch(root).unwrap_or_default();
     let origin_ref = format!("origin/{default_branch}");
     let compare_ref = if git.ref_exists(root, &origin_ref) {
         origin_ref
     } else {
-        default_branch.clone()
+        default_branch
     };
     RepoView {
         name: name.to_string(),
         repo_root: root.to_path_buf(),
-        default_branch,
         head_branch,
         compare_ref,
         ahead,

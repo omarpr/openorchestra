@@ -477,6 +477,10 @@ impl HarnessWorkspace {
         // A multi-project task's tile is its coordinator agent; the repo rows
         // under it are the specialists it delegates to.
         let multi = task.members.len() >= 2;
+        let task_pr = task.members.first().filter(|_| !multi).and_then(|member| {
+            self.worktree_pull_request(&member.worktree_id, &member.branch)
+        });
+        let menu_pr = pr_menu_target(task_pr);
         let coord_focused = multi && self.focused_coordinator_task().as_deref() == Some(task.id.as_str());
         let coord_missing = multi && self.agent_missing(&task.id, None);
         let coord_fresh = self.restart_is_fresh(&task.id, None);
@@ -546,7 +550,8 @@ impl HarnessWorkspace {
                     cx.stop_propagation();
                     let pos = ev.position;
                     ws.menu = Some(CardMenu {
-                        id: menu_id.clone(),
+                        id: Some(menu_id.clone()),
+                        pr: menu_pr.clone(),
                         x: pos.x,
                         y: pos.y,
                     });
@@ -617,7 +622,7 @@ impl HarnessWorkspace {
                             .flex()
                             .flex_col()
                             .child(name_el)
-                            .when_some(task_branch(task), |d, branch| {
+                            .when_some(task_branch(task).filter(|branch| *branch != task.name), |d, branch| {
                                 d.child(
                                     div()
                                         .text_size(px(10.0))
@@ -667,11 +672,7 @@ impl HarnessWorkspace {
                                         .child(format!("{a2a_active} A2A")),
                                 )
                             })
-                            .when(task.dirty > 0, |d| {
-                                d.child(
-                                    div().text_color(hx.amber).child(format!("~{}", task.dirty)),
-                                )
-                            })
+                            .when(multi, |d| d.children(git_counts(hx, 0, 0, task.dirty)))
                             .when(multi && task_ending.is_none(), |d| {
                                 if coord_missing {
                                     d.child(restart_pill(hx, coord_fresh, tid_restart.clone(), None, cx))
@@ -722,41 +723,14 @@ impl HarnessWorkspace {
                 ));
             }
             let label = m.repo.clone();
+            let pr = self.worktree_pull_request(&m.worktree_id, &m.branch);
+            let pr_for_menu = pr_menu_target(pr);
+            let member_menu_id = tid.clone();
             let agent = self
                 .agent_status
                 .get(&m.path)
                 .copied()
                 .unwrap_or(AgentState::Unknown);
-            // flex_none throughout the row's trailing items: the status pill was
-            // being pushed past the sidebar's right edge because every item here
-            // was shrinkable in principle and none of them could actually shrink
-            // (text sets its own min width), so the row overflowed instead.
-            let mut badges = div().flex().flex_none().items_center().gap_1();
-            if m.ahead > 0 {
-                badges = badges.child(
-                    div()
-                        .text_size(px(10.0))
-                        .text_color(hx.green)
-                        .child(format!("↑{}", m.ahead)),
-                );
-            }
-            if m.behind > 0 {
-                badges = badges.child(
-                    div()
-                        .text_size(px(10.0))
-                        .text_color(hx.amber)
-                        .child(format!("↓{}", m.behind)),
-                );
-            }
-            if m.dirty > 0 {
-                badges = badges.child(
-                    div()
-                        .text_size(px(10.0))
-                        .font_family(hx.font_mono)
-                        .text_color(hx.amber)
-                        .child(format!("~{}", m.dirty)),
-                );
-            }
             members = members.child(
                 div()
                     .id(gpui::SharedString::from(format!(
@@ -793,6 +767,16 @@ impl HarnessWorkspace {
                             cx,
                         );
                     }))
+                    .on_mouse_down(MouseButton::Right, cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        ws.menu = Some(CardMenu {
+                            id: Some(member_menu_id.clone()),
+                            pr: pr_for_menu.clone(),
+                            x: ev.position.x,
+                            y: ev.position.y,
+                        });
+                        cx.notify();
+                    }))
                     .child(
                         div()
                             .flex_1()
@@ -826,7 +810,8 @@ impl HarnessWorkspace {
                         format!("remote-dot-member-{}-{}", task.id, m.worktree_id),
                         &worktree_pane_key(Some(&task.id), &m.worktree_id),
                     ))
-                    .child(badges)
+                    .children(pr.map(|pr| pr_badge(hx, pr)))
+                    .children(git_counts(hx, m.ahead, m.behind, m.dirty))
                     .child(match task_ending {
                         Some(kind) => busy_pill(hx, kind.doing_label(), now).into_any_element(),
                         None if self.agent_missing(&task.id, Some(&m.worktree_id)) => restart_pill(
@@ -880,24 +865,20 @@ impl HarnessWorkspace {
     pub(crate) fn render_context_menu(&self, hx: &HarnessTheme, menu: &CardMenu, cx: &mut Context<Self>) -> impl IntoElement {
         // A multi-project task opened from one of its PROJECTS rows still
         // archives/deletes as a whole; say so rather than imply one worktree.
-        let whole_task = self
-            .task_store
-            .get(&menu.id)
+        let whole_task = menu.id.as_deref()
+            .and_then(|id| self.task_store.get(id))
             .is_some_and(|t| t.members.len() > 1);
         let (archive_label, delete_label) = if whole_task {
             ("Archive task", "Delete task…")
         } else {
             ("Archive", "Delete…")
         };
-        let rename_id = menu.id.clone();
-        let archive_id = menu.id.clone();
-        let del_id = menu.id.clone();
 
         div()
             .absolute()
             .left(menu.x)
             .top(menu.y)
-            .w(px(170.0))
+            .min_w(px(190.0))
             .p(px(4.0))
             .rounded_md()
             .bg(hx.surface2)
@@ -914,36 +895,55 @@ impl HarnessWorkspace {
                 MouseButton::Left,
                 cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
             )
-            .child(self.menu_item(hx, "Rename", false, cx.listener(move |ws, _, window, cx| {
-                cx.stop_propagation();
-                let name = ws
-                    .task_store
-                    .get(&rename_id)
-                    .map(|t| t.name.clone())
-                    .or_else(|| ws.manager.registry.get(&rename_id).map(|e| e.name.clone()))
-                    .unwrap_or_default();
-                if ws.task_store.get(&rename_id).is_some() {
-                    ws.select(
-                        Selection::Task {
-                            task_id: rename_id.clone(),
-                            member_id: None,
-                        },
-                        window,
-                        cx,
-                    );
-                } else {
-                    ws.select(Selection::Worktree(rename_id.clone()), window, cx);
-                }
-                ws.begin_edit(EditKind::Rename(rename_id.clone()), &name, "name…", window, cx);
-            })))
-            .child(self.menu_item(hx, archive_label, false, cx.listener(move |ws, _, window, cx| {
-                cx.stop_propagation();
-                ws.request_end(archive_id.clone(), crate::workspace::lifecycle::EndKind::Archive, window, cx);
-            })))
-            .child(self.menu_item(hx, delete_label, true, cx.listener(move |ws, _, window, cx| {
-                cx.stop_propagation();
-                ws.request_end(del_id.clone(), crate::workspace::lifecycle::EndKind::Delete, window, cx);
-            })))
+            .when_some(menu.pr.clone(), |d, (number, url)| {
+                d.child(self.menu_item(
+                    hx,
+                    &format!("Open pull request #{number}"),
+                    false,
+                    cx.listener(move |ws, _, _, cx| {
+                        cx.stop_propagation();
+                        ws.menu = None;
+                        cx.open_url(&url);
+                        cx.notify();
+                    }),
+                ))
+            })
+            .when_some(menu.id.clone(), |d, rename_id| {
+                let archive_id = rename_id.clone();
+                let del_id = rename_id.clone();
+                d.child(self.menu_item(hx, "Rename", false, cx.listener(move |ws, _, window, cx| {
+                    cx.stop_propagation();
+                    let name = ws
+                        .task_store
+                        .get(&rename_id)
+                        .map(|t| t.name.clone())
+                        .or_else(|| ws.manager.registry.get(&rename_id).map(|e| e.name.clone()))
+                        .unwrap_or_default();
+                    if ws.task_store.get(&rename_id).is_some() {
+                        ws.select(
+                            Selection::Task { task_id: rename_id.clone(), member_id: None },
+                            window,
+                            cx,
+                        );
+                    } else {
+                        ws.select(Selection::Worktree(rename_id.clone()), window, cx);
+                    }
+                    ws.begin_edit(EditKind::Rename(rename_id.clone()), &name, "name…", window, cx);
+                })))
+                .child(self.menu_item(hx, archive_label, false, cx.listener(move |ws, _, window, cx| {
+                    cx.stop_propagation();
+                    ws.request_end(archive_id.clone(), crate::workspace::lifecycle::EndKind::Archive, window, cx);
+                })))
+                .child(self.menu_item(hx, delete_label, true, cx.listener(move |ws, _, window, cx| {
+                    cx.stop_propagation();
+                    ws.request_end(del_id.clone(), crate::workspace::lifecycle::EndKind::Delete, window, cx);
+                })))
+            })
+    }
+
+    fn worktree_pull_request(&self, worktree_id: &str, branch: &str) -> Option<&forge::PrInfo> {
+        let worktree = self.manager.registry.get(worktree_id)?;
+        self.branch_status(&worktree.repo_root, branch)?.pr.as_ref()
     }
 
     pub(crate) fn menu_item(
@@ -962,12 +962,61 @@ impl HarnessWorkspace {
             .py_1()
             .rounded_md()
             .text_sm()
+            .whitespace_nowrap()
             .text_color(if danger { hx.red } else { hx.tx1 })
             .cursor_pointer()
             .hover(|d| d.bg(hx.surface_hover).text_color(if danger { hx.red } else { hx.tx0 }))
             .on_click(handler)
             .child(label.to_string())
     }
+}
+
+fn pr_menu_target(pr: Option<&forge::PrInfo>) -> Option<(u64, String)> {
+    let pr = pr?;
+    Some((pr.number, pr.url.clone()?))
+}
+
+fn pr_badge(hx: &HarnessTheme, pr: &forge::PrInfo) -> impl IntoElement {
+    use forge::PrState;
+    let (state, color) = match pr.state {
+        PrState::Open => ("Open", hx.accent),
+        PrState::Draft => ("Draft", hx.tx1),
+        PrState::Merged => ("Merged", hx.green),
+        PrState::Closed => ("Closed", hx.tx1),
+    };
+    let label = format!("#{number}", number = pr.number);
+    linked_sidebar_chip(hx, color, "sidebar-pr", format!("{state} PR {label} · {}", pr.title), pr.url.clone())
+        .child(label)
+}
+
+fn ci_badge(hx: &HarnessTheme, status: &BranchStatus) -> Option<impl IntoElement> {
+    let (color, state) = ci_summary(hx, &status.checks)?;
+    let url = status.pr.as_ref().and_then(|pr| pr.url.as_deref())
+        .map(|url| format!("{}/checks", url.trim_end_matches('/')));
+    let tooltip = if url.is_some() { format!("{state} · Open checks") } else { state.to_owned() };
+    Some(linked_sidebar_chip(hx, color, "sidebar-ci", tooltip, url)
+        .child(div().size(px(5.0)).rounded_full().bg(color))
+        .child("CI"))
+}
+
+fn linked_sidebar_chip(
+    hx: &HarnessTheme,
+    color: Rgba,
+    id: &'static str,
+    tooltip: String,
+    url: Option<String>,
+) -> gpui::Stateful<gpui::Div> {
+    sidebar_chip(hx, color)
+        .id(id)
+        .tooltip(tip(tooltip))
+        .when_some(url, |d, url| {
+            d.cursor_pointer()
+                .hover(move |d| d.bg(tint(color, 0.25)))
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    cx.open_url(&url);
+                })
+        })
 }
 
 const ID_TOGGLE: &str = "repo-toggle";

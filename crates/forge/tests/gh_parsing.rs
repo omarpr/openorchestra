@@ -88,7 +88,7 @@ fn repo() -> &'static Path {
 }
 
 const VIEW_ARGS: &str =
-    "pr list --head feat/nav --state all --json number,state,isDraft,title";
+    "pr list --head feat/nav --state all --json number,state,isDraft,title,url";
 const CHECKS_ARGS: &str = "pr checks --json name,state,bucket -- feat/nav";
 
 // ---- pr_for_branch ---------------------------------------------------------
@@ -100,6 +100,7 @@ fn open_pr_parses() {
     assert_eq!(pr.number, 128);
     assert_eq!(pr.state, PrState::Open);
     assert_eq!(pr.title, "Add worktree navigation sidebar");
+    assert_eq!(pr.url.as_deref(), Some("https://github.com/example/openorchestra/pull/128"));
 }
 
 #[test]

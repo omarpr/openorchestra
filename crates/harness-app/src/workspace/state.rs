@@ -453,7 +453,6 @@ mod main_resolve_tests {
         RepoView {
             name: "app".into(),
             repo_root: PathBuf::from("/r/app"),
-            default_branch: "master".into(),
             head_branch: head.into(),
             compare_ref: "origin/master".into(),
             ahead: 0,

@@ -11,6 +11,27 @@ type MenuAction = dyn Fn(&mut HarnessWorkspace, &mut Window, &mut Context<Harnes
 /// shared with the drag ghost so the ghost is the row's exact size.
 const REORDER_ROW_W: f32 = 228.0;
 
+fn project_card() -> gpui::Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap_2()
+        .h(gpui::rems(3.5))
+        .px_2()
+        .py_1p5()
+        .rounded_md()
+}
+
+// Reserve both lines even for a clean checkout and keep the status pill out of row sizing.
+fn project_card_title() -> gpui::Div {
+    div().flex().items_center().gap_2().h(gpui::rems(1.5))
+}
+
+fn project_card_details() -> gpui::Div {
+    div().flex().items_center().gap_1().h(gpui::rems(1.1)).overflow_hidden()
+}
+
 /// A reorder row's inside: the name, then the four-dot grip on the right.
 fn reorder_row_content(hx: &HarnessTheme, name: &str, grip: gpui::Div) -> gpui::Div {
     div()
@@ -198,7 +219,7 @@ impl HarnessWorkspace {
             // PROJECTS.
             body = body.child(self.render_main_entry(hx, repo, cx));
             for wt in &repo.worktrees {
-                body = body.child(self.render_project_worktree_row(hx, wt, cx));
+                body = body.child(self.render_project_worktree_row(hx, &repo.repo_root, wt, cx));
             }
             group = group.child(body);
         }
@@ -211,6 +232,7 @@ impl HarnessWorkspace {
     pub(crate) fn render_project_worktree_row(
         &self,
         hx: &HarnessTheme,
+        repo_root: &Path,
         wt: &crate::data::WorktreeView,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -218,6 +240,7 @@ impl HarnessWorkspace {
             Some(t) => Selection::Task { task_id: t.clone(), member_id: Some(wt.id.clone()) },
             None => Selection::Worktree(wt.id.clone()),
         };
+        let pr = self.branch_status(repo_root, &wt.branch).and_then(|status| status.pr.as_ref());
         // Match on where the selection actually lands, not its exact shape: a
         // task selected from TASKS, a restore, or the conductor can carry
         // `member_id: None` (the home member) or a bare `Worktree` id, and an
@@ -253,6 +276,7 @@ impl HarnessWorkspace {
                 .into_any_element(),
             None => div()
                 .text_sm()
+                .line_height(gpui::rems(1.15))
                 .text_color(hx.tx0)
                 .whitespace_nowrap()
                 .overflow_hidden()
@@ -261,15 +285,26 @@ impl HarnessWorkspace {
                 .into_any_element(),
         };
         let counts = member.and_then(|m| git_counts(hx, m.ahead, m.behind, m.dirty));
-        div()
+        let branch = (wt.name != wt.branch).then_some(wt.branch.as_str());
+        let subtitle = project_card_details()
+            .when_some(branch, |d, branch| {
+                d.child(div()
+                    .max_w_full()
+                    .min_w_0()
+                    .text_xs()
+                    .font_family(hx.font_mono)
+                    .text_color(hx.tx2)
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(branch.to_string()))
+            })
+            .children(pr.map(|pr| pr_badge(hx, pr)))
+            .children(counts);
+        project_card()
             .id(gpui::SharedString::from(format!("project-wt-{}", wt.id)))
-            .flex()
-            .items_center()
-            .gap_2()
-            .mt_1()
-            .px_2()
-            .py_1()
-            .rounded_md()
+            .mx_1()
+            .my_0p5()
             .when(selected, |d| d.bg(selected_row_bg(hx)))
             // Going away: dimmed and inert until it's gone.
             .when(ending.is_some(), |d| d.opacity(0.55))
@@ -283,9 +318,15 @@ impl HarnessWorkspace {
             // keyed on the owning task, since that is what those act on.
             .on_mouse_down(MouseButton::Right, {
                 let menu_id = wt.task_id.clone().unwrap_or_else(|| wt.id.clone());
+                let pr = pr_menu_target(pr);
                 cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
                     cx.stop_propagation();
-                    ws.menu = Some(CardMenu { id: menu_id.clone(), x: ev.position.x, y: ev.position.y });
+                    ws.menu = Some(CardMenu {
+                        id: Some(menu_id.clone()),
+                        pr: pr.clone(),
+                        x: ev.position.x,
+                        y: ev.position.y,
+                    });
                     cx.notify();
                 })
             })
@@ -304,37 +345,19 @@ impl HarnessWorkspace {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .child(name_el)
-                    // Branch, then its git counts on the same line: on a line
-                    // of their own the counts made rows uneven heights.
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1p5()
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .text_xs()
-                                    .font_family(hx.font_mono)
-                                    .text_color(hx.tx2)
-                                    .whitespace_nowrap()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .child(wt.branch.clone()),
-                            )
-                            .children(counts),
-                    ),
+                    .child(project_card_title()
+                        .child(div().flex_1().min_w_0().child(name_el))
+                        .children(self.remote_dot(
+                            hx,
+                            format!("remote-dot-wt-{}", wt.id),
+                            &worktree_pane_key(wt.task_id.as_deref(), &wt.id),
+                        ))
+                        .child(match ending {
+                            Some(kind) => busy_pill(hx, kind.doing_label(), self.anim_secs()).into_any_element(),
+                            None => agent_pill(hx, agent, self.anim_secs()).into_any_element(),
+                        }))
+                    .child(subtitle),
             )
-            .children(self.remote_dot(
-                hx,
-                format!("remote-dot-wt-{}", wt.id),
-                &worktree_pane_key(wt.task_id.as_deref(), &wt.id),
-            ))
-            .child(match ending {
-                Some(kind) => busy_pill(hx, kind.doing_label(), self.anim_secs()).into_any_element(),
-                None => agent_pill(hx, agent, self.anim_secs()).into_any_element(),
-            })
     }
 
     /// The restorable "ARCHIVED" list at the foot of the sidebar. Each row
@@ -451,86 +474,69 @@ impl HarnessWorkspace {
             .copied()
             .unwrap_or(AgentState::Unknown);
 
-        // The branch HEAD is on is the row's name — it is what you scan for.
-        // Titled "main" with the branch underneath, a main checkout on
-        // `review-fixes` read as a contradiction. Git counts and CI share the
-        // subtitle line, so every row is the same two lines tall.
-        let fs = self.forge_status.get(&repo.default_branch);
-        let ci = fs.and_then(|s| ci_summary(hx, &s.checks)).map(|(c, label)| {
-            div()
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap_1()
-                .text_xs()
-                .text_color(c)
-                .child(div().size(px(5.0)).rounded_full().bg(c))
-                .child(label)
-        });
-        // "<default branch> · ↑7 ~9": the branch this checkout tracks says
-        // which row it is without a phrase for it, and the dot only appears
-        // when there are counts to separate.
-        let counts = git_counts(hx, repo.ahead, repo.behind, repo.dirty);
-        let subtitle = div()
-            .flex()
-            .items_center()
-            .gap_1p5()
-            .text_xs()
-            .text_color(hx.tx2)
-            .child(
-                div()
-                    .min_w_0()
-                    .font_family(hx.font_mono)
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .child(repo.default_branch.clone()),
-            )
-            .when(counts.is_some(), |d| d.child(div().flex_none().child("·")))
+        let title = if repo.head_branch.is_empty() { "Checkout" } else { &repo.head_branch };
+        let status = self.branch_status(&repo.repo_root, &repo.head_branch);
+        let pr = status.and_then(|status| status.pr.as_ref());
+        let ci = status.and_then(|status| ci_badge(hx, status));
+        let counts = git_counts(hx, repo.ahead, repo.behind, repo.dirty)
+            .map(|chip| chip.flex_shrink(1.0).min_w_0().overflow_hidden());
+        let subtitle = project_card_details()
+            .children(pr.map(|pr| pr_badge(hx, pr)))
             .children(counts)
             .children(ci);
 
-        div()
+        project_card()
             .id(repo_element_id(ID_MAIN, &repo.name))
-            .flex()
-            .items_center()
-            .gap_2()
             .mx_1()
             .my_0p5()
-            .p_2()
-            .rounded_md()
             .when(selected, |d| d.bg(selected_row_bg(hx)))
             .cursor_pointer()
             .hover({
                 let hover_bg = row_hover_bg(hx, selected);
                 move |d| d.bg(hover_bg)
             })
-            .tooltip(tip(format!("{} · main checkout on {}", repo.name, repo.head_branch)))
+            .tooltip(tip(format!("{} · {title}", repo.name)))
             .on_click(cx.listener(move |ws, _, window, cx| {
                 ws.select(Selection::Main(repo_name.clone()), window, cx);
             }))
+            .when_some(pr_menu_target(pr), |d, pr| {
+                d.on_mouse_down(MouseButton::Right, cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    ws.menu = Some(CardMenu {
+                        id: None,
+                        pr: Some(pr.clone()),
+                        x: ev.position.x,
+                        y: ev.position.y,
+                    });
+                    cx.notify();
+                }))
+            })
             .child(state_tile(hx, ICON_MAIN_CHECKOUT, agent, self.anim_secs()))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .child(
-                        div()
-                            .text_sm()
-                            .text_color(hx.tx0)
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(repo.head_branch.clone()),
+                        project_card_title()
+                            .child(div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_sm()
+                                .line_height(gpui::rems(1.15))
+                                .text_color(hx.tx0)
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .child(title.to_string()))
+                            .children(self.remote_dot(
+                                hx,
+                                format!("remote-dot-main-{}", repo.name),
+                                &format!("main:{}", repo.name),
+                            ))
+                            .child(agent_pill(hx, agent, self.anim_secs())),
                     )
                     .child(subtitle),
             )
-            .children(self.remote_dot(
-                hx,
-                format!("remote-dot-main-{}", repo.name),
-                &format!("main:{}", repo.name),
-            ))
-            .child(agent_pill(hx, agent, self.anim_secs()))
     }
 
     /// The "Reorder projects" / "Reorder tasks" panel: every row with a

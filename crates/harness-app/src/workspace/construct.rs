@@ -65,24 +65,11 @@ impl HarnessWorkspace {
         let manager = Manager::new(registry, git, data_dir.join("worktrees"));
         let data = WorkspaceData::build(manager.git(), &manager.registry, &task_store, &repo_roots, None);
 
-        let mut branches: Vec<BranchKey> = manager
-            .registry
-            .active()
-            .map(|e| BranchKey {
-                repo_dir: e.repo_root.clone(),
-                branch: e.branch.clone(),
-            })
-            .collect();
-        // Main-checkout CI: poll each repo's default branch too (main is
-        // first-class). PRs don't apply to a default branch, but its CI does.
-        for repo in &data.repos {
-            branches.push(BranchKey {
-                repo_dir: repo.repo_root.clone(),
-                branch: repo.default_branch.clone(),
-            });
-        }
-        let (poller, forge_rx) =
-            Poller::spawn(Arc::new(GhCli::new()), branches, PollerConfig::default());
+        let (poller, forge_rx) = Poller::spawn(
+            Arc::new(GhCli::new()),
+            data.forge_branches(),
+            PollerConfig::default(),
+        );
 
         // One bus for every adapter's signal (§4.6). The sidebar pill, the
         // status bar, and the notifier each take their own subscription, so it

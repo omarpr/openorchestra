@@ -220,11 +220,7 @@ impl Render for HarnessWorkspace {
             );
 
         if let Some(m) = &self.menu {
-            let menu = CardMenu {
-                id: m.id.clone(),
-                x: m.x,
-                y: m.y,
-            };
+            let menu = m.clone();
             root = root.child(
                 div()
                     .id("menu-backdrop")
@@ -657,18 +653,46 @@ pub(crate) fn row_hover_bg(hx: &HarnessTheme, selected: bool) -> Rgba {
     tint(hx.accent, if selected { 0.26 } else { 0.09 })
 }
 
-/// A row's git counts — `↑ahead ↓behind ~dirty`, zeros left out — sized to
-/// sit on the row's subtitle line after its branch. `None` when all are zero.
+/// A compact chip for the row's Git counts. Zero counts take no space.
 pub(crate) fn git_counts(hx: &HarnessTheme, ahead: usize, behind: usize, dirty: usize) -> Option<gpui::Div> {
-    let mut row = div().flex().flex_none().items_center().gap_1().text_xs().font_family(hx.font_mono);
-    let mut any = false;
-    for (n, glyph, color) in [(ahead, "↑", hx.green), (behind, "↓", hx.amber), (dirty, "~", hx.amber)] {
-        if n > 0 {
-            any = true;
-            row = row.child(div().text_color(color).child(format!("{glyph}{n}")));
+    let mut row = sidebar_chip(hx, hx.tx1).gap_1();
+    for (count, icon, color, label) in [
+        (ahead, "icons/arrow_up.svg", hx.green, "Commits ahead"),
+        (behind, "icons/arrow_down.svg", hx.amber, "Commits behind"),
+        (dirty, "icons/file_diff.svg", hx.amber, "Changed files"),
+    ] {
+        if count == 0 {
+            continue;
         }
+        row = row.child(
+            div()
+                .id(label)
+                .flex()
+                .items_center()
+                .gap(px(2.0))
+                .text_color(color)
+                .tooltip(tip(format!("{label} · {count}")))
+                .child(svg().path(icon).size(px(11.0)).text_color(color))
+                .child(count.to_string()),
+        );
     }
-    any.then_some(row)
+    (ahead > 0 || behind > 0 || dirty > 0).then_some(row)
+}
+
+pub(crate) fn sidebar_chip(hx: &HarnessTheme, color: Rgba) -> gpui::Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(2.0))
+        .rounded_md()
+        .px_1()
+        .line_height(gpui::rems(0.95))
+        .text_size(gpui::rems(0.68))
+        .font_family(hx.font_mono)
+        .whitespace_nowrap()
+        .text_color(color)
+        .bg(tint(color, 0.13))
 }
 
 pub(crate) fn ci_summary(hx: &HarnessTheme, checks: &[forge::CheckRun]) -> Option<(Rgba, &'static str)> {
@@ -676,11 +700,11 @@ pub(crate) fn ci_summary(hx: &HarnessTheme, checks: &[forge::CheckRun]) -> Optio
         return None;
     }
     if checks.iter().any(|c| c.status == CheckStatus::Fail) {
-        Some((hx.red, "ci"))
+        Some((hx.red, "Checks failed"))
     } else if checks.iter().any(|c| c.status == CheckStatus::Running) {
-        Some((hx.amber, "ci"))
+        Some((hx.amber, "Checks in progress"))
     } else if checks.iter().any(|c| c.status == CheckStatus::Pass) {
-        Some((hx.green, "ci"))
+        Some((hx.green, "Checks passed"))
     } else {
         None
     }

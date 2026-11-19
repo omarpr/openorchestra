@@ -70,6 +70,8 @@ impl HarnessWorkspace {
                 // runs forever on an idle app, and an unconditional notify would
                 // repaint the window every few seconds for nothing.
                 if apply_live_status(&mut ws.data, computed) {
+                    ws.sync_forge_branches();
+                    ws.remote_refresh(cx);
                     cx.notify();
                 }
                 if ws.status_rerun {
@@ -325,7 +327,6 @@ mod live_status_tests {
             repos: vec![RepoView {
                 name: "app".into(),
                 repo_root: PathBuf::from("/r/app"),
-                default_branch: "main".into(),
                 head_branch: "main".into(),
                 compare_ref: "origin/main".into(),
                 ahead: 0,
@@ -372,6 +373,26 @@ mod live_status_tests {
         assert_eq!(d.tasks[0].members[0].branch, "feat/new");
         assert_eq!(d.tasks[0].members[0].dirty, 2);
         assert_eq!(d.tasks[0].dirty, 2);
+        assert_eq!(
+            d.forge_branches().iter().map(|key| key.branch.as_str()).collect::<Vec<_>>(),
+            ["dev", "feat/new"],
+        );
+    }
+
+    #[test]
+    fn forge_polling_keeps_the_same_branch_in_each_project() {
+        let mut first = data();
+        first.repos[0].head_branch = "feat/old".into();
+        let mut second = data();
+        second.repos[0].repo_root = PathBuf::from("/r/api");
+        second.repos[0].head_branch = "feat/old".into();
+        first.repos.extend(second.repos);
+
+        let keys = first.forge_branches();
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].branch, keys[1].branch);
+        assert_eq!(keys[0].repo_dir, PathBuf::from("/r/app"));
+        assert_eq!(keys[1].repo_dir, PathBuf::from("/r/api"));
     }
 
     #[test]

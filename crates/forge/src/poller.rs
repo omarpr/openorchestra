@@ -117,6 +117,11 @@ impl Poller {
         self.branches.lock().unwrap().retain(|k| k != key);
     }
 
+    /// Follow the branches currently shown by the workspace.
+    pub fn set_branches(&self, branches: Vec<BranchKey>) {
+        *self.branches.lock().unwrap() = branches;
+    }
+
     /// Signal the thread to stop and wait for it.
     pub fn stop(mut self) {
         self.shutdown();

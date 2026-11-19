@@ -3,6 +3,7 @@
 		"isDraft": false,
 		"number": 128,
 		"state": "OPEN",
-		"title": "Add worktree navigation sidebar"
+		"title": "Add worktree navigation sidebar",
+		"url": "https://github.com/example/openorchestra/pull/128"
 	}
 ]

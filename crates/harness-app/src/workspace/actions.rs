@@ -64,33 +64,10 @@ impl HarnessWorkspace {
         // removed one would keep firing recomputes for cards that are gone.
         self.git_watch.watch_repos(&self.repo_roots);
 
-        let items: Vec<(PathBuf, String, PathBuf)> = self
-            .data
-            .repos
-            .iter()
-            .flat_map(|repo| {
-                repo.worktrees
-                    .iter()
-                    .map(move |w| (repo.repo_root.clone(), w.branch.clone(), w.path.clone()))
-            })
-            .collect();
-        if let Some(p) = &self._poller {
-            for (root, branch, _) in &items {
-                p.add_branch(BranchKey {
-                    repo_dir: root.clone(),
-                    branch: branch.clone(),
-                });
-            }
-            // Default branches for main-checkout CI (first-class main).
-            for repo in &self.data.repos {
-                p.add_branch(BranchKey {
-                    repo_dir: repo.repo_root.clone(),
-                    branch: repo.default_branch.clone(),
-                });
-            }
-        }
+        self.sync_forge_branches();
         if let Some(source) = &mut self.status_source {
-            for (_, _, path) in &items {
+            for wt in self.data.repos.iter().flat_map(|repo| &repo.worktrees) {
+                let path = &wt.path;
                 let kind = self
                     .manager
                     .registry

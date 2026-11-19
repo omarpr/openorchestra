@@ -49,6 +49,18 @@ fn init_repo(root: &Path) {
 }
 
 #[test]
+fn reads_the_checked_out_branch_before_the_first_commit() {
+    let repo = tempfile::tempdir().unwrap();
+    git(repo.path(), &["init", "-b", "main"]);
+    let worktrees = GitWorktrees::new(SystemRunner);
+    assert_eq!(worktrees.current_branch(repo.path()).unwrap(), "main");
+
+    git(repo.path(), &["commit", "--allow-empty", "-m", "first commit"]);
+    git(repo.path(), &["checkout", "--detach"]);
+    assert_eq!(worktrees.current_branch(repo.path()).unwrap(), "HEAD");
+}
+
+#[test]
 fn projects_can_create_worktrees_with_the_same_name_and_branch() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();

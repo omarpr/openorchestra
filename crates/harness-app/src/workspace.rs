@@ -24,7 +24,7 @@ use gpui::{
 use editor::Editor;
 
 use agent_runtime::{AgentKind, AgentSignal, AgentState, Bus, StatusFileSource, WaitFidelity};
-use forge::{BranchKey, BranchStatus, CheckStatus, ForgeUpdate, GhCli, Poller, PollerConfig};
+use forge::{BranchStatus, CheckStatus, ForgeUpdate, GhCli, Poller, PollerConfig};
 use worktrees::{
     Change, CreateTaskMember, CreateTaskRequest, GitWorktrees, HookEnv, HookLayer, HookScriptPhase,
     HooksConfig, Manager, Registry, SystemRunner, TaskHooks, TaskStore, clear_local_hooks,
@@ -442,8 +442,10 @@ impl DiffBase {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct CardMenu {
-    id: String,
+    id: Option<String>,
+    pr: Option<(u64, String)>,
     x: Pixels,
     y: Pixels,
 }
@@ -685,7 +687,7 @@ pub struct HarnessWorkspace {
     /// as a toast until [`NOTE_TTL`] after `note_at`. Set it with `set_note`.
     note: String,
     note_at: Option<std::time::Instant>,
-    forge_status: HashMap<String, BranchStatus>,
+    forge_status: HashMap<PathBuf, HashMap<String, BranchStatus>>,
     agent_status: HashMap<PathBuf, AgentState>,
     /// When each worktree's status last changed, and the tool its latest
     /// signal reported — the phone's "waiting since" and tool chip.

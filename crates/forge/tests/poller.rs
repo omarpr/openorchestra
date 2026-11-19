@@ -33,6 +33,7 @@ fn pr(number: u64) -> PrInfo {
         number,
         state: PrState::Open,
         title: format!("PR #{number}"),
+        url: None,
     }
 }
 
