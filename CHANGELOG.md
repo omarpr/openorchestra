@@ -12,6 +12,8 @@ Unreleased is empty.
 
 ## Unreleased
 
+## 1.2.1 - 2026-11-19
+
 ### Fixed
 
 - Keep native macOS menu items (`About openOrchestra`, `Check for updates…`,
