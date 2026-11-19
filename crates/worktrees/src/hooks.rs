@@ -141,11 +141,9 @@ impl std::fmt::Display for HooksError {
                 script.display(),
                 status
             ),
-            HooksError::Untrusted { repo_root, .. } => write!(
-                f,
-                "hooks in {} are not trusted yet",
-                repo_root.display()
-            ),
+            HooksError::Untrusted { repo_root, .. } => {
+                write!(f, "hooks in {} are not trusted yet", repo_root.display())
+            }
         }
     }
 }
@@ -231,8 +229,8 @@ set -euo pipefail
 fn load_file(path: &Path) -> Result<Option<HooksFile>, HooksError> {
     match fs::read_to_string(path) {
         Ok(text) => {
-            let file: HooksFile = toml::from_str(&text)
-                .map_err(|e| HooksError::Parse(format!("{path:?}: {e}")))?;
+            let file: HooksFile =
+                toml::from_str(&text).map_err(|e| HooksError::Parse(format!("{path:?}: {e}")))?;
             Ok(Some(file))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -470,11 +468,7 @@ impl HooksConfig {
         shell_commands_for(&self.teardown, env)
     }
 
-    pub fn run_setup<R: CommandRunner>(
-        &self,
-        runner: &R,
-        env: &HookEnv,
-    ) -> Result<(), HooksError> {
+    pub fn run_setup<R: CommandRunner>(&self, runner: &R, env: &HookEnv) -> Result<(), HooksError> {
         run_scripts(runner, &self.setup, env)
     }
 
@@ -656,10 +650,7 @@ fn run_scripts<R: CommandRunner>(
         for (k, v) in env.to_map() {
             exports.push_str(&format!("export {k}={}; ", shell_quote(&v)));
         }
-        let cmdline = format!(
-            "{exports}exec {}",
-            shell_quote(&script.to_string_lossy())
-        );
+        let cmdline = format!("{exports}exec {}", shell_quote(&script.to_string_lossy()));
         let out = run_in_login_shell(runner, Some(&env.worktree), &cmdline)?;
         if !out.success() {
             return Err(HooksError::ScriptFailed {
@@ -734,7 +725,11 @@ fn member_env_key(repo: &str) -> String {
         .chars()
         .map(|c| {
             let c = c.to_ascii_uppercase();
-            if c.is_ascii_uppercase() || c.is_ascii_digit() { c } else { '_' }
+            if c.is_ascii_uppercase() || c.is_ascii_digit() {
+                c
+            } else {
+                '_'
+            }
         })
         .collect();
     format!("HARNESS_MEMBER_{name}")
@@ -778,9 +773,20 @@ mod hardening_tests {
     fn a_project_name_cannot_inject_shell_into_the_member_export() {
         assert_eq!(member_env_key("my-app"), "HARNESS_MEMBER_MY_APP");
         let key = member_env_key("a=1;touch ~/.pwn;b");
-        assert!(key.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'), "{key}");
-        let cmd = task_hook_command(Path::new("/s.sh"), &[("a=1;touch x;b".into(), PathBuf::from("/wt"))]);
-        assert_eq!(cmd.matches(';').count(), 1, "only the separator after the export: {cmd}");
+        assert!(
+            key.chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'),
+            "{key}"
+        );
+        let cmd = task_hook_command(
+            Path::new("/s.sh"),
+            &[("a=1;touch x;b".into(), PathBuf::from("/wt"))],
+        );
+        assert_eq!(
+            cmd.matches(';').count(),
+            1,
+            "only the separator after the export: {cmd}"
+        );
     }
 
     #[test]
@@ -863,9 +869,14 @@ mod tests {
         let data = tmp.path().join("data");
         fs::create_dir_all(&repo).unwrap();
 
-        let setup =
-            ensure_hook_script(HookLayer::Repo, HookScriptPhase::Setup, &repo, &data, "repo")
-                .unwrap();
+        let setup = ensure_hook_script(
+            HookLayer::Repo,
+            HookScriptPhase::Setup,
+            &repo,
+            &data,
+            "repo",
+        )
+        .unwrap();
         let teardown = ensure_hook_script(
             HookLayer::Repo,
             HookScriptPhase::Teardown,
@@ -962,10 +973,7 @@ mod tests {
         )
         .unwrap();
         assert!(path.is_file());
-        assert_eq!(
-            path,
-            local_scripts_dir(&data, "myrepo").join("teardown.sh")
-        );
+        assert_eq!(path, local_scripts_dir(&data, "myrepo").join("teardown.sh"));
         let cfg = HooksConfig::load(&repo, &data, "myrepo").unwrap();
         assert_eq!(cfg.teardown, vec![path.clone()]);
         assert_eq!(
@@ -985,8 +993,12 @@ mod tests {
             home_worktree: Some(PathBuf::from("/home-wt")),
         };
         let steps = setup_shell_steps(&[PathBuf::from("/s.sh")], &env);
-        assert!(steps.iter().any(|s| s.starts_with("export HARNESS_WORKTREE=")));
-        assert!(steps.iter().any(|s| s.starts_with("export HARNESS_TASK_SLUG=")));
+        assert!(steps
+            .iter()
+            .any(|s| s.starts_with("export HARNESS_WORKTREE=")));
+        assert!(steps
+            .iter()
+            .any(|s| s.starts_with("export HARNESS_TASK_SLUG=")));
         assert!(steps.iter().any(|s| s == "cd '/wt' && '/s.sh'"));
         // No mega-line of joined exports.
         assert!(!steps.iter().any(|s| s.contains("; export ")));
@@ -1032,13 +1044,20 @@ mod tests {
             .output()
             .unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert!(stdout.contains("hi-from-setup"), "{stdout}");
         // Success says nothing about exit codes; a bare 0 is noise.
         assert!(stdout.contains("=== setup finished ==="), "{stdout}");
         assert!(!stdout.contains("exit 0"), "{stdout}");
         // Banner is preceded by a blank line so it reads as a block start.
-        assert!(stdout.starts_with("\n=== openOrchestra setup ==="), "{stdout}");
+        assert!(
+            stdout.starts_with("\n=== openOrchestra setup ==="),
+            "{stdout}"
+        );
     }
 
     #[test]
@@ -1140,7 +1159,9 @@ impl HookTrust {
             teardown: resolve_contained_scripts(&base, &committed.teardown.scripts)?,
         };
         let mut trust = Self::load(data_dir);
-        trust.repos.insert(Self::key(repo_root), fingerprint(repo_root, &cfg));
+        trust
+            .repos
+            .insert(Self::key(repo_root), fingerprint(repo_root, &cfg));
         let path = Self::path(data_dir);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -1186,7 +1207,11 @@ mod trust_tests {
         let repo = tmp.path().join("repo");
         let data = tmp.path().join("data");
         fs::create_dir_all(repo_scripts_dir(&repo)).unwrap();
-        fs::write(committed_hooks_path(&repo), "[setup]\nscripts = [\"scripts/setup.sh\"]\n").unwrap();
+        fs::write(
+            committed_hooks_path(&repo),
+            "[setup]\nscripts = [\"scripts/setup.sh\"]\n",
+        )
+        .unwrap();
         fs::write(repo_scripts_dir(&repo).join("setup.sh"), body).unwrap();
         (tmp, repo, data)
     }
@@ -1201,7 +1226,13 @@ mod trust_tests {
             _ => panic!("expected committed hooks to require approval"),
         }
         HookTrust::trust(&data, &repo).unwrap();
-        assert_eq!(HooksConfig::load_trusted(&repo, &data, "repo").unwrap().setup.len(), 1);
+        assert_eq!(
+            HooksConfig::load_trusted(&repo, &data, "repo")
+                .unwrap()
+                .setup
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -1224,7 +1255,14 @@ mod trust_tests {
         assert!(HooksConfig::load_trusted(&repo, &data, "repo").is_ok());
 
         let (_tmp, repo, data) = repo_with_setup("echo hi\n");
-        ensure_hook_script(HookLayer::Local, HookScriptPhase::Setup, &repo, &data, "repo").unwrap();
+        ensure_hook_script(
+            HookLayer::Local,
+            HookScriptPhase::Setup,
+            &repo,
+            &data,
+            "repo",
+        )
+        .unwrap();
         assert!(HooksConfig::load_trusted(&repo, &data, "repo").is_ok());
     }
 }

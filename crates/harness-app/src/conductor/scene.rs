@@ -66,7 +66,9 @@ pub fn frame_index(pose: Pose, eyes_open: bool) -> usize {
         Pose::Rest => CONDUCT_FRAMES * 2 + blink,
         Pose::Cue => CONDUCT_FRAMES * 2 + 2 + blink,
         Pose::Bow(f) => CONDUCT_FRAMES * 2 + 4 + f.min(BOW_FRAMES - 1),
-        Pose::ConductCue(f) => CONDUCT_FRAMES * 2 + 4 + BOW_FRAMES + (f % CONDUCT_FRAMES) * 2 + blink,
+        Pose::ConductCue(f) => {
+            CONDUCT_FRAMES * 2 + 4 + BOW_FRAMES + (f % CONDUCT_FRAMES) * 2 + blink
+        }
     }
 }
 
@@ -373,7 +375,11 @@ impl Scene {
                 } else {
                     // Faint grain so it isn't plastic.
                     let grain = 0.5 + 0.5 * (p.y * 90.0 + (p.x * 7.0).sin() * 2.0).sin();
-                    s(mix(v3(0.40, 0.23, 0.12), v3(0.48, 0.29, 0.15), grain), 0.35, 30.0)
+                    s(
+                        mix(v3(0.40, 0.23, 0.12), v3(0.48, 0.29, 0.15), grain),
+                        0.35,
+                        30.0,
+                    )
                 }
             }
         }
@@ -415,17 +421,20 @@ fn loop_spline(pts: &[V3], t: f32) -> V3 {
     let p3 = pts[(i + 2) % n];
     let u2 = u * u;
     let u3 = u2 * u;
-    (p1 * 2.0 + (p2 - p0) * u + (p0 * 2.0 - p1 * 5.0 + p2 * 4.0 - p3) * u2 + (p1 * 3.0 - p0 - p2 * 3.0 + p3) * u3)
+    (p1 * 2.0
+        + (p2 - p0) * u
+        + (p0 * 2.0 - p1 * 5.0 + p2 * 4.0 - p3) * u2
+        + (p1 * 3.0 - p0 - p2 * 3.0 + p3) * u3)
         * 0.5
 }
 
 /// The classic 4/4 pattern for the baton hand: down, in, out, up.
 const BEAT_PATTERN: [V3; 5] = [
-    v3(-0.30, 0.30, 0.30), // top of the bar
+    v3(-0.30, 0.30, 0.30),  // top of the bar
     v3(-0.30, -0.20, 0.36), // 1: the downbeat
     v3(-0.02, -0.06, 0.38), // 2: across the body
     v3(-0.64, -0.08, 0.26), // 3: out wide
-    v3(-0.44, 0.16, 0.32), // 4: the upbeat
+    v3(-0.44, 0.16, 0.32),  // 4: the upbeat
 ];
 
 fn rig_for(pose: Pose, eyes_open: bool) -> Rig {
@@ -530,12 +539,33 @@ fn build_scene(pose: Pose, eyes_open: bool) -> Scene {
     };
 
     // Podium first: it is the biggest thing and usually the nearest hit.
-    s.push(Shape::RoundBox { c: v3(0.0, -0.90, 0.10), half: v3(0.46, 0.24, 0.26), r: 0.04 }, Mat::Wood, 0.0);
-    s.push(Shape::RoundBox { c: v3(0.0, -0.64, 0.10), half: v3(0.52, 0.025, 0.31), r: 0.02 }, Mat::Wood, 0.0);
+    s.push(
+        Shape::RoundBox {
+            c: v3(0.0, -0.90, 0.10),
+            half: v3(0.46, 0.24, 0.26),
+            r: 0.04,
+        },
+        Mat::Wood,
+        0.0,
+    );
+    s.push(
+        Shape::RoundBox {
+            c: v3(0.0, -0.64, 0.10),
+            half: v3(0.52, 0.025, 0.31),
+            r: 0.02,
+        },
+        Mat::Wood,
+        0.0,
+    );
 
     // Torso: a tapered tailcoat.
     s.push(
-        Shape::RoundCone { a: up(v3(0.0, -0.62, 0.0)), b: up(v3(0.0, -0.08, 0.0)), ra: 0.34, rb: 0.25 },
+        Shape::RoundCone {
+            a: up(v3(0.0, -0.62, 0.0)),
+            b: up(v3(0.0, -0.08, 0.0)),
+            ra: 0.34,
+            rb: 0.25,
+        },
         Mat::Coat,
         0.0,
     );
@@ -543,18 +573,77 @@ fn build_scene(pose: Pose, eyes_open: bool) -> Scene {
     let (er, hr) = elbow(SHOULDER_R, rig.baton_hand, v3(-1.0, -0.7, -0.5));
     let (el, hl) = elbow(SHOULDER_L, rig.free_hand, v3(1.0, -0.7, -0.5));
     for (sh, el, ha) in [(SHOULDER_R, er, hr), (SHOULDER_L, el, hl)] {
-        s.push(Shape::Capsule { a: up(sh), b: up(el), r: 0.072 }, Mat::Coat, 0.06);
-        s.push(Shape::Capsule { a: up(el), b: up(ha), r: 0.062 }, Mat::Coat, 0.03);
+        s.push(
+            Shape::Capsule {
+                a: up(sh),
+                b: up(el),
+                r: 0.072,
+            },
+            Mat::Coat,
+            0.06,
+        );
+        s.push(
+            Shape::Capsule {
+                a: up(el),
+                b: up(ha),
+                r: 0.062,
+            },
+            Mat::Coat,
+            0.03,
+        );
     }
     // Shirt front and the neck.
-    s.push(Shape::Ellipsoid { c: up(v3(0.0, -0.22, 0.19)), r: v3(0.11, 0.20, 0.10) }, Mat::Shirt, 0.0);
-    s.push(Shape::Capsule { a: up(v3(0.0, -0.06, 0.0)), b: head(v3(0.0, 0.10, 0.0)), r: 0.09 }, Mat::Skin, 0.0);
+    s.push(
+        Shape::Ellipsoid {
+            c: up(v3(0.0, -0.22, 0.19)),
+            r: v3(0.11, 0.20, 0.10),
+        },
+        Mat::Shirt,
+        0.0,
+    );
+    s.push(
+        Shape::Capsule {
+            a: up(v3(0.0, -0.06, 0.0)),
+            b: head(v3(0.0, 0.10, 0.0)),
+            r: 0.09,
+        },
+        Mat::Skin,
+        0.0,
+    );
 
     // Head and face.
-    s.push(Shape::Sphere { c: head(v3(0.0, 0.27, 0.02)), r: 0.26 }, Mat::Skin, 0.0);
-    s.push(Shape::Sphere { c: head(v3(-0.26, 0.26, 0.0)), r: 0.055 }, Mat::Skin, 0.03);
-    s.push(Shape::Sphere { c: head(v3(0.26, 0.26, 0.0)), r: 0.055 }, Mat::Skin, 0.03);
-    s.push(Shape::Sphere { c: head(v3(0.0, 0.24, 0.27)), r: 0.055 }, Mat::Skin, 0.03);
+    s.push(
+        Shape::Sphere {
+            c: head(v3(0.0, 0.27, 0.02)),
+            r: 0.26,
+        },
+        Mat::Skin,
+        0.0,
+    );
+    s.push(
+        Shape::Sphere {
+            c: head(v3(-0.26, 0.26, 0.0)),
+            r: 0.055,
+        },
+        Mat::Skin,
+        0.03,
+    );
+    s.push(
+        Shape::Sphere {
+            c: head(v3(0.26, 0.26, 0.0)),
+            r: 0.055,
+        },
+        Mat::Skin,
+        0.03,
+    );
+    s.push(
+        Shape::Sphere {
+            c: head(v3(0.0, 0.24, 0.27)),
+            r: 0.055,
+        },
+        Mat::Skin,
+        0.03,
+    );
     // Wild white maestro hair, bald on top.
     for (c, r) in [
         (v3(-0.25, 0.33, -0.06), 0.12),
@@ -568,39 +657,111 @@ fn build_scene(pose: Pose, eyes_open: bool) -> Scene {
         s.push(Shape::Sphere { c: head(c), r }, Mat::Hair, 0.07);
     }
     // Mustache.
-    s.push(Shape::Ellipsoid { c: head(v3(-0.06, 0.175, 0.245)), r: v3(0.075, 0.028, 0.035) }, Mat::Hair, 0.0);
-    s.push(Shape::Ellipsoid { c: head(v3(0.06, 0.175, 0.245)), r: v3(0.075, 0.028, 0.035) }, Mat::Hair, 0.03);
-    // Brows.
-    let br = rig.brow_raise;
     s.push(
-        Shape::Capsule { a: head(v3(-0.05, 0.40 + br, 0.24)), b: head(v3(-0.15, 0.385 + br, 0.205)), r: 0.018 },
+        Shape::Ellipsoid {
+            c: head(v3(-0.06, 0.175, 0.245)),
+            r: v3(0.075, 0.028, 0.035),
+        },
         Mat::Hair,
         0.0,
     );
     s.push(
-        Shape::Capsule { a: head(v3(0.05, 0.40 + br, 0.24)), b: head(v3(0.15, 0.385 + br, 0.205)), r: 0.018 },
+        Shape::Ellipsoid {
+            c: head(v3(0.06, 0.175, 0.245)),
+            r: v3(0.075, 0.028, 0.035),
+        },
+        Mat::Hair,
+        0.03,
+    );
+    // Brows.
+    let br = rig.brow_raise;
+    s.push(
+        Shape::Capsule {
+            a: head(v3(-0.05, 0.40 + br, 0.24)),
+            b: head(v3(-0.15, 0.385 + br, 0.205)),
+            r: 0.018,
+        },
+        Mat::Hair,
+        0.0,
+    );
+    s.push(
+        Shape::Capsule {
+            a: head(v3(0.05, 0.40 + br, 0.24)),
+            b: head(v3(0.15, 0.385 + br, 0.205)),
+            r: 0.018,
+        },
         Mat::Hair,
         0.0,
     );
     // Eyes: glossy beads that squash flat to blink.
     let eye_h = (0.048 * rig.eyes).max(0.007);
     for x in [-0.095, 0.095] {
-        s.push(Shape::Ellipsoid { c: head(v3(x, 0.32, 0.225)), r: v3(0.04, eye_h, 0.03) }, Mat::Eye, 0.0);
+        s.push(
+            Shape::Ellipsoid {
+                c: head(v3(x, 0.32, 0.225)),
+                r: v3(0.04, eye_h, 0.03),
+            },
+            Mat::Eye,
+            0.0,
+        );
     }
 
     // Bow tie in the theme's accent.
-    s.push(Shape::Ellipsoid { c: up(v3(-0.065, -0.02, 0.255)), r: v3(0.06, 0.04, 0.03) }, Mat::Tie, 0.0);
-    s.push(Shape::Ellipsoid { c: up(v3(0.065, -0.02, 0.255)), r: v3(0.06, 0.04, 0.03) }, Mat::Tie, 0.02);
-    s.push(Shape::Sphere { c: up(v3(0.0, -0.02, 0.27)), r: 0.028 }, Mat::Tie, 0.02);
+    s.push(
+        Shape::Ellipsoid {
+            c: up(v3(-0.065, -0.02, 0.255)),
+            r: v3(0.06, 0.04, 0.03),
+        },
+        Mat::Tie,
+        0.0,
+    );
+    s.push(
+        Shape::Ellipsoid {
+            c: up(v3(0.065, -0.02, 0.255)),
+            r: v3(0.06, 0.04, 0.03),
+        },
+        Mat::Tie,
+        0.02,
+    );
+    s.push(
+        Shape::Sphere {
+            c: up(v3(0.0, -0.02, 0.27)),
+            r: 0.028,
+        },
+        Mat::Tie,
+        0.02,
+    );
 
     // White gloves and the baton.
     // Gloves sit just past the cuff so the sleeve never pokes through.
     let past = |el: V3, ha: V3| ha + (ha - el).norm() * 0.035;
-    s.push(Shape::Sphere { c: up(past(er, hr)), r: 0.07 }, Mat::Glove, 0.0);
-    s.push(Shape::Sphere { c: up(past(el, hl)), r: 0.075 }, Mat::Glove, 0.0);
+    s.push(
+        Shape::Sphere {
+            c: up(past(er, hr)),
+            r: 0.07,
+        },
+        Mat::Glove,
+        0.0,
+    );
+    s.push(
+        Shape::Sphere {
+            c: up(past(el, hl)),
+            r: 0.075,
+        },
+        Mat::Glove,
+        0.0,
+    );
     let grip = past(er, hr);
     let tip = up(grip + rig.baton_dir * 0.50);
-    s.push(Shape::Capsule { a: up(grip + rig.baton_dir * 0.03), b: tip, r: 0.013 }, Mat::Baton, 0.0);
+    s.push(
+        Shape::Capsule {
+            a: up(grip + rig.baton_dir * 0.03),
+            b: tip,
+            r: 0.013,
+        },
+        Mat::Baton,
+        0.0,
+    );
 
     s
 }
@@ -667,7 +828,11 @@ pub fn render_frame(pose: Pose, eyes_open: bool, accent: [f32; 3]) -> Vec<u8> {
                 0.35 * (1.0 - smoothstep(0.4, 1.0, r))
             };
 
-            let coverage = if hit { 1.0 } else { (1.0 - min_d / px).clamp(0.0, 1.0) };
+            let coverage = if hit {
+                1.0
+            } else {
+                (1.0 - min_d / px).clamp(0.0, 1.0)
+            };
             let o = (j * n + i) * 4;
             if coverage <= 0.0 {
                 out[o + 3] = (sh * 255.0) as u8;
@@ -686,7 +851,9 @@ pub fn render_frame(pose: Pose, eyes_open: bool, accent: [f32; 3]) -> Vec<u8> {
             let fd = nrm.dot(fill).max(0.0);
             let sky = 0.5 + 0.5 * nrm.y;
             let ambient = mix(v3(0.10, 0.08, 0.07), v3(0.22, 0.25, 0.32), sky) * ao;
-            let light = v3(1.0, 0.95, 0.88) * (kd * shadow * 1.15) + v3(0.30, 0.38, 0.52) * (fd * 0.55) + ambient;
+            let light = v3(1.0, 0.95, 0.88) * (kd * shadow * 1.15)
+                + v3(0.30, 0.38, 0.52) * (fd * 0.55)
+                + ambient;
             let mut col = surf.albedo.mulv(light);
 
             let half = (key + view).norm();
@@ -715,7 +882,9 @@ pub fn render_frame(pose: Pose, eyes_open: bool, accent: [f32; 3]) -> Vec<u8> {
 /// Render every frame of [`all_frames`] across the machine's cores.
 pub fn render_all(accent: [f32; 3]) -> Vec<Vec<u8>> {
     let specs = all_frames();
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8);
+    let threads = std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .clamp(1, 8);
     let mut out: Vec<Vec<u8>> = vec![Vec::new(); specs.len()];
     std::thread::scope(|scope| {
         let chunks = out.chunks_mut(specs.len().div_ceil(threads));
@@ -759,9 +928,16 @@ mod tests {
     fn blinking_changes_the_face_and_nothing_else_much() {
         let open = render_frame(Pose::Rest, true, [0.36, 0.61, 1.0]);
         let shut = render_frame(Pose::Rest, false, [0.36, 0.61, 1.0]);
-        let differing = open.chunks(4).zip(shut.chunks(4)).filter(|(a, b)| a != b).count();
+        let differing = open
+            .chunks(4)
+            .zip(shut.chunks(4))
+            .filter(|(a, b)| a != b)
+            .count();
         assert!(differing > 10, "a blink must be visible ({differing} px)");
-        assert!(differing < 1500, "a blink must not move the body ({differing} px)");
+        assert!(
+            differing < 1500,
+            "a blink must not move the body ({differing} px)"
+        );
     }
 
     #[test]
@@ -769,7 +945,10 @@ mod tests {
         let a = render_frame(Pose::Conduct(0), true, [0.36, 0.61, 1.0]);
         let b = render_frame(Pose::Conduct(CONDUCT_FRAMES / 4), true, [0.36, 0.61, 1.0]);
         let differing = a.chunks(4).zip(b.chunks(4)).filter(|(x, y)| x != y).count();
-        assert!(differing > 500, "beats must look different ({differing} px)");
+        assert!(
+            differing > 500,
+            "beats must look different ({differing} px)"
+        );
     }
 
     /// Writes every frame as a contact sheet BMP for eyeballing the art:
@@ -780,7 +959,11 @@ mod tests {
         let path = std::env::var("CONDUCTOR_SHEET").unwrap_or_else(|_| "conductor.bmp".into());
         let started = std::time::Instant::now();
         let frames = render_all([0.36, 0.61, 1.0]);
-        eprintln!("rendered {} frames in {:?}", frames.len(), started.elapsed());
+        eprintln!(
+            "rendered {} frames in {:?}",
+            frames.len(),
+            started.elapsed()
+        );
         let cols = 8usize;
         let rows = frames.len().div_ceil(cols);
         let f = FRAME_PX as usize;

@@ -62,8 +62,8 @@ impl<R: CommandRunner> GhCli<R> {
     }
 }
 
-/// Wire shape of one element of
-/// `gh pr list --head <branch> --state all --json number,state,isDraft,title,url`.
+/// Wire shape of one element of `gh pr list --head <branch> --author @me
+/// --state all --json number,state,isDraft,title,url`.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GhPrView {
@@ -139,17 +139,18 @@ impl<R: CommandRunner> Forge for GhCli<R> {
         self.available
     }
 
-    fn pr_for_branch(
-        &self,
-        repo_dir: &Path,
-        branch: &str,
-    ) -> Result<Option<PrInfo>, ForgeError> {
+    fn pr_for_branch(&self, repo_dir: &Path, branch: &str) -> Result<Option<PrInfo>, ForgeError> {
         self.ensure_available()?;
         // `gh pr list --head` rather than `gh pr view <branch>`: the latter
         // only resolves PRs whose head branch lives in the *base* repo, so a
         // fork-pushed worktree branch silently shows no badge (M1 §5, verified
-        // against gh 2.95.0). `pr list` also reports "no PR" as an empty array
-        // on exit 0, so the fragile stderr-string match goes away too.
+        // against gh 2.95.0). `--author @me` keeps the list to the signed-in
+        // user, including a pull request they opened from a fork, and leaves
+        // out anyone else's pull request on the same head. `pr list` reports
+        // "no PR" as an empty array on exit 0, so the fragile stderr-string
+        // match goes away too. `--state all` stays: a merged or closed pull
+        // request is still returned for outcome labeling. The sidebar poller
+        // is what hides those from the badge.
         let out = self.run_gh(
             repo_dir,
             &[
@@ -157,6 +158,8 @@ impl<R: CommandRunner> Forge for GhCli<R> {
                 "list",
                 "--head",
                 branch,
+                "--author",
+                "@me",
                 "--state",
                 "all",
                 "--json",
@@ -197,15 +200,14 @@ impl<R: CommandRunner> Forge for GhCli<R> {
             number: chosen.number,
             state: map_pr_state(&chosen.state, chosen.is_draft)?,
             title: chosen.title.clone(),
-            url: chosen.url.clone().filter(|url| url.starts_with("https://") || url.starts_with("http://")),
+            url: chosen
+                .url
+                .clone()
+                .filter(|url| url.starts_with("https://") || url.starts_with("http://")),
         }))
     }
 
-    fn create_pr(
-        &self,
-        repo_dir: &Path,
-        req: &CreatePrRequest,
-    ) -> Result<PrInfo, ForgeError> {
+    fn create_pr(&self, repo_dir: &Path, req: &CreatePrRequest) -> Result<PrInfo, ForgeError> {
         self.ensure_available()?;
 
         // Every user-supplied value goes through `--flag value` rather than
@@ -213,10 +215,14 @@ impl<R: CommandRunner> Forge for GhCli<R> {
         // or title beginning with `-` cannot be read as an option (the same
         // arg-injection discipline as the `--` terminators elsewhere).
         let mut args: Vec<&str> = vec![
-            "pr", "create",
-            "--head", &req.branch,
-            "--title", &req.title,
-            "--body", &req.body,
+            "pr",
+            "create",
+            "--head",
+            &req.branch,
+            "--title",
+            &req.title,
+            "--body",
+            &req.body,
         ];
         if let Some(base) = &req.base {
             args.extend_from_slice(&["--base", base]);

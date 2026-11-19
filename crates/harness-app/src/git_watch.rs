@@ -34,7 +34,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
 /// Watches the `.git` of every known repo root and signals that git moved.
@@ -105,8 +105,8 @@ impl GitWatcher {
 
         let tx = self.tx.clone();
         let current = Arc::clone(&self.current);
-        let mut watcher = match notify::recommended_watcher(
-            move |res: Result<Event, notify::Error>| {
+        let mut watcher =
+            match notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
                 let Ok(event) = res else { return }; // transient backend error; next event re-syncs
                 let roots = current.lock().unwrap().clone();
                 for path in &event.paths {
@@ -115,14 +115,13 @@ impl GitWatcher {
                         break;
                     }
                 }
-            },
-        ) {
-            Ok(w) => w,
-            Err(e) => {
-                log::warn!("git watcher unavailable: {e}");
-                return;
-            }
-        };
+            }) {
+                Ok(w) => w,
+                Err(e) => {
+                    log::warn!("git watcher unavailable: {e}");
+                    return;
+                }
+            };
 
         let mut watched_any = false;
         for (path, mode) in targets {
@@ -145,11 +144,17 @@ fn watch_targets(roots: &[PathBuf]) -> Vec<(PathBuf, RecursiveMode)> {
     for root in roots {
         let git_dir = root.join(".git");
         if !git_dir.is_dir() {
-            log::debug!("no .git directory at {}; badges stay static", root.display());
+            log::debug!(
+                "no .git directory at {}; badges stay static",
+                root.display()
+            );
             continue;
         }
         out.push((git_dir.clone(), RecursiveMode::NonRecursive));
-        for (sub, mode) in [("refs", RecursiveMode::Recursive), ("worktrees", RecursiveMode::Recursive)] {
+        for (sub, mode) in [
+            ("refs", RecursiveMode::Recursive),
+            ("worktrees", RecursiveMode::Recursive),
+        ] {
             let path = git_dir.join(sub);
             // refs/ always exists; worktrees/ only once one is created.
             if path.exists() {
@@ -182,8 +187,13 @@ pub fn is_relevant_change(path: &Path) -> bool {
 
 /// Root of the repository whose remote-tracking ref changed.
 pub fn remote_tracking_repo(path: &Path) -> Option<&Path> {
-    let git_dir = path.ancestors().find(|p| p.file_name().is_some_and(|n| n == ".git"))?;
-    path.strip_prefix(git_dir.join("refs/remotes")).ok()?.components().nth(1)?;
+    let git_dir = path
+        .ancestors()
+        .find(|p| p.file_name().is_some_and(|n| n == ".git"))?;
+    path.strip_prefix(git_dir.join("refs/remotes"))
+        .ok()?
+        .components()
+        .nth(1)?;
     git_dir.parent()
 }
 
@@ -197,7 +207,9 @@ mod tests {
         assert!(is_relevant_change(Path::new("/repo/.git/index")));
         assert!(is_relevant_change(Path::new("/repo/.git/HEAD")));
         assert!(is_relevant_change(Path::new("/repo/.git/packed-refs")));
-        assert!(is_relevant_change(Path::new("/repo/.git/refs/heads/master")));
+        assert!(is_relevant_change(Path::new(
+            "/repo/.git/refs/heads/master"
+        )));
         // The push case: a nested remote-tracking ref, and the reason `.git` is
         // watched recursively under `refs/`.
         assert!(is_relevant_change(Path::new(
@@ -215,7 +227,10 @@ mod tests {
             remote_tracking_repo(Path::new("/repo/.git/refs/remotes/origin/feat/sidebar")),
             Some(Path::new("/repo")),
         );
-        assert_eq!(remote_tracking_repo(Path::new("/repo/.git/refs/heads/main")), None);
+        assert_eq!(
+            remote_tracking_repo(Path::new("/repo/.git/refs/heads/main")),
+            None
+        );
         assert_eq!(remote_tracking_repo(Path::new("/repo/.git/index")), None);
     }
 

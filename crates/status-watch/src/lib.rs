@@ -1,6 +1,5 @@
-//! status-watch — file-watches worktree roots for `.harness/status.json`
-//! changes (written by the pi extension `pi-ext/harness-status.ts`) and
-//! delivers parsed [`AgentStatus`] updates over a crossbeam channel.
+//! Watches worktrees for `.harness/status-tab-<id>.json` and legacy
+//! `.harness/status.json` changes and delivers parsed [`AgentStatus`] updates.
 //!
 //! See `docs/architecture.md` §4.1/§6.2 and `docs/spike2-notes.md` for the
 //! frozen `status.json` schema:
@@ -26,7 +25,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
-use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::event::{AccessKind, AccessMode};
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
 
 /// Agent lifecycle state as surfaced in the sidebar pill.
@@ -53,15 +53,16 @@ impl std::fmt::Display for AgentState {
     }
 }
 
-/// Parsed contents of `.harness/status.json`.
+/// Parsed contents of a worktree status file.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentStatus {
     pub state: AgentState,
-    /// Which agent wrote this file. Every agent shares the one status.json
-    /// per worktree, so without self-identification the watcher can only
-    /// attribute changes to the worktree's *registered* kind — which labeled
-    /// Claude Code's work as "pi". Optional for old files.
+    /// A tagged copy of the per-tab status may also be written to status.json
+    /// for existing readers of that file.
+    #[serde(default)]
+    pub tab_id: Option<u64>,
+    /// Which agent wrote this file. Legacy files may use the worktree default.
     #[serde(default)]
     pub agent: Option<String>,
     #[serde(default)]
@@ -90,6 +91,7 @@ impl AgentStatus {
     pub fn unknown() -> Self {
         AgentStatus {
             state: AgentState::Unknown,
+            tab_id: None,
             agent: None,
             timestamp: None,
             session_file: None,
@@ -98,11 +100,36 @@ impl AgentStatus {
     }
 }
 
-/// A status update for one watched worktree.
+/// A status update for one tab or a worktree's legacy status file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusEvent {
     pub worktree_root: PathBuf,
+    pub tab_id: Option<u64>,
     pub status: AgentStatus,
+}
+
+pub fn status_path(root: &Path, tab_id: Option<u64>) -> PathBuf {
+    root.join(".harness").join(status_filename(tab_id))
+}
+
+fn status_filename(tab_id: Option<u64>) -> String {
+    tab_id.map_or_else(
+        || "status.json".into(),
+        |id| format!("status-tab-{id}.json"),
+    )
+}
+
+fn status_tab(path: &Path) -> Option<Option<u64>> {
+    let name = path.file_name()?.to_str()?;
+    if name == "status.json" {
+        return Some(None);
+    }
+    let id = name
+        .strip_prefix("status-tab-")?
+        .strip_suffix(".json")?
+        .parse()
+        .ok()?;
+    (status_filename(Some(id)) == name).then_some(Some(id))
 }
 
 #[derive(Debug)]
@@ -164,14 +191,12 @@ struct WatchEntry {
     worktree_root: PathBuf,
     /// Last status delivered on the channel; used to suppress duplicate
     /// deliveries when the OS reports several events per atomic write.
-    last_emitted: Option<AgentStatus>,
-    /// Last successfully parsed status; malformed writes never clobber it.
-    last_good: Option<AgentStatus>,
+    last_emitted: HashMap<Option<u64>, AgentStatus>,
 }
 
 type Registry = Arc<Mutex<HashMap<PathBuf, WatchEntry>>>;
 
-/// Watches any number of worktree roots for `.harness/status.json` changes.
+/// Watches worktree roots for tab and legacy status changes in `.harness`.
 ///
 /// ```no_run
 /// use status_watch::StatusWatcher;
@@ -233,32 +258,17 @@ impl StatusWatcher {
 
         // Watch the directory (not the file): atomic temp+rename replaces the
         // inode, which would silently detach a file-level watch.
+        // On Linux, watch() waits for the same thread that delivers callbacks.
+        // Let those callbacks acquire the registry lock while it registers.
         self.watcher
             .watch(&harness_dir, RecursiveMode::NonRecursive)?;
-
-        let initial = read_status(&harness_dir.join("status.json"));
+        let mut registry = self.registry.lock().unwrap();
         let mut entry = WatchEntry {
             worktree_root: root,
-            last_emitted: None,
-            last_good: None,
+            last_emitted: HashMap::new(),
         };
-        let status = match initial {
-            ReadOutcome::Parsed(s) => {
-                entry.last_good = Some(s.clone());
-                s
-            }
-            // Malformed on first read: nothing better to report than Unknown.
-            ReadOutcome::Missing | ReadOutcome::Malformed => AgentStatus::unknown(),
-        };
-        entry.last_emitted = Some(status.clone());
-
-        let event = StatusEvent {
-            worktree_root: entry.worktree_root.clone(),
-            status,
-        };
-        self.registry.lock().unwrap().insert(harness_dir, entry);
-        // Receiver dropped just means nobody is listening anymore.
-        let _ = self.tx.send(event);
+        entry.refresh_dir(&harness_dir, &self.tx);
+        registry.insert(harness_dir, entry);
         Ok(())
     }
 
@@ -306,54 +316,96 @@ fn read_status(path: &Path) -> ReadOutcome {
 }
 
 fn handle_fs_event(registry: &Registry, tx: &Sender<StatusEvent>, event: &Event) {
-    // Collect the .harness dirs this event touches. Events carry paths like
-    // `<root>/.harness/status.json` (or the dir itself). If the event has no
-    // usable paths, conservatively re-check every watched entry.
+    // inotify reports our own reads as access events. Reading again in response
+    // keeps its event loop busy, so only handle access events that close a write.
+    if matches!(event.kind, EventKind::Access(kind) if kind != AccessKind::Close(AccessMode::Write))
+    {
+        return;
+    }
     let mut registry = registry.lock().unwrap();
-    let dirs: Vec<PathBuf> = if event.paths.is_empty() {
-        registry.keys().cloned().collect()
-    } else {
-        registry
-            .keys()
-            .filter(|dir| event.paths.iter().any(|p| p.starts_with(dir) || p == *dir))
-            .cloned()
-            .collect()
-    };
-
-    for dir in dirs {
-        // Only status.json (and dir-level churn) matters; ignore events that
-        // are clearly about other files (e.g. lingering temp files).
-        let relevant = event.paths.is_empty()
-            || event.paths.iter().any(|p| {
-                p == &dir
-                    || p.file_name()
-                        .map(|n| n == "status.json")
-                        .unwrap_or(true)
-            });
-        if !relevant {
-            continue;
+    if event.paths.is_empty() {
+        for (dir, entry) in registry.iter_mut() {
+            entry.refresh_dir(dir, tx);
         }
+        return;
+    }
+    for path in &event.paths {
+        if let Some(entry) = registry.get_mut(path) {
+            entry.refresh_dir(path, tx);
+        } else if let Some((entry, tab_id)) = path
+            .parent()
+            .and_then(|dir| registry.get_mut(dir))
+            .zip(status_tab(path))
+        {
+            entry.refresh_file(path, tab_id, tx);
+        }
+    }
+}
 
-        let Some(entry) = registry.get_mut(&dir) else {
-            continue;
-        };
+impl WatchEntry {
+    fn refresh_dir(&mut self, dir: &Path, tx: &Sender<StatusEvent>) {
+        let mut tabs: Vec<_> = self.last_emitted.keys().filter_map(|&id| id).collect();
+        tabs.extend(
+            std::fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|entry| status_tab(&entry.path()).flatten()),
+        );
+        tabs.sort_unstable();
+        tabs.dedup();
+        self.refresh_file(&dir.join("status.json"), None, tx);
+        for id in tabs {
+            self.refresh_file(&dir.join(status_filename(Some(id))), Some(id), tx);
+        }
+    }
 
-        let status = match read_status(&dir.join("status.json")) {
-            ReadOutcome::Parsed(s) => {
-                entry.last_good = Some(s.clone());
-                s
+    fn refresh_file(&mut self, path: &Path, tab_id: Option<u64>, tx: &Sender<StatusEvent>) {
+        let (status, keep) = match read_status(path) {
+            // The tagged status.json mirrors a dedicated tab file. Publishing
+            // both would count that tab twice and repeat notifications.
+            // A tagged status.json is a mirror of a tab file. If an untagged
+            // status was already delivered, dropping the mirror leaves that
+            // legacy record in place, so a later Idle on the tab file does
+            // not clear the root's Running.
+            ReadOutcome::Parsed(s) if tab_id.is_none() && s.tab_id.is_some() => {
+                if self
+                    .last_emitted
+                    .get(&None)
+                    .is_some_and(|previous| previous.state != AgentState::Unknown)
+                {
+                    self.last_emitted.insert(None, AgentStatus::unknown());
+                    let _ = tx.send(StatusEvent {
+                        worktree_root: self.worktree_root.clone(),
+                        tab_id: None,
+                        status: AgentStatus::unknown(),
+                    });
+                }
+                return;
             }
-            ReadOutcome::Missing => AgentStatus::unknown(),
-            // Malformed: keep last good, deliver nothing new.
-            ReadOutcome::Malformed => continue,
+            ReadOutcome::Parsed(s) => (s, true),
+            ReadOutcome::Missing
+                if tab_id.is_some() && self.last_emitted.remove(&tab_id).is_none() =>
+            {
+                return
+            }
+            ReadOutcome::Missing => (AgentStatus::unknown(), tab_id.is_none()),
+            ReadOutcome::Malformed
+                if tab_id.is_none() && !self.last_emitted.contains_key(&None) =>
+            {
+                (AgentStatus::unknown(), true)
+            }
+            ReadOutcome::Malformed => return,
         };
-
-        if entry.last_emitted.as_ref() == Some(&status) {
-            continue; // duplicate OS event for the same content
+        if self.last_emitted.get(&tab_id) == Some(&status) {
+            return;
         }
-        entry.last_emitted = Some(status.clone());
+        if keep {
+            self.last_emitted.insert(tab_id, status.clone());
+        }
         let _ = tx.send(StatusEvent {
-            worktree_root: entry.worktree_root.clone(),
+            worktree_root: self.worktree_root.clone(),
+            tab_id,
             status,
         });
     }

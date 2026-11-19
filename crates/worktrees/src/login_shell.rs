@@ -46,7 +46,11 @@ fn is_bare_posix_sh(program: &str) -> bool {
 /// version-manager shim — resolves the same way it would in their terminal.
 pub fn interactive_login_command(script: &str) -> (String, Vec<String>) {
     let program = shell_program();
-    let flags = if is_bare_posix_sh(&program) { "-lc" } else { "-lic" };
+    let flags = if is_bare_posix_sh(&program) {
+        "-lc"
+    } else {
+        "-lic"
+    };
     (program, vec![flags.to_string(), script.to_string()])
 }
 

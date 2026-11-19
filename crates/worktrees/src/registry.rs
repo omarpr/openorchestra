@@ -36,6 +36,7 @@ pub enum AgentKind {
     Codex,
     ClaudeCode,
     Kimi,
+    Grok,
     /// An agent this build does not know about. Round-trips unchanged.
     Other(String),
 }
@@ -48,18 +49,20 @@ impl AgentKind {
             AgentKind::Codex => "codex",
             AgentKind::ClaudeCode => "claude-code",
             AgentKind::Kimi => "kimi",
+            AgentKind::Grok => "grok",
             AgentKind::Other(s) => s,
         }
     }
 
     /// Every kind this build knows how to drive, in sidebar order.
-    pub fn known() -> [AgentKind; 5] {
+    pub fn known() -> [AgentKind; 6] {
         [
             AgentKind::Pi,
             AgentKind::OpenCode,
             AgentKind::Codex,
             AgentKind::ClaudeCode,
             AgentKind::Kimi,
+            AgentKind::Grok,
         ]
     }
 }
@@ -72,6 +75,7 @@ impl From<&str> for AgentKind {
             "codex" => AgentKind::Codex,
             "claude-code" => AgentKind::ClaudeCode,
             "kimi" => AgentKind::Kimi,
+            "grok" => AgentKind::Grok,
             other => AgentKind::Other(other.to_string()),
         }
     }

@@ -212,9 +212,15 @@ mod tests {
 
         // Rust syntax captures resolve to the intended hues (keyword = accent,
         // string = green), proving the SyntaxTheme is populated from our tokens.
-        let keyword = theme.syntax().style_for_name("keyword").expect("keyword style");
+        let keyword = theme
+            .syntax()
+            .style_for_name("keyword")
+            .expect("keyword style");
         assert_eq!(keyword.color, Some(want(hx.accent)));
-        let string = theme.syntax().style_for_name("string").expect("string style");
+        let string = theme
+            .syntax()
+            .style_for_name("string")
+            .expect("string style");
         assert_eq!(string.color, Some(want(hx.green)));
     }
 

@@ -128,7 +128,32 @@ const leftovers = fs
 	.filter((f) => f !== "status.json");
 assert(leftovers.length === 0, "no temp files left behind");
 
+// A pane created before HARNESS_AGENT_TAB_ID existed still names its tmux session.
+delete process.env.HARNESS_AGENT_TAB_ID;
+process.env.HARNESS_REMOTE_SESSION = "harness_example_7";
+const remoteCwd = fs.mkdtempSync(path.join(os.tmpdir(), "harness-status-remote-"));
+const remoteHandlers = {};
+factory({ on: (ev, h) => { (remoteHandlers[ev] ??= []).push(h); } });
+const remoteCtx = { ...ctx, cwd: remoteCwd };
+for (const h of remoteHandlers.session_start ?? []) await h({ reason: "startup" }, remoteCtx);
+const remoteStatus = JSON.parse(fs.readFileSync(path.join(remoteCwd, ".harness/status-tab-7.json"), "utf8"));
+assert(remoteStatus.tabId === 7 && remoteStatus.agent === "pi", "remote session name supplies the tab id");
+
+process.env.HARNESS_AGENT_TAB_ID = "9";
+const explicitCwd = fs.mkdtempSync(path.join(os.tmpdir(), "harness-status-tab-"));
+const explicitHandlers = {};
+factory({ on: (ev, h) => { (explicitHandlers[ev] ??= []).push(h); } });
+const explicitCtx = { ...ctx, cwd: explicitCwd };
+for (const h of explicitHandlers.session_start ?? []) await h({ reason: "startup" }, explicitCtx);
+const explicitStatus = JSON.parse(fs.readFileSync(path.join(explicitCwd, ".harness/status-tab-9.json"), "utf8"));
+assert(explicitStatus.tabId === 9, "HARNESS_AGENT_TAB_ID wins over the session name");
+assert(!fs.existsSync(path.join(explicitCwd, ".harness/status-tab-7.json")), "the session suffix is not used when the tab id is set");
+
 fs.rmSync(cwd, { recursive: true, force: true });
+fs.rmSync(remoteCwd, { recursive: true, force: true });
+fs.rmSync(explicitCwd, { recursive: true, force: true });
+delete process.env.HARNESS_AGENT_TAB_ID;
+delete process.env.HARNESS_REMOTE_SESSION;
 if (failures > 0) {
 	console.error(`${failures} assertion(s) failed`);
 	process.exit(1);

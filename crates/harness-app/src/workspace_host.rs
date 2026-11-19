@@ -25,15 +25,15 @@
 //! window; it is a `Render` entity like any other, so it can be placed inside
 //! our center column. That is the finding R10 was waiting on.
 
-use std::sync::Arc;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::Result;
 use gpui::{App, AppContext, Entity, Window};
 // `detach_and_log_err` lives on this gpui extension trait, not on Task.
-use gpui::TaskExt as _;
-use project::{Project, LocalProjectFlags};
 use gpui::Focusable as _;
+use gpui::TaskExt as _;
+use project::{LocalProjectFlags, Project};
 use workspace::{AppState, Workspace};
 
 /// The harness state root (`~/.openorchestra`), matching `workspace.rs`.
@@ -54,8 +54,7 @@ pub fn app_state(cx: &mut App) -> Arc<AppState> {
         return existing;
     }
 
-    let fs: Arc<dyn fs::Fs> =
-        fs::RealFs::new(None, cx.background_executor().clone());
+    let fs: Arc<dyn fs::Fs> = fs::RealFs::new(None, cx.background_executor().clone());
     let mut registry = language::LanguageRegistry::new(cx.background_executor().clone());
     // Language servers need somewhere to live even when they are NOT
     // downloaded: the adapter consults this directory before falling back to a
@@ -233,9 +232,9 @@ fn build_workspace(
     // or commit header — the search-bar failure again, wearing a different hat.
     {
         let init_toolbar = |workspace: &Workspace,
-                           pane: &Entity<workspace::Pane>,
-                           window: &mut Window,
-                           cx: &mut gpui::Context<Workspace>| {
+                            pane: &Entity<workspace::Pane>,
+                            window: &mut Window,
+                            cx: &mut gpui::Context<Workspace>| {
             let languages = workspace.project().read(cx).languages().clone();
             // Built outside the `pane.update` because each constructor wants
             // `&Workspace`, which is borrowed for the duration of that closure.
@@ -245,8 +244,7 @@ fn build_workspace(
                 cx.new(|cx| git_ui::staged_diff::StagedDiffToolbar::new(workspace, cx));
             let unstaged_diff_toolbar =
                 cx.new(|cx| git_ui::unstaged_diff::UnstagedDiffToolbar::new(workspace, cx));
-            let branch_diff_toolbar =
-                cx.new(git_ui::branch_diff::BranchDiffToolbar::new);
+            let branch_diff_toolbar = cx.new(git_ui::branch_diff::BranchDiffToolbar::new);
             let markdown_preview_button =
                 cx.new(|_| crate::markdown_preview_button::MarkdownPreviewButton::new(workspace));
             let breadcrumbs = cx.new(|_| breadcrumbs::Breadcrumbs::new());
@@ -258,11 +256,11 @@ fn build_workspace(
                     // with `justify_between`, which needs a left sibling to
                     // justify against. See the Cargo.toml note.
                     toolbar.add_item(breadcrumbs, window, cx);
-                    let buffer_search_bar = cx.new(|cx| {
-                        search::BufferSearchBar::new(Some(languages), window, cx)
-                    });
+                    let buffer_search_bar =
+                        cx.new(|cx| search::BufferSearchBar::new(Some(languages), window, cx));
                     toolbar.add_item(buffer_search_bar, window, cx);
-                    let project_search_bar = cx.new(|_| search::project_search::ProjectSearchBar::new());
+                    let project_search_bar =
+                        cx.new(|_| search::project_search::ProjectSearchBar::new());
                     toolbar.add_item(project_search_bar, window, cx);
                     // Each of these renders only for its own item type, so all
                     // four can coexist on every pane exactly as they do in zed.
@@ -340,7 +338,11 @@ fn build_workspace(
         &workspace,
         "project_panel",
         project_panel::ProjectPanel::load,
-        if mode == HostedMode::Ide { StartOpen::Yes } else { StartOpen::No },
+        if mode == HostedMode::Ide {
+            StartOpen::Yes
+        } else {
+            StartOpen::No
+        },
         window,
         cx,
     );
@@ -451,7 +453,6 @@ fn dock_panel<T, Fut>(
     });
 }
 
-
 /// Open `rel` (worktree-relative to `root`) in a hosted workspace, putting the
 /// caret on `line` when there is one.
 ///
@@ -519,7 +520,7 @@ pub fn open_file_at(
                             cx,
                             |s| {
                                 s.select_ranges([
-                                    language::Point::new(row, 0)..language::Point::new(row, 0),
+                                    language::Point::new(row, 0)..language::Point::new(row, 0)
                                 ]);
                             },
                         );

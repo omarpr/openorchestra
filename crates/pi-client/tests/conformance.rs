@@ -9,9 +9,7 @@ use std::io::BufReader;
 
 use pi_client::framing::{read_record, split_records, strip_terminator};
 use pi_client::protocol::ExtensionUiRequest;
-use pi_client::{
-    AgentState, ExtensionUiResponse, RpcCommand, RpcEvent, RpcRecord, SettleTracker,
-};
+use pi_client::{AgentState, ExtensionUiResponse, RpcCommand, RpcEvent, RpcRecord, SettleTracker};
 
 const RECORDED: &str = include_str!("../fixtures/rpc-session-0.73.1.jsonl");
 
@@ -36,7 +34,10 @@ fn a_trailing_cr_is_stripped_but_inner_whitespace_is_untouched() {
     assert_eq!(strip_terminator("{\"a\":1}\n"), "{\"a\":1}");
     assert_eq!(strip_terminator("{\"a\":1}"), "{\"a\":1}");
     // trim_end() would eat these; strip_terminator must not.
-    assert_eq!(strip_terminator("{\"a\":\"x\u{2028}\"}\n"), "{\"a\":\"x\u{2028}\"}");
+    assert_eq!(
+        strip_terminator("{\"a\":\"x\u{2028}\"}\n"),
+        "{\"a\":\"x\u{2028}\"}"
+    );
 }
 
 #[test]
@@ -83,7 +84,9 @@ fn the_recorded_session_has_the_expected_event_shape() {
         .collect();
 
     assert!(events.iter().any(|e| matches!(e, RpcEvent::AgentStart)));
-    assert!(events.iter().any(|e| matches!(e, RpcEvent::AgentEnd { .. })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, RpcEvent::AgentEnd { .. })));
     assert!(events.iter().any(|e| matches!(e, RpcEvent::TurnStart)));
 
     // The tool round-trip is the interesting part for the chat panel's tool
@@ -91,9 +94,11 @@ fn the_recorded_session_has_the_expected_event_shape() {
     let start = events
         .iter()
         .find_map(|e| match e {
-            RpcEvent::ToolExecutionStart { tool_call_id, tool_name, .. } => {
-                Some((tool_call_id.clone(), tool_name.clone()))
-            }
+            RpcEvent::ToolExecutionStart {
+                tool_call_id,
+                tool_name,
+                ..
+            } => Some((tool_call_id.clone(), tool_name.clone())),
             _ => None,
         })
         .expect("recorded session executes a tool");
@@ -113,9 +118,10 @@ fn message_update_carries_assistant_message_event_not_delta() {
     let update = recorded()
         .into_iter()
         .find_map(|r| match r {
-            RpcRecord::Event(RpcEvent::MessageUpdate { assistant_message_event, .. }) => {
-                Some(assistant_message_event)
-            }
+            RpcRecord::Event(RpcEvent::MessageUpdate {
+                assistant_message_event,
+                ..
+            }) => Some(assistant_message_event),
             _ => None,
         })
         .expect("recorded session streams updates");
@@ -200,30 +206,47 @@ fn only_dialog_methods_block_the_agent() {
     for method in ["select", "confirm", "input", "editor"] {
         assert!(ui_request(method).is_blocking(), "{method} blocks");
     }
-    for method in ["notify", "setStatus", "setWidget", "setTitle", "set_editor_text"] {
+    for method in [
+        "notify",
+        "setStatus",
+        "setWidget",
+        "setTitle",
+        "set_editor_text",
+    ] {
         assert!(!ui_request(method).is_blocking(), "{method} does not block");
     }
 }
 
 #[test]
 fn ui_responses_serialize_per_method() {
-    let v: serde_json::Value =
-        serde_json::from_str(ExtensionUiResponse::value("u1", "b").to_record().unwrap().trim_end())
-            .unwrap();
+    let v: serde_json::Value = serde_json::from_str(
+        ExtensionUiResponse::value("u1", "b")
+            .to_record()
+            .unwrap()
+            .trim_end(),
+    )
+    .unwrap();
     assert_eq!(v["type"], "extension_ui_response");
     assert_eq!(v["value"], "b");
     assert!(v.get("confirmed").is_none());
 
     let v: serde_json::Value = serde_json::from_str(
-        ExtensionUiResponse::confirmed("u1", true).to_record().unwrap().trim_end(),
+        ExtensionUiResponse::confirmed("u1", true)
+            .to_record()
+            .unwrap()
+            .trim_end(),
     )
     .unwrap();
     assert_eq!(v["confirmed"], true);
     assert!(v.get("value").is_none());
 
-    let v: serde_json::Value =
-        serde_json::from_str(ExtensionUiResponse::cancelled("u1").to_record().unwrap().trim_end())
-            .unwrap();
+    let v: serde_json::Value = serde_json::from_str(
+        ExtensionUiResponse::cancelled("u1")
+            .to_record()
+            .unwrap()
+            .trim_end(),
+    )
+    .unwrap();
     assert_eq!(v["cancelled"], true);
 }
 
@@ -249,7 +272,10 @@ fn auto_retry_never_blips_idle_however_long_the_backoff() {
     let mut tracker = SettleTracker::new();
     let feed = |t: &mut SettleTracker, json: &str| t.observe(&RpcRecord::parse(json).unwrap());
 
-    assert_eq!(feed(&mut tracker, r#"{"type":"agent_start"}"#), Some(AgentState::Running));
+    assert_eq!(
+        feed(&mut tracker, r#"{"type":"agent_start"}"#),
+        Some(AgentState::Running)
+    );
     // Provider error: agent_end fires, but a retry is coming.
     feed(&mut tracker, r#"{"type":"agent_end","messages":[]}"#);
     let blip = feed(&mut tracker, r#"{"type":"auto_retry_start","attempt":1}"#);
@@ -258,7 +284,10 @@ fn auto_retry_never_blips_idle_however_long_the_backoff() {
         AgentState::Running,
         "must stay Running across the retry gap; transition was {blip:?}"
     );
-    feed(&mut tracker, r#"{"type":"auto_retry_end","succeeded":true}"#);
+    feed(
+        &mut tracker,
+        r#"{"type":"auto_retry_end","succeeded":true}"#,
+    );
     feed(&mut tracker, r#"{"type":"agent_start"}"#);
     assert_eq!(tracker.state(), AgentState::Running);
     assert_eq!(
@@ -275,7 +304,8 @@ fn a_blocking_dialog_marks_the_agent_waiting_until_answered() {
     let mut tracker = SettleTracker::new();
     tracker.observe(&RpcRecord::parse(r#"{"type":"agent_start"}"#).unwrap());
 
-    let confirm = r#"{"type":"extension_ui_request","id":"u1","method":"confirm","title":"t","message":"m"}"#;
+    let confirm =
+        r#"{"type":"extension_ui_request","id":"u1","method":"confirm","title":"t","message":"m"}"#;
     assert_eq!(
         tracker.observe(&RpcRecord::parse(confirm).unwrap()),
         Some(AgentState::Waiting)

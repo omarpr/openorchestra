@@ -22,7 +22,7 @@ use gpui::{
 };
 use markdown::{Markdown, MarkdownElement, MarkdownStyle};
 
-use crate::theme::{theme, HarnessTheme};
+use crate::theme::{HarnessTheme, theme};
 
 /// Whether a path is markdown, and therefore previewable.
 pub fn is_markdown(path: &str) -> bool {
@@ -81,7 +81,7 @@ impl MarkdownPreview {
 
 /// Map the harness tokens onto zed's markdown styling, so a preview looks like
 /// part of the app rather than a foreign document.
-fn markdown_style(hx: &HarnessTheme, cx: &App) -> MarkdownStyle {
+pub(crate) fn markdown_style(hx: &HarnessTheme, cx: &App) -> MarkdownStyle {
     let mut style = MarkdownStyle {
         base_text_style: gpui::TextStyle {
             color: hx.tx1.into(),
@@ -121,8 +121,9 @@ impl Render for MarkdownPreview {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let hx = theme(cx).clone();
         let body = match (&self.markdown, &self.note) {
-            (Some(markdown), _) => MarkdownElement::new(markdown.clone(), markdown_style(&hx, cx))
-                .into_any_element(),
+            (Some(markdown), _) => {
+                MarkdownElement::new(markdown.clone(), markdown_style(&hx, cx)).into_any_element()
+            }
             (None, Some(note)) => div()
                 .p_2()
                 .text_xs()
@@ -161,7 +162,12 @@ mod tests {
 
     #[test]
     fn markdown_extensions_are_recognized_case_insensitively() {
-        for path in ["README.md", "docs/architecture.MD", "notes.markdown", "a/b/c.Md"] {
+        for path in [
+            "README.md",
+            "docs/architecture.MD",
+            "notes.markdown",
+            "a/b/c.Md",
+        ] {
             assert!(is_markdown(path), "{path} should be previewable");
         }
     }
@@ -171,7 +177,14 @@ mod tests {
         // `.mdx` and `.mdown` are deliberately excluded: zed's renderer does
         // not handle MDX's embedded JSX, and offering a preview that silently
         // mangles the file is worse than not offering one.
-        for path in ["src/main.rs", "Cargo.toml", "page.mdx", "notes.mdown", "README", "a.md.bak"] {
+        for path in [
+            "src/main.rs",
+            "Cargo.toml",
+            "page.mdx",
+            "notes.mdown",
+            "README",
+            "a.md.bak",
+        ] {
             assert!(!is_markdown(path), "{path} should not be previewable");
         }
     }

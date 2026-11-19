@@ -44,7 +44,10 @@ const MAX_EVENT_BYTES: usize = 8 * 1024 * 1024;
 /// of stream, `Ok(None)` when the line is longer than `max`.
 fn read_line_capped<R: BufRead>(reader: &mut R, max: usize) -> io::Result<Option<String>> {
     let mut buf = Vec::new();
-    reader.by_ref().take(max as u64 + 1).read_until(b'\n', &mut buf)?;
+    reader
+        .by_ref()
+        .take(max as u64 + 1)
+        .read_until(b'\n', &mut buf)?;
     if buf.len() > max {
         return Ok(None);
     }

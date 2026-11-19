@@ -21,9 +21,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::{
-    resolve_on_path, AgentCommand, AgentKind, AgentRuntime, SignalKind, WaitFidelity,
-};
+use crate::{resolve_on_path, AgentCommand, AgentKind, AgentRuntime, SignalKind, WaitFidelity};
 
 /// Everything materialized into the state dir, baked in at compile time.
 ///
@@ -40,8 +38,14 @@ pub(crate) const PROGRAM: &str = "pi";
 pub(crate) const DEFAULT_ARGS: &[&str] = &[];
 
 const ASSETS: &[(&str, &str)] = &[
-    ("harness-status.ts", include_str!("../../../pi-ext/harness-status.ts")),
-    ("harness-tools.ts", include_str!("../../../pi-ext/harness-tools.ts")),
+    (
+        "harness-status.ts",
+        include_str!("../../../pi-ext/harness-status.ts"),
+    ),
+    (
+        "harness-tools.ts",
+        include_str!("../../../pi-ext/harness-tools.ts"),
+    ),
     ("tools.json", agent_schema::TOOLS_JSON),
 ];
 

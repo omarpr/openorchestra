@@ -59,12 +59,19 @@ fn open_private(path: &Path) -> io::Result<fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     // create_new: never write through something already sitting at the temp
     // path, such as a symlink planted there.
-    fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
 }
 
 #[cfg(not(unix))]
 fn open_private(path: &Path) -> io::Result<fs::File> {
-    fs::OpenOptions::new().write(true).create_new(true).open(path)
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
 }
 
 #[cfg(all(test, unix))]
@@ -87,7 +94,11 @@ mod tests {
         fs::write(&f, "old").unwrap(); // an older build's world-readable file
         write_private(&f, b"new").unwrap();
         assert_eq!(fs::read_to_string(&f).unwrap(), "new");
-        assert_eq!(mode(&f), 0o600, "rewritten files must not keep the old mode");
+        assert_eq!(
+            mode(&f),
+            0o600,
+            "rewritten files must not keep the old mode"
+        );
         let leftovers: Vec<_> = fs::read_dir(&dir)
             .unwrap()
             .filter_map(Result::ok)

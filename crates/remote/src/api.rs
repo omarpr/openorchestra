@@ -255,7 +255,10 @@ async fn pair(
             s.pair_result(peer.ip(), false, Instant::now());
             eprintln!("oo-remote: wrong pairing code from {}", peer.ip());
             if s.pair_locked(peer.ip(), Instant::now()) {
-                eprintln!("oo-remote: {} locked out of pairing after repeated wrong codes", peer.ip());
+                eprintln!(
+                    "oo-remote: {} locked out of pairing after repeated wrong codes",
+                    peer.ip()
+                );
             }
             error(StatusCode::UNAUTHORIZED, "invalid")
         }
@@ -618,7 +621,9 @@ fn validate_webp(bytes: &[u8]) -> bool {
             b"ANIM" if animated && !saw_animation_header && data.len() == 6 => {
                 saw_animation_header = true;
             }
-            b"ANMF" if saw_animation_header && canvas.is_some_and(|c| validate_webp_frame(data, c)) => {
+            b"ANMF"
+                if saw_animation_header && canvas.is_some_and(|c| validate_webp_frame(data, c)) =>
+            {
                 saw_image = true;
             }
             b"VP8X" | b"VP8 " | b"VP8L" | b"ANIM" | b"ANMF" => return false,
@@ -760,7 +765,9 @@ async fn send_screenshot(State(s): AppState, Path(id): Path<String>, request: Re
     let (_permit, bytes, extension) = match tokio::task::spawn_blocking(move || {
         let extension = screenshot_extension(&bytes);
         (permit, bytes, extension)
-    }).await {
+    })
+    .await
+    {
         Ok((permit, bytes, Some(extension))) => (permit, bytes, extension),
         Ok((_, _, None)) => return error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_image"),
         Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
@@ -896,7 +903,10 @@ async fn send_screenshot_reply(
         )
         .is_some()
     };
-    match hub.send_screenshot(text, saved, native_image, authorize).await {
+    match hub
+        .send_screenshot(text, saved, native_image, authorize)
+        .await
+    {
         Ok(()) => Ok(()),
         Err(SendLineError::Unauthorized) => Err((StatusCode::NOT_FOUND, "not_found")),
         Err(SendLineError::NotWritten(_) | SendLineError::PartialOrUnknown(_)) => {
@@ -1044,7 +1054,10 @@ mod tests {
         ] {
             assert_eq!(screenshot_extension(jpeg), Some("jpg"));
             assert_eq!(screenshot_extension(&jpeg[..jpeg.len() - 2]), None);
-            let scan = jpeg.windows(2).position(|marker| marker == b"\xff\xda").unwrap();
+            let scan = jpeg
+                .windows(2)
+                .position(|marker| marker == b"\xff\xda")
+                .unwrap();
             let mut no_scan = jpeg[..scan].to_vec();
             no_scan.extend_from_slice(b"\xff\xd9");
             assert_eq!(screenshot_extension(&no_scan), None);
@@ -1078,7 +1091,11 @@ mod tests {
         let riff_size = (empty_frame.len() - 8) as u32;
         empty_frame[4..8].copy_from_slice(&riff_size.to_le_bytes());
 
-        for webp in [extended_header.as_slice(), lossless_header.as_slice(), &empty_frame] {
+        for webp in [
+            extended_header.as_slice(),
+            lossless_header.as_slice(),
+            &empty_frame,
+        ] {
             assert_eq!(screenshot_extension(webp), None);
         }
     }
@@ -1131,7 +1148,10 @@ mod tests {
                 let _ = hold.recv();
             });
             let mut save = Box::pin(save_temp_screenshot(dir.path().to_path_buf(), "png", bytes));
-            assert!(save.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+            assert!(save
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending());
             drop(save);
             release.send(()).unwrap();
             blocker.await.unwrap();
@@ -1158,7 +1178,9 @@ mod tests {
             .uri(format!("/api/agents/{id}/send-screenshot"))
             .header(header::AUTHORIZATION, format!("Bearer {writer}"))
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from_stream(stream::pending::<Result<Bytes, Infallible>>()))
+            .body(Body::from_stream(stream::pending::<
+                Result<Bytes, Infallible>,
+            >()))
             .unwrap();
         stalled
             .extensions_mut()
@@ -1269,14 +1291,19 @@ mod tests {
             .insert(ConnectInfo("127.0.0.1:1234".parse::<SocketAddr>().unwrap()));
         let response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), 200);
-        let body = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
         serde_json::from_slice(&body).unwrap()
     }
 
     #[tokio::test]
     async fn voice_is_not_advertised_for_an_unsupported_locale() {
         let (_dir, app, writer, _) = voice_fixture(4);
-        assert!(device_capabilities(&app, &writer).await.get("voice_input").is_none());
+        assert!(device_capabilities(&app, &writer)
+            .await
+            .get("voice_input")
+            .is_none());
 
         let mut request = Request::builder()
             .method("POST")
@@ -1295,8 +1322,14 @@ mod tests {
     async fn voice_requires_write_permission_and_returns_an_uncached_draft() {
         const WAV: &[u8] = b"RIFF\x26\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x80\x3e\0\0\0\x7d\0\0\x02\0\x10\0data\x02\0\0\0\0\0";
         let (_dir, app, writer, reader) = voice_fixture(0);
-        assert_eq!(device_capabilities(&app, &writer).await["voice_input"], true);
-        assert!(device_capabilities(&app, &reader).await.get("voice_input").is_none());
+        assert_eq!(
+            device_capabilities(&app, &writer).await["voice_input"],
+            true
+        );
+        assert!(device_capabilities(&app, &reader)
+            .await
+            .get("voice_input")
+            .is_none());
         async fn post(app: &Router, token: Option<&str>, audio: &'static [u8]) -> Response {
             let mut builder = Request::builder()
                 .method("POST")
@@ -1353,7 +1386,8 @@ mod tests {
         let body_stream = stream::once(async move {
             started.send(()).unwrap();
             Ok::<_, Infallible>(Bytes::from_static(&WAV[..20]))
-        }).chain(stream::once(async move {
+        })
+        .chain(stream::once(async move {
             rest_rx.await.unwrap();
             Ok(Bytes::from_static(&WAV[20..]))
         }));
@@ -1369,14 +1403,20 @@ mod tests {
             .insert(ConnectInfo("127.0.0.1:1234".parse::<SocketAddr>().unwrap()));
 
         let resp_task = tokio::spawn(async move { app.oneshot(request).await.unwrap() });
-        tokio::time::timeout(Duration::from_secs(2), reading).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), reading)
+            .await
+            .unwrap()
+            .unwrap();
         let writer_id = shared.current_file().devices[0].id.clone();
         auth::revoke(&shared.store(), &writer_id).unwrap();
         rest.send(()).unwrap();
 
         let resp = resp_task.await.unwrap();
         assert_eq!(resp.status(), 401);
-        assert!(!marker.exists(), "helper must not run after device revocation");
+        assert!(
+            !marker.exists(),
+            "helper must not run after device revocation"
+        );
     }
 
     #[test]

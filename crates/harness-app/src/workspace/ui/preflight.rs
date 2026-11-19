@@ -21,45 +21,40 @@ impl HarnessWorkspace {
                 (true, Severity::Recommended) => ("!", hx.amber),
                 (true, Severity::Optional) => ("·", hx.tx2),
             };
-            let mut line = div()
-                .flex()
-                .flex_col()
-                .gap_0p5()
-                .py_1p5()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(div().flex_none().w(px(12.0)).text_color(color).child(mark))
-                        .child(
-                            div()
-                                .flex_none()
-                                .w(px(110.0))
-                                .text_xs()
-                                .font_family(hx.font_mono)
-                                .text_color(if c.missing() { hx.tx0 } else { hx.tx1 })
-                                .child(c.name),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_xs()
-                                .font_family(hx.font_mono)
-                                .text_color(hx.tx2)
-                                .whitespace_nowrap()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(match &c.found {
-                                    Some(v) => v.clone(),
-                                    None if c.severity == Severity::Required => {
-                                        "required — not found".to_string()
-                                    }
-                                    None => "not found".to_string(),
-                                }),
-                        ),
-                );
+            let mut line = div().flex().flex_col().gap_0p5().py_1p5().child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_none().w(px(12.0)).text_color(color).child(mark))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(110.0))
+                            .text_xs()
+                            .font_family(hx.font_mono)
+                            .text_color(if c.missing() { hx.tx0 } else { hx.tx1 })
+                            .child(c.name),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .font_family(hx.font_mono)
+                            .text_color(hx.tx2)
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(match &c.found {
+                                Some(v) => v.clone(),
+                                None if c.severity == Severity::Required => {
+                                    "required — not found".to_string()
+                                }
+                                None => "not found".to_string(),
+                            }),
+                    ),
+            );
             // Only a gap needs explaining. A present tool has nothing to say
             // beyond its version, and repeating the cost for every row would
             // bury the two lines that matter.
@@ -113,7 +108,11 @@ impl HarnessWorkspace {
                 .rounded_md()
                 .border_1()
                 .border_color(if primary { hx.accent } else { hx.border2 })
-                .bg(if primary { tint(hx.accent, 0.16) } else { hx.surface })
+                .bg(if primary {
+                    tint(hx.accent, 0.16)
+                } else {
+                    hx.surface
+                })
                 .text_xs()
                 .text_color(if primary { hx.accent } else { hx.tx1 })
                 .cursor_pointer()

@@ -32,9 +32,8 @@ impl HarnessWorkspace {
         // Drop file tabs — they pointed at the previous Workspace's items.
         if let Some(pane) = self.panes.get_mut(&key) {
             // Editor tabs go too: they share the old workspace's project.
-            pane.tabs.retain(|t| {
-                !matches!(t.content, TabContent::File { .. } | TabContent::Editor(_))
-            });
+            pane.tabs
+                .retain(|t| !matches!(t.content, TabContent::File { .. } | TabContent::Editor(_)));
             if pane.tabs.iter().all(|t| t.id != pane.active) {
                 pane.active = pane.tabs.last().map(|t| t.id).unwrap_or(0);
             }
@@ -74,13 +73,7 @@ impl HarnessWorkspace {
             cx.notify();
             return;
         };
-        let script = match ensure_hook_script(
-            layer,
-            phase,
-            &repo_root,
-            &self.data_dir,
-            repo,
-        ) {
+        let script = match ensure_hook_script(layer, phase, &repo_root, &self.data_dir, repo) {
             Ok(p) => p,
             Err(e) => {
                 self.set_note(format!("hooks: {e}"));
@@ -130,13 +123,7 @@ impl HarnessWorkspace {
         match clear_local_hooks(&self.data_dir, repo) {
             Ok(()) => {
                 self.set_note(format!("cleared local hooks for ‘{repo}’"));
-                self.open_project_hooks(
-                    repo,
-                    HookScriptPhase::Setup,
-                    HookLayer::Repo,
-                    window,
-                    cx,
-                );
+                self.open_project_hooks(repo, HookScriptPhase::Setup, HookLayer::Repo, window, cx);
             }
             Err(e) => {
                 self.set_note(format!("clear local hooks: {e}"));

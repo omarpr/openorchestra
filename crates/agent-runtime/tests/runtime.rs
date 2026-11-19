@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use agent_runtime::{
-    AgentKind, AgentRuntime, AgentSignal, AgentState, Bus, PiRuntime, SignalKind,
-    StatusFileSource, TerminalOnlyRuntime, WaitFidelity, WaitReason,
+    AgentKind, AgentRuntime, AgentSignal, AgentState, Bus, PiRuntime, SignalKind, StatusFileSource,
+    TerminalOnlyRuntime, WaitFidelity, WaitReason,
 };
 
 const RECV: Duration = Duration::from_secs(10);
@@ -17,6 +17,7 @@ const QUIET: Duration = Duration::from_millis(400);
 fn signal(root: &str, state: AgentState) -> AgentSignal {
     AgentSignal {
         worktree_root: PathBuf::from(root),
+        tab_id: None,
         kind: AgentKind::Pi,
         state,
         reason: WaitReason::None,
@@ -154,7 +155,12 @@ fn pi_command_points_the_extension_at_the_materialized_contract() {
         .filter(|(flag, _)| flag.as_str() == "-e")
         .map(|(_, path)| path)
         .collect();
-    assert_eq!(ext_args.len(), 2, "both extensions should be passed: {:?}", cmd.args);
+    assert_eq!(
+        ext_args.len(),
+        2,
+        "both extensions should be passed: {:?}",
+        cmd.args
+    );
 
     let schema_env = cmd
         .env
@@ -173,11 +179,18 @@ fn pi_refreshes_a_stale_extension() {
     let pi = PiRuntime::new(state.path());
     pi.on_spawn(worktree.path()).unwrap();
 
-    fs::write(pi.extension_path(), "// stale contents from an older build\n").unwrap();
+    fs::write(
+        pi.extension_path(),
+        "// stale contents from an older build\n",
+    )
+    .unwrap();
     pi.on_spawn(worktree.path()).unwrap();
 
     let refreshed = fs::read_to_string(pi.extension_path()).unwrap();
-    assert!(!refreshed.starts_with("// stale"), "stale copy was not replaced");
+    assert!(
+        !refreshed.starts_with("// stale"),
+        "stale copy was not replaced"
+    );
 }
 
 #[test]
@@ -253,6 +266,10 @@ fn settings_default_display_matches_what_the_spawn_actually_runs() {
         ),
         (AgentKind::Kimi, Box::new(agent_runtime::KimiRuntime)),
         (
+            AgentKind::Grok,
+            Box::new(agent_runtime::GrokRuntime::new(dir.path())),
+        ),
+        (
             AgentKind::OpenCode,
             Box::new(agent_runtime::OpenCodeRuntime::new("/tmp/wt")),
         ),
@@ -279,9 +296,43 @@ fn settings_default_display_matches_what_the_spawn_actually_runs() {
         "claude --permission-mode auto"
     );
     assert_eq!(
+        agent_runtime::default_command_display(&AgentKind::Grok),
+        "grok --permission-mode auto"
+    );
+    assert_eq!(
         agent_runtime::default_command_display(&AgentKind::Codex),
         "codex --sandbox workspace-write --ask-for-approval on-request"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_uses_its_own_server_when_the_cli_supports_it() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let program = dir.path().join("codex");
+    let runtime = agent_runtime::CodexRuntime::new(dir.path());
+    let args = vec!["resume".into(), "--last".into()];
+    let command = agent_runtime::AgentCommand {
+        program: program.clone(),
+        args: args.clone(),
+        env: vec![("HARNESS_MANAGED".into(), "1".into())],
+        label: "codex".into(),
+    };
+
+    fs::write(&program, "#!/bin/sh\nexit 2\n").unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(runtime.prepare_launch(command.clone()).args, args);
+
+    fs::write(
+        &program,
+        "#!/bin/sh\n[ \"$1\" = --no-daemon ] && [ \"$2\" = --version ]\n",
+    )
+    .unwrap();
+    let prepared = runtime.prepare_launch(command);
+    assert_eq!(prepared.args, ["resume", "--last", "--no-daemon"]);
+    assert_eq!(runtime.prepare_launch(prepared.clone()).args, prepared.args);
 }
 
 #[test]
@@ -303,7 +354,9 @@ fn write_status(root: &Path, state: &str) {
     let tmp = dir.join(".status.tmp");
     fs::write(
         &tmp,
-        format!(r#"{{"state":"{state}","timestamp":"2026-07-21T00:00:00Z","sessionFile":"/s.jsonl"}}"#),
+        format!(
+            r#"{{"state":"{state}","timestamp":"2026-07-21T00:00:00Z","sessionFile":"/s.jsonl"}}"#
+        ),
     )
     .unwrap();
     fs::rename(&tmp, dir.join("status.json")).unwrap();
@@ -378,17 +431,40 @@ fn unwatching_stops_signals_for_that_worktree() {
 // the CLI scopes "most recent" to the launch directory.
 #[test]
 fn continue_args_only_for_directory_scoped_resume() {
-    use agent_runtime::{AgentKind, continue_args};
+    use agent_runtime::{continue_args, AgentKind};
     let base = vec!["--permission-mode".to_string(), "auto".to_string()];
     assert_eq!(
         continue_args(&AgentKind::ClaudeCode, &base),
-        Some(vec!["--permission-mode".into(), "auto".into(), "--continue".into()])
+        Some(vec![
+            "--permission-mode".into(),
+            "auto".into(),
+            "--continue".into()
+        ])
     );
-    assert_eq!(continue_args(&AgentKind::Pi, &[]), Some(vec!["--continue".to_string()]));
+    assert_eq!(
+        continue_args(&AgentKind::Pi, &[]),
+        Some(vec!["--continue".to_string()])
+    );
+    assert_eq!(
+        continue_args(&AgentKind::Grok, &base),
+        Some(vec![
+            "--permission-mode".into(),
+            "auto".into(),
+            "--continue".into()
+        ])
+    );
     // Codex: subcommand first, then the usual flags (resume accepts them).
     assert_eq!(
-        continue_args(&AgentKind::Codex, &["--ask-for-approval".into(), "never".into()]),
-        Some(vec!["resume".into(), "--last".into(), "--ask-for-approval".into(), "never".into()])
+        continue_args(
+            &AgentKind::Codex,
+            &["--ask-for-approval".into(), "never".into()]
+        ),
+        Some(vec![
+            "resume".into(),
+            "--last".into(),
+            "--ask-for-approval".into(),
+            "never".into()
+        ])
     );
     assert_eq!(continue_args(&AgentKind::OpenCode, &[]), None);
     assert_eq!(continue_args(&AgentKind::Kimi, &[]), None);
@@ -399,10 +475,12 @@ fn continue_args_only_for_directory_scoped_resume() {
 // conversations under projects/<path with non-alphanumerics as '-'>.
 #[test]
 fn claude_conversation_lookup_matches_its_folder_naming() {
-    use agent_runtime::{AgentKind, claude_project_slug, has_conversation};
+    use agent_runtime::{claude_project_slug, has_conversation, AgentKind};
     use std::path::Path;
     assert_eq!(
-        claude_project_slug(Path::new("/Users/example/.openorchestra/worktrees/demo/test12")),
+        claude_project_slug(Path::new(
+            "/Users/example/.openorchestra/worktrees/demo/test12"
+        )),
         "-Users-example--openorchestra-worktrees-demo-test12"
     );
     let cfg = tempfile::tempdir().unwrap();
@@ -412,9 +490,14 @@ fn claude_conversation_lookup_matches_its_folder_naming() {
     assert_eq!(has_conversation(&AgentKind::ClaudeCode, work), Some(false));
     let proj = cfg.path().join("projects").join(claude_project_slug(work));
     std::fs::create_dir_all(&proj).unwrap();
-    assert_eq!(has_conversation(&AgentKind::ClaudeCode, work), Some(false), "empty folder");
+    assert_eq!(
+        has_conversation(&AgentKind::ClaudeCode, work),
+        Some(false),
+        "empty folder"
+    );
     std::fs::write(proj.join("abc.jsonl"), "{}\n").unwrap();
     assert_eq!(has_conversation(&AgentKind::ClaudeCode, work), Some(true));
     // Unknown storage: the caller tries continuing.
     assert_eq!(has_conversation(&AgentKind::Pi, work), None);
+    assert_eq!(has_conversation(&AgentKind::Grok, work), None);
 }

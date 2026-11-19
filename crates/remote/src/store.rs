@@ -233,7 +233,10 @@ pub(crate) fn save_screenshot(
     }
     let path = dir.join(new_id("screenshot_")?).with_extension(extension);
     write_atomic_private(&path, bytes)?;
-    Ok(PendingScreenshot { path, retain: false })
+    Ok(PendingScreenshot {
+        path,
+        retain: false,
+    })
 }
 
 impl Store {

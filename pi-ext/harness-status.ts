@@ -41,6 +41,7 @@ type HarnessState = "running" | "waiting" | "idle";
 
 interface HarnessStatus {
 	agent?: string;
+	tabId?: number;
 	state: HarnessState;
 	timestamp: string; // ISO-8601
 	sessionFile: string | null;
@@ -56,6 +57,12 @@ export default function (pi: ExtensionAPI) {
 	let agentActive = false;
 	let dialogDepth = 0; // >0 while any extension UI dialog is open
 	let lastWritten: string | undefined;
+	// Tabs created before HARNESS_AGENT_TAB_ID existed still carry the tmux
+	// session name. Same fallback as shims/remote-tab.mjs.
+	const tabId = Number(
+		process.env.HARNESS_AGENT_TAB_ID ??
+			/^harness_[A-Za-z0-9_-]+_(\d+)$/.exec(process.env.HARNESS_REMOTE_SESSION ?? "")?.[1],
+	);
 
 	const currentState = (): HarnessState =>
 		dialogDepth > 0 ? "waiting" : agentActive ? "running" : "idle";
@@ -78,17 +85,22 @@ export default function (pi: ExtensionAPI) {
 			sessionFile,
 			pid: process.pid,
 		};
+		if (Number.isSafeInteger(tabId) && tabId > 0) status.tabId = tabId;
 		try {
-			const dir = path.join(cwd, ".harness");
+			const dir = path.join(process.env.HARNESS_AGENT_WORKTREE || cwd, ".harness");
 			fs.mkdirSync(dir, { recursive: true });
 			const payload = JSON.stringify(status, null, "\t") + "\n";
 			// Skip redundant writes (ignoring the timestamp) so the file watcher
 			// isn't spammed, but always write on state change.
 			const key = `${status.state}|${status.sessionFile ?? ""}`;
 			if (key === lastWritten) return;
-			const tmp = path.join(dir, `.status-${process.pid}-${crypto.randomBytes(4).toString("hex")}.tmp`);
-			fs.writeFileSync(tmp, payload, "utf8");
-			fs.renameSync(tmp, path.join(dir, "status.json")); // atomic on POSIX
+			const write = (file: string) => {
+				const tmp = path.join(dir, `.status-${process.pid}-${crypto.randomBytes(4).toString("hex")}.tmp`);
+				fs.writeFileSync(tmp, payload, "utf8");
+				fs.renameSync(tmp, path.join(dir, file));
+			};
+			if (status.tabId !== undefined) write(`status-tab-${status.tabId}.json`);
+			write("status.json");
 			lastWritten = key;
 		} catch {
 			// Never let status bookkeeping break the agent.

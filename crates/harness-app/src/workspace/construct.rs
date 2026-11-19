@@ -63,7 +63,13 @@ impl HarnessWorkspace {
             }
         }
         let manager = Manager::new(registry, git, data_dir.join("worktrees"));
-        let data = WorkspaceData::build(manager.git(), &manager.registry, &task_store, &repo_roots, None);
+        let data = WorkspaceData::build(
+            manager.git(),
+            &manager.registry,
+            &task_store,
+            &repo_roots,
+            None,
+        );
 
         let (poller, forge_rx) = Poller::spawn(
             Arc::new(GhCli::new()),
@@ -95,7 +101,10 @@ impl HarnessWorkspace {
                 // A multi-project task's coordinator runs in the task folder,
                 // not a worktree: watch it so its pill works from launch.
                 let tasks_root = data_dir.join("tasks");
-                for task in task_store.active().filter(|t| super::coordinator::has_coordinator(t)) {
+                for task in task_store
+                    .active()
+                    .filter(|t| super::coordinator::has_coordinator(t))
+                {
                     let dir = worktrees::task_coordinator_dir(&tasks_root, &task.slug);
                     if let Err(err) = source.watch(&dir, task.agent_kind.clone()) {
                         log::warn!("cannot watch coordinator {}: {err}", dir.display());
@@ -174,6 +183,7 @@ impl HarnessWorkspace {
             clearing_review: false,
             settings_open: false,
             settings_section: SettingsSection::Appearance,
+            review_model_catalogs: Default::default(),
             // Probed once at startup; the screen opens below if this machine is
             // missing something that blocks, or if it has never been shown.
             preflight_open: false,
@@ -225,9 +235,7 @@ impl HarnessWorkspace {
             note_at: None,
             forge_status: HashMap::new(),
             agent_status: HashMap::new(),
-            agent_since: HashMap::new(),
             remote: super::remote::RemoteRuntime::new(&data_dir),
-            agent_fidelity: HashMap::new(),
             _poller: Some(poller),
             status_source,
             diff_watch,
@@ -438,11 +446,16 @@ impl HarnessWorkspace {
         .detach();
 
         if let Some(status_rx) = status_rx {
-            cx.spawn(async move |view, cx| {
+            cx.spawn_in(window, async move |view, cx| {
                 loop {
                     match status_rx.try_recv() {
                         Ok(ev) => {
-                            if view.update(cx, |ws, cx| ws.apply_agent(ev, cx)).is_err() {
+                            if view
+                                .update_in(cx, |ws, window, cx| {
+                                    ws.apply_agent(ev, window.is_window_active(), cx);
+                                })
+                                .is_err()
+                            {
                                 break;
                             }
                         }
@@ -462,31 +475,33 @@ impl HarnessWorkspace {
         // poll cadence is the debounce — a burst of edits in one agent turn
         // collapses to one recompute per tick, and the `diff_gen` guard drops
         // any overlap. State-preserving so an in-progress review is not reset.
-        cx.spawn(async move |view, cx| loop {
-            match diff_dirty_rx.try_recv() {
-                Ok(_) => {
-                    // Coalesce everything already queued this instant.
-                    while diff_dirty_rx.try_recv().is_ok() {}
-                    // The same edit that moved the diff moved the selected
-                    // card's `~N`. Nothing else sees a plain unstaged write —
-                    // it touches no git file — so this signal is the only way
-                    // that badge tracks typing.
-                    if view
-                        .update(cx, |ws, cx| {
-                            ws.refresh_diff_live(cx);
-                            ws.refresh_status_live(cx);
-                        })
-                        .is_err()
-                    {
-                        break;
+        cx.spawn(async move |view, cx| {
+            loop {
+                match diff_dirty_rx.try_recv() {
+                    Ok(_) => {
+                        // Coalesce everything already queued this instant.
+                        while diff_dirty_rx.try_recv().is_ok() {}
+                        // The same edit that moved the diff moved the selected
+                        // card's `~N`. Nothing else sees a plain unstaged write —
+                        // it touches no git file — so this signal is the only way
+                        // that badge tracks typing.
+                        if view
+                            .update(cx, |ws, cx| {
+                                ws.refresh_diff_live(cx);
+                                ws.refresh_status_live(cx);
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
+                    Err(e) if e.is_empty() => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(250))
+                            .await
+                    }
+                    Err(_) => break,
                 }
-                Err(e) if e.is_empty() => {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(250))
-                        .await
-                }
-                Err(_) => break,
             }
         })
         .detach();
@@ -495,73 +510,78 @@ impl HarnessWorkspace {
         // shape as the diff watch, and the 250 ms cadence is again the debounce
         // — a commit writes the index, a ref and often packed-refs, which is one
         // recompute here rather than three.
-        cx.spawn(async move |view, cx| loop {
-            match git_moved_rx.try_recv() {
-                Ok(path) => {
-                    log::debug!("git moved: {}", path.display());
-                    let remote_updates: std::collections::HashSet<_> =
-                        std::iter::once(path)
+        cx.spawn(async move |view, cx| {
+            loop {
+                match git_moved_rx.try_recv() {
+                    Ok(path) => {
+                        log::debug!("git moved: {}", path.display());
+                        let remote_updates: std::collections::HashSet<_> = std::iter::once(path)
                             .chain(git_moved_rx.try_iter())
                             .filter_map(|path| {
                                 crate::git_watch::remote_tracking_repo(&path).map(Path::to_owned)
                             })
                             .collect();
-                    if view
-                        .update(cx, |ws, cx| {
-                            // Cheap when nothing changed (it compares first).
-                            // A repo's first `git worktree add` creates
-                            // `.git/worktrees`, which needs a watch of its own.
-                            let roots = ws.repo_roots.clone();
-                            ws.git_watch.watch_repos(&roots);
-                            if !remote_updates.is_empty() {
-                                for root in roots.iter().filter(|root| {
-                                    remote_updates.contains(*root)
-                                        || std::fs::canonicalize(root)
-                                            .is_ok_and(|path| remote_updates.contains(&path))
-                                }) {
-                                    ws.refresh_forge_repo(root);
+                        if view
+                            .update(cx, |ws, cx| {
+                                // Cheap when nothing changed (it compares first).
+                                // A repo's first `git worktree add` creates
+                                // `.git/worktrees`, which needs a watch of its own.
+                                let roots = ws.repo_roots.clone();
+                                ws.git_watch.watch_repos(&roots);
+                                if !remote_updates.is_empty() {
+                                    for root in roots.iter().filter(|root| {
+                                        remote_updates.contains(*root)
+                                            || std::fs::canonicalize(root)
+                                                .is_ok_and(|path| remote_updates.contains(&path))
+                                    }) {
+                                        ws.refresh_forge_repo(root);
+                                    }
+                                    cx.notify();
                                 }
-                                cx.notify();
-                            }
-                            ws.refresh_status_live(cx);
-                            // A commit or a push moves what the push control
-                            // offers, and both land here.
-                            ws.refresh_push_state(cx);
-                            // And what the diff shows. The diff watcher skips
-                            // `.git` by design, so a commit in the selected
-                            // worktree — which moves HEAD and empties the
-                            // working-tree diff without touching one tracked
-                            // file — reached nothing: the panel kept listing
-                            // files that were already committed. A checkout or
-                            // a rebase is the same story with more files.
-                            ws.refresh_diff_live(cx);
-                        })
-                        .is_err()
-                    {
-                        break;
+                                ws.refresh_status_live(cx);
+                                // A commit or a push moves what the push control
+                                // offers, and both land here.
+                                ws.refresh_push_state(cx);
+                                // And what the diff shows. The diff watcher skips
+                                // `.git` by design, so a commit in the selected
+                                // worktree — which moves HEAD and empties the
+                                // working-tree diff without touching one tracked
+                                // file — reached nothing: the panel kept listing
+                                // files that were already committed. A checkout or
+                                // a rebase is the same story with more files.
+                                ws.refresh_diff_live(cx);
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
+                    Err(e) if e.is_empty() => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(250))
+                            .await
+                    }
+                    Err(_) => break,
                 }
-                Err(e) if e.is_empty() => {
-                    cx.background_executor().timer(Duration::from_millis(250)).await
-                }
-                Err(_) => break,
             }
         })
         .detach();
 
         // Toast expiry: a cheap once-a-second check that repaints only when a
         // message actually times out.
-        cx.spawn(async move |view, cx| loop {
-            cx.background_executor().timer(Duration::from_secs(1)).await;
-            if view
-                .update(cx, |ws, cx| {
-                    if ws.expire_note() {
-                        cx.notify();
-                    }
-                })
-                .is_err()
-            {
-                break;
+        cx.spawn(async move |view, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                if view
+                    .update(cx, |ws, cx| {
+                        if ws.expire_note() {
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
             }
         })
         .detach();
@@ -571,16 +591,20 @@ impl HarnessWorkspace {
         // worktree you are not viewing, which changes that card's `~N` without
         // touching git. Ten seconds is slow enough to be free on an idle app —
         // the recompute runs off-thread and repaints only when a number moved.
-        cx.spawn(async move |view, cx| loop {
-            cx.background_executor().timer(Duration::from_secs(10)).await;
-            if view
-                .update(cx, |ws, cx| {
-                    ws.refresh_status_live(cx);
-                    ws.refresh_push_state(cx);
-                })
-                .is_err()
-            {
-                break;
+        cx.spawn(async move |view, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_secs(10))
+                    .await;
+                if view
+                    .update(cx, |ws, cx| {
+                        ws.refresh_status_live(cx);
+                        ws.refresh_push_state(cx);
+                    })
+                    .is_err()
+                {
+                    break;
+                }
             }
         })
         .detach();
@@ -591,16 +615,22 @@ impl HarnessWorkspace {
             cx.spawn(async move |view, cx| {
                 loop {
                     cx.background_executor().timer(Duration::from_secs(3)).await;
-                    let Ok(expected) = view.update(cx, |ws, _| ws.task_panes_expecting_agents()) else {
+                    let Ok(expected) = view.update(cx, |ws, _| ws.task_panes_expecting_agents())
+                    else {
                         break;
                     };
                     if expected.is_empty() {
                         continue;
                     }
-                    let panes = cx.background_spawn(async move { crate::tmux::pane_commands() }).await;
+                    let panes = cx
+                        .background_spawn(async move { crate::tmux::pane_commands() })
+                        .await;
                     let Some(panes) = panes else { continue };
                     let missing = crate::tmux::missing_agent_keys(&expected, &panes);
-                    if view.update(cx, |ws, cx| ws.set_missing_agents(missing, cx)).is_err() {
+                    if view
+                        .update(cx, |ws, cx| ws.set_missing_agents(missing, cx))
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -685,7 +715,10 @@ impl HarnessWorkspace {
                     .background_spawn(async move { crate::ports::sample(sampler_has_tmux) })
                     .await;
                 // `None`: the scan timed out; keep the last sample, retry next tick.
-                if view.update(cx, |ws, cx| ws.finish_ports_scan(seq, started, sample, cx)).is_err() {
+                if view
+                    .update(cx, |ws, cx| ws.finish_ports_scan(seq, started, sample, cx))
+                    .is_err()
+                {
                     break;
                 }
             }

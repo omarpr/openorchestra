@@ -11,8 +11,8 @@ use crate::audit::AuditEvent;
 use crate::bridge::{BridgeEvent, InboxDelivery, InboxMessage};
 use crate::card::{agent_card_for_member, orchestrator_card};
 use crate::protocol::{
-    Artifact, JsonRpcRequest, JsonRpcResponse, Message, MessagePart, Role, SendMessageParams,
-    Task, TaskState, TaskStatus,
+    Artifact, JsonRpcRequest, JsonRpcResponse, Message, MessagePart, Role, SendMessageParams, Task,
+    TaskState, TaskStatus,
 };
 use crate::BrokerState;
 
@@ -98,14 +98,15 @@ impl BrokerServer {
                             live.fetch_add(1, Ordering::SeqCst);
                             let st = Arc::clone(&state_accept);
                             let live_conn = Arc::clone(&live);
-                            let spawned = thread::Builder::new()
-                                .name("a2a-conn".into())
-                                .spawn(move || {
-                                    if let Err(e) = handle_connection(stream, st) {
-                                        log_warn(&format!("a2a conn: {e}"));
-                                    }
-                                    live_conn.fetch_sub(1, Ordering::SeqCst);
-                                });
+                            let spawned =
+                                thread::Builder::new()
+                                    .name("a2a-conn".into())
+                                    .spawn(move || {
+                                        if let Err(e) = handle_connection(stream, st) {
+                                            log_warn(&format!("a2a conn: {e}"));
+                                        }
+                                        live_conn.fetch_sub(1, Ordering::SeqCst);
+                                    });
                             if spawned.is_err() {
                                 live.fetch_sub(1, Ordering::SeqCst);
                             }
@@ -192,9 +193,10 @@ fn drain_bridge(state: &BrokerState) {
             BridgeEvent::Failed { a2a_task_id, error } => {
                 (a2a_task_id, TaskState::Failed, error, "failed", None)
             }
-            BridgeEvent::Rejected { a2a_task_id, reason } => {
-                (a2a_task_id, TaskState::Rejected, reason, "rejected", None)
-            }
+            BridgeEvent::Rejected {
+                a2a_task_id,
+                reason,
+            } => (a2a_task_id, TaskState::Rejected, reason, "rejected", None),
         };
         // A terminal state is final: a repeated or late complete/reject must
         // not flip it, duplicate the summary artifact, or re-notify. Read
@@ -312,7 +314,10 @@ const MAX_CONNECTIONS: usize = 64;
 /// sending bytes without a newline.
 fn read_line_capped<R: BufRead>(reader: &mut R) -> std::io::Result<Option<String>> {
     let mut buf = Vec::new();
-    let n = reader.by_ref().take(MAX_LINE + 1).read_until(b'\n', &mut buf)?;
+    let n = reader
+        .by_ref()
+        .take(MAX_LINE + 1)
+        .read_until(b'\n', &mut buf)?;
     if n as u64 > MAX_LINE {
         return Ok(None);
     }
@@ -394,7 +399,8 @@ fn handle_connection(mut stream: TcpStream, state: Arc<BrokerState>) -> std::io:
     }
 
     // Root card = coordinator
-    if method == "GET" && (path == "/.well-known/agent-card.json" || path == "/.well-known/agent.json")
+    if method == "GET"
+        && (path == "/.well-known/agent-card.json" || path == "/.well-known/agent.json")
     {
         let home = state
             .config
@@ -476,7 +482,10 @@ fn handle_connection(mut stream: TcpStream, state: Arc<BrokerState>) -> std::io:
     // Plain-form send, for the shell helpers: `curl --data-urlencode text=…`
     // does the encoding, so they need neither python nor jq to build JSON.
     if method == "POST" && is_form {
-        if let Some(tenant) = path.strip_prefix("/t/").and_then(|r| r.strip_suffix("/send")) {
+        if let Some(tenant) = path
+            .strip_prefix("/t/")
+            .and_then(|r| r.strip_suffix("/send"))
+        {
             let tenant = crate::decode_tenant(tenant);
             let text = form_value(&body, "text").unwrap_or_default();
             let params = serde_json::json!({
@@ -588,7 +597,9 @@ fn percent_decode(s: &str) -> String {
         match b[i] {
             b'+' => out.push(b' '),
             b'%' if i + 2 < b.len() => {
-                let hex = std::str::from_utf8(&b[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok());
+                let hex = std::str::from_utf8(&b[i + 1..i + 3])
+                    .ok()
+                    .and_then(|h| u8::from_str_radix(h, 16).ok());
                 match hex {
                     Some(byte) => {
                         out.push(byte);
@@ -788,18 +799,26 @@ fn handle_send_message(
     Ok(serde_json::to_value(task).unwrap_or_default())
 }
 
-fn handle_get_task(state: &BrokerState, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+fn handle_get_task(
+    state: &BrokerState,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
     let id = params
         .get("id")
         .or_else(|| params.get("taskId"))
         .and_then(|v| v.as_str())
         .ok_or_else(|| "id required".to_string())?;
     let tasks = state.tasks.lock().map_err(|e| e.to_string())?;
-    let task = tasks.get(id).ok_or_else(|| format!("task {id} not found"))?;
+    let task = tasks
+        .get(id)
+        .ok_or_else(|| format!("task {id} not found"))?;
     Ok(serde_json::to_value(task).unwrap_or_default())
 }
 
-fn handle_cancel(state: &BrokerState, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+fn handle_cancel(
+    state: &BrokerState,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
     let id = params
         .get("id")
         .or_else(|| params.get("taskId"))
@@ -931,7 +950,6 @@ fn write_response(
     stream.write_all(body)?;
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1190,7 +1208,10 @@ mod tests {
 
     fn raw_http(method: &str, url: &str, key: &str, body: Option<&str>) -> String {
         let url = url.strip_prefix("http://").unwrap();
-        let (host_port, path) = url.split_once('/').map(|(h, p)| (h, format!("/{p}"))).unwrap();
+        let (host_port, path) = url
+            .split_once('/')
+            .map(|(h, p)| (h, format!("/{p}")))
+            .unwrap();
         let addr: SocketAddr = host_port.parse().unwrap();
         let mut stream = TcpStream::connect(addr).unwrap();
         let body_bytes = body.unwrap_or("").as_bytes();
@@ -1336,8 +1357,8 @@ mod tests {
 
 #[cfg(test)]
 mod coordinator_push_tests {
-    use super::*;
     use super::tests::test_state;
+    use super::*;
 
     fn start() -> (
         tempfile::TempDir,
@@ -1378,17 +1399,20 @@ mod coordinator_push_tests {
         (id, d)
     }
 
-    fn coordinator_reply(
-        rx: &crossbeam_channel::Receiver<InboxDelivery>,
-    ) -> InboxDelivery {
-        rx.recv_timeout(Duration::from_secs(2)).expect("reply pushed")
+    fn coordinator_reply(rx: &crossbeam_channel::Receiver<InboxDelivery>) -> InboxDelivery {
+        rx.recv_timeout(Duration::from_secs(2))
+            .expect("reply pushed")
     }
 
     #[test]
     fn completion_pushes_one_reply_to_coordinator() {
         let (dir, handle, rx) = start();
         let (id, _) = delegate(&handle, &rx);
-        form(&handle, "/v1/complete", &format!("a2a_task_id={id}&summary=shipped"));
+        form(
+            &handle,
+            "/v1/complete",
+            &format!("a2a_task_id={id}&summary=shipped"),
+        );
         let d = coordinator_reply(&rx);
         assert_eq!(d.tenant, "@coordinator");
         assert!(d.message.reply);
@@ -1406,7 +1430,11 @@ mod coordinator_push_tests {
     fn failure_pushes_failed_reply() {
         let (_dir, handle, rx) = start();
         let (id, _) = delegate(&handle, &rx);
-        form(&handle, "/v1/complete", &format!("a2a_task_id={id}&failed=1&error=boom"));
+        form(
+            &handle,
+            "/v1/complete",
+            &format!("a2a_task_id={id}&failed=1&error=boom"),
+        );
         assert_eq!(coordinator_reply(&rx).message.text, "failed by api: boom");
         handle.shutdown();
     }
@@ -1420,9 +1448,20 @@ mod coordinator_push_tests {
             "/v1/complete",
             &format!("a2a_task_id={id}&rejected=1&reason=not+my+repo"),
         );
-        assert_eq!(coordinator_reply(&rx).message.text, "rejected by api: not my repo");
         assert_eq!(
-            handle.state.tasks.lock().unwrap().get(&id).unwrap().status.state,
+            coordinator_reply(&rx).message.text,
+            "rejected by api: not my repo"
+        );
+        assert_eq!(
+            handle
+                .state
+                .tasks
+                .lock()
+                .unwrap()
+                .get(&id)
+                .unwrap()
+                .status
+                .state,
             TaskState::Rejected
         );
         handle.shutdown();
@@ -1455,14 +1494,26 @@ mod coordinator_push_tests {
     }
 
     fn state_of(handle: &BrokerHandle, id: &str) -> TaskState {
-        handle.state.tasks.lock().unwrap().get(id).unwrap().status.state
+        handle
+            .state
+            .tasks
+            .lock()
+            .unwrap()
+            .get(id)
+            .unwrap()
+            .status
+            .state
     }
 
     #[test]
     fn terminal_state_is_final() {
         let (_dir, handle, rx) = start();
         let (id, _) = delegate(&handle, &rx);
-        form(&handle, "/v1/complete", &format!("a2a_task_id={id}&summary=shipped"));
+        form(
+            &handle,
+            "/v1/complete",
+            &format!("a2a_task_id={id}&summary=shipped"),
+        );
         coordinator_reply(&rx);
         assert_eq!(state_of(&handle, &id), TaskState::Completed);
         form(
@@ -1471,15 +1522,31 @@ mod coordinator_push_tests {
             &format!("a2a_task_id={id}&rejected=1&reason=late"),
         );
         thread::sleep(Duration::from_millis(700));
-        assert_eq!(state_of(&handle, &id), TaskState::Completed, "a late reject must not flip it");
+        assert_eq!(
+            state_of(&handle, &id),
+            TaskState::Completed,
+            "a late reject must not flip it"
+        );
         let tasks = handle.state.tasks.lock().unwrap();
-        assert_eq!(tasks.get(&id).unwrap().artifacts.len(), 1, "one summary artifact");
+        assert_eq!(
+            tasks.get(&id).unwrap().artifacts.len(),
+            1,
+            "one summary artifact"
+        );
         drop(tasks);
         // A repeated complete must not duplicate the summary artifact either.
-        form(&handle, "/v1/complete", &format!("a2a_task_id={id}&summary=again"));
+        form(
+            &handle,
+            "/v1/complete",
+            &format!("a2a_task_id={id}&summary=again"),
+        );
         thread::sleep(Duration::from_millis(700));
         let tasks = handle.state.tasks.lock().unwrap();
-        assert_eq!(tasks.get(&id).unwrap().artifacts.len(), 1, "no duplicate artifact");
+        assert_eq!(
+            tasks.get(&id).unwrap().artifacts.len(),
+            1,
+            "no duplicate artifact"
+        );
         drop(tasks);
         assert!(rx.try_recv().is_err(), "no second push");
         handle.shutdown();
@@ -1493,7 +1560,10 @@ mod coordinator_push_tests {
             .to_string();
         let out = json_post(&handle, "/v1/complete", &body);
         assert!(out.starts_with("HTTP/1.1 200"), "{out}");
-        assert_eq!(coordinator_reply(&rx).message.text, "rejected by api: not mine");
+        assert_eq!(
+            coordinator_reply(&rx).message.text,
+            "rejected by api: not mine"
+        );
         assert_eq!(state_of(&handle, &id), TaskState::Rejected);
         handle.shutdown();
     }
@@ -1507,7 +1577,11 @@ mod coordinator_push_tests {
         let d = rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(d.tenant, "@coordinator");
         // The coordinator completes it: no reply is pushed back to itself.
-        form(&handle, "/v1/complete", &format!("a2a_task_id={id}&summary=answered"));
+        form(
+            &handle,
+            "/v1/complete",
+            &format!("a2a_task_id={id}&summary=answered"),
+        );
         thread::sleep(Duration::from_millis(700));
         assert_eq!(state_of(&handle, &id), TaskState::Completed);
         assert!(rx.try_recv().is_err(), "no echo to the coordinator");
@@ -1526,8 +1600,8 @@ mod coordinator_push_tests {
 
 #[cfg(test)]
 mod hardening_tests {
-    use super::*;
     use super::tests::{status_of, test_state};
+    use super::*;
 
     #[test]
     fn timestamps_are_rfc3339() {
@@ -1544,7 +1618,10 @@ mod hardening_tests {
         assert_eq!(form_value(body, "empty").as_deref(), Some(""));
         assert_eq!(form_value(body, "bad").as_deref(), Some("%zz"));
         assert_eq!(form_value(body, "missing"), None);
-        assert_eq!(form_value("x=caf%C3%A9".as_bytes(), "x").as_deref(), Some("café"));
+        assert_eq!(
+            form_value("x=caf%C3%A9".as_bytes(), "x").as_deref(),
+            Some("café")
+        );
     }
 
     #[test]
@@ -1575,7 +1652,10 @@ mod hardening_tests {
         };
         let sent = form("/t/api%2Fauth/send", "text=Add+a+%22login%22+endpoint");
         let id = sent["result"]["id"].as_str().unwrap().to_string();
-        assert_eq!(sent["result"]["history"][0]["parts"][0]["text"], "Add a \"login\" endpoint");
+        assert_eq!(
+            sent["result"]["history"][0]["parts"][0]["text"],
+            "Add a \"login\" endpoint"
+        );
 
         form("/v1/complete", &format!("a2a_task_id={id}&summary=shipped"));
         thread::sleep(Duration::from_millis(500));

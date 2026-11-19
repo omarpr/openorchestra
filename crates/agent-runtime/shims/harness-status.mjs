@@ -20,9 +20,8 @@
 // agent look broken. Writes are atomic (temp + rename).
 
 import fs from "node:fs";
-import path from "node:path";
-import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { writeStatusFiles } from "./remote-tab.mjs";
 
 const AGENT = process.env.HARNESS_AGENT;
 
@@ -84,22 +83,12 @@ export function classify(payload) {
 
 export function writeStatus(cwd, state, agent, sessionFile) {
 	try {
-		const dir = path.join(cwd, ".harness");
-		fs.mkdirSync(dir, { recursive: true });
-		const payload =
-			JSON.stringify(
-				{
-					state,
-					agent: agent ?? "agent",
-					timestamp: new Date().toISOString(),
-					sessionFile: sessionFile ?? null,
-				},
-				null,
-				"\t",
-			) + "\n";
-		const tmp = path.join(dir, `.status-${process.pid}-${crypto.randomBytes(4).toString("hex")}.tmp`);
-		fs.writeFileSync(tmp, payload, "utf8");
-		fs.renameSync(tmp, path.join(dir, "status.json")); // atomic on POSIX
+		writeStatusFiles(cwd, {
+			state,
+			agent: agent ?? "agent",
+			timestamp: new Date().toISOString(),
+			sessionFile: sessionFile ?? null,
+		});
 	} catch {
 		// Never let status bookkeeping break the agent.
 	}

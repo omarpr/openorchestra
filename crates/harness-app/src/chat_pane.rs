@@ -18,8 +18,8 @@ use std::path::PathBuf;
 use agent_runtime::AgentKind;
 
 use gpui::{
-    App, Context, FocusHandle, Focusable, IntoElement, KeyDownEvent, ParentElement,
-    Render, Styled, Window, div, prelude::*, px,
+    App, Context, FocusHandle, Focusable, IntoElement, KeyDownEvent, ParentElement, Render, Styled,
+    Window, div, prelude::*, px,
 };
 
 use pi_client::{
@@ -27,7 +27,7 @@ use pi_client::{
     SettleTracker,
 };
 
-use crate::theme::{theme, HarnessTheme};
+use crate::theme::{HarnessTheme, theme};
 
 /// One rendered line of the conversation.
 #[derive(Debug, Clone)]
@@ -89,27 +89,30 @@ impl ChatPane {
             Ok(rpc) => {
                 let records = rpc.subscribe();
                 self.rpc = Some(rpc);
-                self.entries.push(Entry::Notice("pi session started".into()));
+                self.entries
+                    .push(Entry::Notice("pi session started".into()));
 
                 // Poll, never block. `cx.spawn` runs on the FOREGROUND
                 // executor, so a blocking `recv()` here wedges the UI thread
                 // for as long as pi has nothing to say — which is most of the
                 // time, and looked exactly like the app hanging on tab click.
                 // Same try_recv + timer shape the forge and status channels use.
-                cx.spawn(async move |view, cx| loop {
-                    match records.try_recv() {
-                        Ok(record) => {
-                            if view.update(cx, |pane, cx| pane.apply(record, cx)).is_err() {
-                                break; // pane went away
+                cx.spawn(async move |view, cx| {
+                    loop {
+                        match records.try_recv() {
+                            Ok(record) => {
+                                if view.update(cx, |pane, cx| pane.apply(record, cx)).is_err() {
+                                    break; // pane went away
+                                }
                             }
+                            Err(e) if e.is_empty() => {
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_millis(60))
+                                    .await
+                            }
+                            // Sidecar exited and closed the channel.
+                            Err(_) => break,
                         }
-                        Err(e) if e.is_empty() => {
-                            cx.background_executor()
-                                .timer(std::time::Duration::from_millis(60))
-                                .await
-                        }
-                        // Sidecar exited and closed the channel.
-                        Err(_) => break,
                     }
                 })
                 .detach();
@@ -221,7 +224,8 @@ impl ChatPane {
             }
         };
         if let Err(e) = rpc.send(&command) {
-            self.entries.push(Entry::Notice(format!("send failed: {e}")));
+            self.entries
+                .push(Entry::Notice(format!("send failed: {e}")));
         } else {
             self.entries.push(Entry::User(message));
         }
@@ -428,18 +432,13 @@ impl Render for ChatPane {
                             .text_color(status.1)
                             .child(status.0),
                     )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_xs()
-                            .text_color(hx.tx0)
-                            .child(if self.input.is_empty() {
-                                "type a message · enter to send · esc aborts".to_string()
-                            } else {
-                                self.input.clone()
-                            }),
-                    ),
+                    .child(div().flex_1().min_w_0().text_xs().text_color(hx.tx0).child(
+                        if self.input.is_empty() {
+                            "type a message · enter to send · esc aborts".to_string()
+                        } else {
+                            self.input.clone()
+                        },
+                    )),
             );
         }
         root

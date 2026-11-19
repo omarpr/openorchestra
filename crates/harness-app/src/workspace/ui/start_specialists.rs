@@ -22,8 +22,7 @@ impl HarnessWorkspace {
         let Some(dialog) = self.start_specialists.as_mut() else {
             return;
         };
-        let selected = default_enabled_agent(&self.prefs)
-            .unwrap_or(AgentKind::OpenCode);
+        let selected = default_enabled_agent(&self.prefs).unwrap_or(AgentKind::OpenCode);
         dialog.step = StartSpecialistsStep::PickAgent { selected };
         cx.notify();
     }
@@ -52,11 +51,7 @@ impl HarnessWorkspace {
 
     /// Persist the chosen agent on the task + member registry entries, then
     /// open an Agent tab in every member and finish on the coordinator.
-    pub(crate) fn confirm_start_all_agents(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn confirm_start_all_agents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(dialog) = self.start_specialists.as_ref() else {
             return;
         };
@@ -139,10 +134,7 @@ impl HarnessWorkspace {
         let member_ids: Vec<String> = match self.task_store.get_mut(task_id) {
             Some(task) => {
                 task.agent_kind = kind.clone();
-                task.members
-                    .iter()
-                    .map(|m| m.worktree_id.clone())
-                    .collect()
+                task.members.iter().map(|m| m.worktree_id.clone()).collect()
             }
             None => return,
         };
@@ -168,14 +160,12 @@ impl HarnessWorkspace {
         };
 
         let card = match &dialog.step {
-            StartSpecialistsStep::AskOpenAll => {
-                self.render_start_ask_open_all(hx, task, cx)
-                    .into_any_element()
-            }
-            StartSpecialistsStep::PickAgent { selected } => {
-                self.render_start_pick_agent(hx, task, selected, cx)
-                    .into_any_element()
-            }
+            StartSpecialistsStep::AskOpenAll => self
+                .render_start_ask_open_all(hx, task, cx)
+                .into_any_element(),
+            StartSpecialistsStep::PickAgent { selected } => self
+                .render_start_pick_agent(hx, task, selected, cx)
+                .into_any_element(),
         };
 
         div()
@@ -345,13 +335,7 @@ impl HarnessWorkspace {
                             ws.start_specialists_select_agent(kind_click.clone(), cx);
                         }))
                         .child(div().size(px(18.0)).child(agent_icon(kind, 17.0)))
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_sm()
-                                .text_color(hx.tx0)
-                                .child(label),
-                        )
+                        .child(div().flex_1().text_sm().text_color(hx.tx0).child(label))
                         .child(
                             div()
                                 .text_xs()
@@ -388,14 +372,9 @@ impl HarnessWorkspace {
                     .text_color(hx.tx0)
                     .child("Choose agent"),
             )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(hx.tx2)
-                    .child(format!(
-                        "Same agent opens in all {n} projects. Only agents enabled in Settings are listed.",
-                    )),
-            )
+            .child(div().text_sm().text_color(hx.tx2).child(format!(
+                "Same agent opens in all {n} projects. Only agents enabled in Settings are listed.",
+            )))
             .child(rows)
             .child(
                 div()
@@ -482,18 +461,27 @@ mod tests {
     #[test]
     fn matching_coordinator_agent_is_kept() {
         let tabs = [(1, None), (2, Some(AgentKind::ClaudeCode))];
-        assert_eq!(coordinator_agent_fixup(&tabs, &AgentKind::ClaudeCode), (false, vec![]));
+        assert_eq!(
+            coordinator_agent_fixup(&tabs, &AgentKind::ClaudeCode),
+            (false, vec![])
+        );
     }
 
     #[test]
     fn wrong_kind_is_replaced() {
         let tabs = [(1, None), (2, Some(AgentKind::ClaudeCode))];
-        assert_eq!(coordinator_agent_fixup(&tabs, &AgentKind::Codex), (true, vec![2]));
+        assert_eq!(
+            coordinator_agent_fixup(&tabs, &AgentKind::Codex),
+            (true, vec![2])
+        );
     }
 
     #[test]
     fn no_agent_opens_one() {
-        assert_eq!(coordinator_agent_fixup(&[(1, None)], &AgentKind::Codex), (true, vec![]));
+        assert_eq!(
+            coordinator_agent_fixup(&[(1, None)], &AgentKind::Codex),
+            (true, vec![])
+        );
     }
 
     #[test]
@@ -503,6 +491,9 @@ mod tests {
             (3, Some(AgentKind::Codex)),
             (4, Some(AgentKind::Codex)),
         ];
-        assert_eq!(coordinator_agent_fixup(&tabs, &AgentKind::Codex), (false, vec![2, 4]));
+        assert_eq!(
+            coordinator_agent_fixup(&tabs, &AgentKind::Codex),
+            (false, vec![2, 4])
+        );
     }
 }

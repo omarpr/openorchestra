@@ -34,7 +34,10 @@ impl TaskStore {
     fn evict(&mut self) {
         let mut ix = 0;
         while self.tasks.len() > MAX_TASKS && ix < self.order.len() {
-            let done = self.tasks.get(&self.order[ix]).is_none_or(|t| finished(t.status.state));
+            let done = self
+                .tasks
+                .get(&self.order[ix])
+                .is_none_or(|t| finished(t.status.state));
             if done {
                 if let Some(id) = self.order.remove(ix) {
                     self.tasks.remove(&id);
@@ -107,7 +110,11 @@ mod tests {
             id: id.into(),
             context_id: "c".into(),
             tenant: "t".into(),
-            status: TaskStatus { state, message: None, timestamp: None },
+            status: TaskStatus {
+                state,
+                message: None,
+                timestamp: None,
+            },
             history: Vec::new(),
             artifacts: Vec::new(),
         }

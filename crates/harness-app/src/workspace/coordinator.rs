@@ -118,17 +118,17 @@ mod tests {
     fn single_member_task_focuses_its_member() {
         let t = task(vec![member("api", "wt-api")]);
         assert!(!has_coordinator(&t));
-        assert_eq!(
-            task_focus(&t, None),
-            Some(TaskFocus::Member(&t.members[0]))
-        );
+        assert_eq!(task_focus(&t, None), Some(TaskFocus::Member(&t.members[0])));
     }
 
     #[test]
     fn coordinator_diff_watch_covers_every_member_not_the_task_folder() {
         let t = two();
         let roots = diff_watch_roots(Some(&t), std::path::Path::new("/tasks/ship-it"));
-        assert_eq!(roots, vec![PathBuf::from("/wt/wt-api"), PathBuf::from("/wt/wt-web")]);
+        assert_eq!(
+            roots,
+            vec![PathBuf::from("/wt/wt-api"), PathBuf::from("/wt/wt-web")]
+        );
     }
 
     #[test]

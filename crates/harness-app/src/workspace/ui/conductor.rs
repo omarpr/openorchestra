@@ -82,7 +82,9 @@ impl HarnessWorkspace {
                         break;
                     };
                     cx.background_executor().timer(interval).await;
-                    let keep = view.update(cx, |ws, cx| ws.conductor_tick(cx)).unwrap_or(false);
+                    let keep = view
+                        .update(cx, |ws, cx| ws.conductor_tick(cx))
+                        .unwrap_or(false);
                     if !keep {
                         break;
                     }
@@ -101,14 +103,20 @@ impl HarnessWorkspace {
             cx.notify();
             return false;
         }
-        let selected = self.resolve().map(|r| r.path);
+        let selected = self
+            .selected_agent()
+            .map(|(target, kind)| self.agent_selection_target(target, kind));
         // `tick` needs the workspace (to name alert targets) while mutating
         // the conductor, so lend it out for the call.
         let mut conductor = std::mem::take(&mut self.conductor);
-        let view = conductor.tick(std::time::Instant::now(), selected.as_deref(), |root, kind| {
-            let (_, _, id) = self.alert_target(root);
-            super::super::state::alert_nav_id(&id, kind)
-        });
+        let view = conductor.tick(
+            std::time::Instant::now(),
+            selected.as_ref(),
+            |target, kind| {
+                let (_, _, id) = self.alert_target(&target.root);
+                super::super::state::alert_nav_id(&id, kind, target.tab_id)
+            },
+        );
         self.conductor = conductor;
         if self.conductor_view.as_ref() != Some(&view) {
             self.conductor_view = Some(view);
@@ -119,8 +127,15 @@ impl HarnessWorkspace {
 
     /// Follow the pointer while the conductor is being dragged. Returns
     /// whether a conductor drag consumed the move.
-    pub(crate) fn conductor_drag_move(&mut self, ev: &MouseMoveEvent, window: &Window, cx: &mut Context<Self>) -> bool {
-        let Some(drag) = &mut self.conductor_drag else { return false };
+    pub(crate) fn conductor_drag_move(
+        &mut self,
+        ev: &MouseMoveEvent,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(drag) = &mut self.conductor_drag else {
+            return false;
+        };
         if ev.pressed_button != Some(MouseButton::Left) {
             self.conductor_drag = None;
             save_prefs_to(&self.prefs_path, &self.prefs);
@@ -144,16 +159,16 @@ impl HarnessWorkspace {
     /// Finish a press on the conductor: save where a drag left him, or treat
     /// a still press on the caption as "take me to that agent".
     pub(crate) fn conductor_drag_end(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(drag) = self.conductor_drag.take() else { return };
+        let Some(drag) = self.conductor_drag.take() else {
+            return;
+        };
         if drag.moved {
             save_prefs_to(&self.prefs_path, &self.prefs);
         } else if let Some(nav) = drag.nav.filter(|n| !n.is_empty()) {
             self.navigate_to_alert(&nav, window, cx);
             // Clicking his line is checking on that agent, even when you were
             // already there (so the next tick sees no arrival to dismiss on).
-            if let Some(r) = self.resolve() {
-                self.conductor.dismiss(&r.path);
-            }
+            self.dismiss_selected_agent();
         }
         cx.notify();
     }
@@ -167,7 +182,11 @@ impl HarnessWorkspace {
     /// nothing until the pointer outran his edge — and he jumped to catch
     /// up. Listening on him too gets every move. (Both firing is harmless:
     /// the position is start + delta, and ending twice is a no-op.)
-    fn track_conductor_pointer(&self, el: gpui::Stateful<gpui::Div>, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+    fn track_conductor_pointer(
+        &self,
+        el: gpui::Stateful<gpui::Div>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         el.on_mouse_move(cx.listener(|ws, ev: &MouseMoveEvent, window, cx| {
             ws.conductor_drag_move(ev, window, cx);
         }))
@@ -177,7 +196,12 @@ impl HarnessWorkspace {
         )
     }
 
-    fn start_conductor_drag(&mut self, ev: &MouseDownEvent, nav: Option<String>, cx: &mut Context<Self>) {
+    fn start_conductor_drag(
+        &mut self,
+        ev: &MouseDownEvent,
+        nav: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         cx.stop_propagation();
         self.conductor_drag = Some(ConductorDrag {
             mouse: ev.position,
@@ -190,7 +214,12 @@ impl HarnessWorkspace {
 
     /// The conductor and his speech bubble, floating over everything but
     /// modal overlays. The bubble sits on whichever side has room.
-    pub(crate) fn render_conductor(&self, hx: &HarnessTheme, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(crate) fn render_conductor(
+        &self,
+        hx: &HarnessTheme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         if !self.prefs.conductor_always_on {
             return None;
         }
@@ -215,7 +244,11 @@ impl HarnessWorkspace {
             .bottom(px(bottom))
             .w(px(FIGURE))
             .h(px(FIGURE))
-            .cursor(if dragging { gpui::CursorStyle::ClosedHand } else { gpui::CursorStyle::OpenHand })
+            .cursor(if dragging {
+                gpui::CursorStyle::ClosedHand
+            } else {
+                gpui::CursorStyle::OpenHand
+            })
             .child(img(frame).size_full())
             .on_hover(cx.listener(|ws, hovered: &bool, _, cx| {
                 ws.conductor_hovered = *hovered;
@@ -232,8 +265,8 @@ impl HarnessWorkspace {
         // "finished" opens the full bubble, and so does hovering him.
         let collapsed = !view.needs_you() && !self.conductor_hovered && !dragging;
         let on_left = right + FIGURE / 2.0 < vw / 2.0;
-        let badge = (collapsed && !view.lines.is_empty()).then(|| {
-            let n = view.lines.len() + view.more;
+        let badge = (collapsed && view.running > 0).then(|| {
+            let n = view.running;
             let b = div()
                 .id("conductor-badge")
                 .occlude()
@@ -252,7 +285,11 @@ impl HarnessWorkspace {
                 .text_xs()
                 .text_color(hx.tx1)
                 .whitespace_nowrap()
-                .child(if n == 1 { "1 agent working".to_string() } else { format!("{n} agents working") })
+                .child(if n == 1 {
+                    "1 agent working".to_string()
+                } else {
+                    format!("{n} agents working")
+                })
                 // Same arc as the sidebar's RUNNING pill, on the same clock,
                 // so the badge and the rows it summarises spin together.
                 .child(spin_arc(
@@ -265,7 +302,11 @@ impl HarnessWorkspace {
                     ws.conductor_hovered = *hovered;
                     cx.notify();
                 }));
-            let b = if on_left { b.right(px(right + FIGURE + 2.0)) } else { b.left(px(vw - right + 2.0)) };
+            let b = if on_left {
+                b.right(px(right + FIGURE + 2.0))
+            } else {
+                b.left(px(vw - right + 2.0))
+            };
             self.track_conductor_pointer(b, cx)
         });
         let bubble = (!collapsed && !view.lines.is_empty()).then(|| {
@@ -295,7 +336,9 @@ impl HarnessWorkspace {
                 }))
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|ws, ev: &MouseDownEvent, _, cx| ws.start_conductor_drag(ev, None, cx)),
+                    cx.listener(|ws, ev: &MouseDownEvent, _, cx| {
+                        ws.start_conductor_drag(ev, None, cx)
+                    }),
                 );
             for (i, line) in view.lines.iter().enumerate() {
                 let nav = line.nav.clone();
@@ -308,8 +351,16 @@ impl HarnessWorkspace {
                         .flex()
                         .flex_col()
                         .when(i > 0, |d| d.border_t_1().border_color(hx.border))
-                        .when(!line.nav.is_empty(), |d| d.cursor_pointer().hover(|d| d.bg(hx.surface_hover)))
-                        .child(div().text_xs().text_color(hx.tx2).truncate().child(line.label.clone()))
+                        .when(!line.nav.is_empty(), |d| {
+                            d.cursor_pointer().hover(|d| d.bg(hx.surface_hover))
+                        })
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(hx.tx2)
+                                .truncate()
+                                .child(line.label.clone()),
+                        )
                         .child(
                             div()
                                 .text_xs()

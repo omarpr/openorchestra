@@ -50,13 +50,15 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
 
 /// The release in a `releases/latest` API response.
 pub fn parse_latest(json: &[u8]) -> Result<Release, String> {
-    let v: serde_json::Value =
-        serde_json::from_slice(json).map_err(|_| "GitHub sent an unexpected response.".to_string())?;
+    let v: serde_json::Value = serde_json::from_slice(json)
+        .map_err(|_| "GitHub sent an unexpected response.".to_string())?;
     let tag = v["tag_name"]
         .as_str()
         .ok_or_else(|| "No published release was found.".to_string())?;
     if parse_version(tag).is_none() {
-        return Err(format!("The latest release has an unexpected version ({tag})."));
+        return Err(format!(
+            "The latest release has an unexpected version ({tag})."
+        ));
     }
     let tag = tag.trim();
     let url = v["html_url"]
@@ -108,9 +110,12 @@ pub fn fetch_latest() -> Result<Release, String> {
 /// Whether this copy came from the Homebrew cask (upgrade with brew, so
 /// brew's record of the installed version stays right).
 fn installed_with_homebrew() -> bool {
-    ["/opt/homebrew/Caskroom/openorchestra", "/usr/local/Caskroom/openorchestra"]
-        .iter()
-        .any(|p| Path::new(p).exists())
+    [
+        "/opt/homebrew/Caskroom/openorchestra",
+        "/usr/local/Caskroom/openorchestra",
+    ]
+    .iter()
+    .any(|p| Path::new(p).exists())
 }
 
 /// The About panel's credits: the one-line description, then a clickable
@@ -119,9 +124,9 @@ fn installed_with_homebrew() -> bool {
 /// which must run on the main thread and can't be exercised by a unit test.
 #[cfg(target_os = "macos")]
 fn about_credits() -> Option<objc2::rc::Retained<objc2::runtime::AnyObject>> {
+    use objc2::msg_send;
     use objc2::rc::{Allocated, Retained};
     use objc2::runtime::{AnyClass, AnyObject};
-    use objc2::msg_send;
     use objc2_foundation::{NSRange, NSString};
 
     const BLURB: &str =
@@ -168,9 +173,9 @@ fn about_credits() -> Option<objc2::rc::Retained<objc2::runtime::AnyObject>> {
 /// name, the version, and the credits above.
 #[cfg(target_os = "macos")]
 pub(crate) fn show_native_about() -> bool {
+    use objc2::msg_send;
     use objc2::rc::Retained;
     use objc2::runtime::{AnyClass, AnyObject};
-    use objc2::msg_send;
     use objc2_foundation::NSString;
 
     let (Some(app_class), Some(dict_class)) = (
@@ -189,7 +194,10 @@ pub(crate) fn show_native_about() -> bool {
         };
         set("ApplicationName", &NSString::from_str("openOrchestra"));
         set("ApplicationVersion", &NSString::from_str(VERSION));
-        set("Copyright", &NSString::from_str("Free software under the GPL-3.0 license."));
+        set(
+            "Copyright",
+            &NSString::from_str("Free software under the GPL-3.0 license."),
+        );
         if let Some(credits) = about_credits() {
             set("Credits", &credits);
         }
@@ -241,12 +249,7 @@ pub fn check_for_updates(window: &mut Window, cx: &mut App) {
     .detach();
 }
 
-fn show_result(
-    result: Result<Release, String>,
-    brew: bool,
-    window: &mut Window,
-    cx: &mut App,
-) {
+fn show_result(result: Result<Release, String>, brew: bool, window: &mut Window, cx: &mut App) {
     match result {
         Ok(r) if is_newer(&r.version, VERSION) => {
             let detail = if brew {
@@ -254,7 +257,9 @@ fn show_result(
                     "You have {VERSION}. You installed openOrchestra with Homebrew, so upgrade with:\n\n{BREW_UPGRADE}"
                 )
             } else {
-                format!("You have {VERSION}. Download the new version from GitHub and replace the app in Applications.")
+                format!(
+                    "You have {VERSION}. Download the new version from GitHub and replace the app in Applications."
+                )
             };
             let buttons: &[&str] = if brew {
                 &["Copy Command", "Release Notes", "Later"]
@@ -339,14 +344,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.version, "1.2.0");
-        assert_eq!(r.url, "https://github.com/omarpr/openorchestra/releases/tag/1.2.0");
-        assert_eq!(parse_latest(br#"{"tag_name":"v1.2.0"}"#).unwrap().version, "1.2.0");
+        assert_eq!(
+            r.url,
+            "https://github.com/omarpr/openorchestra/releases/tag/1.2.0"
+        );
+        assert_eq!(
+            parse_latest(br#"{"tag_name":"v1.2.0"}"#).unwrap().version,
+            "1.2.0"
+        );
     }
 
     #[test]
     fn never_opens_a_link_outside_the_releases_page() {
-        let r = parse_latest(br#"{"tag_name":"1.2.0","html_url":"https://evil.example/x"}"#).unwrap();
-        assert_eq!(r.url, "https://github.com/omarpr/openorchestra/releases/latest");
+        let r =
+            parse_latest(br#"{"tag_name":"1.2.0","html_url":"https://evil.example/x"}"#).unwrap();
+        assert_eq!(
+            r.url,
+            "https://github.com/omarpr/openorchestra/releases/latest"
+        );
     }
 
     /// Runs every AppKit message the credits send, so a wrong selector or
@@ -361,7 +376,10 @@ mod tests {
         use objc2_foundation::NSString;
         let credits = about_credits().expect("credits");
         let text: Retained<NSString> = unsafe { msg_send![&*credits, string] };
-        assert!(text.to_string().ends_with("github.com/omarpr/openorchestra"));
+        assert!(
+            text.to_string()
+                .ends_with("github.com/omarpr/openorchestra")
+        );
         let (mut range, at) = (objc2_foundation::NSRange::new(0, 0), text.length() - 1);
         let link: Option<Retained<AnyObject>> = unsafe {
             msg_send![&*credits, attribute: &*NSString::from_str("NSLink"), atIndex: at, effectiveRange: &mut range]

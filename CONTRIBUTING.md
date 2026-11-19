@@ -29,7 +29,7 @@ A change that breaks one of these will not merge:
   `agent-runtime`, `agent-schema`, `training`, `pi-client`, `a2a-broker` and
   `remote` (`oo-remote`) are headless and fully tested without a window. The
   app crate renders; it does not own protocol or git logic.
-- **Agent-agnostic.** pi, Claude Code, Codex, OpenCode and Kimi are peers. Don't
+- **Agent-agnostic.** pi, Claude Code, Codex, OpenCode, Kimi and Grok are peers. Don't
   privilege one in shared paths; agent-specific behavior belongs behind
   `AgentKind` or in that agent's own module.
 - **Nothing leaves the machine.** No telemetry, no analytics, no uploading a

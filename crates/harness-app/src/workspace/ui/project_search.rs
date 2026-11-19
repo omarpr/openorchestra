@@ -19,11 +19,7 @@ const SEARCH_DEBOUNCE_MS: u64 = 150;
 
 impl HarnessWorkspace {
     /// Create the query editor if missing and wire BufferEdited → debounced search.
-    pub(crate) fn ensure_project_search_ui(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn ensure_project_search_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.project_search.is_some() {
             return;
         }
@@ -62,11 +58,7 @@ impl HarnessWorkspace {
     }
 
     /// Public entry used when selection changes (already have a Window).
-    pub(crate) fn schedule_project_search(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn schedule_project_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.ensure_project_search_ui(window, cx);
         let search_id = {
             let Some(ui) = self.project_search.as_mut() else {
@@ -163,10 +155,7 @@ impl HarnessWorkspace {
             ui.results.clear();
         }
         cx.spawn(async move |this, cx| {
-            let project::SearchResults {
-                task_handle,
-                rx,
-            } = results;
+            let project::SearchResults { task_handle, rx } = results;
             // Keep the search task alive until the stream ends.
             let _search_task = task_handle;
 

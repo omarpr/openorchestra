@@ -92,7 +92,10 @@ pub enum SessionError {
     /// The header declares a format version this build has not been checked
     /// against. Refused rather than guessed at: silently mis-parsing sessions
     /// would poison the training set (§6.4).
-    UnsupportedVersion { path: PathBuf, version: u32 },
+    UnsupportedVersion {
+        path: PathBuf,
+        version: u32,
+    },
 }
 
 impl std::fmt::Display for SessionError {
@@ -169,7 +172,9 @@ pub fn parse_session(text: &str, path: &Path) -> Result<Session, SessionError> {
     let mut visited: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut cursor = records.iter().rev().find(|r| r["id"].is_string());
     while let Some(record) = cursor {
-        let Some(id) = record["id"].as_str() else { break };
+        let Some(id) = record["id"].as_str() else {
+            break;
+        };
         if !visited.insert(id) {
             break;
         }
@@ -230,7 +235,10 @@ fn turn_from(record: &serde_json::Value) -> Option<Turn> {
             })
         }
         "toolResult" => Some(Turn::ToolResult {
-            tool_call_id: message["toolCallId"].as_str().unwrap_or_default().to_string(),
+            tool_call_id: message["toolCallId"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
             tool_name: message["toolName"].as_str().unwrap_or_default().to_string(),
             text: concat_text(&message["content"]),
             is_error: message["isError"].as_bool().unwrap_or(false),

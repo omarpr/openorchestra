@@ -168,11 +168,7 @@ impl std::fmt::Display for GitError {
                 command,
                 code,
                 stderr,
-            } => write!(
-                f,
-                "git {command} failed (exit {code:?}): {}",
-                stderr.trim()
-            ),
+            } => write!(f, "git {command} failed (exit {code:?}): {}", stderr.trim()),
         }
     }
 }
@@ -252,7 +248,15 @@ impl<R: CommandRunner> GitWorktrees<R> {
         // and git's default `branch.autoSetupMerge` would make the new branch
         // track *it* — leaving every task branch claiming `origin/master` as
         // its upstream. See `push_state` for what that breaks.
-        let mut args = vec!["worktree", "add", "--no-track", "-b", branch, "--", &path_str];
+        let mut args = vec![
+            "worktree",
+            "add",
+            "--no-track",
+            "-b",
+            branch,
+            "--",
+            &path_str,
+        ];
         if let Some(base) = base_ref {
             args.push(base);
         }
@@ -266,13 +270,17 @@ impl<R: CommandRunner> GitWorktrees<R> {
     /// [`delete_branch`]: GitWorktrees::delete_branch
     pub fn remove_worktree(&self, repo_root: &Path, path: &Path) -> Result<(), GitError> {
         let path_str = path.to_string_lossy();
-        self.git_ok(repo_root, &["worktree", "remove", "--force", "--", &path_str])
-            .map(|_| ())
+        self.git_ok(
+            repo_root,
+            &["worktree", "remove", "--force", "--", &path_str],
+        )
+        .map(|_| ())
     }
 
     /// `git branch -D <branch>` (Delete flow only — §6.1 D6).
     pub fn delete_branch(&self, repo_root: &Path, branch: &str) -> Result<(), GitError> {
-        self.git_ok(repo_root, &["branch", "-D", "--", branch]).map(|_| ())
+        self.git_ok(repo_root, &["branch", "-D", "--", branch])
+            .map(|_| ())
     }
 
     /// Parse `git worktree list --porcelain`.
@@ -323,8 +331,12 @@ impl<R: CommandRunner> GitWorktrees<R> {
         std::fs::create_dir_all(&info).map_err(io_error)?;
         // The exclude file itself is replaced on each write. Lock a stable
         // sibling across both threads and app instances.
-        let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true)
-            .open(info.join(".exclude.harness.lock")).map_err(io_error)?;
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(info.join(".exclude.harness.lock"))
+            .map_err(io_error)?;
         lock.lock().map_err(io_error)?;
         let existing = match std::fs::read_to_string(&exclude) {
             Ok(contents) => contents,
@@ -391,9 +403,10 @@ impl<R: CommandRunner> GitWorktrees<R> {
     /// Default branch name, from `origin/HEAD` when present, else a local
     /// `main`/`master` probe.
     pub fn default_branch(&self, repo_root: &Path) -> Result<String, GitError> {
-        if let Ok(out) =
-            self.git_ro(repo_root, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
-        {
+        if let Ok(out) = self.git_ro(
+            repo_root,
+            &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+        ) {
             let name = out.stdout.trim();
             if let Some(stripped) = name.strip_prefix("origin/") {
                 return Ok(stripped.to_string());
@@ -421,7 +434,12 @@ impl<R: CommandRunner> GitWorktrees<R> {
         if let Some(branch) = self
             .git_ro(dir, &["symbolic-ref", "--quiet", "HEAD"])
             .ok()
-            .and_then(|out| out.stdout.trim().strip_prefix("refs/heads/").map(str::to_owned))
+            .and_then(|out| {
+                out.stdout
+                    .trim()
+                    .strip_prefix("refs/heads/")
+                    .map(str::to_owned)
+            })
         {
             return Ok(branch);
         }
@@ -439,8 +457,7 @@ impl<R: CommandRunner> GitWorktrees<R> {
         let (mut ahead, mut behind) = (0, 0);
         if let Some(upstream) = upstream.filter(|u| is_safe_ref(u)) {
             let range = format!("{upstream}...HEAD");
-            if let Ok(out) =
-                self.git_ro(worktree, &["rev-list", "--left-right", "--count", &range])
+            if let Ok(out) = self.git_ro(worktree, &["rev-list", "--left-right", "--count", &range])
             {
                 // "<behind>\t<ahead>" — left = upstream-only, right = HEAD-only.
                 let mut nums = out.stdout.split_whitespace();
@@ -471,7 +488,12 @@ impl<R: CommandRunner> GitWorktrees<R> {
         let upstream = self
             .git_ok(
                 worktree,
-                &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+                &[
+                    "rev-parse",
+                    "--abbrev-ref",
+                    "--symbolic-full-name",
+                    "@{upstream}",
+                ],
             )
             .ok()
             .map(|o| o.stdout.trim().to_string())
@@ -494,8 +516,11 @@ impl<R: CommandRunner> GitWorktrees<R> {
             let Ok(branch) = self.current_branch(worktree) else {
                 return false;
             };
-            self.git_ro(worktree, &["config", "--get", &format!("branch.{branch}.merge")])
-                .is_ok_and(|o| upstream_is_own_branch(o.stdout.trim(), &branch))
+            self.git_ro(
+                worktree,
+                &["config", "--get", &format!("branch.{branch}.merge")],
+            )
+            .is_ok_and(|o| upstream_is_own_branch(o.stdout.trim(), &branch))
         });
 
         let base = upstream.clone().unwrap_or_else(|| fallback.to_string());
@@ -586,8 +611,20 @@ impl<R: CommandRunner> GitWorktrees<R> {
             return Ok(Diff::default());
         }
 
-        let numstat = self.git_ro(worktree, &["diff", "--no-ext-diff", "--no-textconv", "--numstat", &base])?;
-        let name_status = self.git_ro(worktree, &["diff", "--no-ext-diff", "--no-textconv", "--name-status", &base])?;
+        let numstat = self.git_ro(
+            worktree,
+            &["diff", "--no-ext-diff", "--no-textconv", "--numstat", &base],
+        )?;
+        let name_status = self.git_ro(
+            worktree,
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--name-status",
+                &base,
+            ],
+        )?;
 
         let files = merge_diff(&numstat.stdout, &name_status.stdout);
         Ok(Diff {
@@ -759,17 +796,16 @@ fn parse_worktree_list(stdout: &str) -> Vec<WorktreeListEntry> {
     let mut branch: Option<String> = None;
     let mut head: Option<String> = None;
 
-    let mut flush = |path: &mut Option<String>,
-                     branch: &mut Option<String>,
-                     head: &mut Option<String>| {
-        if let Some(p) = path.take() {
-            out.push(WorktreeListEntry {
-                path: p,
-                branch: branch.take(),
-                head: head.take(),
-            });
-        }
-    };
+    let mut flush =
+        |path: &mut Option<String>, branch: &mut Option<String>, head: &mut Option<String>| {
+            if let Some(p) = path.take() {
+                out.push(WorktreeListEntry {
+                    path: p,
+                    branch: branch.take(),
+                    head: head.take(),
+                });
+            }
+        };
 
     for line in stdout.lines() {
         if line.is_empty() {

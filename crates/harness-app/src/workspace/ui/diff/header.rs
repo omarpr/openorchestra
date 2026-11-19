@@ -146,7 +146,10 @@ impl HarnessWorkspace {
             };
             row = row.child(
                 div()
-                    .id(gpui::SharedString::from(format!("diff-view-{}", view.label())))
+                    .id(gpui::SharedString::from(format!(
+                        "diff-view-{}",
+                        view.label()
+                    )))
                     .flex()
                     .items_center()
                     .h(px(18.0))
@@ -205,7 +208,10 @@ impl HarnessWorkspace {
         let row = |base: DiffBase, hint: &'static str, cx: &mut Context<Self>| {
             let selected = base == active;
             div()
-                .id(gpui::SharedString::from(format!("diff-base-{}", base.label(&compare))))
+                .id(gpui::SharedString::from(format!(
+                    "diff-base-{}",
+                    base.label(&compare)
+                )))
                 .flex()
                 .flex_col()
                 .px_2()
@@ -224,18 +230,17 @@ impl HarnessWorkspace {
                         .gap_1()
                         .text_sm()
                         .text_color(if selected { hx.tx0 } else { hx.tx1 })
-                        .child(div().w(px(10.0)).flex_none().text_xs().text_color(hx.accent).child(
-                            if selected { "✓" } else { " " },
-                        ))
+                        .child(
+                            div()
+                                .w(px(10.0))
+                                .flex_none()
+                                .text_xs()
+                                .text_color(hx.accent)
+                                .child(if selected { "✓" } else { " " }),
+                        )
                         .child(base.label(&compare)),
                 )
-                .child(
-                    div()
-                        .pl(px(14.0))
-                        .text_xs()
-                        .text_color(hx.tx2)
-                        .child(hint),
-                )
+                .child(div().pl(px(14.0)).text_xs().text_color(hx.tx2).child(hint))
         };
 
         div()
@@ -257,8 +262,16 @@ impl HarnessWorkspace {
                 MouseButton::Left,
                 cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
             )
-            .child(row(DiffBase::Uncommitted, "changes you have not committed", cx))
-            .child(row(DiffBase::DefaultBranch, "everything this branch changes", cx))
+            .child(row(
+                DiffBase::Uncommitted,
+                "changes you have not committed",
+                cx,
+            ))
+            .child(row(
+                DiffBase::DefaultBranch,
+                "everything this branch changes",
+                cx,
+            ))
     }
 
     pub(crate) fn render_diff_header(
@@ -297,7 +310,8 @@ impl HarnessWorkspace {
                     // *wrapping*, and a long branch wrapped to three lines inside
                     // this `h(px(34.0))` row overflowed it above and below —
                     // painting over the row beneath.
-                    .child(div().flex_1().min_w_0().text_xs().font_family(hx.font_ui).text_color(hx.tx1).truncate().child(r.branch.clone())),
+                    .child(div().flex_1().min_w_0().text_xs().font_family(hx.font_ui).text_color(hx.tx1).truncate().child(r.branch.clone()))
+                    .child(self.review_overview_button(hx, cx)),
             )
             .child(
                 div()

@@ -176,11 +176,15 @@ impl HarnessWorkspace {
         let project = service.read(cx).project().clone();
         match crate::workspace_host::ide_workspace_for(project, window, cx) {
             Ok(ws) => {
-                cx.subscribe_in(&ws, window, |this, hosted, event: &workspace::Event, window, cx| {
-                    if matches!(event, workspace::Event::ModalOpened) {
-                        this.watch_finder_dismiss(hosted, window, cx);
-                    }
-                })
+                cx.subscribe_in(
+                    &ws,
+                    window,
+                    |this, hosted, event: &workspace::Event, window, cx| {
+                        if matches!(event, workspace::Event::ModalOpened) {
+                            this.watch_finder_dismiss(hosted, window, cx);
+                        }
+                    },
+                )
                 .detach();
                 self.ide_workspaces.insert(key, ws.clone());
                 Some(ws)
@@ -261,16 +265,22 @@ impl HarnessWorkspace {
                 self.service_workspaces.insert(key, hosted.clone());
                 // Ensure a pane set exists so file tabs have somewhere to land.
                 self.pane_clock = self.pane_clock.wrapping_add(1);
-                self.panes.entry(r.key.clone()).or_insert_with(|| PaneSet {
-                    tabs: Vec::new(),
-                    active: 0,
-                    last_used: 0,
-                }).last_used = self.pane_clock;
+                self.panes
+                    .entry(r.key.clone())
+                    .or_insert_with(|| PaneSet {
+                        tabs: Vec::new(),
+                        active: 0,
+                        last_used: 0,
+                    })
+                    .last_used = self.pane_clock;
                 cx.notify();
                 Some(hosted)
             }
             Err(e) => {
-                log::warn!("could not open project for {}: {e}", r.editor_path.display());
+                log::warn!(
+                    "could not open project for {}: {e}",
+                    r.editor_path.display()
+                );
                 self.set_note(format!("could not open project: {e}"));
                 cx.notify();
                 None
@@ -312,28 +322,26 @@ impl HarnessWorkspace {
         })
         .detach();
         cx.subscribe_in(hosted, window, {
-            move |this, hosted, event: &workspace::Event, window, cx| {
-                match event {
-                    workspace::Event::ItemAdded { item } => {
-                        this.on_service_item_added(hosted, item.as_ref(), window, cx);
-                    }
-                    workspace::Event::ItemRemoved { item_id } => {
-                        this.on_service_item_removed(*item_id, window, cx);
-                    }
-                    workspace::Event::ActiveItemChanged => {
-                        this.on_service_active_item_changed(hosted, window, cx);
-                    }
-                    workspace::Event::PaneAdded(pane) => {
-                        pane.update(cx, |pane, _| {
-                            pane.set_should_display_tab_bar(|_, _| false);
-                        });
-                        this.observe_service_pane_preview(pane, cx);
-                    }
-                    workspace::Event::ModalOpened => {
-                        this.watch_finder_dismiss(hosted, window, cx);
-                    }
-                    _ => {}
+            move |this, hosted, event: &workspace::Event, window, cx| match event {
+                workspace::Event::ItemAdded { item } => {
+                    this.on_service_item_added(hosted, item.as_ref(), window, cx);
                 }
+                workspace::Event::ItemRemoved { item_id } => {
+                    this.on_service_item_removed(*item_id, window, cx);
+                }
+                workspace::Event::ActiveItemChanged => {
+                    this.on_service_active_item_changed(hosted, window, cx);
+                }
+                workspace::Event::PaneAdded(pane) => {
+                    pane.update(cx, |pane, _| {
+                        pane.set_should_display_tab_bar(|_, _| false);
+                    });
+                    this.observe_service_pane_preview(pane, cx);
+                }
+                workspace::Event::ModalOpened => {
+                    this.watch_finder_dismiss(hosted, window, cx);
+                }
+                _ => {}
             }
         })
         .detach();
@@ -369,9 +377,11 @@ impl HarnessWorkspace {
             let TabContent::File { item_id, preview } = &mut tab.content else {
                 continue;
             };
-            let is_preview = hosted.read(cx).panes().iter().any(|pane| {
-                pane.read(cx).is_active_preview_item(*item_id)
-            });
+            let is_preview = hosted
+                .read(cx)
+                .panes()
+                .iter()
+                .any(|pane| pane.read(cx).is_active_preview_item(*item_id));
             if *preview != is_preview {
                 *preview = is_preview;
                 changed = true;
@@ -457,15 +467,15 @@ impl HarnessWorkspace {
         // tree made the italic tab jump to the end of the strip each time.
         let mut replace_at = None;
         if preview {
-            let is_other_preview = |t: &Tab| {
-                matches!(&t.content, TabContent::File { preview: true, item_id: id } if *id != item_id)
-            };
+            let is_other_preview = |t: &Tab| matches!(&t.content, TabContent::File { preview: true, item_id: id } if *id != item_id);
             replace_at = pane.tabs.iter().position(&is_other_preview);
             pane.tabs.retain(|t| !is_other_preview(t));
         }
-        if let Some(existing) = pane.tabs.iter_mut().find(|t| {
-            matches!(&t.content, TabContent::File { item_id: id, .. } if *id == item_id)
-        }) {
+        if let Some(existing) = pane
+            .tabs
+            .iter_mut()
+            .find(|t| matches!(&t.content, TabContent::File { item_id: id, .. } if *id == item_id))
+        {
             existing.title = title;
             existing.content = TabContent::File { item_id, preview };
             pane.active = existing.id;
@@ -504,29 +514,20 @@ impl HarnessWorkspace {
     ) {
         let Some(r) = self.resolve() else { return };
         let key = r.key.clone();
-        let Some(pane) = self.panes.get_mut(&key) else { return };
-        let was_active = pane.tabs.iter().any(|t| {
-            t.id == pane.active
-                && matches!(&t.content, TabContent::File { item_id: id, .. } if *id == item_id)
-        });
+        let Some(pane) = self.panes.get_mut(&key) else {
+            return;
+        };
+        let closed_index = pane.tabs.iter().position(
+            |t| matches!(&t.content, TabContent::File { item_id: id, .. } if *id == item_id),
+        );
         // Any closed file tab's slot, not just a flagged preview's: zed's
         // `close_current_preview_item` clears the preview id *before* removing
         // the item, so our flag sync has already marked the tab non-preview by
         // the time this runs. The timestamp below limits reuse to a preview
         // that arrives in the same replacement.
-        self.preview_slot = pane
-            .tabs
-            .iter()
-            .position(|t| {
-                matches!(&t.content, TabContent::File { item_id: id, .. } if *id == item_id)
-            })
-            .map(|ix| (key.clone(), ix, std::time::Instant::now()));
-        pane.tabs.retain(|t| {
-            !matches!(&t.content, TabContent::File { item_id: id, .. } if *id == item_id)
-        });
-        if was_active {
-            pane.active = pane.tabs.last().map(|t| t.id).unwrap_or(0);
-        }
+        self.preview_slot = closed_index.map(|ix| (key, ix, std::time::Instant::now()));
+        let Some(ix) = closed_index else { return };
+        pane.remove_tab_at(ix);
         if pane.tabs.is_empty() {
             self.open_tab(TabKind::Shell, window, cx);
         } else {
@@ -542,18 +543,52 @@ impl HarnessWorkspace {
         cx: &mut Context<Self>,
     ) {
         self.sync_file_preview_flags(cx);
-        let Some(item) = hosted.read(cx).active_item(cx) else { return };
-        let item_id = item.item_id();
         let Some(r) = self.resolve() else { return };
-        let Some(pane) = self.panes.get_mut(&r.key) else { return };
-        if let Some(tab) = pane.tabs.iter().find(|t| {
-            matches!(&t.content, TabContent::File { item_id: id, .. } if *id == item_id)
-        })
-            && pane.active != tab.id {
-                pane.active = tab.id;
-                self.focus_active_pane(window, cx);
-                cx.notify();
-            }
+        if self.service_workspaces.get(&r.key) != Some(hosted) {
+            return;
+        }
+        let key = r.key.clone();
+        // A close writes this slot, then Zed emits a follow-up activation
+        // after focus has left the editor. An Explorer click on a file that
+        // is already open is also unfocused, and that one must select the tab.
+        let follows_close = self.preview_slot.as_ref().is_some_and(|(slot_key, _, at)| {
+            activation_follows_close(Some(slot_key), &key, at.elapsed())
+        });
+        let Some(pane) = self.panes.get_mut(&key) else {
+            return;
+        };
+        let service = hosted.read(cx);
+        // Zed can activate its own fallback before emitting ItemRemoved. Let
+        // the removal handler choose the neighbor from the visible tab order.
+        if let Some(TabContent::File { item_id, .. }) = pane.active_tab().map(|tab| &tab.content)
+            && !service
+                .panes()
+                .iter()
+                .any(|pane| pane.read(cx).items().any(|item| item.item_id() == *item_id))
+        {
+            return;
+        }
+        let Some(item) = service.active_item(cx) else {
+            return;
+        };
+        // A close emits a follow-up activation after focus has moved to the
+        // neighbor. Ignore that one. Any other unfocused activation is
+        // Explorer selecting a file that is already open.
+        let focus = item.item_focus_handle(cx);
+        if !focus.is_focused(window) && !focus.contains_focused(window, cx) && follows_close {
+            return;
+        }
+        let item_id = item.item_id();
+        if let Some(tab) = pane
+            .tabs
+            .iter()
+            .find(|t| matches!(&t.content, TabContent::File { item_id: id, .. } if *id == item_id))
+            && pane.active != tab.id
+        {
+            pane.active = tab.id;
+            self.focus_active_pane(window, cx);
+            cx.notify();
+        }
     }
 
     /// Switch bodies between unified and side-by-side.
@@ -585,22 +620,11 @@ impl HarnessWorkspace {
         }
         self.prefs.diff_location = location;
         if location == DiffLocation::Dock {
-            let keys: Vec<String> = self.panes.keys().cloned().collect();
-            for key in keys {
-                let Some(pane) = self.panes.get_mut(&key) else { continue };
-                let closing: Vec<u64> = pane
-                    .tabs
-                    .iter()
-                    .filter(|t| matches!(t.content, TabContent::Diff))
-                    .map(|t| t.id)
-                    .collect();
-                if closing.is_empty() {
-                    continue;
-                }
-                pane.tabs.retain(|t| !closing.contains(&t.id));
-                if closing.contains(&pane.active) {
-                    // Prefer the tab to the left, the way close_tab does.
-                    pane.active = pane.tabs.last().map(|t| t.id).unwrap_or(0);
+            for pane in self.panes.values_mut() {
+                for ix in (0..pane.tabs.len()).rev() {
+                    if matches!(pane.tabs[ix].content, TabContent::Diff) {
+                        pane.remove_tab_at(ix);
+                    }
                 }
             }
             // A worktree left with no tabs is a dead end; give it a shell back,
@@ -619,5 +643,26 @@ impl HarnessWorkspace {
         self.save_prefs(cx);
         self.focus_active_pane(window, cx);
         cx.notify();
+    }
+}
+
+/// True when an unfocused `ActiveItemChanged` is the follow-up Zed emits
+/// while replacing a preview, not an Explorer click on an open file.
+fn activation_follows_close(slot_key: Option<&str>, key: &str, age: std::time::Duration) -> bool {
+    slot_key.is_some_and(|slot_key| slot_key == key) && age < std::time::Duration::from_millis(500)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_fresh_close_in_the_same_worktree_suppresses_an_unfocused_activation() {
+        let fresh = std::time::Duration::from_millis(10);
+        let stale = std::time::Duration::from_millis(500);
+        assert!(activation_follows_close(Some("work"), "work", fresh));
+        assert!(!activation_follows_close(Some("other"), "work", fresh));
+        assert!(!activation_follows_close(Some("work"), "work", stale));
+        assert!(!activation_follows_close(None, "work", fresh));
     }
 }

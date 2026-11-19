@@ -17,7 +17,12 @@ enum Tone {
     Danger,
 }
 
-fn dialog_button(hx: &HarnessTheme, id: &'static str, label: impl Into<SharedString>, tone: Tone) -> gpui::Stateful<Div> {
+fn dialog_button(
+    hx: &HarnessTheme,
+    id: &'static str,
+    label: impl Into<SharedString>,
+    tone: Tone,
+) -> gpui::Stateful<Div> {
     let (border, bg, fg, hover) = match tone {
         Tone::Primary => (hx.accent, tint(hx.accent, 0.16), hx.accent, hx.accent),
         Tone::Plain => (hx.border2, hx.surface, hx.tx0, hx.red),
@@ -44,7 +49,12 @@ fn dialog_button(hx: &HarnessTheme, id: &'static str, label: impl Into<SharedStr
 impl HarnessWorkspace {
     /// The card every dialog sits in. Clicks inside it never reach the
     /// backdrop's dismiss handler.
-    fn dialog_card(&self, hx: &HarnessTheme, title: impl Into<SharedString>, cx: &mut Context<Self>) -> Div {
+    fn dialog_card(
+        &self,
+        hx: &HarnessTheme,
+        title: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> Div {
         div()
             .w(px(440.0))
             .max_w(relative(0.92))
@@ -91,20 +101,30 @@ impl HarnessWorkspace {
             .items_center()
             .justify_center()
             .bg(rgba(0x00000099))
-            .on_mouse_down(MouseButton::Left, cx.listener(move |ws, _, window, cx| dismiss(ws, window, cx)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |ws, _, window, cx| dismiss(ws, window, cx)),
+            )
             .child(card)
             .into_any_element()
     }
 
     /// The keep-or-close-terminals confirmation shown on quit. Clicking the
     /// backdrop cancels the quit — the safe default.
-    pub(crate) fn render_close_prompt(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_close_prompt(
+        &self,
+        hx: &HarnessTheme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(prompt) = self.close_prompt.as_ref() else {
             return div().into_any_element();
         };
         let n = prompt.session_count;
         let remember = prompt.remember;
-        let count_label = format!("{n} terminal session{} still running.", if n == 1 { " is" } else { "s are" });
+        let count_label = format!(
+            "{n} terminal session{} still running.",
+            if n == 1 { " is" } else { "s are" }
+        );
 
         // Checkbox: a small square that fills with the accent when ticked.
         let checkbox = div()
@@ -130,9 +150,16 @@ impl HarnessWorkspace {
                     .border_1()
                     .border_color(if remember { hx.accent } else { hx.border2 })
                     .when(remember, |d| d.bg(hx.accent))
-                    .when(remember, |d| d.child(div().text_xs().text_color(rgb(0xffffff)).child("✓"))),
+                    .when(remember, |d| {
+                        d.child(div().text_xs().text_color(rgb(0xffffff)).child("✓"))
+                    }),
             )
-            .child(div().text_sm().text_color(hx.tx1).child("Remember my choice"));
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(hx.tx1)
+                    .child("Remember my choice"),
+            );
 
         let card = self
             .dialog_card(hx, "Quit openOrchestra?", cx)
@@ -159,14 +186,21 @@ impl HarnessWorkspace {
 
     /// "Remove ‘x’?" — the confirm step for removing a project or an archived
     /// entry. Cancel is the highlighted, safe choice; clicking outside cancels.
-    pub(crate) fn render_removal_prompt(&self, hx: &HarnessTheme, removal: Removal, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_removal_prompt(
+        &self,
+        hx: &HarnessTheme,
+        removal: Removal,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let (name, body) = match &removal {
             Removal::Project(name) => (
                 name.clone(),
                 "It leaves the sidebar. Its files, branches and worktrees stay on disk — add the folder again to bring it back.",
             ),
             Removal::Archived(root) => (
-                root.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+                root.file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
                 "It leaves the archived list. Its files stay on disk — add the folder again to bring it back.",
             ),
         };
@@ -178,21 +212,27 @@ impl HarnessWorkspace {
                     .flex()
                     .gap_2()
                     .mt_1()
-                    .child(dialog_button(hx, "remove-cancel", "Cancel", Tone::Primary).on_click(cx.listener(
-                        |ws, _, _, cx| {
-                            ws.confirm_removal = None;
-                            cx.notify();
-                        },
-                    )))
-                    .child(dialog_button(hx, "remove-confirm", "Remove", Tone::Plain).on_click(cx.listener(
-                        move |ws, _, window, cx| {
-                            ws.confirm_removal = None;
-                            match &removal {
-                                Removal::Project(name) => ws.remove_repo(name.clone(), window, cx),
-                                Removal::Archived(root) => ws.forget_archived(root, cx),
-                            }
-                        },
-                    ))),
+                    .child(
+                        dialog_button(hx, "remove-cancel", "Cancel", Tone::Primary).on_click(
+                            cx.listener(|ws, _, _, cx| {
+                                ws.confirm_removal = None;
+                                cx.notify();
+                            }),
+                        ),
+                    )
+                    .child(
+                        dialog_button(hx, "remove-confirm", "Remove", Tone::Plain).on_click(
+                            cx.listener(move |ws, _, window, cx| {
+                                ws.confirm_removal = None;
+                                match &removal {
+                                    Removal::Project(name) => {
+                                        ws.remove_repo(name.clone(), window, cx)
+                                    }
+                                    Removal::Archived(root) => ws.forget_archived(root, cx),
+                                }
+                            }),
+                        ),
+                    ),
             );
         self.dialog_backdrop(
             "remove-backdrop",
@@ -207,7 +247,11 @@ impl HarnessWorkspace {
 
     /// Archive / delete confirmation, naming exactly what would be lost.
     /// Rendered only once the loss check has answered.
-    pub(crate) fn render_end_confirm(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(crate) fn render_end_confirm(
+        &self,
+        hx: &HarnessTheme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let EndConfirm { plan, losses } = self.end_confirm.clone()?;
         let losses = losses?;
         let kind = plan.kind;
@@ -239,11 +283,20 @@ impl HarnessWorkspace {
                     .child("Nothing unsaved: every change is committed and pushed."),
             );
         } else {
-            details = details.child(div().text_sm().text_color(hx.tx1).child("This will be lost:"));
+            details = details.child(
+                div()
+                    .text_sm()
+                    .text_color(hx.tx1)
+                    .child("This will be lost:"),
+            );
             for l in lost {
                 let mut parts = Vec::new();
                 if l.dirty > 0 {
-                    parts.push(format!("{} uncommitted file{}", l.dirty, if l.dirty == 1 { "" } else { "s" }));
+                    parts.push(format!(
+                        "{} uncommitted file{}",
+                        l.dirty,
+                        if l.dirty == 1 { "" } else { "s" }
+                    ));
                 }
                 if kind == EndKind::Delete && l.unpushed > 0 {
                     parts.push(format!(
@@ -258,7 +311,12 @@ impl HarnessWorkspace {
                         .gap_2()
                         .text_sm()
                         .child(div().text_color(hx.red).child("•"))
-                        .child(div().font_family(hx.font_mono).text_color(hx.tx0).child(l.repo.clone()))
+                        .child(
+                            div()
+                                .font_family(hx.font_mono)
+                                .text_color(hx.tx0)
+                                .child(l.repo.clone()),
+                        )
                         .child(div().text_color(hx.red).child(parts.join(", "))),
                 );
             }
@@ -277,25 +335,43 @@ impl HarnessWorkspace {
                         dialog_button(hx, "end-cancel", "Cancel", Tone::Primary)
                             .on_click(cx.listener(|ws, _, _, cx| ws.cancel_end(cx))),
                     )
-                    .child(dialog_button(hx, "end-confirm", kind.verb(), Tone::Danger).on_click(cx.listener(
-                        move |ws, _, window, cx| ws.start_end(plan.clone(), window, cx),
-                    ))),
+                    .child(
+                        dialog_button(hx, "end-confirm", kind.verb(), Tone::Danger).on_click(
+                            cx.listener(move |ws, _, window, cx| {
+                                ws.start_end(plan.clone(), window, cx)
+                            }),
+                        ),
+                    ),
             );
         Some(self.dialog_backdrop("end-backdrop", card, |ws, _, cx| ws.cancel_end(cx), cx))
     }
 
     /// "Run this project's setup scripts?" — committed hooks arrive with the
     /// repository, so they run only after someone has looked at them.
-    pub(crate) fn render_hook_trust(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(crate) fn render_hook_trust(
+        &self,
+        hx: &HarnessTheme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let prompt = self.hook_trust.clone()?;
         let names: Vec<String> = prompt.repos.iter().map(|(n, _, _)| n.clone()).collect();
         let roots: Vec<PathBuf> = prompt.repos.iter().map(|(_, r, _)| r.clone()).collect();
 
         let mut list = div().flex().flex_col().gap_1();
         for (name, root, scripts) in &prompt.repos {
-            list = list.child(div().text_sm().font_family(hx.font_mono).text_color(hx.tx0).child(name.clone()));
+            list = list.child(
+                div()
+                    .text_sm()
+                    .font_family(hx.font_mono)
+                    .text_color(hx.tx0)
+                    .child(name.clone()),
+            );
             for s in scripts {
-                let shown = s.strip_prefix(root).unwrap_or(s).to_string_lossy().into_owned();
+                let shown = s
+                    .strip_prefix(root)
+                    .unwrap_or(s)
+                    .to_string_lossy()
+                    .into_owned();
                 list = list.child(
                     div()
                         .pl_3()

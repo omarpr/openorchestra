@@ -106,7 +106,11 @@ fn ask_login_shell() -> Option<String> {
 
     let raw = std::fs::read_to_string(&out_path).ok();
     let _ = std::fs::remove_file(&out_path);
-    finished.then_some(raw).flatten().as_deref().and_then(extract)
+    finished
+        .then_some(raw)
+        .flatten()
+        .as_deref()
+        .and_then(extract)
 }
 
 /// Whether this process needs the repair at all.
@@ -149,9 +153,8 @@ mod tests {
         // The regression this whole module exists for is a *silently wrong*
         // answer, so a profile that prints a banner must not be able to produce
         // one: the markers are what make the answer identifiable.
-        let raw = format!(
-            "nvm: using v20\nWelcome back!\n\n{BEGIN}/opt/homebrew/bin:/usr/bin{END}\n"
-        );
+        let raw =
+            format!("nvm: using v20\nWelcome back!\n\n{BEGIN}/opt/homebrew/bin:/usr/bin{END}\n");
         assert_eq!(extract(&raw).as_deref(), Some("/opt/homebrew/bin:/usr/bin"));
     }
 
@@ -159,7 +162,11 @@ mod tests {
     fn output_without_markers_is_not_a_path() {
         assert_eq!(extract(""), None);
         assert_eq!(extract("/opt/homebrew/bin:/usr/bin"), None);
-        assert_eq!(extract(&format!("{BEGIN}/opt/homebrew/bin")), None, "unterminated");
+        assert_eq!(
+            extract(&format!("{BEGIN}/opt/homebrew/bin")),
+            None,
+            "unterminated"
+        );
         assert_eq!(extract(&format!("{BEGIN}   {END}")), None, "empty PATH");
     }
 

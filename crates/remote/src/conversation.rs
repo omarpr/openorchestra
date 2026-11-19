@@ -437,9 +437,13 @@ fn codex_entries(records: &[Value], cwd: Option<&Path>) -> Vec<Entry> {
     // Current Codex emits completed UI items alongside raw model messages.
     // Only the UI item identifies a real user prompt (the model also receives
     // environment and instruction messages with role=user).
-    let completed_ids: HashSet<&str> = records.iter()
-        .filter(|r| r["type"] == "event_msg" && r["payload"]["type"] == "item_completed"
-            && r["payload"]["item"]["type"] == "AgentMessage")
+    let completed_ids: HashSet<&str> = records
+        .iter()
+        .filter(|r| {
+            r["type"] == "event_msg"
+                && r["payload"]["type"] == "item_completed"
+                && r["payload"]["item"]["type"] == "AgentMessage"
+        })
         .filter_map(|r| r["payload"]["item"]["id"].as_str())
         .collect();
     let has_assistant_events = records
@@ -451,8 +455,11 @@ fn codex_entries(records: &[Value], cwd: Option<&Path>) -> Vec<Entry> {
         let id = format!("codex:{}:{index}", at.as_deref().unwrap_or_default());
         match (r["type"].as_str(), p["type"].as_str()) {
             (Some("response_item"), Some("message"))
-                if p["role"] == "assistant" && !has_assistant_events
-                    && !p["id"].as_str().is_some_and(|id| completed_ids.contains(id)) =>
+                if p["role"] == "assistant"
+                    && !has_assistant_events
+                    && !p["id"]
+                        .as_str()
+                        .is_some_and(|id| completed_ids.contains(id)) =>
             {
                 for (i, part) in p["content"].as_array().into_iter().flatten().enumerate() {
                     if part["type"] == "output_text" {
@@ -475,8 +482,12 @@ fn codex_entries(records: &[Value], cwd: Option<&Path>) -> Vec<Entry> {
                 let id = item["id"].as_str().unwrap_or(&id);
                 for (i, part) in item["content"].as_array().into_iter().flatten().enumerate() {
                     if matches!(part["type"].as_str(), Some("text" | "Text")) {
-                        out.extend(text_entry(format!("{id}:{i}"), kind,
-                            part["text"].as_str().unwrap_or_default(), at.clone()));
+                        out.extend(text_entry(
+                            format!("{id}:{i}"),
+                            kind,
+                            part["text"].as_str().unwrap_or_default(),
+                            at.clone(),
+                        ));
                     }
                 }
             }

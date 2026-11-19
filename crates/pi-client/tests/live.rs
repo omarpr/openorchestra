@@ -85,7 +85,10 @@ fn drives_a_real_pi_rpc_process() {
         .expect("pi must be on PATH");
     let records = pi.subscribe();
 
-    pi.send(&RpcCommand::GetState { id: Some("s1".into()) }).unwrap();
+    pi.send(&RpcCommand::GetState {
+        id: Some("s1".into()),
+    })
+    .unwrap();
     pi.send(&RpcCommand::Prompt {
         id: Some("p1".into()),
         message: "ping".into(),
@@ -122,7 +125,10 @@ fn drives_a_real_pi_rpc_process() {
     let _ = stub.wait();
     let _ = std::io::stdout().flush();
 
-    assert!(saw_state_response, "get_state response never correlated by id");
+    assert!(
+        saw_state_response,
+        "get_state response never correlated by id"
+    );
     assert_eq!(
         transitions,
         vec![AgentState::Running, AgentState::Idle],

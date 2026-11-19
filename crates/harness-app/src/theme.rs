@@ -116,11 +116,9 @@ impl HarnessTheme {
         // that could drift out of sync with the colors.
         self.bg0.r < 0.5
     }
-
 }
 
 impl Global for HarnessTheme {}
-
 
 pub fn theme(cx: &App) -> &HarnessTheme {
     cx.global::<HarnessTheme>()
@@ -165,7 +163,11 @@ fn resolve_font(preferred: &[&str], fallback: &'static str, cx: &App) -> &'stati
 fn ui_font_family(cx: &App) -> &'static str {
     resolve_font(
         &["IBM Plex Sans", "IBMPlexSans"],
-        if cfg!(target_os = "macos") { "Helvetica Neue" } else { "DejaVu Sans" },
+        if cfg!(target_os = "macos") {
+            "Helvetica Neue"
+        } else {
+            "DejaVu Sans"
+        },
         cx,
     )
 }
@@ -173,7 +175,11 @@ fn ui_font_family(cx: &App) -> &'static str {
 fn mono_font_family(cx: &App) -> &'static str {
     resolve_font(
         &["IBM Plex Mono", "IBMPlexMono"],
-        if cfg!(target_os = "macos") { "Menlo" } else { "DejaVu Sans Mono" },
+        if cfg!(target_os = "macos") {
+            "Menlo"
+        } else {
+            "DejaVu Sans Mono"
+        },
         cx,
     )
 }

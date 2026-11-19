@@ -27,15 +27,23 @@ impl Render for DragGhost {
 }
 
 impl HarnessWorkspace {
-
-    pub(crate) fn render_center(&self, hx: &HarnessTheme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_center(
+        &self,
+        hx: &HarnessTheme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         if crate::probe_paint() {
             log::info!(
                 "paint: center selection={:?} pane={:?}",
                 self.selection,
                 self.resolve().map(|r| {
                     let p = self.panes.get(&r.key);
-                    (r.key.clone(), p.map(|p| p.tabs.len()), p.and_then(|p| p.active_tab()).map(|t| t.title.clone()))
+                    (
+                        r.key.clone(),
+                        p.map(|p| p.tabs.len()),
+                        p.and_then(|p| p.active_tab()).map(|t| t.title.clone()),
+                    )
                 }),
             );
         }
@@ -99,6 +107,9 @@ impl HarnessWorkspace {
                 }
                 TabContent::Chat(c) => c.clone().into_any_element(),
                 TabContent::Diff => self.render_diff_surface(hx, None, true, cx),
+                TabContent::ReviewOverview(overview) => {
+                    self.render_review_overview(overview, hx, cx)
+                }
             },
             None => div().into_any_element(),
         };
@@ -119,9 +130,12 @@ impl HarnessWorkspace {
             .track_scroll(&self.tab_scroll);
         if let Some(p) = pane {
             for tab in &p.tabs {
-                tabs = tabs.child(
-                    div().flex_none().child(self.render_tab(hx, tab, tab.id == p.active, cx)),
-                );
+                tabs = tabs.child(div().flex_none().child(self.render_tab(
+                    hx,
+                    tab,
+                    tab.id == p.active,
+                    cx,
+                )));
             }
             // Bring a newly active tab into view (only on change).
             if p.active != self.tab_scrolled_to.get()
@@ -222,12 +236,7 @@ impl HarnessWorkspace {
                 phase,
                 HookLayer::Local,
             ))
-            .child(
-                div()
-                    .w(px(1.0))
-                    .h(px(14.0))
-                    .bg(hx.border),
-            )
+            .child(div().w(px(1.0)).h(px(14.0)).bg(hx.border))
             .child(chip(
                 "hooks-setup",
                 "Setup",
@@ -286,9 +295,12 @@ impl HarnessWorkspace {
             )
     }
 
-    pub(crate) fn render_empty_center(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_empty_center(
+        &self,
+        hx: &HarnessTheme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         div()
-            .track_focus(&self.focus_handle)
             .flex()
             .flex_col()
             .flex_1()
@@ -298,8 +310,19 @@ impl HarnessWorkspace {
             .justify_center()
             .gap_3()
             .bg(hx.bg0)
-            .child(div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx1).child("No project open"))
-            .child(div().text_sm().text_color(hx.tx2).child("Open a git repository to start orchestrating worktrees."))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(hx.tx1)
+                    .child("No project open"),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(hx.tx2)
+                    .child("Open a git repository to start orchestrating worktrees."),
+            )
             .child(
                 div()
                     .id("empty-add")
@@ -338,6 +361,10 @@ impl HarnessWorkspace {
         let ghost_theme = hx.clone();
         let hover_bg = hx.surface_hover;
         let group = gpui::SharedString::from(format!("tab-{}", tab.id));
+        let overview = match &tab.content {
+            TabContent::ReviewOverview(overview) => Some(overview),
+            _ => None,
+        };
         div()
             .id(("tab", tab.id as usize))
             .group(group.clone())
@@ -353,24 +380,41 @@ impl HarnessWorkspace {
             // tab 2px wider and nudged every tab after it sideways — the strip
             // visibly jittered on each click.
             .border_1()
-            .border_color(if active { hx.border } else { Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 } })
+            .border_color(if active {
+                hx.border
+            } else {
+                Rgba {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.0,
+                }
+            })
             .when(active, |d| d.bg(hx.bg0))
             // The UI face, like the rest of the chrome: the labels are names,
             // not code, and monospace here was the one place it stood out.
             .text_xs()
             .text_color(if active { hx.tx0 } else { hx.tx2 })
             .when(
-                matches!(
-                    &tab.content,
-                    TabContent::File {
-                        preview: true,
-                        ..
-                    }
-                ),
+                matches!(&tab.content, TabContent::File { preview: true, .. }),
                 |d| d.italic(),
             )
             .when_some(tab.agent.clone(), |d, kind| {
                 d.child(div().mr_1().size(px(14.0)).child(agent_icon(&kind, 13.0)))
+            })
+            .when_some(overview, |d, overview| {
+                if matches!(overview.status, OverviewStatus::Running(_)) {
+                    d.child(super::review_overview::review_spinner(
+                        ::ui::IconSize::Small,
+                    ))
+                } else {
+                    d.child(
+                        svg()
+                            .path(::ui::IconName::ListTodo.path())
+                            .size(px(14.0))
+                            .text_color(if active { hx.accent } else { hx.tx2 }),
+                    )
+                }
             })
             // A file tab is a view into zed (the service workspace), so it
             // wears the Editor tab's `{ }` mark: same glyph, same spacing as
@@ -439,7 +483,9 @@ impl HarnessWorkspace {
                     // On the active tab, and on whichever one is hovered: an ×
                     // on every tab was as loud as the labels themselves. It is
                     // only faded, so the tab keeps its width.
-                    .when(!active, |d| d.opacity(0.0).group_hover(group, |s| s.opacity(1.0)))
+                    .when(!active, |d| {
+                        d.opacity(0.0).group_hover(group, |s| s.opacity(1.0))
+                    })
                     .hover(|d| d.bg(hx.surface).text_color(hx.red))
                     .child("×")
                     .on_click(cx.listener(move |ws, _, window, cx| {
@@ -455,7 +501,11 @@ impl HarnessWorkspace {
     /// One affordance rather than one button per kind: the strip already
     /// carries the worktree's tabs, and four permanent `＋x` buttons competed
     /// with them for both space and attention.
-    pub(crate) fn render_new_tab_button(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_new_tab_button(
+        &self,
+        hx: &HarnessTheme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         div()
             .id("new-tab")
             .flex()
@@ -588,16 +638,11 @@ impl HarnessWorkspace {
                     .bg(hx.bg1)
                     .border_t_1()
                     .border_color(hx.border)
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(hx.tx2)
-                            .child(if existing {
-                                "clear the text to delete"
-                            } else {
-                                "goes to the agent with the review"
-                            }),
-                    )
+                    .child(div().text_xs().text_color(hx.tx2).child(if existing {
+                        "clear the text to delete"
+                    } else {
+                        "goes to the agent with the review"
+                    }))
                     .child(
                         div()
                             .flex()

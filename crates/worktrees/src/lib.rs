@@ -21,8 +21,8 @@ mod runner;
 mod tasks;
 
 pub use git::{
-    Change, Diff, DiffFile, GitError, GitStatus, GitWorktrees, PushState, WorktreeListEntry,
-    MAX_UNTRACKED_FILES, is_safe_ref,
+    is_safe_ref, Change, Diff, DiffFile, GitError, GitStatus, GitWorktrees, PushState,
+    WorktreeListEntry, MAX_UNTRACKED_FILES,
 };
 pub use hooks::{
     classify_hook_script, clear_local_hooks, committed_hooks_path, ensure_hook_script,
@@ -33,7 +33,7 @@ pub use hooks::{
 };
 pub use login_shell::interactive_login_command;
 pub use registry::{
-    AVATAR_PALETTE_LEN, AgentKind, Avatar, Registry, RegistryError, RepoGroup, WorktreeEntry,
+    AgentKind, Avatar, Registry, RegistryError, RepoGroup, WorktreeEntry, AVATAR_PALETTE_LEN,
 };
 pub use runner::{CommandOutput, CommandRunner, SystemRunner};
 pub use tasks::{

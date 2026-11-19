@@ -21,12 +21,11 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use serde_json::{json, Value};
 
-use crate::{
-    resolve_on_path, AgentCommand, AgentKind, AgentRuntime, SignalKind, WaitFidelity,
-};
+use crate::{resolve_on_path, AgentCommand, AgentKind, AgentRuntime, SignalKind, WaitFidelity};
 
 const SHIM: &str = include_str!("../shims/codex-hook.mjs");
 const SHIM_FILENAME: &str = "codex-hook.mjs";
@@ -43,8 +42,13 @@ const HOOK_EVENTS: &[&str] = &["UserPromptSubmit", "Stop"];
 /// below and the settings UI (via [`crate::default_command_display`]) both
 /// derive from these two consts.
 pub(crate) const PROGRAM: &str = "codex";
-pub(crate) const DEFAULT_ARGS: &[&str] =
-    &["--sandbox", "workspace-write", "--ask-for-approval", "on-request"];
+pub(crate) const DEFAULT_ARGS: &[&str] = &[
+    "--sandbox",
+    "workspace-write",
+    "--ask-for-approval",
+    "on-request",
+];
+const NO_DAEMON: &str = "--no-daemon";
 
 pub struct CodexRuntime {
     state_dir: PathBuf,
@@ -92,7 +96,11 @@ impl CodexRuntime {
     }
 
     fn install_hook(&self, shim: &Path) -> io::Result<()> {
-        install_status_hooks(&self.codex_home(), &shim.display().to_string(), &Self::hook_command(shim))
+        install_status_hooks(
+            &self.codex_home(),
+            &shim.display().to_string(),
+            &Self::hook_command(shim),
+        )
     }
 
     /// Best-effort removal of the pre-hooks `notify` line from `config.toml`,
@@ -195,7 +203,9 @@ fn ensure_hook(root: &mut Value, event: &str, marker: &str, command: &str) {
         };
         let was_empty = handlers.is_empty();
         handlers.retain_mut(|handler| {
-            let belongs_to_us = handler["command"].as_str().is_some_and(|cmd| cmd.contains(marker));
+            let belongs_to_us = handler["command"]
+                .as_str()
+                .is_some_and(|cmd| cmd.contains(marker));
             if !belongs_to_us {
                 return true;
             }
@@ -249,11 +259,31 @@ impl AgentRuntime for CodexRuntime {
         Some(AgentCommand {
             program: resolve_on_path(PROGRAM)?,
             args: DEFAULT_ARGS.iter().map(|s| s.to_string()).collect(),
-            // The notify hook lives in the user's GLOBAL codex config; this
-            // marker is what scopes it — the shim exits without writing
-            // unless it inherits this from a harness-spawned codex.
+            // The global status hook only writes when it inherits this marker
+            // from a harness-spawned Codex process.
             env: vec![("HARNESS_MANAGED".to_string(), "1".to_string())],
             label: PROGRAM.to_string(),
         })
+    }
+
+    fn prepare_launch(&self, mut command: AgentCommand) -> AgentCommand {
+        // A shared Codex server runs hooks with its own environment, which
+        // lacks this terminal's HARNESS_MANAGED and HARNESS_REMOTE_SESSION.
+        // Keep the server local to the CLI so both reach the hooks. Older CLI
+        // releases reject the flag. Shell-based command overrides own their
+        // arguments and are passed through by the caller.
+        if command.program.file_name() == Some(PROGRAM.as_ref())
+            && !command.args.iter().any(|arg| arg == NO_DAEMON)
+            && Command::new(&command.program)
+                .args([NO_DAEMON, "--version"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        {
+            command.args.push(NO_DAEMON.into());
+        }
+        command
     }
 }

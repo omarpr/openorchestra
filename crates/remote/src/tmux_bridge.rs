@@ -67,10 +67,7 @@ impl Tmux {
     /// Run a one-shot tmux command (argv only); stdout on success.
     async fn output(&self, args: &[&str]) -> io::Result<Vec<u8>> {
         let mut command = self.command();
-        command
-            .args(args)
-            .stdin(Stdio::null())
-            .kill_on_drop(true);
+        command.args(args).stdin(Stdio::null()).kill_on_drop(true);
         let out = tokio::time::timeout(TMUX_COMMAND_TIMEOUT, command.output())
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "tmux command timed out"))??;
@@ -85,11 +82,14 @@ impl Tmux {
             } else {
                 io::ErrorKind::Other
             };
-            return Err(io::Error::new(kind, format!(
-                "tmux {}: {}",
-                args.first().copied().unwrap_or(""),
-                stderr.trim()
-            )));
+            return Err(io::Error::new(
+                kind,
+                format!(
+                    "tmux {}: {}",
+                    args.first().copied().unwrap_or(""),
+                    stderr.trim()
+                ),
+            ));
         }
         Ok(out.stdout)
     }
@@ -523,8 +523,12 @@ impl SessionHub {
         } else {
             (format!("{text} Screenshot file: {path:?}"), String::new())
         };
-        let screenshot = ScreenshotSend { file, authorize: Box::new(authorize) };
-        self.send_line_batches(text.as_bytes(), paste.as_bytes(), Some(screenshot)).await
+        let screenshot = ScreenshotSend {
+            file,
+            authorize: Box::new(authorize),
+        };
+        self.send_line_batches(text.as_bytes(), paste.as_bytes(), Some(screenshot))
+            .await
     }
 
     async fn send_line_batches(
@@ -713,13 +717,15 @@ impl Actor {
             }
             tokio::time::sleep(ENTER_DELAY).await;
         }
-        self.exec_tracking_write(&enter).await.map_err(|(wrote, e)| {
-            if wrote_any || wrote {
-                SendLineError::PartialOrUnknown(e)
-            } else {
-                SendLineError::NotWritten(e)
-            }
-        })
+        self.exec_tracking_write(&enter)
+            .await
+            .map_err(|(wrote, e)| {
+                if wrote_any || wrote {
+                    SendLineError::PartialOrUnknown(e)
+                } else {
+                    SendLineError::NotWritten(e)
+                }
+            })
     }
 
     async fn run(mut self, mut rx: mpsc::UnboundedReceiver<Cmd>) {
@@ -733,7 +739,11 @@ impl Actor {
                     screenshot,
                     done,
                 } => {
-                    let result = if let Some(ScreenshotSend { mut file, authorize }) = screenshot {
+                    let result = if let Some(ScreenshotSend {
+                        mut file,
+                        authorize,
+                    }) = screenshot
+                    {
                         if done.is_closed() {
                             continue;
                         }
@@ -905,7 +915,14 @@ impl Actor {
         let write = tokio::time::timeout(CONTROL_WRITE_TIMEOUT, async {
             stdin.write_all(&payload).await?;
             stdin.flush().await
-        }).await.unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "tmux control write")));
+        })
+        .await
+        .unwrap_or_else(|_| {
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "tmux control write",
+            ))
+        });
         if let Err(error) = write {
             // A partial line or an unacknowledged write makes the FIFO unsafe
             // for another command. Close this client and report unknown delivery.
@@ -918,7 +935,9 @@ impl Actor {
                 ok &= ack.await.map_err(|_| hub_gone())?;
             }
             Ok(ok)
-        }).await.unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "tmux ack")));
+        })
+        .await
+        .unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "tmux ack")));
         let ok = match acknowledgements {
             Ok(ok) => ok,
             Err(error) => {
@@ -1203,9 +1222,15 @@ mod tests {
             registry: FitRegistry::default(),
         };
         let batches = [vec!["x".repeat(1024 * 1024)], Vec::new(), Vec::new()];
-        let result = tokio::time::timeout(CONTROL_WRITE_TIMEOUT + Duration::from_secs(2), actor.send_line(batches))
-            .await.unwrap();
-        assert!(matches!(result, Err(SendLineError::PartialOrUnknown(err)) if err.kind() == io::ErrorKind::TimedOut));
+        let result = tokio::time::timeout(
+            CONTROL_WRITE_TIMEOUT + Duration::from_secs(2),
+            actor.send_line(batches),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(result, Err(SendLineError::PartialOrUnknown(err)) if err.kind() == io::ErrorKind::TimedOut)
+        );
         assert!(actor.stdin.is_none());
         assert!(actor.closed.load(Ordering::SeqCst));
         assert!(actor.pending.lock().unwrap().is_empty());
@@ -1245,7 +1270,10 @@ mod tests {
         };
         let (canceled, canceled_path) = save();
         let mut send = Box::pin(hub.send_screenshot("hi", canceled, true, || true));
-        assert!(send.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        assert!(send
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending());
         assert!(canceled_path.is_file());
         drop(send);
 
@@ -1266,7 +1294,9 @@ mod tests {
         );
 
         let (unauthorized, unauthorized_path) = save();
-        let res = hub.send_screenshot("hi", unauthorized, true, || false).await;
+        let res = hub
+            .send_screenshot("hi", unauthorized, true, || false)
+            .await;
         assert!(matches!(res, Err(SendLineError::Unauthorized)));
         assert!(!unauthorized_path.exists());
         assert!(!canceled_path.exists());
@@ -1287,7 +1317,10 @@ mod tests {
         closed.store(false, Ordering::SeqCst);
         let (written, written_path) = save();
         let mut send = Box::pin(hub.send_screenshot("hi", written, true, || true));
-        assert!(send.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        assert!(send
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending());
         let mut line = String::new();
         tokio::time::timeout(Duration::from_secs(2), stdout.read_line(&mut line))
             .await
@@ -1297,11 +1330,20 @@ mod tests {
         assert_eq!(line.trim_end(), hex_keys("%1", paste.as_bytes())[0]);
         drop(send);
         // Stop the send before other batches by simulating a failed tmux acknowledgment.
-        pending.lock().unwrap().pop_front().unwrap().send(false).unwrap();
+        pending
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap()
+            .send(false)
+            .unwrap();
         hub.shutdown().await;
         assert!(written_path.is_file());
         let mut received = Vec::new();
         stdout.read_to_end(&mut received).await.unwrap();
-        assert!(received.is_empty(), "expected zero bytes written: {received:?}");
+        assert!(
+            received.is_empty(),
+            "expected zero bytes written: {received:?}"
+        );
     }
 }

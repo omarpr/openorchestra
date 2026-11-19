@@ -11,9 +11,7 @@
 use std::io;
 use std::path::Path;
 
-use crate::{
-    resolve_on_path, AgentCommand, AgentKind, AgentRuntime, SignalKind, WaitFidelity,
-};
+use crate::{resolve_on_path, AgentCommand, AgentKind, AgentRuntime, SignalKind, WaitFidelity};
 
 /// The default launch command — THE one definition for this agent. The spawn
 /// below and the settings UI (via [`crate::default_command_display`]) both

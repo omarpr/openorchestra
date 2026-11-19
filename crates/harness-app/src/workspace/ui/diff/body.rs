@@ -245,7 +245,10 @@ impl HarnessWorkspace {
         } else {
             list.flex_grow_1().min_h_0()
         };
-        log::trace!("diff body: {count} items prepared in {:?}", _started.elapsed());
+        log::trace!(
+            "diff body: {count} items prepared in {:?}",
+            _started.elapsed()
+        );
         // Same idiom as the settings overlay: a virtualized list that lays out
         // to zero height reports perfect state and paints nothing, which is
         // indistinguishable from "the diff is empty" without this.
@@ -275,7 +278,12 @@ impl HarnessWorkspace {
         item: BodyItem,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let transparent = Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+        let transparent = Rgba {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.0,
+        };
         let ix = match item {
             BodyItem::Split(sr) => return self.render_split_item(hx, file, rows, sr, cx),
             BodyItem::Truncated(n) => {
@@ -419,7 +427,11 @@ impl HarnessWorkspace {
                     .when(has_comment, |d| d.bg(tint(hx.amber, 0.18)))
                     .text_color(if has_comment { hx.amber } else { hx.tx2 })
                     .cursor_pointer()
-                    .tooltip(tip(if has_comment { "Edit comment" } else { "Comment on line" }))
+                    .tooltip(tip(if has_comment {
+                        "Edit comment"
+                    } else {
+                        "Comment on line"
+                    }))
                     .hover(|d| d.bg(hx.surface).text_color(hx.accent))
                     // The marker sits in a fixed slot rather than being prefixed
                     // to the number, so commented lines do not shift their digits
@@ -438,13 +450,7 @@ impl HarnessWorkspace {
                     .on_click(cx.listener(move |ws, ev: &gpui::ClickEvent, window, cx| {
                         cx.stop_propagation();
                         if let Some(line) = line_no {
-                            ws.begin_comment(
-                                comment_file.clone(),
-                                line,
-                                ev.position(),
-                                window,
-                                cx,
-                            );
+                            ws.begin_comment(comment_file.clone(), line, ev.position(), window, cx);
                         }
                     })),
             )
@@ -555,8 +561,19 @@ impl HarnessWorkspace {
         selected: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let transparent = Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
-        let half = div().flex().flex_1().flex_basis(px(0.0)).min_w_0().h_full().overflow_hidden();
+        let transparent = Rgba {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.0,
+        };
+        let half = div()
+            .flex()
+            .flex_1()
+            .flex_basis(px(0.0))
+            .min_w_0()
+            .h_full()
+            .overflow_hidden();
 
         let Some(ix) = ix else {
             return half.bg(tint(hx.tx2, 0.06)).into_any_element();
@@ -591,7 +608,12 @@ impl HarnessWorkspace {
             .gap_1()
             .when(has_comment, |d| d.bg(tint(hx.amber, 0.18)))
             .text_color(if has_comment { hx.amber } else { hx.tx2 })
-            .child(div().flex_none().w(px(8.0)).child(if has_comment { "▸" } else { "" }))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(8.0))
+                    .child(if has_comment { "▸" } else { "" }),
+            )
             .child(
                 div()
                     .flex_1()
@@ -600,7 +622,11 @@ impl HarnessWorkspace {
         if commentable {
             gutter = gutter
                 .cursor_pointer()
-                .tooltip(tip(if has_comment { "Edit comment" } else { "Comment on line" }))
+                .tooltip(tip(if has_comment {
+                    "Edit comment"
+                } else {
+                    "Comment on line"
+                }))
                 .hover(|d| d.bg(hx.surface).text_color(hx.accent))
                 .on_click(cx.listener(move |ws, ev: &gpui::ClickEvent, window, cx| {
                     cx.stop_propagation();

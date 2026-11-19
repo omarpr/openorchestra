@@ -25,8 +25,7 @@ pub fn task_context_prompt(contents: &str) -> String {
 /// follow what each CLI actually supports for extra instructions.
 pub fn apply_task_context(cmd: &mut AgentCommand, kind: &AgentKind, context_path: &Path) {
     let path_str = context_path.to_string_lossy().into_owned();
-    cmd.env
-        .retain(|(k, _)| k != HARNESS_TASK_CONTEXT);
+    cmd.env.retain(|(k, _)| k != HARNESS_TASK_CONTEXT);
     cmd.env
         .push((HARNESS_TASK_CONTEXT.to_string(), path_str.clone()));
 
@@ -38,8 +37,7 @@ pub fn apply_task_context(cmd: &mut AgentCommand, kind: &AgentKind, context_path
 
     match kind {
         AgentKind::ClaudeCode => {
-            cmd.args
-                .push("--append-system-prompt-file".to_string());
+            cmd.args.push("--append-system-prompt-file".to_string());
             cmd.args.push(path_str);
         }
         AgentKind::Pi => {
@@ -61,6 +59,11 @@ pub fn apply_task_context(cmd: &mut AgentCommand, kind: &AgentKind, context_path
         }
         AgentKind::Kimi => {
             cmd.args.push("--system-prompt".to_string());
+            cmd.args.push(prompt);
+        }
+        AgentKind::Grok => {
+            // `--rules` appends the text to Grok's system prompt.
+            cmd.args.push("--rules".to_string());
             cmd.args.push(prompt);
         }
         // OpenCode has no dedicated append flag; Other covers cursor-agent etc.
@@ -132,9 +135,10 @@ mod tests {
         fs::write(&path, "# Task: t\nAlso:\n- api: `/wt/api`\n").unwrap();
         let mut cmd = empty_cmd();
         apply_task_context(&mut cmd, &AgentKind::ClaudeCode, &path);
-        assert!(cmd.args.windows(2).any(|w| {
-            w[0] == "--append-system-prompt-file" && w[1] == path.to_string_lossy()
-        }));
+        assert!(cmd
+            .args
+            .windows(2)
+            .any(|w| { w[0] == "--append-system-prompt-file" && w[1] == path.to_string_lossy() }));
         assert!(cmd
             .env
             .iter()
@@ -148,9 +152,10 @@ mod tests {
         fs::write(&path, "siblings\n").unwrap();
         let mut cmd = empty_cmd();
         apply_task_context(&mut cmd, &AgentKind::Pi, &path);
-        assert!(cmd.args.windows(2).any(|w| {
-            w[0] == "--append-system-prompt" && w[1] == path.to_string_lossy()
-        }));
+        assert!(cmd
+            .args
+            .windows(2)
+            .any(|w| { w[0] == "--append-system-prompt" && w[1] == path.to_string_lossy() }));
     }
 
     #[test]
@@ -164,11 +169,7 @@ mod tests {
             env: Vec::new(),
             label: "cursor-agent".into(),
         };
-        apply_task_context(
-            &mut cmd,
-            &AgentKind::Other("cursor-agent".into()),
-            &path,
-        );
+        apply_task_context(&mut cmd, &AgentKind::Other("cursor-agent".into()), &path);
         assert_eq!(cmd.args.len(), 1);
         assert!(cmd.args[0].contains("OpenOrchestra task context"));
         assert!(cmd.args[0].contains("Home (cwd): jam"));
@@ -205,9 +206,23 @@ mod tests {
         fs::write(&path, "Home (cwd): jam\n").unwrap();
         let mut cmd = empty_cmd();
         apply_task_context(&mut cmd, &AgentKind::Kimi, &path);
-        assert!(cmd.args.windows(2).any(|w| {
-            w[0] == "--system-prompt" && w[1].contains("Home (cwd): jam")
-        }));
+        assert!(cmd
+            .args
+            .windows(2)
+            .any(|w| { w[0] == "--system-prompt" && w[1].contains("Home (cwd): jam") }));
+    }
+
+    #[test]
+    fn grok_gets_rules_with_the_prompt_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent-context.md");
+        fs::write(&path, "Home (cwd): jam\n").unwrap();
+        let mut cmd = empty_cmd();
+        apply_task_context(&mut cmd, &AgentKind::Grok, &path);
+        assert!(cmd
+            .args
+            .windows(2)
+            .any(|w| { w[0] == "--rules" && w[1].contains("Home (cwd): jam") }));
     }
 
     #[test]

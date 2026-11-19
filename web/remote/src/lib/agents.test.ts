@@ -4,6 +4,7 @@ import { agentName, closureText, isRemoteWide, isRetryable } from "./agents";
 describe("agents", () => {
   it("names agent kinds, and nothing for a shell", () => {
     expect(agentName("claude-code")).toBe("Claude Code");
+    expect(agentName("grok")).toBe("Grok");
     expect(agentName("weird")).toBe("weird");
     expect(agentName(null)).toBe("");
   });

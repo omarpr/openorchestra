@@ -6,6 +6,28 @@ use super::*;
 impl HarnessWorkspace {
     /// Open a new tab in the active worktree's set and focus it.
     pub(crate) fn open_tab(&mut self, kind: TabKind, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_tab_with_review(kind, None, window, cx);
+    }
+
+    pub(crate) fn open_review_chat(
+        &mut self,
+        review: ReviewFollowup,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(kind) = review.cli.agent_kind() else {
+            return;
+        };
+        self.open_tab_with_review(TabKind::Agent(kind), Some(review), window, cx);
+    }
+
+    fn open_tab_with_review(
+        &mut self,
+        kind: TabKind,
+        review: Option<ReviewFollowup>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(r) = self.resolve() else { return };
         // `main` is a read-only checkout with no agent (D8).
         // D8 revised (July 22, 2026): agents may run on main too — it is the
@@ -16,6 +38,21 @@ impl HarnessWorkspace {
             self.set_note("agent chat needs a worktree".to_string());
             cx.notify();
             return;
+        }
+
+        if kind == TabKind::ReviewOverview {
+            self.tools_maximized = false;
+            if let Some(pane) = self.panes.get_mut(&r.key)
+                && let Some(tab) = pane
+                    .tabs
+                    .iter()
+                    .find(|t| matches!(t.content, TabContent::ReviewOverview(_)))
+            {
+                pane.active = tab.id;
+                self.focus_active_pane(window, cx);
+                cx.notify();
+                return;
+            }
         }
 
         let tab_id = self.next_tab_id();
@@ -43,12 +80,14 @@ impl HarnessWorkspace {
                 )
             }
             TabKind::Agent(ref agent) => {
-                let prep = self.prepare_agent_launch(agent, &r);
-                let session = self.has_tmux.then(|| crate::terminal_pane::TerminalSession {
-                    name: crate::tmux::session_name(&r.key, tab_id),
-                    attach_only: false,
-                    env: self.pane_env(&r),
-                });
+                let prep = self.prepare_agent_launch(agent, &r, tab_id);
+                let session = self
+                    .has_tmux
+                    .then(|| crate::terminal_pane::TerminalSession {
+                        name: crate::tmux::session_name(&r.key, tab_id),
+                        attach_only: false,
+                        env: self.pane_env(&r),
+                    });
                 let label = agent.as_str().to_string();
                 let term_pane = cx.new(|cx| {
                     TerminalPane::new_pending(
@@ -65,11 +104,17 @@ impl HarnessWorkspace {
             // Nothing to construct: the surface reads state the view already
             // holds, so the tab is a marker saying where to draw it.
             TabKind::Diff => (TabContent::Diff, "⑂ diff".to_string()),
+            TabKind::ReviewOverview => (
+                TabContent::ReviewOverview(OverviewTab::default()),
+                "Review Overview".to_string(),
+            ),
             TabKind::Editor => {
                 // One per worktree: a second ⌘E switches to the existing tab.
                 if let Some(pane) = self.panes.get_mut(&r.key)
-                    && let Some(existing) =
-                        pane.tabs.iter().find(|t| matches!(t.content, TabContent::Editor(_)))
+                    && let Some(existing) = pane
+                        .tabs
+                        .iter()
+                        .find(|t| matches!(t.content, TabContent::Editor(_)))
                 {
                     pane.active = existing.id;
                     self.focus_active_pane(window, cx);
@@ -100,34 +145,47 @@ impl HarnessWorkspace {
         // and the else case silently dropped the tab — including a fully
         // constructed zed Workspace, whose own diagnostics all read healthy
         // because the entity *was* healthy right up until it was released.
-        // Every state probe passed while the screen showed nothing; a tab
-        // that cannot be attached must never be discarded without a trace.
-        self.pane_clock = self.pane_clock.wrapping_add(1);
-        let pane = self.panes.entry(r.key.clone()).or_insert_with(|| PaneSet {
-            tabs: Vec::new(),
-            active: 0,
-            last_used: 0,
-        });
-        pane.last_used = self.pane_clock;
-        pane.tabs.push(Tab { id: tab_id, title, content, agent: agent_of_kind });
-        pane.active = tab_id;
+        // Every state probe passed while the screen showed nothing.
+        self.attach_tab(
+            &r.key,
+            Tab {
+                id: tab_id,
+                title,
+                content,
+                agent: agent_of_kind,
+            },
+        );
         if let TabKind::Agent(a) = &kind {
             // The transcript on record is an earlier session's, not this tab's.
             self.remote.forget_session(&r.path, a.as_str());
         }
         self.focus_active_pane(window, cx);
         self.save_panes();
+        if kind == TabKind::ReviewOverview {
+            self.run_review_overview(cx);
+        }
         if let Some((prep, session)) = pending_agent_launch {
             self.pending_agent_launches.insert(tab_id);
             let key = r.key.clone();
             let session_name = session.as_ref().map(|session| session.name.clone());
             cx.spawn_in(window, async move |view, cx| {
-                let command = cx
+                let resolved = cx
                     .background_executor()
-                    .spawn(async move { prep.resolve() })
+                    .spawn(async move { prep.resolve(review) })
                     .await;
                 let launch = view
                     .update_in(cx, |ws, window, cx| {
+                        if resolved.review_cli_missing {
+                            ws.abandon_missing_review_cli(
+                                &key,
+                                tab_id,
+                                &resolved.kind_label,
+                                window,
+                                cx,
+                            );
+                            return None;
+                        }
+                        let command = resolved.command;
                         let pane = ws.panes.get_mut(&key)?;
                         let tab = pane.tabs.iter_mut().find(|t| t.id == tab_id)?;
                         let TabContent::Terminal(term_pane) = &tab.content else {
@@ -142,9 +200,8 @@ impl HarnessWorkspace {
                             tab.title = label;
                             ws.save_panes();
                         }
-                        let launch = term_pane.update(cx, |pane, cx| {
-                            pane.launch(command, session, window, cx)
-                        });
+                        let launch = term_pane
+                            .update(cx, |pane, cx| pane.launch(command, session, window, cx));
                         cx.notify();
                         Some(launch)
                     })
@@ -212,11 +269,6 @@ impl HarnessWorkspace {
         self.exit_hooks_edit(window, cx);
         self.edit_prompt = None;
         let Some(r) = self.resolve() else { return };
-        let Some(hosted) = self.ensure_service_workspace(window, cx) else {
-            self.set_note("could not open an editor".to_string());
-            cx.notify();
-            return;
-        };
         // A task's diff keys files `repo/path`: open it in its member's
         // worktree. Anything else is relative to the editor root, never
         // `r.path`: for a coordinator that is the task folder, which holds
@@ -230,7 +282,23 @@ impl HarnessWorkspace {
             Some(f) => (f.worktree.clone(), f.file.path.clone()),
             None => (r.editor_path.clone(), file),
         };
-        crate::workspace_host::open_file_at(&hosted, &root, &rel, line, false, window, cx);
+        self.open_workspace_file(&root, &rel, line, window, cx);
+    }
+
+    pub(crate) fn open_workspace_file(
+        &mut self,
+        root: &Path,
+        relative: &str,
+        line: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(hosted) = self.ensure_service_workspace(window, cx) else {
+            self.set_note("could not open an editor".to_string());
+            cx.notify();
+            return;
+        };
+        crate::workspace_host::open_file_at(&hosted, root, relative, line, false, window, cx);
         cx.notify();
     }
 
@@ -240,7 +308,9 @@ impl HarnessWorkspace {
     /// entities — a pty and the process on the other end of it — travel with
     /// their tab instead of being dropped and respawned.
     pub(crate) fn move_tab(&mut self, key: &str, dragged: u64, onto: u64) {
-        let Some(pane) = self.panes.get_mut(key) else { return };
+        let Some(pane) = self.panes.get_mut(key) else {
+            return;
+        };
         let ids: Vec<u64> = pane.tabs.iter().map(|t| t.id).collect();
         let order = reordered(&ids, dragged, onto);
         if order == ids {
@@ -255,7 +325,12 @@ impl HarnessWorkspace {
     /// process, a chat's `pi --mode rpc` sidecar, or a service-Workspace item.
     /// Close a tab from the UI. Closing a task pane's agent tab stops one of
     /// the task's agents, so it asks first; everything else closes directly.
-    pub(crate) fn request_close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn request_close_tab(
+        &mut self,
+        id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(r) = self.resolve() else { return };
         let agent_label = self
             .panes
@@ -269,7 +344,11 @@ impl HarnessWorkspace {
             self.close_tab(id, window, cx);
             return;
         };
-        let task_name = self.task_store.get(&tid).map(|t| t.name.clone()).unwrap_or(tid);
+        let task_name = self
+            .task_store
+            .get(&tid)
+            .map(|t| t.name.clone())
+            .unwrap_or(tid);
         let who = if member == a2a_broker::COORDINATOR_TENANT {
             "coordinator".to_string()
         } else {
@@ -299,33 +378,37 @@ impl HarnessWorkspace {
         let Some(r) = self.resolve() else { return };
         let key = r.key.clone();
         let file_item = self.panes.get(&key).and_then(|p| {
-            p.tabs.iter().find(|t| t.id == id).and_then(|t| match &t.content {
-                TabContent::File { item_id, .. } => Some(*item_id),
-                _ => None,
-            })
+            p.tabs
+                .iter()
+                .find(|t| t.id == id)
+                .and_then(|t| match &t.content {
+                    TabContent::File { item_id, .. } => Some(*item_id),
+                    _ => None,
+                })
         });
         if let Some(item_id) = file_item
-            && let Some(hosted) = self.service_workspaces.get(&key).cloned() {
-                // ItemRemoved sync removes the harness tab; avoid double-remove.
-                hosted.update(cx, |ws, cx| {
-                    for pane in ws.panes() {
-                        let has = pane.read(cx).items().any(|i| i.item_id() == item_id);
-                        if has {
-                            pane.update(cx, |pane, cx| {
-                                pane.close_item_by_id(
-                                    item_id,
-                                    workspace::SaveIntent::Close,
-                                    window,
-                                    cx,
-                                )
-                                .detach_and_log_err(cx);
-                            });
-                            break;
-                        }
+            && let Some(hosted) = self.service_workspaces.get(&key).cloned()
+        {
+            // ItemRemoved sync removes the harness tab; avoid double-remove.
+            hosted.update(cx, |ws, cx| {
+                for pane in ws.panes() {
+                    let has = pane.read(cx).items().any(|i| i.item_id() == item_id);
+                    if has {
+                        pane.update(cx, |pane, cx| {
+                            pane.close_item_by_id(
+                                item_id,
+                                workspace::SaveIntent::Close,
+                                window,
+                                cx,
+                            )
+                            .detach_and_log_err(cx);
+                        });
+                        break;
                     }
-                });
-                return;
-            }
+                }
+            });
+            return;
+        }
         // Is the tab being closed an agent tab? If so, killing its session ends
         // that agent, and a dead agent never writes the resolving "idle" — so its
         // pill would stay stuck on WAITING/RUNNING forever. Clear it here.
@@ -346,28 +429,26 @@ impl HarnessWorkspace {
             self.remote.forget_session(&r.path, a.as_str());
         }
         if was_agent {
-            // Unknown (renders as IDLE) rather than Idle: we killed the process,
-            // we didn't observe a clean finish. A file event can't unstick this
-            // because the dead agent will never touch status.json again.
-            self.conductor.stopped(&r.path);
-            self.agent_since.insert(r.path.clone(), (std::time::SystemTime::now(), None));
-            self.agent_status.insert(r.path.clone(), AgentState::Unknown);
+            self.stop_agent(&crate::conductor::AgentTarget::new(&r.path, Some(id)));
+            let _ = std::fs::remove_file(agent_runtime::status_path(&r.path, Some(id)));
+            if !self.panes[&key]
+                .tabs
+                .iter()
+                .any(|tab| tab.id != id && tab.agent.is_some())
+            {
+                self.stop_agent(&crate::conductor::AgentTarget::new(&r.path, None));
+            }
         }
-        let Some(pane) = self.panes.get_mut(&key) else { return };
-        let Some(ix) = pane.tabs.iter().position(|t| t.id == id) else { return };
-        pane.tabs.remove(ix);
+        let Some(pane) = self.panes.get_mut(&key) else {
+            return;
+        };
+        let Some(ix) = pane.tabs.iter().position(|t| t.id == id) else {
+            return;
+        };
         // The pane keeps its agent on record even when its last agent tab is
         // closed on purpose: a task needs every agent, so a closed one shows
         // STOPPED with a Restart like one lost to a computer restart.
-        if pane.active == id {
-            // Prefer the tab to the left, which is where the eye already is.
-            pane.active = pane
-                .tabs
-                .get(ix.saturating_sub(1))
-                .or_else(|| pane.tabs.last())
-                .map(|t| t.id)
-                .unwrap_or(0);
-        }
+        pane.remove_tab_at(ix);
         // A worktree with no tabs is a dead end; give it a shell back.
         if pane.tabs.is_empty() {
             self.open_tab(TabKind::Shell, window, cx); // saves panes itself
@@ -382,7 +463,8 @@ impl HarnessWorkspace {
     /// keeping the active pane and any panes still starting agents.
     pub(crate) fn evict_stale_panes(&mut self, keep: &str) {
         while self.panes.len() > MAX_LIVE_PANES {
-            let Some(victim) = pane_to_evict(&self.panes, keep, &self.pending_agent_launches) else {
+            let Some(victim) = pane_to_evict(&self.panes, keep, &self.pending_agent_launches)
+            else {
                 break;
             };
             let victim = victim.to_owned();
@@ -408,14 +490,17 @@ impl HarnessWorkspace {
                     if let Some(hosted) = self.service_workspaces.get(&r.key) {
                         let item_id = *item_id;
                         let item = hosted.read(cx).panes().iter().find_map(|pane| {
-                            pane.read(cx).items().find(|i| i.item_id() == item_id).cloned()
+                            pane.read(cx)
+                                .items()
+                                .find(|i| i.item_id() == item_id)
+                                .cloned()
                         });
                         if let Some(item) = item {
                             hosted.update(cx, |ws, cx| {
                                 ws.activate_item(item.as_ref(), true, true, window, cx);
                             });
-                        }
-                        if hosted.read(cx).active_item(cx).is_some() {
+                            item.item_focus_handle(cx)
+                        } else if hosted.read(cx).active_item(cx).is_some() {
                             hosted.read(cx).focus_handle(cx)
                         } else {
                             self.editor_host_focus.clone()
@@ -426,6 +511,7 @@ impl HarnessWorkspace {
                 }
                 TabContent::Chat(c) => c.read(cx).focus_handle(cx),
                 TabContent::Diff => self.diff_surface_focus.clone(),
+                TabContent::ReviewOverview(_) => self.focus_handle.clone(),
                 TabContent::Editor(ws) => {
                     if ws.read(cx).active_item(cx).is_some() {
                         ws.read(cx).focus_handle(cx)
@@ -451,7 +537,12 @@ impl HarnessWorkspace {
                 .panes_state
                 .worktrees
                 .get(id)
-                .map(|wp| wp.tabs.iter().map(|t| crate::tmux::session_name(id, t.id)).collect())
+                .map(|wp| {
+                    wp.tabs
+                        .iter()
+                        .map(|t| crate::tmux::session_name(id, t.id))
+                        .collect()
+                })
                 .unwrap_or_default();
             for name in names {
                 crate::tmux::kill_session(&name);
@@ -489,28 +580,36 @@ impl HarnessWorkspace {
                 let tabs: Vec<TabRecord> = pane
                     .tabs
                     .iter()
-                    .filter(|t| !matches!(t.content, TabContent::File { .. }))
-                    .map(|t| TabRecord {
-                        id: t.id,
-                        kind: t.kind_tag(),
-                        title: t.title.clone(),
+                    .filter_map(|t| {
+                        Some(TabRecord {
+                            id: t.id,
+                            kind: t.kind_tag()?,
+                            title: t.title.clone(),
+                        })
                     })
                     .collect();
-                let active = pane
-                    .tabs
+                let active = tabs
                     .iter()
-                    .find(|t| t.id == pane.active && !matches!(t.content, TabContent::File { .. }))
+                    .find(|t| t.id == pane.active)
                     .map(|t| t.id)
                     .or_else(|| tabs.first().map(|t| t.id));
                 // A live agent tab names the pane's agent; with none (it came
                 // back as a shell after a restart) keep the kind on record so
                 // the pane can still show STOPPED and be restarted.
-                let agent = pane
-                    .tabs
-                    .iter()
-                    .find_map(|t| t.agent.clone())
-                    .or_else(|| self.panes_state.worktrees.get(key).and_then(|w| w.agent.clone()));
-                (key.clone(), WorktreePanes { active, tabs, agent })
+                let agent = pane.tabs.iter().find_map(|t| t.agent.clone()).or_else(|| {
+                    self.panes_state
+                        .worktrees
+                        .get(key)
+                        .and_then(|w| w.agent.clone())
+                });
+                (
+                    key.clone(),
+                    WorktreePanes {
+                        active,
+                        tabs,
+                        agent,
+                    },
+                )
             })
             .collect();
         for (key, wp) in updates {
@@ -523,15 +622,29 @@ impl HarnessWorkspace {
     /// reattach; dead ones (reboot / killed) come back as a plain shell — never
     /// an unattended agent relaunch. Returns false if there was nothing to
     /// restore.
-    pub(crate) fn restore_tabs(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn restore_tabs(
+        &mut self,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         use crate::panes_state::TabRecordKind as K;
         let saved = self.panes_state.worktrees.get(key);
         // Clone out before mutating self.
         let mut records: Vec<(u64, K, String)> = saved
-            .map(|s| s.tabs.iter().map(|t| (t.id, t.kind.clone(), t.title.clone())).collect())
+            .map(|s| {
+                s.tabs
+                    .iter()
+                    .map(|t| (t.id, t.kind.clone(), t.title.clone()))
+                    .collect()
+            })
             .unwrap_or_default();
         let saved_active = saved.and_then(|s| s.active);
-        let live = if self.has_tmux { crate::tmux::live_sessions() } else { Vec::new() };
+        let live = if self.has_tmux {
+            crate::tmux::live_sessions()
+        } else {
+            Vec::new()
+        };
 
         // Adopt this worktree's live tmux sessions the saved list lost track
         // of (another app instance overwrote panes.json, or we died before
@@ -540,6 +653,9 @@ impl HarnessWorkspace {
         // them.
         let known: Vec<u64> = records.iter().map(|r| r.0).collect();
         let orphans = crate::tmux::orphan_tab_ids(key, &live, &known);
+        // Status written before this tab existed was dropped. Replay it once
+        // the tab is attached, and only for these adopted sessions.
+        let mut adopted_agents: Vec<(u64, AgentKind)> = Vec::new();
         if !orphans.is_empty() {
             let starts = crate::tmux::session_start_commands();
             for id in orphans {
@@ -548,9 +664,15 @@ impl HarnessWorkspace {
                     .iter()
                     .find(|(n, _)| *n == name)
                     .and_then(|(_, cmd)| crate::tmux::agent_from_start_command(cmd));
-                log::info!("adopting orphaned tmux session {name} ({:?})", agent.as_ref().map(|a| a.1));
+                log::info!(
+                    "adopting orphaned tmux session {name} ({:?})",
+                    agent.as_ref().map(|a| a.1)
+                );
                 records.push(match agent {
-                    Some((kind, prog)) => (id, K::Agent(kind), prog.to_string()),
+                    Some((kind, prog)) => {
+                        adopted_agents.push((id, kind.clone()));
+                        (id, K::Agent(kind), prog.to_string())
+                    }
                     None => (id, K::Shell, "❯_ shell".to_string()),
                 });
                 // Never hand this id out again.
@@ -566,8 +688,28 @@ impl HarnessWorkspace {
                 K::Editor => self.open_tab(TabKind::Editor, window, cx),
                 K::Chat => self.open_tab(TabKind::Chat, window, cx),
                 K::Diff => self.open_tab(TabKind::Diff, window, cx),
+                K::ReviewOverview(saved) => {
+                    let mut overview = OverviewTab {
+                        preferences: self.prefs.review_overview.clone(),
+                        ..Default::default()
+                    };
+                    if let Some(saved) = saved {
+                        overview.set_report(saved, cx);
+                    }
+                    self.attach_tab(
+                        key,
+                        Tab {
+                            id,
+                            title,
+                            content: TabContent::ReviewOverview(overview),
+                            agent: None,
+                        },
+                    );
+                }
                 K::Shell => self.restore_terminal_tab(key, id, None, &title, &live, window, cx),
-                K::Agent(a) => self.restore_terminal_tab(key, id, Some(a), &title, &live, window, cx),
+                K::Agent(a) => {
+                    self.restore_terminal_tab(key, id, Some(a), &title, &live, window, cx)
+                }
             }
         }
 
@@ -580,7 +722,11 @@ impl HarnessWorkspace {
             // conversation and the one A2A should deliver to, not whichever
             // tab happened to be rebuilt last.
             let pick = saved.or_else(|| {
-                pane.tabs.iter().filter(|t| t.agent.is_some()).map(|t| t.id).min()
+                pane.tabs
+                    .iter()
+                    .filter(|t| t.agent.is_some())
+                    .map(|t| t.id)
+                    .min()
             });
             if let Some(active) = pick {
                 pane.active = active;
@@ -589,9 +735,59 @@ impl HarnessWorkspace {
         }
         let restored = self.panes.contains_key(key);
         if restored {
+            self.replay_adopted_status(key, &adopted_agents, window, cx);
             self.save_panes();
         }
         restored
+    }
+
+    /// Re-read status for sessions adopted after their first signal was dropped.
+    /// A tab that is still closed stays rejected: nothing here invents one.
+    fn replay_adopted_status(
+        &mut self,
+        key: &str,
+        adopted: &[(u64, AgentKind)],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self
+            .resolve()
+            .filter(|r| r.key == key)
+            .map(|r| r.path.clone())
+        else {
+            return;
+        };
+        for (id, kind) in adopted {
+            let Some(signal) = saved_tab_signal(&root, *id, kind.clone()) else {
+                continue;
+            };
+            self.apply_agent(signal, window.is_window_active(), cx);
+        }
+    }
+
+    /// The review CLI is not installed. Drop the pending tab instead of
+    /// opening a shell the report would never reach. The overview tab still
+    /// holds the report.
+    fn abandon_missing_review_cli(
+        &mut self,
+        key: &str,
+        tab_id: u64,
+        kind_label: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pane) = self.panes.get_mut(key)
+            && let Some(ix) = pane.tabs.iter().position(|t| t.id == tab_id)
+        {
+            pane.remove_tab_at(ix);
+        }
+        self.pending_agent_launches.remove(&tab_id);
+        self.set_note(format!(
+            "{kind_label} is not on PATH. The review was not opened in a terminal. The report is still in Review Overview."
+        ));
+        self.focus_active_pane(window, cx);
+        self.save_panes();
+        cx.notify();
     }
 
     /// Rebuild one terminal/agent tab, preserving its persisted id. Live session
@@ -628,16 +824,70 @@ impl HarnessWorkspace {
             crate::terminal_pane::TerminalPane::new(r.path.clone(), None, session, window, cx)
         }));
 
-        self.pane_clock = self.pane_clock.wrapping_add(1);
-        let pane = self.panes.entry(key.to_string()).or_insert_with(|| PaneSet {
-            tabs: Vec::new(),
-            active: 0,
-            last_used: 0,
-        });
-        pane.last_used = self.pane_clock;
-        pane.tabs.push(Tab { id, title: title.to_string(), content, agent: mark });
-        pane.active = id;
+        self.attach_tab(
+            key,
+            Tab {
+                id,
+                title: title.to_string(),
+                content,
+                agent: mark,
+            },
+        );
     }
+
+    fn attach_tab(&mut self, key: &str, tab: Tab) {
+        self.pane_clock = self.pane_clock.wrapping_add(1);
+        let pane = self
+            .panes
+            .entry(key.to_string())
+            .or_insert_with(|| PaneSet {
+                tabs: Vec::new(),
+                active: 0,
+                last_used: 0,
+            });
+        pane.last_used = self.pane_clock;
+        pane.active = tab.id;
+        pane.tabs.push(tab);
+    }
+}
+
+/// The status file an adopted tab already wrote. `Unknown` and a missing
+/// file stay quiet: there is nothing to replay.
+fn saved_tab_signal(root: &Path, tab_id: u64, fallback: AgentKind) -> Option<AgentSignal> {
+    let bytes = std::fs::read(agent_runtime::status_path(root, Some(tab_id))).ok()?;
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SavedTabStatus {
+        state: AgentState,
+        #[serde(default)]
+        agent: Option<String>,
+        #[serde(default)]
+        session_file: Option<String>,
+        #[serde(default)]
+        tool: Option<agent_runtime::ToolCall>,
+    }
+    let saved: SavedTabStatus = serde_json::from_slice(&bytes).ok()?;
+    if saved.state == AgentState::Unknown {
+        return None;
+    }
+    let reason = match saved.state {
+        AgentState::Waiting => agent_runtime::WaitReason::PermissionPrompt,
+        AgentState::Idle => agent_runtime::WaitReason::TurnComplete,
+        AgentState::Running | AgentState::Unknown => agent_runtime::WaitReason::None,
+    };
+    Some(AgentSignal {
+        worktree_root: root.to_path_buf(),
+        tab_id: Some(tab_id),
+        kind: saved
+            .agent
+            .as_deref()
+            .map(AgentKind::from)
+            .unwrap_or(fallback),
+        state: saved.state,
+        reason,
+        session_file: saved.session_file.map(PathBuf::from),
+        tool: saved.tool,
+    })
 }
 
 fn pane_to_evict<'a>(
@@ -648,7 +898,11 @@ fn pane_to_evict<'a>(
     panes
         .iter()
         .filter(|(key, pane)| {
-            key.as_str() != active && !pane.tabs.iter().any(|tab| pending_launches.contains(&tab.id))
+            key.as_str() != active
+                && !pane
+                    .tabs
+                    .iter()
+                    .any(|tab| pending_launches.contains(&tab.id))
         })
         .min_by_key(|(_, pane)| pane.last_used)
         .map(|(key, _)| key.as_str())
@@ -658,6 +912,39 @@ fn pane_to_evict<'a>(
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn closing_a_tab_selects_the_next_tab_then_the_previous() {
+        for (ids, active, closing, expected) in [
+            (&[1, 3, 2][..], 1, 0, 3),
+            (&[1, 3, 2][..], 3, 1, 2),
+            (&[1, 3, 2][..], 2, 2, 3),
+            (&[1, 3, 2][..], 1, 1, 1),
+            (&[1][..], 1, 0, 0),
+        ] {
+            let mut pane = PaneSet {
+                tabs: ids
+                    .iter()
+                    .map(|&id| Tab {
+                        id,
+                        title: String::new(),
+                        content: TabContent::Diff,
+                        agent: None,
+                    })
+                    .collect(),
+                active,
+                last_used: 0,
+            };
+
+            pane.remove_tab_at(closing);
+
+            assert_eq!(
+                pane.active, expected,
+                "closing tab {} in {ids:?}",
+                ids[closing]
+            );
+        }
+    }
 
     #[test]
     fn bulk_agent_launches_can_exceed_the_pane_cap_until_startup_finishes() {
@@ -688,5 +975,37 @@ mod tests {
         assert_eq!(pane_to_evict(&panes, "2", &pending), Some("1"));
         pending.remove(&0);
         assert_eq!(pane_to_evict(&panes, "2", &pending), Some("0"));
+    }
+
+    #[test]
+    fn a_saved_tab_status_becomes_a_signal_and_unknown_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let path = agent_runtime::status_path(root, Some(7));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"state":"waiting","agent":"codex","sessionFile":"/tmp/s.jsonl","tool":{"name":"shell"}}"#,
+        )
+        .unwrap();
+        let signal = saved_tab_signal(root, 7, AgentKind::ClaudeCode).unwrap();
+        assert_eq!(signal.tab_id, Some(7));
+        assert_eq!(signal.kind, AgentKind::Codex);
+        assert_eq!(signal.state, AgentState::Waiting);
+        assert_eq!(signal.reason, agent_runtime::WaitReason::PermissionPrompt);
+        assert_eq!(
+            signal.session_file.as_deref(),
+            Some(Path::new("/tmp/s.jsonl"))
+        );
+        assert_eq!(signal.tool.unwrap().name, "shell");
+
+        std::fs::write(&path, r#"{"state":"unknown"}"#).unwrap();
+        assert!(saved_tab_signal(root, 7, AgentKind::Codex).is_none());
+        assert!(saved_tab_signal(root, 8, AgentKind::Codex).is_none());
+
+        std::fs::write(&path, r#"{"state":"idle"}"#).unwrap();
+        let signal = saved_tab_signal(root, 7, AgentKind::Pi).unwrap();
+        assert_eq!(signal.kind, AgentKind::Pi);
+        assert_eq!(signal.reason, agent_runtime::WaitReason::TurnComplete);
     }
 }

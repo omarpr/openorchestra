@@ -53,6 +53,7 @@ impl StatusFileSource {
                     };
                     pump_bus.publish(AgentSignal {
                         worktree_root: event.worktree_root,
+                        tab_id: event.tab_id,
                         kind,
                         state: event.status.state,
                         reason: reason_for(event.status.state),

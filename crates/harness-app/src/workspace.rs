@@ -29,10 +29,15 @@ use worktrees::{
     Change, CreateTaskMember, CreateTaskRequest, GitWorktrees, HookEnv, HookLayer, HookScriptPhase,
     HooksConfig, Manager, Registry, SystemRunner, TaskHooks, TaskStore, clear_local_hooks,
     create_task, ensure_hook_script, local_hooks_base, migrate_worktrees_to_tasks, task_name_slug,
-    visible_setup_shell_line, write_task_agent_context, write_task_brief, write_visible_setup_runner,
+    visible_setup_shell_line, write_task_agent_context, write_task_brief,
+    write_visible_setup_runner,
 };
 
 use crate::data::{UnifiedDiff, WorkspaceData, compute_diff};
+use crate::review_overview::models::ModelCatalog;
+use crate::review_overview::{
+    ReadingStep, ReviewCli, ReviewFollowup, ReviewPreferences, ReviewRun, StoredReviewOverview,
+};
 use crate::terminal_pane::TerminalPane;
 use crate::theme::{HarnessTheme, theme, tint};
 
@@ -132,6 +137,30 @@ enum TabContent {
     /// resolved per worktree. Giving the tab its own entity would create a
     /// second copy that could disagree with the dock's.
     Diff,
+    ReviewOverview(OverviewTab),
+}
+
+#[derive(Default)]
+struct OverviewTab {
+    preferences: ReviewPreferences,
+    status: OverviewStatus,
+    last_report: Option<Arc<StoredReviewOverview>>,
+    reading_steps: Vec<ReadingStep>,
+    /// The step whose file was opened most recently from the reading-order path.
+    last_reading_step: Option<usize>,
+}
+
+#[derive(Default)]
+enum OverviewStatus {
+    #[default]
+    Waiting,
+    Cancelled,
+    Running(ReviewRun),
+    Ready {
+        markdown: Entity<markdown::Markdown>,
+        saved: Arc<StoredReviewOverview>,
+    },
+    Failed(String),
 }
 
 /// What to open, before the entity exists.
@@ -145,6 +174,7 @@ pub(crate) enum TabKind {
     Chat,
     /// The diff review surface as a center tab (`DiffLocation::Tab`).
     Diff,
+    ReviewOverview,
     /// The full editor (IDE) tab — one per worktree.
     Editor,
 }
@@ -184,7 +214,11 @@ fn reordered<T: PartialEq + Clone>(items: &[T], dragged: T, onto: T) -> Vec<T> {
 /// (missing or unreadable file) while this build has entries falls back to
 /// this build's list, so a reorder never empties it.
 fn reorder_base<T: Clone>(disk: Vec<T>, current: &[T]) -> Vec<T> {
-    if disk.is_empty() { current.to_vec() } else { disk }
+    if disk.is_empty() {
+        current.to_vec()
+    } else {
+        disk
+    }
 }
 
 /// Reorder panel geometry at the default 16 px rem: its width, a row's
@@ -210,7 +244,8 @@ fn reorder_panel_origin(
 ) -> (f32, f32) {
     let m = REORDER_PANEL_MARGIN;
     let scale = (rem / 16.0).max(1.0);
-    let panel_h = (rows as f32 * REORDER_ROW_H * scale).min(list_max_h) + REORDER_PANEL_CHROME_H * scale;
+    let panel_h =
+        (rows as f32 * REORDER_ROW_H * scale).min(list_max_h) + REORDER_PANEL_CHROME_H * scale;
     let x = origin.0.min(window.0 - REORDER_PANEL_W - m).max(m);
     let y = origin.1.min(window.1 - panel_h - m).max(m);
     (x, y)
@@ -225,7 +260,11 @@ fn same_members<T: PartialEq>(a: &[T], b: &[T]) -> bool {
 /// [`reorder_base`]), save it, and return the store as saved. `Ok(None)` when
 /// nothing changed (same or unknown ids). An unreadable file is an error and
 /// is left untouched rather than overwritten.
-fn move_task_on_disk(current: &TaskStore, dragged: &str, onto: &str) -> std::io::Result<Option<TaskStore>> {
+fn move_task_on_disk(
+    current: &TaskStore,
+    dragged: &str,
+    onto: &str,
+) -> std::io::Result<Option<TaskStore>> {
     let mut fresh = TaskStore::load(current.path())?;
     if fresh.tasks().is_empty() {
         fresh = current.clone();
@@ -258,7 +297,11 @@ fn shifted<T: PartialEq + Clone>(items: &[T], item: &T, up: bool) -> Vec<T> {
     let Some(i) = out.iter().position(|x| x == item) else {
         return out;
     };
-    let j = if up { i.checked_sub(1) } else { Some(i + 1).filter(|j| *j < out.len()) };
+    let j = if up {
+        i.checked_sub(1)
+    } else {
+        Some(i + 1).filter(|j| *j < out.len())
+    };
     if let Some(j) = j {
         out.swap(i, j);
     }
@@ -280,13 +323,11 @@ impl Tab {
     /// Classify this tab for persistence (`panes_state`). `TabContent` holds
     /// live entities that can't be matched by kind ergonomically at the call
     /// site, so `save_panes` goes through this instead.
-    fn kind_tag(&self) -> crate::panes_state::TabRecordKind {
+    fn kind_tag(&self) -> Option<crate::panes_state::TabRecordKind> {
         use crate::panes_state::TabRecordKind as K;
-        match &self.content {
-            // File tabs are session-ephemeral (reopened from the tree); do not
-            // persist them. kind_tag is only used from save_panes which skips
-            // File — this arm is unreachable there.
-            TabContent::File { .. } => K::Shell,
+        Some(match &self.content {
+            TabContent::File { .. } => return None,
+            TabContent::ReviewOverview(overview) => K::ReviewOverview(overview.last_report.clone()),
             TabContent::Chat(_) => K::Chat,
             TabContent::Diff => K::Diff,
             TabContent::Editor(_) => K::Editor,
@@ -294,7 +335,7 @@ impl Tab {
                 Some(a) => K::Agent(a.clone()),
                 None => K::Shell,
             },
-        }
+        })
     }
 }
 
@@ -481,6 +522,16 @@ impl PaneSet {
     fn active_tab(&self) -> Option<&Tab> {
         self.tabs.iter().find(|t| t.id == self.active)
     }
+
+    fn remove_tab_at(&mut self, index: usize) {
+        if self.tabs.remove(index).id == self.active {
+            self.active = self
+                .tabs
+                .get(index)
+                .or_else(|| self.tabs.last())
+                .map_or(0, |tab| tab.id);
+        }
+    }
 }
 
 /// How many worktree pane sets stay live at once.
@@ -506,7 +557,6 @@ pub(crate) struct Resolved {
     /// When set, DIFF is the unified multi-member changeset for this task.
     task_id: Option<String>,
 }
-
 
 pub struct HarnessWorkspace {
     manager: Manager<SystemRunner>,
@@ -585,6 +635,7 @@ pub struct HarnessWorkspace {
     /// Which Settings pane is showing. Not persisted: reopening Settings should
     /// land where the page starts, not where you happened to leave it.
     settings_section: SettingsSection,
+    review_model_catalogs: std::collections::BTreeMap<ReviewCli, ModelCatalog>,
     /// The requirements screen is open. Not dismissible while a Required tool
     /// is missing — see `preflight::blocked`.
     preflight_open: bool,
@@ -689,14 +740,8 @@ pub struct HarnessWorkspace {
     note_at: Option<std::time::Instant>,
     forge_status: HashMap<PathBuf, HashMap<String, BranchStatus>>,
     agent_status: HashMap<PathBuf, AgentState>,
-    /// When each worktree's status last changed, and the tool its latest
-    /// signal reported — the phone's "waiting since" and tool chip.
-    agent_since: HashMap<PathBuf, (std::time::SystemTime, Option<String>)>,
     /// oo-remote: marks cache, phone server lifecycle, keep-awake.
     remote: remote::RemoteRuntime,
-    /// Fidelity of the adapter behind each worktree's status, so the UI can be
-    /// honest about how much the pill actually knows (R11).
-    agent_fidelity: HashMap<PathBuf, WaitFidelity>,
     _poller: Option<Poller>,
     /// One watcher for every StatusFile-signalled worktree (pi, Claude Code).
     status_source: Option<StatusFileSource>,
@@ -786,7 +831,10 @@ pub struct HarnessWorkspace {
     /// The last press on a sort dropdown's button (which menu, where), so the
     /// open menu's outside handler leaves that press to the button
     /// (`ports_panel::dismisses`).
-    ports_sort_trigger_press: Option<(crate::workspace::ui::ports_panel::SortMenu, gpui::Point<Pixels>)>,
+    ports_sort_trigger_press: Option<(
+        crate::workspace::ui::ports_panel::SortMenu,
+        gpui::Point<Pixels>,
+    )>,
     /// Project roots the user archived — hidden from the active list but kept so
     /// they can be restored. Persisted to `archived.json`; never deletes files.
     archived_repos: Vec<PathBuf>,
@@ -820,20 +868,20 @@ const RESOURCE_HISTORY: usize = 60;
 // constructor, shared types, the Render/Focusable roots, and free
 // helpers live here.
 mod actions;
-mod navigation;
 mod agents;
 mod construct;
 mod diff_rows;
+mod navigation;
 mod prefs;
 mod render;
 pub(crate) use agents::*;
 pub(crate) use diff_rows::*;
 pub(crate) use prefs::*;
 pub(crate) use render::*;
-pub(crate) mod lifecycle;
 mod a2a;
 mod agent_restart;
 mod coordinator;
+pub(crate) mod lifecycle;
 pub(crate) mod remote;
 mod state;
 mod ui;
@@ -922,4 +970,3 @@ mod slugify_tests {
         assert_eq!(task_name_slug("  Hello, World!  "), "hello-world");
     }
 }
-

@@ -3,8 +3,8 @@
 //! file decides which sessions count as "this task" and draws the rows.
 
 use super::super::*;
-use crate::ports::{self, PortRow, PortSort, PortsView, Scope, SortField, SortOrder};
 use super::sidebar::SidebarSection;
+use crate::ports::{self, PortRow, PortSort, PortsView, Scope, SortField, SortOrder};
 
 /// The two sort dropdowns in the Ports tab.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,12 +23,13 @@ impl HarnessWorkspace {
     /// the same keys the footprint monitor attributes by (`apply_resource`),
     /// plus each one's folder so Compose containers started there count too.
     pub(crate) fn ports_scopes(&self) -> Vec<Scope> {
-        let scope = |label: &str, key: &str, path: Option<&std::path::Path>, repo: Option<&str>| Scope {
-            label: label.to_string(),
-            session_prefix: crate::tmux::session_prefix(key),
-            path: path.map(|p| p.to_path_buf()),
-            repo: repo.map(str::to_string),
-        };
+        let scope =
+            |label: &str, key: &str, path: Option<&std::path::Path>, repo: Option<&str>| Scope {
+                label: label.to_string(),
+                session_prefix: crate::tmux::session_prefix(key),
+                path: path.map(|p| p.to_path_buf()),
+                repo: repo.map(str::to_string),
+            };
         let task_scopes = |task_id: &str| -> Vec<Scope> {
             let Some(task) = self.task_store.get(task_id) else {
                 return Vec::new();
@@ -42,13 +43,23 @@ impl HarnessWorkspace {
                 })
                 .collect();
             if super::super::coordinator::has_coordinator(task) {
-                out.push(scope("coordinator", &a2a_broker::coordinator_pane_key(&task.id), None, None));
+                out.push(scope(
+                    "coordinator",
+                    &a2a_broker::coordinator_pane_key(&task.id),
+                    None,
+                    None,
+                ));
             }
             out
         };
         match &self.selection {
             Selection::Main(repo) => {
-                let root = self.data.repos.iter().find(|r| &r.name == repo).map(|r| r.repo_root.as_path());
+                let root = self
+                    .data
+                    .repos
+                    .iter()
+                    .find(|r| &r.name == repo)
+                    .map(|r| r.repo_root.as_path());
                 vec![scope(repo, &format!("main:{repo}"), root, Some(repo))]
             }
             Selection::Task { task_id, .. } => task_scopes(task_id),
@@ -60,9 +71,11 @@ impl HarnessWorkspace {
             {
                 Some(tid) => task_scopes(&tid),
                 None => {
-                    let found = self.data.repos.iter().find_map(|r| {
-                        r.worktrees.iter().find(|w| &w.id == id).map(|w| (r, w))
-                    });
+                    let found = self
+                        .data
+                        .repos
+                        .iter()
+                        .find_map(|r| r.worktrees.iter().find(|w| &w.id == id).map(|w| (r, w)));
                     let path = found.map(|(_, w)| w.path.as_path());
                     let repo = found.map(|(r, _)| r.name.as_str());
                     vec![scope(id, id, path, repo)]
@@ -101,8 +114,20 @@ impl HarnessWorkspace {
             .py_1()
             // No bottom rule: THIS TASK's header draws the line below.
             .child(div().text_xs().text_color(hx.tx2).mr_1().child("Sort"))
-            .child(self.render_sort_dropdown(hx, SortMenu::Field, sort.field.label(), field_items, cx))
-            .child(self.render_sort_dropdown(hx, SortMenu::Order, sort.order.label(), order_items, cx))
+            .child(self.render_sort_dropdown(
+                hx,
+                SortMenu::Field,
+                sort.field.label(),
+                field_items,
+                cx,
+            ))
+            .child(self.render_sort_dropdown(
+                hx,
+                SortMenu::Order,
+                sort.order.label(),
+                order_items,
+                cx,
+            ))
             .into_any_element()
     }
 
@@ -164,7 +189,9 @@ impl HarnessWorkspace {
             for (label, selected, choice) in items {
                 list = list.child(
                     div()
-                        .id(gpui::SharedString::from(format!("ports-sort-{menu:?}-{label}")))
+                        .id(gpui::SharedString::from(format!(
+                            "ports-sort-{menu:?}-{label}"
+                        )))
                         .flex()
                         .items_center()
                         .gap_2()
@@ -187,7 +214,9 @@ impl HarnessWorkspace {
             }
             // Deferred + anchored: drawn above the lists instead of pushing
             // them down, and kept inside the window.
-            col = col.child(gpui::deferred(gpui::anchored().snap_to_window().child(list)));
+            col = col.child(gpui::deferred(
+                gpui::anchored().snap_to_window().child(list),
+            ));
         }
         col.into_any_element()
     }
@@ -206,7 +235,8 @@ impl HarnessWorkspace {
 
     /// Whether the shown sample is recent enough to present as current.
     fn ports_current(&self) -> bool {
-        self.ports_sample_at.is_some_and(|at| ports::is_current(at.elapsed()))
+        self.ports_sample_at
+            .is_some_and(|at| ports::is_current(at.elapsed()))
     }
 
     /// Take one sample now, off the UI thread.
@@ -219,7 +249,9 @@ impl HarnessWorkspace {
         let seq = self.next_ports_seq();
         let started = std::time::Instant::now();
         cx.spawn(async move |view, cx| {
-            let sample = cx.background_spawn(async move { ports::sample(has_tmux) }).await;
+            let sample = cx
+                .background_spawn(async move { ports::sample(has_tmux) })
+                .await;
             let _ = view.update(cx, |ws, cx| ws.finish_ports_scan(seq, started, sample, cx));
         })
         .detach();
@@ -253,7 +285,13 @@ impl HarnessWorkspace {
         self.ports_seq_issued
     }
 
-    fn apply_ports(&mut self, seq: u64, started: std::time::Instant, sample: ports::PortsSample, cx: &mut Context<Self>) {
+    fn apply_ports(
+        &mut self,
+        seq: u64,
+        started: std::time::Instant,
+        sample: ports::PortsSample,
+        cx: &mut Context<Self>,
+    ) {
         if !ports::accept_scan(&mut self.ports_seq_applied, seq) {
             return;
         }
@@ -263,7 +301,11 @@ impl HarnessWorkspace {
         cx.notify();
     }
 
-    pub(crate) fn render_ports_panel(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_ports_panel(
+        &self,
+        hx: &HarnessTheme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(view) = self.ports_view() else {
             return div()
                 .flex()
@@ -373,7 +415,11 @@ impl HarnessWorkspace {
             .addrs
             .iter()
             .all(|a| a == "127.0.0.1" || a == "::1" || a == "localhost");
-        let reach = if loopback_only { "localhost only".to_string() } else { row.addrs.join(", ") };
+        let reach = if loopback_only {
+            "localhost only".to_string()
+        } else {
+            row.addrs.join(", ")
+        };
         // A container port reads as the container ("db · urbital · → 5432"),
         // not as the engine process that happens to hold the socket.
         let what = match &row.container {
@@ -394,7 +440,10 @@ impl HarnessWorkspace {
                 } else {
                     ""
                 };
-                format!("container {} · image {} · via {} (pid {}){why}", c.name, c.image, row.name, row.pid)
+                format!(
+                    "container {} · image {} · via {} (pid {}){why}",
+                    c.name, c.image, row.name, row.pid
+                )
             }
             None => format!("{} (pid {})", row.name, row.pid),
         };
@@ -414,16 +463,14 @@ impl HarnessWorkspace {
             .hover(|d| d.bg(hx.surface))
             .tooltip(tip(hover))
             // Fixed slot so ports line up whether or not a row has the icon.
-            .child(
-                div().flex_none().size(px(14.0)).when(is_container, |d| {
-                    d.child(
-                        gpui::svg()
-                            .size(px(14.0))
-                            .path("icons/file_icons/docker.svg")
-                            .text_color(hx.tx1),
-                    )
-                }),
-            )
+            .child(div().flex_none().size(px(14.0)).when(is_container, |d| {
+                d.child(
+                    gpui::svg()
+                        .size(px(14.0))
+                        .path("icons/file_icons/docker.svg")
+                        .text_color(hx.tx1),
+                )
+            }))
             .child(
                 div()
                     .flex_none()
@@ -444,21 +491,25 @@ impl HarnessWorkspace {
             )
             .when(!actionable, |d| d.opacity(0.6))
             .when(actionable, |d| {
-                d.child(small_button(hx, port_action_id("open", section, row.pid, port), "Open").on_click({
-                    let url = url.clone();
-                    cx.listener(move |_, _, _, cx| {
-                        cx.stop_propagation();
-                        cx.open_url(&url);
-                    })
-                }))
-                .child(small_button(hx, port_action_id("copy", section, row.pid, port), "Copy").on_click(
-                    cx.listener(move |ws, _, _, cx| {
-                        cx.stop_propagation();
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(url.clone()));
-                        ws.set_note(format!("copied {url}"));
-                        cx.notify();
-                    }),
-                ))
+                d.child(
+                    small_button(hx, port_action_id("open", section, row.pid, port), "Open")
+                        .on_click({
+                            let url = url.clone();
+                            cx.listener(move |_, _, _, cx| {
+                                cx.stop_propagation();
+                                cx.open_url(&url);
+                            })
+                        }),
+                )
+                .child(
+                    small_button(hx, port_action_id("copy", section, row.pid, port), "Copy")
+                        .on_click(cx.listener(move |ws, _, _, cx| {
+                            cx.stop_propagation();
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(url.clone()));
+                            ws.set_note(format!("copied {url}"));
+                            cx.notify();
+                        })),
+                )
             })
     }
 }
@@ -530,10 +581,18 @@ mod tests {
     fn any_other_press_closes_it() {
         let button = point(px(40.), px(12.));
         let elsewhere = point(px(300.), px(500.));
-        assert!(dismisses(SortMenu::Field, Some((SortMenu::Field, button)), elsewhere));
+        assert!(dismisses(
+            SortMenu::Field,
+            Some((SortMenu::Field, button)),
+            elsewhere
+        ));
         assert!(dismisses(SortMenu::Field, None, elsewhere));
         // The other dropdown's button: this menu closes, that one opens.
-        assert!(dismisses(SortMenu::Field, Some((SortMenu::Order, button)), button));
+        assert!(dismisses(
+            SortMenu::Field,
+            Some((SortMenu::Order, button)),
+            button
+        ));
     }
 
     #[test]

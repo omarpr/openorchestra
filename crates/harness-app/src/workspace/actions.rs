@@ -8,7 +8,6 @@ mod tasks;
 mod window;
 
 impl HarnessWorkspace {
-
     pub(crate) fn select(&mut self, sel: Selection, window: &mut Window, cx: &mut Context<Self>) {
         // Heal any hooks-poisoned Main editor before leaving this selection.
         self.exit_hooks_edit(window, cx);
@@ -85,7 +84,11 @@ impl HarnessWorkspace {
             }
             // And each multi-project task's coordinator (task folder).
             let tasks_root = self.data_dir.join("tasks");
-            for task in self.task_store.active().filter(|t| super::coordinator::has_coordinator(t)) {
+            for task in self
+                .task_store
+                .active()
+                .filter(|t| super::coordinator::has_coordinator(t))
+            {
                 let dir = worktrees::task_coordinator_dir(&tasks_root, &task.slug);
                 let _ = source.watch(&dir, task.agent_kind.clone());
             }
@@ -107,9 +110,10 @@ impl HarnessWorkspace {
         });
         cx.spawn_in(window, async move |view, cx| {
             if let Ok(Ok(Some(paths))) = rx.await
-                && let Some(path) = paths.into_iter().next() {
-                    let _ = view.update_in(cx, |ws, window, cx| ws.add_repo(path, window, cx));
-                }
+                && let Some(path) = paths.into_iter().next()
+            {
+                let _ = view.update_in(cx, |ws, window, cx| ws.add_repo(path, window, cx));
+            }
         })
         .detach();
     }
@@ -165,13 +169,7 @@ impl HarnessWorkspace {
         self.refresh(window, cx);
         self.select(Selection::Main(name.clone()), window, cx);
         // Offer setup-script editing right after add — TOML stays hidden.
-        self.open_project_hooks(
-            &name,
-            HookScriptPhase::Setup,
-            HookLayer::Repo,
-            window,
-            cx,
-        );
+        self.open_project_hooks(&name, HookScriptPhase::Setup, HookLayer::Repo, window, cx);
     }
 
     /// The tracked git root for a repo group, by its display name.
@@ -210,8 +208,15 @@ impl HarnessWorkspace {
     /// Non-destructive — worktrees and files stay on disk; the group just leaves
     /// the active sidebar until restored (from the Archived section, or by
     /// adding it again).
-    pub(crate) fn archive_repo(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(root) = self.repo_root_for_name(&name) else { return };
+    pub(crate) fn archive_repo(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self.repo_root_for_name(&name) else {
+            return;
+        };
         if relocate_root(&mut self.repo_roots, &mut self.archived_repos, &root) {
             save_repos(&self.repos_path, &self.repo_roots);
             save_repos(&self.archived_path, &self.archived_repos);
@@ -228,17 +233,36 @@ impl HarnessWorkspace {
     }
 
     /// Drop project `dragged` onto `onto`'s position (reorder panel).
-    pub(crate) fn move_repo(&mut self, dragged: &str, onto: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(from), Some(to)) = (self.repo_root_for_name(dragged), self.repo_root_for_name(onto)) else {
+    pub(crate) fn move_repo(
+        &mut self,
+        dragged: &str,
+        onto: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (Some(from), Some(to)) = (
+            self.repo_root_for_name(dragged),
+            self.repo_root_for_name(onto),
+        ) else {
             return;
         };
-        self.apply_repo_order(|roots| reordered(roots, from.clone(), to.clone()), window, cx);
+        self.apply_repo_order(
+            |roots| reordered(roots, from.clone(), to.clone()),
+            window,
+            cx,
+        );
     }
 
     /// Drop task `dragged` onto `onto`'s position (reorder panel). The move
     /// is applied to tasks.json as it is on disk now, so tasks the other
     /// build (Dev / installed release) added meanwhile are kept, and shown.
-    pub(crate) fn move_task(&mut self, dragged: &str, onto: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn move_task(
+        &mut self,
+        dragged: &str,
+        onto: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match move_task_on_disk(&self.task_store, dragged, onto) {
             Ok(Some(store)) => self.task_store = store,
             Ok(None) => return,
@@ -256,16 +280,32 @@ impl HarnessWorkspace {
             self.reselect_if_gone(window, cx);
             return;
         }
-        let order: Vec<String> = self.task_store.tasks().iter().map(|t| t.id.clone()).collect();
-        self.data
-            .tasks
-            .sort_by_key(|t| order.iter().position(|id| *id == t.id).unwrap_or(usize::MAX));
+        let order: Vec<String> = self
+            .task_store
+            .tasks()
+            .iter()
+            .map(|t| t.id.clone())
+            .collect();
+        self.data.tasks.sort_by_key(|t| {
+            order
+                .iter()
+                .position(|id| *id == t.id)
+                .unwrap_or(usize::MAX)
+        });
         cx.notify();
     }
 
     /// "Move up" / "Move down" from the project menu.
-    pub(crate) fn shift_repo(&mut self, name: &str, up: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(root) = self.repo_root_for_name(name) else { return };
+    pub(crate) fn shift_repo(
+        &mut self,
+        name: &str,
+        up: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self.repo_root_for_name(name) else {
+            return;
+        };
         self.apply_repo_order(|roots| shifted(roots, &root, up), window, cx);
     }
 
@@ -298,22 +338,36 @@ impl HarnessWorkspace {
             return;
         }
         let roots = &self.repo_roots;
-        self.data
-            .repos
-            .sort_by_key(|r| roots.iter().position(|p| *p == r.repo_root).unwrap_or(usize::MAX));
+        self.data.repos.sort_by_key(|r| {
+            roots
+                .iter()
+                .position(|p| *p == r.repo_root)
+                .unwrap_or(usize::MAX)
+        });
         cx.notify();
     }
 
     /// Whether project `name` can move up / down (it isn't already at that edge).
     pub(crate) fn repo_can_shift(&self, name: &str, up: bool) -> bool {
-        let Some(i) = self.data.repos.iter().position(|r| r.name == name) else { return false };
-        if up { i > 0 } else { i + 1 < self.data.repos.len() }
+        let Some(i) = self.data.repos.iter().position(|r| r.name == name) else {
+            return false;
+        };
+        if up {
+            i > 0
+        } else {
+            i + 1 < self.data.repos.len()
+        }
     }
 
     /// Remove a project from openOrchestra entirely, once the dialog confirms.
     /// Files on disk are untouched — this only forgets the project; re-add it
     /// to bring it back. Distinct from Archive, which keeps it restorable.
-    pub(crate) fn remove_repo(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn remove_repo(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(root) = self.repo_root_for_name(&name) {
             self.repo_roots.retain(|p| p != &root);
             save_repos(&self.repos_path, &self.repo_roots);
@@ -331,14 +385,24 @@ impl HarnessWorkspace {
         self.archived_repos.retain(|p| p != root);
         if self.archived_repos.len() != before {
             save_repos(&self.archived_path, &self.archived_repos);
-            let name = root.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            self.set_note(format!("removed ‘{name}’ from the archive (files kept on disk)"));
+            let name = root
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            self.set_note(format!(
+                "removed ‘{name}’ from the archive (files kept on disk)"
+            ));
         }
         cx.notify();
     }
 
     /// Restore an archived project back into the active list.
-    pub(crate) fn restore_repo(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn restore_repo(
+        &mut self,
+        root: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if relocate_root(&mut self.archived_repos, &mut self.repo_roots, &root) {
             save_repos(&self.repos_path, &self.repo_roots);
             save_repos(&self.archived_path, &self.archived_repos);
@@ -349,7 +413,10 @@ impl HarnessWorkspace {
             self.set_note(format!("restored ‘{name}’"));
         }
         self.refresh(window, cx);
-        let name = root.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = root
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
         self.select(Selection::Main(name), window, cx);
     }
 
@@ -396,7 +463,12 @@ impl HarnessWorkspace {
     }
 
     /// Enter in an inline edit field (routed from the global `menu::Confirm`).
-    pub(crate) fn confirm_edit(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn confirm_edit(
+        &mut self,
+        _: &menu::Confirm,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.new_task.is_some() {
             self.submit_new_task(window, cx);
             return;
@@ -405,7 +477,12 @@ impl HarnessWorkspace {
     }
 
     /// Escape in an inline edit field (routed from `menu::Cancel`): abandon it.
-    pub(crate) fn cancel_edit(&mut self, _: &menu::Cancel, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn cancel_edit(
+        &mut self,
+        _: &menu::Cancel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.new_task.is_some() {
             self.close_new_task(window, cx);
             return;
@@ -416,7 +493,9 @@ impl HarnessWorkspace {
     }
 
     pub(crate) fn commit_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(active) = self.edit.take() else { return };
+        let Some(active) = self.edit.take() else {
+            return;
+        };
         let text = active.editor.read(cx).text(cx);
         match active.kind {
             EditKind::Rename(id) => {
@@ -532,13 +611,8 @@ impl HarnessWorkspace {
             return;
         };
         hosted.update(cx, |ws, cx| {
-            ws.open_abs_path(
-                abs.clone(),
-                ::workspace::OpenOptions::default(),
-                window,
-                cx,
-            )
-            .detach();
+            ws.open_abs_path(abs.clone(), ::workspace::OpenOptions::default(), window, cx)
+                .detach();
         });
         self.set_note(format!("opened {}", abs.display()));
         cx.notify();

@@ -269,7 +269,10 @@ impl ExtensionUiRequest {
     /// NOT raise a modal or a "needs input" notification — treating them as
     /// blocking would spam the user with dialogs the agent never waited on.
     pub fn is_blocking(&self) -> bool {
-        matches!(self.method.as_str(), "select" | "confirm" | "input" | "editor")
+        matches!(
+            self.method.as_str(),
+            "select" | "confirm" | "input" | "editor"
+        )
     }
 }
 

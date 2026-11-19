@@ -32,7 +32,11 @@ fn contract_covers_exactly_the_reference_runtime_toolset() {
 #[test]
 fn every_tool_declares_a_usable_json_schema() {
     for tool in schema().tools {
-        assert!(!tool.description.is_empty(), "{} has no description", tool.name);
+        assert!(
+            !tool.description.is_empty(),
+            "{} has no description",
+            tool.name
+        );
         assert_eq!(
             tool.parameters.get("type").and_then(|t| t.as_str()),
             Some("object"),
@@ -108,7 +112,9 @@ fn newer_minor_is_usable_but_flagged() {
         current: Version { major: 1, minor: 0 },
     };
     assert!(v.is_usable());
-    assert!(v.to_string().contains("may call tools this build does not provide"));
+    assert!(v
+        .to_string()
+        .contains("may call tools this build does not provide"));
 }
 
 #[test]
@@ -141,5 +147,8 @@ fn version_parsing_round_trips() {
         })
     );
     assert_eq!(Version::parse("3.14").unwrap().to_string(), "3.14");
-    assert_eq!(Version::parse("  1.0  "), Some(Version { major: 1, minor: 0 }));
+    assert_eq!(
+        Version::parse("  1.0  "),
+        Some(Version { major: 1, minor: 0 })
+    );
 }

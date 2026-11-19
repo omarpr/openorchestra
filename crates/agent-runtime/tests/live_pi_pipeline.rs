@@ -88,7 +88,9 @@ fn pi_spawned_through_the_adapter_drives_the_sidebar_pill() {
 
     // --- exactly what ensure_pane does -------------------------------------
     let runtime = runtime_for(&AgentKind::Pi, worktree.path(), state_dir.path());
-    runtime.on_spawn(worktree.path()).expect("on_spawn must succeed");
+    runtime
+        .on_spawn(worktree.path())
+        .expect("on_spawn must succeed");
     let command = runtime
         .command(worktree.path())
         .expect("pi must be on PATH for this test");
@@ -158,5 +160,9 @@ fn pi_spawned_through_the_adapter_drives_the_sidebar_pill() {
     );
     // The harvesting hook M7 depends on.
     let session_file = session_file.expect("no sessionFile ever reported");
-    assert!(session_file.exists(), "{} is missing", session_file.display());
+    assert!(
+        session_file.exists(),
+        "{} is missing",
+        session_file.display()
+    );
 }

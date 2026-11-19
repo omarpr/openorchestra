@@ -29,7 +29,12 @@ fn project_card_title() -> gpui::Div {
 }
 
 fn project_card_details() -> gpui::Div {
-    div().flex().items_center().gap_1().h(gpui::rems(1.1)).overflow_hidden()
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .h(gpui::rems(1.1))
+        .overflow_hidden()
 }
 
 /// A reorder row's inside: the name, then the four-dot grip on the right.
@@ -51,7 +56,15 @@ fn reorder_row_content(hx: &HarnessTheme, name: &str, grip: gpui::Div) -> gpui::
                 .text_color(hx.tx0)
                 .child(name.to_string()),
         )
-        .child(div().size(px(22.0)).flex().flex_none().items_center().justify_center().child(grip))
+        .child(
+            div()
+                .size(px(22.0))
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .child(grip),
+        )
 }
 
 /// The row that follows the cursor while dragging in a reorder panel: the
@@ -104,11 +117,17 @@ impl HarnessWorkspace {
         // open): on every project at once they were clutter, and they are
         // second-nature targets for the row you're already pointing at.
         let header_group = repo_element_id("repo-header", &repo.name);
-        let menu_open = self.project_menu.as_ref().is_some_and(|(r, _, _)| r == &repo.name);
+        let menu_open = self
+            .project_menu
+            .as_ref()
+            .is_some_and(|(r, _, _)| r == &repo.name);
         let header_icon = |id_prefix: &'static str, glyph: AnyElement, tip_text: &'static str| {
             div()
                 .id(repo_element_id(id_prefix, &repo.name))
-                .when(!menu_open, |d| d.opacity(0.0).group_hover(header_group.clone(), |s| s.opacity(1.0)))
+                .when(!menu_open, |d| {
+                    d.opacity(0.0)
+                        .group_hover(header_group.clone(), |s| s.opacity(1.0))
+                })
                 .size(px(20.0))
                 .flex()
                 .flex_none()
@@ -154,13 +173,35 @@ impl HarnessWorkspace {
                         ws.save_prefs(cx);
                         cx.notify();
                     }))
-                    .child(div().text_xs().text_color(hx.tx2).child(if collapsed { "▸" } else { "▾" }))
-                    .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx0).child(repo.name.clone()))
+                    .child(div().text_xs().text_color(hx.tx2).child(if collapsed {
+                        "▸"
+                    } else {
+                        "▾"
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(hx.tx0)
+                            .child(repo.name.clone()),
+                    )
                     .when(count > 0, |d| {
-                        d.child(div().flex_none().whitespace_nowrap().text_xs().text_color(hx.tx2).child(format!(
-                            "{count} {}",
-                            if count == 1 { "worktree" } else { "worktrees" }
-                        )))
+                        d.child(
+                            div()
+                                .flex_none()
+                                .whitespace_nowrap()
+                                .text_xs()
+                                .text_color(hx.tx2)
+                                .child(format!(
+                                    "{count} {}",
+                                    if count == 1 { "worktree" } else { "worktrees" }
+                                )),
+                        )
                     }),
             )
             // New worktree, then the ⋯ menu (setup scripts, archive, remove).
@@ -187,7 +228,11 @@ impl HarnessWorkspace {
                     let menu_repo = repo.name.clone();
                     cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
-                        ws.project_menu = Some((menu_repo.clone(), ev.position.x - px(150.0), ev.position.y + px(8.0)));
+                        ws.project_menu = Some((
+                            menu_repo.clone(),
+                            ev.position.x - px(150.0),
+                            ev.position.y + px(8.0),
+                        ));
                         cx.notify();
                     })
                 }),
@@ -226,8 +271,8 @@ impl HarnessWorkspace {
         group
     }
 
-    /// One worktree under its project in PROJECTS: name, branch, badges and
-    /// agent pill. Clicking it selects the owning task focused on this member,
+    /// One worktree under its project in PROJECTS: name, badges and agent
+    /// pill. Clicking it selects the owning task focused on this member,
     /// i.e. exactly what clicking the same row under TASKS does.
     pub(crate) fn render_project_worktree_row(
         &self,
@@ -237,7 +282,10 @@ impl HarnessWorkspace {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let sel = match &wt.task_id {
-            Some(t) => Selection::Task { task_id: t.clone(), member_id: Some(wt.id.clone()) },
+            Some(t) => Selection::Task {
+                task_id: t.clone(),
+                member_id: Some(wt.id.clone()),
+            },
             None => Selection::Worktree(wt.id.clone()),
         };
         let status = self.branch_status(repo_root, &wt.branch);
@@ -260,7 +308,11 @@ impl HarnessWorkspace {
             .iter()
             .flat_map(|t| t.members.iter())
             .find(|m| m.worktree_id == wt.id);
-        let agent = self.agent_status.get(&wt.path).copied().unwrap_or(AgentState::Unknown);
+        let agent = self
+            .agent_status
+            .get(&wt.path)
+            .copied()
+            .unwrap_or(AgentState::Unknown);
         let ending = self.ending_for(wt.task_id.as_deref(), &wt.id);
         // Rename acts on the owning task (that is what the menu keys on), so
         // the field opens here as well as on the TASKS card — before, a rename
@@ -272,7 +324,10 @@ impl HarnessWorkspace {
             // Clicks in the field stay in the field: the row's own click would
             // re-select it and pull focus back to the terminal.
             Some(editor) => div()
-                .on_mouse_down(MouseButton::Left, cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
+                )
                 .child(self.render_input(hx, editor, cx))
                 .into_any_element(),
             None => div()
@@ -286,20 +341,7 @@ impl HarnessWorkspace {
                 .into_any_element(),
         };
         let counts = member.and_then(|m| git_counts(hx, m.ahead, m.behind, m.dirty));
-        let branch = (wt.name != wt.branch).then_some(wt.branch.as_str());
         let subtitle = project_card_details()
-            .when_some(branch, |d, branch| {
-                d.child(div()
-                    .max_w_full()
-                    .min_w_0()
-                    .text_xs()
-                    .font_family(hx.font_mono)
-                    .text_color(hx.tx2)
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .child(branch.to_string()))
-            })
             .children(pr.map(|pr| pr_badge(hx, pr)))
             .children(counts.map(|chip| chip.flex_shrink(1.0).min_w_0().overflow_hidden()))
             .children(status.and_then(|status| ci_badge(hx, status, self.anim_secs())));
@@ -312,9 +354,9 @@ impl HarnessWorkspace {
             .when(ending.is_some(), |d| d.opacity(0.55))
             .when(ending.is_none(), |d| {
                 let hover_bg = row_hover_bg(hx, selected);
-                d.cursor_pointer()
-                    .hover(move |d| d.bg(hover_bg))
-                    .on_click(cx.listener(move |ws, _, window, cx| ws.select(sel.clone(), window, cx)))
+                d.cursor_pointer().hover(move |d| d.bg(hover_bg)).on_click(
+                    cx.listener(move |ws, _, window, cx| ws.select(sel.clone(), window, cx)),
+                )
             })
             // The same Rename / Archive / Delete menu the TASKS card has —
             // keyed on the owning task, since that is what those act on.
@@ -332,32 +374,41 @@ impl HarnessWorkspace {
                     cx.notify();
                 })
             })
-            // Name and branch both ellipsize in a narrow sidebar; the tooltip
-            // always has them in full.
-            .tooltip(tip(format!("{} · {} — right-click to rename, archive or delete", wt.name, wt.branch)))
+            // Keep the full name and branch available on hover.
+            .tooltip(tip(format!(
+                "{} · {} — right-click to rename, archive or delete",
+                wt.name, wt.branch
+            )))
             // Grey while it's being archived or deleted: the busy pill says
             // so, and a state colour there would be about an agent going away.
             .child(state_tile(
                 hx,
                 ICON_WORKTREE,
-                if ending.is_some() { AgentState::Unknown } else { agent },
+                if ending.is_some() {
+                    AgentState::Unknown
+                } else {
+                    agent
+                },
                 self.anim_secs(),
             ))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .child(project_card_title()
-                        .child(div().flex_1().min_w_0().child(name_el))
-                        .children(self.remote_dot(
-                            hx,
-                            format!("remote-dot-wt-{}", wt.id),
-                            &worktree_pane_key(wt.task_id.as_deref(), &wt.id),
-                        ))
-                        .child(match ending {
-                            Some(kind) => busy_pill(hx, kind.doing_label(), self.anim_secs()).into_any_element(),
-                            None => agent_pill(hx, agent, self.anim_secs()).into_any_element(),
-                        }))
+                    .child(
+                        project_card_title()
+                            .child(div().flex_1().min_w_0().child(name_el))
+                            .children(self.remote_dot(
+                                hx,
+                                format!("remote-dot-wt-{}", wt.id),
+                                &worktree_pane_key(wt.task_id.as_deref(), &wt.id),
+                            ))
+                            .child(match ending {
+                                Some(kind) => busy_pill(hx, kind.doing_label(), self.anim_secs())
+                                    .into_any_element(),
+                                None => agent_pill(hx, agent, self.anim_secs()).into_any_element(),
+                            }),
+                    )
                     .child(subtitle),
             )
     }
@@ -369,7 +420,11 @@ impl HarnessWorkspace {
     /// it scrolls inside itself, so it never crowds out PROJECTS. Only the
     /// "restore" link restores — a stray click on the row does nothing — and
     /// "×" drops an entry from the list (files stay on disk).
-    pub(crate) fn render_archived(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_archived(
+        &self,
+        hx: &HarnessTheme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let count = div()
             .flex_none()
             .text_xs()
@@ -476,7 +531,11 @@ impl HarnessWorkspace {
             .copied()
             .unwrap_or(AgentState::Unknown);
 
-        let title = if repo.head_branch.is_empty() { "Checkout" } else { &repo.head_branch };
+        let title = if repo.head_branch.is_empty() {
+            "Checkout"
+        } else {
+            &repo.head_branch
+        };
         let status = self.branch_status(&repo.repo_root, &repo.head_branch);
         let pr = status.and_then(|status| status.pr.as_ref());
         let ci = status.and_then(|status| ci_badge(hx, status, self.anim_secs()));
@@ -502,16 +561,19 @@ impl HarnessWorkspace {
                 ws.select(Selection::Main(repo_name.clone()), window, cx);
             }))
             .when_some(pr_menu_target(pr), |d, pr| {
-                d.on_mouse_down(MouseButton::Right, cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
-                    cx.stop_propagation();
-                    ws.menu = Some(CardMenu {
-                        id: None,
-                        pr: Some(pr.clone()),
-                        x: ev.position.x,
-                        y: ev.position.y,
-                    });
-                    cx.notify();
-                }))
+                d.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        ws.menu = Some(CardMenu {
+                            id: None,
+                            pr: Some(pr.clone()),
+                            x: ev.position.x,
+                            y: ev.position.y,
+                        });
+                        cx.notify();
+                    }),
+                )
             })
             .child(state_tile(hx, ICON_MAIN_CHECKOUT, agent, self.anim_secs()))
             .child(
@@ -520,16 +582,18 @@ impl HarnessWorkspace {
                     .min_w_0()
                     .child(
                         project_card_title()
-                            .child(div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_sm()
-                                .line_height(gpui::rems(1.15))
-                                .text_color(hx.tx0)
-                                .whitespace_nowrap()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(title.to_string()))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_sm()
+                                    .line_height(gpui::rems(1.15))
+                                    .text_color(hx.tx0)
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .child(title.to_string()),
+                            )
                             .children(self.remote_dot(
                                 hx,
                                 format!("remote-dot-main-{}", repo.name),
@@ -565,8 +629,18 @@ impl HarnessWorkspace {
         };
         // (key used to move it, label shown)
         let rows: Vec<(String, String)> = match list_kind {
-            ReorderList::Projects => self.data.repos.iter().map(|r| (r.name.clone(), r.name.clone())).collect(),
-            ReorderList::Tasks => self.data.tasks.iter().map(|t| (t.id.clone(), t.name.clone())).collect(),
+            ReorderList::Projects => self
+                .data
+                .repos
+                .iter()
+                .map(|r| (r.name.clone(), r.name.clone()))
+                .collect(),
+            ReorderList::Tasks => self
+                .data
+                .tasks
+                .iter()
+                .map(|t| (t.id.clone(), t.name.clone()))
+                .collect(),
         };
         let title = match list_kind {
             ReorderList::Projects => "REORDER PROJECTS",
@@ -601,25 +675,41 @@ impl HarnessWorkspace {
                     .tooltip(tip("Drag to reorder"))
                     // What follows the cursor is the row itself, at its own
                     // width, so it reads as moving the row — not a label.
-                    .on_drag(DraggedReorderRow { list: list_kind, key }, move |_, _, _, cx| {
-                        let name = ghost_label.clone();
-                        let hx = ghost_theme.clone();
-                        cx.new(|_| ReorderRowGhost { name, hx })
-                    })
+                    .on_drag(
+                        DraggedReorderRow {
+                            list: list_kind,
+                            key,
+                        },
+                        move |_, _, _, cx| {
+                            let name = ghost_label.clone();
+                            let hx = ghost_theme.clone();
+                            cx.new(|_| ReorderRowGhost { name, hx })
+                        },
+                    )
                     // The row under the cursor while dragging is where the
                     // dragged row will land (same list only).
                     .drag_over::<DraggedReorderRow>(move |d, dragged, _, _| {
-                        if dragged.list == list_kind { d.bg(drop_bg) } else { d }
+                        if dragged.list == list_kind {
+                            d.bg(drop_bg)
+                        } else {
+                            d
+                        }
                     })
-                    .on_drop(cx.listener(move |ws, dragged: &DraggedReorderRow, window, cx| {
-                        if dragged.list != list_kind {
-                            return;
-                        }
-                        match list_kind {
-                            ReorderList::Projects => ws.move_repo(&dragged.key, &drop_key, window, cx),
-                            ReorderList::Tasks => ws.move_task(&dragged.key, &drop_key, window, cx),
-                        }
-                    }))
+                    .on_drop(
+                        cx.listener(move |ws, dragged: &DraggedReorderRow, window, cx| {
+                            if dragged.list != list_kind {
+                                return;
+                            }
+                            match list_kind {
+                                ReorderList::Projects => {
+                                    ws.move_repo(&dragged.key, &drop_key, window, cx)
+                                }
+                                ReorderList::Tasks => {
+                                    ws.move_task(&dragged.key, &drop_key, window, cx)
+                                }
+                            }
+                        }),
+                    )
                     .child(reorder_row_content(hx, &label, grip(hx.tx2))),
             );
         }
@@ -637,7 +727,10 @@ impl HarnessWorkspace {
             .flex()
             .flex_col()
             .gap_1()
-            .on_mouse_down(MouseButton::Left, cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
+            )
             .child(
                 div()
                     .px_2()
@@ -680,14 +773,27 @@ impl HarnessWorkspace {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let item = |label: &'static str, danger: bool, run: Box<MenuAction>| {
-            self.menu_item(hx, label, danger, cx.listener(move |ws, _, window, cx| {
-                cx.stop_propagation();
-                ws.project_menu = None;
-                run(ws, window, cx);
-            }))
+            self.menu_item(
+                hx,
+                label,
+                danger,
+                cx.listener(move |ws, _, window, cx| {
+                    cx.stop_propagation();
+                    ws.project_menu = None;
+                    run(ws, window, cx);
+                }),
+            )
         };
-        let (r1, r2, r3, r4) = (repo.to_string(), repo.to_string(), repo.to_string(), repo.to_string());
-        let (up, down) = (self.repo_can_shift(repo, true), self.repo_can_shift(repo, false));
+        let (r1, r2, r3, r4) = (
+            repo.to_string(),
+            repo.to_string(),
+            repo.to_string(),
+            repo.to_string(),
+        );
+        let (up, down) = (
+            self.repo_can_shift(repo, true),
+            self.repo_can_shift(repo, false),
+        );
         let (r5, r6) = (repo.to_string(), repo.to_string());
         div()
             .absolute()
@@ -703,17 +809,42 @@ impl HarnessWorkspace {
             .flex()
             .flex_col()
             .gap_1()
-            .on_mouse_down(MouseButton::Left, cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()))
-            .child(item("New worktree…", false, Box::new(move |ws, w, cx| ws.open_new_task_for_repo(&r1, w, cx))))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
+            )
+            .child(item(
+                "New worktree…",
+                false,
+                Box::new(move |ws, w, cx| ws.open_new_task_for_repo(&r1, w, cx)),
+            ))
             .child(item(
                 "Edit setup scripts…",
                 false,
-                Box::new(move |ws, w, cx| ws.open_project_hooks(&r2, HookScriptPhase::Setup, HookLayer::Repo, w, cx)),
+                Box::new(move |ws, w, cx| {
+                    ws.open_project_hooks(&r2, HookScriptPhase::Setup, HookLayer::Repo, w, cx)
+                }),
             ))
-            .when(up, |d| d.child(item("Move up", false, Box::new(move |ws, w, cx| ws.shift_repo(&r5, true, w, cx)))))
-            .when(down, |d| d.child(item("Move down", false, Box::new(move |ws, w, cx| ws.shift_repo(&r6, false, w, cx)))))
+            .when(up, |d| {
+                d.child(item(
+                    "Move up",
+                    false,
+                    Box::new(move |ws, w, cx| ws.shift_repo(&r5, true, w, cx)),
+                ))
+            })
+            .when(down, |d| {
+                d.child(item(
+                    "Move down",
+                    false,
+                    Box::new(move |ws, w, cx| ws.shift_repo(&r6, false, w, cx)),
+                ))
+            })
             .child(div().h(px(1.0)).mx_1().bg(hx.border))
-            .child(item("Archive project", false, Box::new(move |ws, w, cx| ws.archive_repo(r3.clone(), w, cx))))
+            .child(item(
+                "Archive project",
+                false,
+                Box::new(move |ws, w, cx| ws.archive_repo(r3.clone(), w, cx)),
+            ))
             .child(item(
                 "Remove project…",
                 true,

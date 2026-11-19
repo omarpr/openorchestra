@@ -114,7 +114,10 @@ fn measure_losses(members: &[EndingMember]) -> Vec<Loss> {
         .map(|m| Loss {
             repo: m.repo.clone(),
             branch: m.branch.clone(),
-            dirty: git.status(&m.path, None).map(|s| s.dirty_files).unwrap_or(0),
+            dirty: git
+                .status(&m.path, None)
+                .map(|s| s.dirty_files)
+                .unwrap_or(0),
             unpushed: git.push_state(&m.path, &m.fallback_ref).unpushed,
         })
         .collect()
@@ -133,7 +136,11 @@ struct EndOutcome {
 /// Trust covers a repo's whole hooks file, so a repo with untrusted *setup*
 /// scripts fails `load_trusted` even when its teardown list is empty. That
 /// isn't worth a warning at delete time: nothing was skipped.
-fn teardown_hooks(repo_root: &Path, data_dir: &Path, repo: &str) -> Result<Option<HooksConfig>, String> {
+fn teardown_hooks(
+    repo_root: &Path,
+    data_dir: &Path,
+    repo: &str,
+) -> Result<Option<HooksConfig>, String> {
     match HooksConfig::load_trusted(repo_root, data_dir, repo) {
         Ok(hooks) if hooks.teardown.is_empty() => Ok(None),
         Ok(hooks) => Ok(Some(hooks)),
@@ -159,7 +166,11 @@ fn run_end(plan: &EndPlan, data_dir: &Path) -> EndOutcome {
 
     if let Some(slug) = &plan.task_slug {
         let task_dir = data_dir.join("tasks").join(slug);
-        if let Err(e) = TaskHooks::load(data_dir, slug).run_teardown(git.runner(), &task_dir, &plan.member_paths) {
+        if let Err(e) = TaskHooks::load(data_dir, slug).run_teardown(
+            git.runner(),
+            &task_dir,
+            &plan.member_paths,
+        ) {
             errors.push(format!("task teardown: {e}"));
         }
     }
@@ -257,7 +268,12 @@ impl HarnessWorkspace {
                 members: task
                     .members
                     .iter()
-                    .filter(|m| self.manager.registry.get(&m.worktree_id).is_some_and(|e| !e.archived || kind == EndKind::Delete))
+                    .filter(|m| {
+                        self.manager
+                            .registry
+                            .get(&m.worktree_id)
+                            .is_some_and(|e| !e.archived || kind == EndKind::Delete)
+                    })
                     .filter_map(|m| member(&m.worktree_id))
                     .collect(),
                 home_worktree: task.home_path().map(Path::to_path_buf),
@@ -270,7 +286,12 @@ impl HarnessWorkspace {
                 kind,
                 id: id.to_string(),
                 task_id: None,
-                title: self.manager.registry.get(id).map(|e| e.name.clone()).unwrap_or_default(),
+                title: self
+                    .manager
+                    .registry
+                    .get(id)
+                    .map(|e| e.name.clone())
+                    .unwrap_or_default(),
                 members: vec![m],
                 home_worktree: None,
                 task_slug: None,
@@ -281,7 +302,13 @@ impl HarnessWorkspace {
 
     /// The card menu's Archive / Delete: check what would be lost, then ask
     /// (or, for a clean archive, just go).
-    pub(crate) fn request_end(&mut self, id: String, kind: EndKind, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn request_end(
+        &mut self,
+        id: String,
+        kind: EndKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.menu = None;
         if self.ending.contains_key(&id) {
             return;
@@ -295,10 +322,16 @@ impl HarnessWorkspace {
         self.end_confirm = Some(EndConfirm { plan, losses: None });
         cx.notify();
         cx.spawn_in(window, async move |view, cx| {
-            let losses = cx.background_spawn(async move { measure_losses(&members) }).await;
+            let losses = cx
+                .background_spawn(async move { measure_losses(&members) })
+                .await;
             let _ = view.update_in(cx, |ws, window, cx| {
                 // Cancelled, or replaced by another request, meanwhile.
-                let Some(pending) = ws.end_confirm.as_mut().filter(|c| c.plan.id == id && c.plan.kind == kind) else {
+                let Some(pending) = ws
+                    .end_confirm
+                    .as_mut()
+                    .filter(|c| c.plan.id == id && c.plan.kind == kind)
+                else {
                     return;
                 };
                 if needs_confirmation(kind, &losses) {
@@ -346,8 +379,8 @@ impl HarnessWorkspace {
             // kept; a re-created same-slug task must not inherit its pill.
             if let Some(slug) = self.task_store.get(tid).map(|t| t.slug.clone()) {
                 let dir = clear_coordinator_status(&self.data_dir.join("tasks"), &slug);
+                self.conductor.forget_root(&dir);
                 self.agent_status.remove(&dir);
-                self.agent_since.remove(&dir);
             }
             let legacy = format!("task:{tid}");
             self.teardown_sessions(&legacy);
@@ -374,18 +407,32 @@ impl HarnessWorkspace {
         let data_dir = self.data_dir.clone();
         cx.spawn_in(window, async move |view, cx| {
             let job = plan.clone();
-            let outcome = cx.background_spawn(async move { run_end(&job, &data_dir) }).await;
-            let _ = view.update_in(cx, |ws, window, cx| ws.finish_end(plan, outcome, window, cx));
+            let outcome = cx
+                .background_spawn(async move { run_end(&job, &data_dir) })
+                .await;
+            let _ = view.update_in(cx, |ws, window, cx| {
+                ws.finish_end(plan, outcome, window, cx)
+            });
         })
         .detach();
     }
 
-    fn finish_end(&mut self, plan: EndPlan, outcome: EndOutcome, window: &mut Window, cx: &mut Context<Self>) {
+    fn finish_end(
+        &mut self,
+        plan: EndPlan,
+        outcome: EndOutcome,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.ending.remove(&plan.id);
         let mut errors = outcome.errors;
         for wid in &outcome.done {
             let r = match plan.kind {
-                EndKind::Archive => self.manager.registry.mark_archived(wid).map_err(|e| e.to_string()),
+                EndKind::Archive => self
+                    .manager
+                    .registry
+                    .mark_archived(wid)
+                    .map_err(|e| e.to_string()),
                 EndKind::Delete => {
                     self.manager.registry.remove(wid);
                     Ok(())
@@ -403,7 +450,10 @@ impl HarnessWorkspace {
         let all_done = outcome.done.len() == plan.members.len();
         if all_done && let Some(tid) = &plan.task_id {
             let r = match plan.kind {
-                EndKind::Archive => self.task_store.mark_archived(tid).map_err(|e| e.to_string()),
+                EndKind::Archive => self
+                    .task_store
+                    .mark_archived(tid)
+                    .map_err(|e| e.to_string()),
                 EndKind::Delete => {
                     self.task_store.remove(tid);
                     Ok(())
@@ -422,13 +472,23 @@ impl HarnessWorkspace {
         } else if all_done {
             format!("{past} ‘{}’ ({})", plan.title, errors.join("; "))
         } else {
-            format!("{} ‘{}’ failed: {}", plan.kind.verb().to_lowercase(), plan.title, errors.join("; "))
+            format!(
+                "{} ‘{}’ failed: {}",
+                plan.kind.verb().to_lowercase(),
+                plan.title,
+                errors.join("; ")
+            )
         });
         self.refresh(window, cx);
     }
 
     /// Approve a repo's committed hooks as they are now, then retry setup.
-    pub(crate) fn trust_hooks_and_run(&mut self, roots: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn trust_hooks_and_run(
+        &mut self,
+        roots: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.hook_trust = None;
         for root in &roots {
             if let Err(e) = HookTrust::trust(&self.data_dir, root) {
@@ -474,7 +534,12 @@ mod tests {
     }
 
     fn loss(dirty: usize, unpushed: usize) -> Loss {
-        Loss { repo: "app".into(), branch: "feat/x".into(), dirty, unpushed }
+        Loss {
+            repo: "app".into(),
+            branch: "feat/x".into(),
+            dirty,
+            unpushed,
+        }
     }
 
     #[test]
@@ -488,7 +553,10 @@ mod tests {
         assert!(!needs_confirmation(EndKind::Archive, &[loss(0, 0)]));
         // Unpushed commits stay on the branch, which archive keeps.
         assert!(!needs_confirmation(EndKind::Archive, &[loss(0, 5)]));
-        assert!(needs_confirmation(EndKind::Archive, &[loss(0, 0), loss(2, 0)]));
+        assert!(needs_confirmation(
+            EndKind::Archive,
+            &[loss(0, 0), loss(2, 0)]
+        ));
     }
 
     /// A repo whose committed hooks list `setup` and `teardown` scripts, with
@@ -499,7 +567,13 @@ mod tests {
         let data = tmp.path().join("data");
         let hooks = repo.join(".openorchestra");
         std::fs::create_dir_all(hooks.join("scripts")).unwrap();
-        let list = |on: bool, name: &str| if on { format!("[\"scripts/{name}\"]") } else { "[]".into() };
+        let list = |on: bool, name: &str| {
+            if on {
+                format!("[\"scripts/{name}\"]")
+            } else {
+                "[]".into()
+            }
+        };
         std::fs::write(
             hooks.join("hooks.toml"),
             format!(
@@ -533,7 +607,9 @@ mod tests {
     fn trusted_teardown_scripts_load() {
         let (_tmp, repo, data) = untrusted_repo(false, true);
         HookTrust::trust(&data, &repo).unwrap();
-        let cfg = teardown_hooks(&repo, &data, "repo").unwrap().expect("teardown to run");
+        let cfg = teardown_hooks(&repo, &data, "repo")
+            .unwrap()
+            .expect("teardown to run");
         assert_eq!(cfg.teardown.len(), 1);
     }
 
@@ -545,7 +621,14 @@ mod tests {
         let repo = dir.path();
         let git = |args: &[&str]| {
             let ok = std::process::Command::new("git")
-                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
                 .args(args)
                 .current_dir(repo)
                 .output()
@@ -575,6 +658,14 @@ mod tests {
             fallback_ref: "main".into(),
         };
         let l = measure_losses(&[m]);
-        assert_eq!(l, vec![Loss { repo: "app".into(), branch: "feat/x".into(), dirty: 1, unpushed: 1 }]);
+        assert_eq!(
+            l,
+            vec![Loss {
+                repo: "app".into(),
+                branch: "feat/x".into(),
+                dirty: 1,
+                unpushed: 1
+            }]
+        );
     }
 }

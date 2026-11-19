@@ -4,8 +4,8 @@
 use super::super::*;
 use crate::workspace::remote::worktree_pane_key;
 
-mod projects;
 pub(crate) mod links;
+mod projects;
 
 /// The sidebar's three top-level sections, in render order.
 ///
@@ -58,7 +58,6 @@ const ARCHIVED_ROW_H: f32 = 30.0;
 const SECTION_HEADER_H: f32 = 34.0;
 
 impl HarnessWorkspace {
-
     /// A section's trailing `+` button. Stops propagation so adding a task or
     /// project never also toggles the section it lives in.
     fn section_add_button(
@@ -164,13 +163,25 @@ impl HarnessWorkspace {
     /// footprint as two labelled sparklines, with a per-worktree breakdown on
     /// hover. `base + Σ worktrees` by construction, so the hover rows add up to
     /// the totals shown here.
-    pub(crate) fn render_resource_band(&self, hx: &HarnessTheme, _cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_resource_band(
+        &self,
+        hx: &HarnessTheme,
+        _cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         use crate::resource_monitor::{fmt_cpu, fmt_mem};
         let snap = self.resource.as_ref();
-        let cpu_label = snap.map(|s| fmt_cpu(s.total.cpu_pct)).unwrap_or_else(|| "—".into());
-        let mem_label = snap.map(|s| fmt_mem(s.total.rss_bytes)).unwrap_or_else(|| "—".into());
+        let cpu_label = snap
+            .map(|s| fmt_cpu(s.total.cpu_pct))
+            .unwrap_or_else(|| "—".into());
+        let mem_label = snap
+            .map(|s| fmt_mem(s.total.rss_bytes))
+            .unwrap_or_else(|| "—".into());
         let cpu_hist: Vec<f32> = self.resource_history.iter().map(|u| u.cpu_pct).collect();
-        let mem_hist: Vec<f32> = self.resource_history.iter().map(|u| u.rss_bytes as f32).collect();
+        let mem_hist: Vec<f32> = self
+            .resource_history
+            .iter()
+            .map(|u| u.rss_bytes as f32)
+            .collect();
 
         // Hover breakdown: worktrees with any usage, most-CPU first, then the
         // shared base-app row (muted) so the rows sum to the total.
@@ -207,7 +218,14 @@ impl HarnessWorkspace {
                 .items_center()
                 .gap_2()
                 .h(px(15.0))
-                .child(div().w(px(30.0)).flex_none().text_xs().text_color(hx.tx2).child(label))
+                .child(
+                    div()
+                        .w(px(30.0))
+                        .flex_none()
+                        .text_xs()
+                        .text_color(hx.tx2)
+                        .child(label),
+                )
                 .child(sparkline(&hist, color))
                 .child(div().flex_1())
                 .child(
@@ -248,21 +266,26 @@ impl HarnessWorkspace {
                 .flex_none()
                 .text_xs()
                 .text_color(hx.tx1)
-                .child(format!("{} · {}", fmt_cpu(total.cpu_pct), fmt_mem(total.rss_bytes)))
+                .child(format!(
+                    "{} · {}",
+                    fmt_cpu(total.cpu_pct),
+                    fmt_mem(total.rss_bytes)
+                ))
                 .into_any_element(),
         )
     }
 
     /// PROJECTS' trailing `+` — adds a git repository.
     fn projects_add_button(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
-        let add = self.section_add_button(
-            hx,
-            "project-plus",
-            "Add a git repository as a project",
-            |ws, window, cx| ws.add_project(window, cx),
-            cx,
-        )
-        .into_any_element();
+        let add = self
+            .section_add_button(
+                hx,
+                "project-plus",
+                "Add a git repository as a project",
+                |ws, window, cx| ws.add_project(window, cx),
+                cx,
+            )
+            .into_any_element();
         self.with_reorder_button(hx, ReorderList::Projects, self.data.repos.len(), add, cx)
     }
 
@@ -302,30 +325,51 @@ impl HarnessWorkspace {
                 cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
                     cx.stop_propagation();
                     ws.project_menu = None;
-                    ws.reorder_panel = Some((list, ev.position.x - px(200.0), ev.position.y + px(10.0)));
+                    ws.reorder_panel =
+                        Some((list, ev.position.x - px(200.0), ev.position.y + px(10.0)));
                     cx.notify();
                 }),
             )
             // The header strip toggles collapse on click; keep that click here.
             .on_click(|_, _, cx| cx.stop_propagation());
-        div().flex().items_center().gap_1().child(reorder).child(add).into_any_element()
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(reorder)
+            .child(add)
+            .into_any_element()
     }
 
     /// TASKS' trailing `+` — opens the inline new-task editor, expanding the
     /// section first so the editor it reveals is actually on screen.
     fn tasks_add_button(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
         let add = self
-            .section_add_button(hx, "task-plus", "New task", |ws, window, cx| {
-                if ws.prefs.collapsed_sections.remove(SidebarSection::Tasks.label()) {
-                    ws.save_prefs(cx);
-                }
-                ws.open_new_task(window, cx);
-            }, cx)
+            .section_add_button(
+                hx,
+                "task-plus",
+                "New task",
+                |ws, window, cx| {
+                    if ws
+                        .prefs
+                        .collapsed_sections
+                        .remove(SidebarSection::Tasks.label())
+                    {
+                        ws.save_prefs(cx);
+                    }
+                    ws.open_new_task(window, cx);
+                },
+                cx,
+            )
             .into_any_element();
         self.with_reorder_button(hx, ReorderList::Tasks, self.data.tasks.len(), add, cx)
     }
 
-    pub(crate) fn render_sidebar(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_sidebar(
+        &self,
+        hx: &HarnessTheme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let mut column = div()
             .flex()
             .flex_col()
@@ -343,7 +387,8 @@ impl HarnessWorkspace {
 
         if self.data.repos.is_empty() {
             let action = self.projects_add_button(hx, cx);
-            column = column.child(self.section_header(hx, SidebarSection::Projects, Some(action), cx));
+            column =
+                column.child(self.section_header(hx, SidebarSection::Projects, Some(action), cx));
             if !self.section_collapsed(SidebarSection::Projects) {
                 column = column.child(
                     div()
@@ -364,7 +409,9 @@ impl HarnessWorkspace {
             }
             return column
                 .child(div().flex_1())
-                .when(!self.archived_repos.is_empty(), |d| d.child(self.render_archived(hx, cx)));
+                .when(!self.archived_repos.is_empty(), |d| {
+                    d.child(self.render_archived(hx, cx))
+                });
         }
 
         // Every section header stays put; each body scrolls inside its own
@@ -427,7 +474,11 @@ impl HarnessWorkspace {
                 .overflow_y_scroll()
                 .pt(px(4.0));
             for repo in &self.data.repos {
-                body = body.child(div().flex_none().child(self.render_repo_group(hx, repo, cx)));
+                body = body.child(
+                    div()
+                        .flex_none()
+                        .child(self.render_repo_group(hx, repo, cx)),
+                );
             }
             projects = projects.child(body);
         }
@@ -435,7 +486,9 @@ impl HarnessWorkspace {
         column
             .child(tasks_col)
             .child(projects)
-            .when(!self.archived_repos.is_empty(), |d| d.child(self.render_archived(hx, cx)))
+            .when(!self.archived_repos.is_empty(), |d| {
+                d.child(self.render_archived(hx, cx))
+            })
     }
 
     /// The small accent dot on a sidebar row whose worktree (pane `key`) has
@@ -477,11 +530,14 @@ impl HarnessWorkspace {
         // A multi-project task's tile is its coordinator agent; the repo rows
         // under it are the specialists it delegates to.
         let multi = task.members.len() >= 2;
-        let task_pr = task.members.first().filter(|_| !multi).and_then(|member| {
-            self.worktree_pull_request(&member.worktree_id, &member.branch)
-        });
+        let task_pr = task
+            .members
+            .first()
+            .filter(|_| !multi)
+            .and_then(|member| self.worktree_pull_request(&member.worktree_id, &member.branch));
         let menu_pr = pr_menu_target(task_pr);
-        let coord_focused = multi && self.focused_coordinator_task().as_deref() == Some(task.id.as_str());
+        let coord_focused =
+            multi && self.focused_coordinator_task().as_deref() == Some(task.id.as_str());
         let coord_missing = multi && self.agent_missing(&task.id, None);
         let coord_fresh = self.restart_is_fresh(&task.id, None);
         let tid_restart = task.id.clone();
@@ -494,7 +550,11 @@ impl HarnessWorkspace {
         } else {
             AgentState::Unknown
         };
-        let a2a_rows = if multi { self.a2a_rows_for(&task.id) } else { Vec::new() };
+        let a2a_rows = if multi {
+            self.a2a_rows_for(&task.id)
+        } else {
+            Vec::new()
+        };
         let in_flight = |tenant: Option<&str>| {
             a2a_rows
                 .iter()
@@ -506,20 +566,21 @@ impl HarnessWorkspace {
         let a2a_active = in_flight(None);
         let now = self.anim_secs();
 
-        let name_el: AnyElement = if let Some(editor) = renaming.then(|| self.edit_editor()).flatten() {
-            self.render_input(hx, editor, cx).into_any_element()
-        } else {
-            div()
-                .w_full()
-                .min_w_0()
-                .text_sm()
-                .text_color(hx.tx0)
-                .whitespace_nowrap()
-                .overflow_hidden()
-                .text_ellipsis()
-                .child(task.name.clone())
-                .into_any_element()
-        };
+        let name_el: AnyElement =
+            if let Some(editor) = renaming.then(|| self.edit_editor()).flatten() {
+                self.render_input(hx, editor, cx).into_any_element()
+            } else {
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .text_sm()
+                    .text_color(hx.tx0)
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(task.name.clone())
+                    .into_any_element()
+            };
 
         let mut block = div()
             // Unique per task: `("task-row", task.id.len())` gave every task
@@ -572,11 +633,17 @@ impl HarnessWorkspace {
                     .cursor_pointer()
                     .when(coord_focused, |d| d.bg(selected_row_bg(hx)))
                     .hover({
-                        let hover_bg = if multi { row_hover_bg(hx, coord_focused) } else { hx.surface_hover };
+                        let hover_bg = if multi {
+                            row_hover_bg(hx, coord_focused)
+                        } else {
+                            hx.surface_hover
+                        };
                         move |d| d.bg(hover_bg)
                     })
                     .when(multi, |d| {
-                        d.tooltip(tip("Coordinator: plans the task and delegates to each repo's agent"))
+                        d.tooltip(tip(
+                            "Coordinator: plans the task and delegates to each repo's agent",
+                        ))
                     })
                     .on_click(cx.listener(move |ws, _, window, cx| {
                         ws.select(
@@ -622,18 +689,21 @@ impl HarnessWorkspace {
                             .flex()
                             .flex_col()
                             .child(name_el)
-                            .when_some(task_branch(task).filter(|branch| *branch != task.name), |d, branch| {
-                                d.child(
-                                    div()
-                                        .text_size(px(10.0))
-                                        .font_family(hx.font_mono)
-                                        .text_color(hx.tx2)
-                                        .whitespace_nowrap()
-                                        .overflow_hidden()
-                                        .text_ellipsis()
-                                        .child(branch.to_string()),
-                                )
-                            }),
+                            .when_some(
+                                task_branch(task).filter(|branch| *branch != task.name),
+                                |d, branch| {
+                                    d.child(
+                                        div()
+                                            .text_size(px(10.0))
+                                            .font_family(hx.font_mono)
+                                            .text_color(hx.tx2)
+                                            .whitespace_nowrap()
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .child(branch.to_string()),
+                                    )
+                                },
+                            ),
                     )
                     .children({
                         let coord_key = a2a_broker::coordinator_pane_key(&task.id);
@@ -675,7 +745,13 @@ impl HarnessWorkspace {
                             .when(multi, |d| d.children(git_counts(hx, 0, 0, task.dirty)))
                             .when(multi && task_ending.is_none(), |d| {
                                 if coord_missing {
-                                    d.child(restart_pill(hx, coord_fresh, tid_restart.clone(), None, cx))
+                                    d.child(restart_pill(
+                                        hx,
+                                        coord_fresh,
+                                        tid_restart.clone(),
+                                        None,
+                                        cx,
+                                    ))
                                 } else {
                                     d.child(agent_pill(hx, coord_state, now))
                                 }
@@ -767,16 +843,19 @@ impl HarnessWorkspace {
                             cx,
                         );
                     }))
-                    .on_mouse_down(MouseButton::Right, cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                        ws.menu = Some(CardMenu {
-                            id: Some(member_menu_id.clone()),
-                            pr: pr_for_menu.clone(),
-                            x: ev.position.x,
-                            y: ev.position.y,
-                        });
-                        cx.notify();
-                    }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |ws, ev: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            ws.menu = Some(CardMenu {
+                                id: Some(member_menu_id.clone()),
+                                pr: pr_for_menu.clone(),
+                                x: ev.position.x,
+                                y: ev.position.y,
+                            });
+                            cx.notify();
+                        }),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -862,10 +941,17 @@ impl HarnessWorkspace {
             .child(editor)
     }
 
-    pub(crate) fn render_context_menu(&self, hx: &HarnessTheme, menu: &CardMenu, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_context_menu(
+        &self,
+        hx: &HarnessTheme,
+        menu: &CardMenu,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         // A multi-project task opened from one of its PROJECTS rows still
         // archives/deletes as a whole; say so rather than imply one worktree.
-        let whole_task = menu.id.as_deref()
+        let whole_task = menu
+            .id
+            .as_deref()
             .and_then(|id| self.task_store.get(id))
             .is_some_and(|t| t.members.len() > 1);
         let (archive_label, delete_label) = if whole_task {
@@ -911,33 +997,67 @@ impl HarnessWorkspace {
             .when_some(menu.id.clone(), |d, rename_id| {
                 let archive_id = rename_id.clone();
                 let del_id = rename_id.clone();
-                d.child(self.menu_item(hx, "Rename", false, cx.listener(move |ws, _, window, cx| {
-                    cx.stop_propagation();
-                    let name = ws
-                        .task_store
-                        .get(&rename_id)
-                        .map(|t| t.name.clone())
-                        .or_else(|| ws.manager.registry.get(&rename_id).map(|e| e.name.clone()))
-                        .unwrap_or_default();
-                    if ws.task_store.get(&rename_id).is_some() {
-                        ws.select(
-                            Selection::Task { task_id: rename_id.clone(), member_id: None },
+                d.child(self.menu_item(
+                    hx,
+                    "Rename",
+                    false,
+                    cx.listener(move |ws, _, window, cx| {
+                        cx.stop_propagation();
+                        let name = ws
+                            .task_store
+                            .get(&rename_id)
+                            .map(|t| t.name.clone())
+                            .or_else(|| ws.manager.registry.get(&rename_id).map(|e| e.name.clone()))
+                            .unwrap_or_default();
+                        if ws.task_store.get(&rename_id).is_some() {
+                            ws.select(
+                                Selection::Task {
+                                    task_id: rename_id.clone(),
+                                    member_id: None,
+                                },
+                                window,
+                                cx,
+                            );
+                        } else {
+                            ws.select(Selection::Worktree(rename_id.clone()), window, cx);
+                        }
+                        ws.begin_edit(
+                            EditKind::Rename(rename_id.clone()),
+                            &name,
+                            "name…",
                             window,
                             cx,
                         );
-                    } else {
-                        ws.select(Selection::Worktree(rename_id.clone()), window, cx);
-                    }
-                    ws.begin_edit(EditKind::Rename(rename_id.clone()), &name, "name…", window, cx);
-                })))
-                .child(self.menu_item(hx, archive_label, false, cx.listener(move |ws, _, window, cx| {
-                    cx.stop_propagation();
-                    ws.request_end(archive_id.clone(), crate::workspace::lifecycle::EndKind::Archive, window, cx);
-                })))
-                .child(self.menu_item(hx, delete_label, true, cx.listener(move |ws, _, window, cx| {
-                    cx.stop_propagation();
-                    ws.request_end(del_id.clone(), crate::workspace::lifecycle::EndKind::Delete, window, cx);
-                })))
+                    }),
+                ))
+                .child(self.menu_item(
+                    hx,
+                    archive_label,
+                    false,
+                    cx.listener(move |ws, _, window, cx| {
+                        cx.stop_propagation();
+                        ws.request_end(
+                            archive_id.clone(),
+                            crate::workspace::lifecycle::EndKind::Archive,
+                            window,
+                            cx,
+                        );
+                    }),
+                ))
+                .child(self.menu_item(
+                    hx,
+                    delete_label,
+                    true,
+                    cx.listener(move |ws, _, window, cx| {
+                        cx.stop_propagation();
+                        ws.request_end(
+                            del_id.clone(),
+                            crate::workspace::lifecycle::EndKind::Delete,
+                            window,
+                            cx,
+                        );
+                    }),
+                ))
             })
     }
 
@@ -965,7 +1085,10 @@ impl HarnessWorkspace {
             .whitespace_nowrap()
             .text_color(if danger { hx.red } else { hx.tx1 })
             .cursor_pointer()
-            .hover(|d| d.bg(hx.surface_hover).text_color(if danger { hx.red } else { hx.tx0 }))
+            .hover(|d| {
+                d.bg(hx.surface_hover)
+                    .text_color(if danger { hx.red } else { hx.tx0 })
+            })
             .on_click(handler)
             .child(label.to_string())
     }
@@ -985,10 +1108,22 @@ fn pr_badge(hx: &HarnessTheme, pr: &forge::PrInfo) -> impl IntoElement {
         PrState::Closed => ("Closed", hx.tx1),
     };
     let label = format!("#{number}", number = pr.number);
-    linked_sidebar_chip(hx, color, "sidebar-pr", format!("{state} PR {label} · {}", pr.title), pr.url.clone())
-        .gap(px(4.0))
-        .child(svg().path("icons/github.svg").size(px(11.0)).flex_none().text_color(color))
-        .child(label)
+    linked_sidebar_chip(
+        hx,
+        color,
+        "sidebar-pr",
+        format!("{state} PR {label} · {}", pr.title),
+        pr.url.clone(),
+    )
+    .gap(px(4.0))
+    .child(
+        svg()
+            .path("icons/github.svg")
+            .size(px(11.0))
+            .flex_none()
+            .text_color(color),
+    )
+    .child(label)
 }
 
 fn ci_badge(hx: &HarnessTheme, status: &BranchStatus, t: f32) -> Option<impl IntoElement> {
@@ -999,14 +1134,31 @@ fn ci_badge(hx: &HarnessTheme, status: &BranchStatus, t: f32) -> Option<impl Int
         CheckStatus::Fail => (hx.red, "CI", "Checks failed"),
         CheckStatus::Skipped => return None,
     };
-    let url = status.pr.as_ref().and_then(|pr| pr.url.as_deref())
+    let url = status
+        .pr
+        .as_ref()
+        .and_then(|pr| pr.url.as_deref())
         .map(|url| format!("{}/checks", url.trim_end_matches('/')));
-    let tooltip = if url.is_some() { format!("{state} · Open checks") } else { state.to_owned() };
-    Some(linked_sidebar_chip(hx, color, "sidebar-ci", tooltip, url)
-        .gap(px(4.0))
-        .child(div().flex_none().size(px(5.0)).rounded_full().bg(color)
-            .when(summary == CheckStatus::Running, |dot| dot.opacity(dot_blink_opacity(t))))
-        .child(label))
+    let tooltip = if url.is_some() {
+        format!("{state} · Open checks")
+    } else {
+        state.to_owned()
+    };
+    Some(
+        linked_sidebar_chip(hx, color, "sidebar-ci", tooltip, url)
+            .gap(px(4.0))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(5.0))
+                    .rounded_full()
+                    .bg(color)
+                    .when(summary == CheckStatus::Running, |dot| {
+                        dot.opacity(dot_blink_opacity(t))
+                    }),
+            )
+            .child(label),
+    )
 }
 
 fn linked_sidebar_chip(
@@ -1090,7 +1242,14 @@ fn link_connectors(hx: &HarnessTheme, visuals: &[links::LinkVisual]) -> Vec<AnyE
     use links::{ELBOW_END_X, LinkEventKind, LinkVisual, ROW_H, SPINE_X};
     let mid = |i: usize| i as f32 * ROW_H + ROW_H / 2.0;
     let spine = |to: f32, color: gpui::Rgba| {
-        div().absolute().left(ui_px(SPINE_X)).top(px(0.0)).w(px(1.0)).h(ui_px(to)).bg(color).into_any_element()
+        div()
+            .absolute()
+            .left(ui_px(SPINE_X))
+            .top(px(0.0))
+            .w(px(1.0))
+            .h(ui_px(to))
+            .bg(color)
+            .into_any_element()
     };
     let elbow = |i: usize, color: gpui::Rgba| {
         div()
@@ -1112,8 +1271,14 @@ fn link_connectors(hx: &HarnessTheme, visuals: &[links::LinkVisual]) -> Vec<AnyE
         let (color, alpha) = match *v {
             LinkVisual::Idle => continue,
             LinkVisual::Active { pulse } => (hx.amber, 0.35 + 0.5 * pulse),
-            LinkVisual::Travel { kind: LinkEventKind::Down, .. } => (hx.amber, 0.7),
-            LinkVisual::Travel { kind: LinkEventKind::Up { ok }, .. } => (up_color(ok), 0.7),
+            LinkVisual::Travel {
+                kind: LinkEventKind::Down,
+                ..
+            } => (hx.amber, 0.7),
+            LinkVisual::Travel {
+                kind: LinkEventKind::Up { ok },
+                ..
+            } => (up_color(ok), 0.7),
             LinkVisual::Flash { ok, fade } => (up_color(ok), fade.clamp(0.0, 1.0)),
         };
         let c = tint(color, alpha);
@@ -1192,9 +1357,19 @@ fn sparkline(values: &[f32], color: gpui::Rgba) -> impl IntoElement {
 
     let start = values.len().saturating_sub(MAX_BARS);
     let visible = &values[start..];
-    let peak = visible.iter().copied().fold(0.0_f32, f32::max).max(f32::EPSILON);
+    let peak = visible
+        .iter()
+        .copied()
+        .fold(0.0_f32, f32::max)
+        .max(f32::EPSILON);
 
-    let mut row = div().flex().flex_row().items_end().flex_none().h(px(H)).gap(px(1.0));
+    let mut row = div()
+        .flex()
+        .flex_row()
+        .items_end()
+        .flex_none()
+        .h(px(H))
+        .gap(px(1.0));
     for &v in visible {
         let ratio = (v / peak).clamp(0.0, 1.0);
         let bar_h = (ratio * H).max(1.0);
@@ -1234,9 +1409,7 @@ impl Render for ResourceTooltip {
             .shadow_lg();
 
         if self.rows.is_empty() {
-            return col.child(
-                div().text_xs().text_color(hx.tx2).child("Measuring usage…"),
-            );
+            return col.child(div().text_xs().text_color(hx.tx2).child("Measuring usage…"));
         }
 
         for r in &self.rows {
@@ -1320,7 +1493,11 @@ mod tests {
     fn a_task_with_no_home_member_falls_back_to_the_first() {
         let t = task(vec![member("sample-project", "feat/a", false)]);
         assert_eq!(task_branch(&t), Some("feat/a"));
-        assert_eq!(task_branch(&task(vec![])), None, "no members, no branch line");
+        assert_eq!(
+            task_branch(&task(vec![])),
+            None,
+            "no members, no branch line"
+        );
     }
 
     #[test]

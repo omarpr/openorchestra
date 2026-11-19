@@ -18,8 +18,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import crypto from "node:crypto";
-import { recordTab } from "./remote-tab.mjs";
+import { recordTab, writeStatusFiles } from "./remote-tab.mjs";
 import os from "node:os";
 import { pathToFileURL } from "node:url";
 
@@ -94,23 +93,13 @@ export function toolFrom(payload) {
 
 export function writeStatus(cwd, state, sessionFile, tool, sessionId) {
 	try {
-		const dir = path.join(cwd, ".harness");
-		fs.mkdirSync(dir, { recursive: true });
-		const payload =
-			JSON.stringify(
-				{
-					state,
-					agent: "claude-code",
-					timestamp: new Date().toISOString(),
-					sessionFile: sessionFile ?? null,
-					tool: tool ?? null,
-				},
-				null,
-				"\t",
-			) + "\n";
-		const tmp = path.join(dir, `.status-${process.pid}-${crypto.randomBytes(4).toString("hex")}.tmp`);
-		fs.writeFileSync(tmp, payload, "utf8");
-		fs.renameSync(tmp, path.join(dir, "status.json")); // atomic on POSIX
+		const payload = writeStatusFiles(cwd, {
+			state,
+			agent: "claude-code",
+			timestamp: new Date().toISOString(),
+			sessionFile: sessionFile ?? null,
+			tool: tool ?? null,
+		});
 		recordTab(payload, sessionId);
 	} catch {
 		// Never let status bookkeeping break the agent.

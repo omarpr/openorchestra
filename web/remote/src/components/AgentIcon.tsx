@@ -2,6 +2,7 @@ import { SquareTerminal } from "lucide-react";
 import claudecode from "@/assets/agents/claudecode.svg?url";
 import codex from "@/assets/agents/codex.svg?url";
 import cursor from "@/assets/agents/cursor.svg?url";
+import grok from "@/assets/agents/grok.svg?url";
 import kimi from "@/assets/agents/kimi.svg?url";
 import opencode from "@/assets/agents/opencode.svg?url";
 import pi from "@/assets/agents/pi.svg?url";
@@ -9,6 +10,7 @@ import pi from "@/assets/agents/pi.svg?url";
 const ICONS: Record<string, { src: string; color: string; maskSize?: string }> = {
   "claude-code": { src: claudecode, color: "#d97757" },
   codex: { src: codex, color: "#10a37f" },
+  grok: { src: grok, color: "#e6e6e6" },
   kimi: { src: kimi, color: "#4f9cf9" },
   opencode: { src: opencode, color: "#3fb950", maskSize: "1.125rem" },
   pi: { src: pi, color: "#8b7cf6", maskSize: "1rem" },

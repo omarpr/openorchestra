@@ -45,9 +45,7 @@ fn parse_args() -> Result<Args, String> {
     let mut argv = std::env::args().skip(1);
     while let Some(arg) = argv.next() {
         match arg.as_str() {
-            "--state-dir" => {
-                args.state_dir = argv.next().ok_or("--state-dir needs a path")?.into()
-            }
+            "--state-dir" => args.state_dir = argv.next().ok_or("--state-dir needs a path")?.into(),
             "--out" => args.out = argv.next().ok_or("--out needs a path")?.into(),
             "--all" => args.all = true,
             "--include-unlabeled" => args.include_unlabeled = true,

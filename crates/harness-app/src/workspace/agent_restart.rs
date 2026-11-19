@@ -32,7 +32,10 @@ impl HarnessWorkspace {
                 candidates.push(a2a_broker::coordinator_pane_key(&task.id));
             }
             keys.extend(candidates.into_iter().filter(|k| {
-                self.panes_state.worktrees.get(k).is_some_and(|w| w.agent.is_some())
+                self.panes_state
+                    .worktrees
+                    .get(k)
+                    .is_some_and(|w| w.agent.is_some())
             }));
         }
         keys
@@ -52,13 +55,15 @@ impl HarnessWorkspace {
     }
 
     pub(crate) fn agent_missing(&self, task_id: &str, member_id: Option<&str>) -> bool {
-        self.missing_agents.contains(&restart_pane_key(task_id, member_id))
+        self.missing_agents
+            .contains(&restart_pane_key(task_id, member_id))
     }
 
     /// Whether the next Restart of this pane starts fresh, because continuing
     /// the conversation was already tried and the agent is still not running.
     pub(crate) fn restart_is_fresh(&self, task_id: &str, member_id: Option<&str>) -> bool {
-        self.restart_tried.contains(&restart_pane_key(task_id, member_id))
+        self.restart_tried
+            .contains(&restart_pane_key(task_id, member_id))
     }
 
     /// Bring a missing task agent back: open its pane and launch the agent it
@@ -77,7 +82,9 @@ impl HarnessWorkspace {
         if !self.missing_agents.contains(&key) {
             return;
         }
-        let Some(task) = self.task_store.get(&task_id) else { return };
+        let Some(task) = self.task_store.get(&task_id) else {
+            return;
+        };
         let kind = self
             .panes_state
             .worktrees
@@ -86,7 +93,14 @@ impl HarnessWorkspace {
             .unwrap_or_else(|| task.agent_kind.clone());
         let tried = self.restart_tried.contains(&key);
 
-        self.select(Selection::Task { task_id: task_id.clone(), member_id: member_id.clone() }, window, cx);
+        self.select(
+            Selection::Task {
+                task_id: task_id.clone(),
+                member_id: member_id.clone(),
+            },
+            window,
+            cx,
+        );
         // Nothing saved in this folder (the agent was closed before it ever
         // talked): continuing would only print "No conversation found" and
         // leave it stopped, so start fresh on this click.
@@ -101,12 +115,18 @@ impl HarnessWorkspace {
 
         self.restart_tried.insert(key.clone());
         self.missing_agents.remove(&key);
-        log::info!("restarted {kind} agent for {key} ({})", if fresh { "fresh" } else { "continue" });
+        log::info!(
+            "restarted {kind} agent for {key} ({})",
+            if fresh { "fresh" } else { "continue" }
+        );
 
         if member_id.is_none() && self.has_tmux {
-            let Some(tab) = self.panes.get(&key).map(|p| p.active) else { return };
+            let Some(tab) = self.panes.get(&key).map(|p| p.active) else {
+                return;
+            };
             let session = crate::tmux::session_name(&key, tab);
-            cx.background_spawn(async move { nudge_when_running(&session) }).detach();
+            cx.background_spawn(async move { nudge_when_running(&session) })
+                .detach();
         }
         cx.notify();
     }
@@ -127,7 +147,13 @@ fn nudge_when_running(session: &str) {
     for _ in 0..60 {
         std::thread::sleep(Duration::from_millis(500));
         let running = crate::tmux::run_bounded(
-            &["display-message", "-p", "-t", session, "#{pane_current_command}"],
+            &[
+                "display-message",
+                "-p",
+                "-t",
+                session,
+                "#{pane_current_command}",
+            ],
             Duration::from_secs(1),
         )
         .filter(|o| o.status.success())

@@ -11,7 +11,10 @@ use gpui::{AssetSource, SharedString};
 /// Icons bundled with the app itself, by asset path.
 const OWN: &[(&str, &[u8])] = &[
     ("icons/oo/house.svg", include_bytes!("../icons/house.svg")),
-    ("icons/oo/devices.svg", include_bytes!("../icons/devices.svg")),
+    (
+        "icons/oo/devices.svg",
+        include_bytes!("../icons/devices.svg"),
+    ),
     (
         "icons/oo/agents/claudecode.svg",
         include_bytes!("../icons/agents/claudecode.svg"),
@@ -23,6 +26,10 @@ const OWN: &[(&str, &[u8])] = &[
     (
         "icons/oo/agents/cursor.svg",
         include_bytes!("../icons/agents/cursor.svg"),
+    ),
+    (
+        "icons/oo/agents/grok.svg",
+        include_bytes!("../icons/agents/grok.svg"),
     ),
     (
         "icons/oo/agents/kimi.svg",
@@ -50,7 +57,11 @@ impl AssetSource for AppAssets {
 
     fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {
         let mut out = assets::Assets.list(path)?;
-        out.extend(OWN.iter().filter(|(p, _)| p.starts_with(path)).map(|(p, _)| SharedString::from(*p)));
+        out.extend(
+            OWN.iter()
+                .filter(|(p, _)| p.starts_with(path))
+                .map(|(p, _)| SharedString::from(*p)),
+        );
         Ok(out)
     }
 }
@@ -63,6 +74,12 @@ mod tests {
     fn serves_its_own_icons_and_zeds() {
         assert!(AppAssets.load("icons/oo/house.svg").unwrap().is_some());
         assert!(AppAssets.load("icons/git_branch.svg").unwrap().is_some());
-        assert!(AppAssets.list("icons/oo").unwrap().iter().any(|p| p.as_ref() == "icons/oo/house.svg"));
+        assert!(
+            AppAssets
+                .list("icons/oo")
+                .unwrap()
+                .iter()
+                .any(|p| p.as_ref() == "icons/oo/house.svg")
+        );
     }
 }

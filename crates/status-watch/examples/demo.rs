@@ -49,6 +49,10 @@ fn main() {
     }
 
     for event in rx {
-        println!("[{}] agent: {}", label(&event.worktree_root), event.status.state);
+        println!(
+            "[{}] agent: {}",
+            label(&event.worktree_root),
+            event.status.state
+        );
     }
 }

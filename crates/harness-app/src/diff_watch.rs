@@ -84,24 +84,25 @@ impl DiffWatcher {
 
         let tx = self.tx.clone();
         let current = Arc::clone(&self.current);
-        let mut watcher = match notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
-            let Ok(event) = res else { return }; // transient backend error; next event re-syncs
-            let roots = current.lock().unwrap().clone();
-            // Only relevant edits under a *current* root count — a stale
-            // in-flight event from a root we just left is ignored.
-            for path in &event.paths {
-                if roots.iter().any(|root| path.starts_with(root)) && is_relevant_change(path) {
-                    let _ = tx.send(path.clone());
-                    break;
+        let mut watcher =
+            match notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
+                let Ok(event) = res else { return }; // transient backend error; next event re-syncs
+                let roots = current.lock().unwrap().clone();
+                // Only relevant edits under a *current* root count — a stale
+                // in-flight event from a root we just left is ignored.
+                for path in &event.paths {
+                    if roots.iter().any(|root| path.starts_with(root)) && is_relevant_change(path) {
+                        let _ = tx.send(path.clone());
+                        break;
+                    }
                 }
-            }
-        }) {
-            Ok(w) => w,
-            Err(e) => {
-                log::warn!("diff watcher unavailable: {e}");
-                return;
-            }
-        };
+            }) {
+                Ok(w) => w,
+                Err(e) => {
+                    log::warn!("diff watcher unavailable: {e}");
+                    return;
+                }
+            };
         let mut any = false;
         for root in &canonical {
             match watcher.watch(root, RecursiveMode::Recursive) {

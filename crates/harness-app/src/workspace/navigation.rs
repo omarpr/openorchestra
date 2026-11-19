@@ -32,7 +32,12 @@ impl HarnessWorkspace {
     }
 
     /// ⌘1…⌘8 pick that tab; `None` (⌘9) picks the last, as browsers do.
-    pub(crate) fn activate_tab_at(&mut self, ix: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn activate_tab_at(
+        &mut self,
+        ix: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let ids = self.tab_ids();
         let pick = match ix {
             Some(i) => ids.get(i).copied(),
@@ -45,7 +50,11 @@ impl HarnessWorkspace {
 
     pub(crate) fn cycle_tab(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
         let ids = self.tab_ids();
-        let Some(active) = self.resolve().and_then(|r| self.panes.get(&r.key)).map(|p| p.active) else {
+        let Some(active) = self
+            .resolve()
+            .and_then(|r| self.panes.get(&r.key))
+            .map(|p| p.active)
+        else {
             return;
         };
         if let Some(id) = step(&ids, ids.iter().position(|&i| i == active), forward) {
@@ -67,7 +76,10 @@ impl HarnessWorkspace {
                 .filter(|t| !t.archived && super::coordinator::has_coordinator(t))
                 .map(|t| {
                     (
-                        Selection::Task { task_id: t.id.clone(), member_id: None },
+                        Selection::Task {
+                            task_id: t.id.clone(),
+                            member_id: None,
+                        },
                         worktrees::task_coordinator_dir(&tasks_root, &t.slug),
                     )
                 })
@@ -84,7 +96,10 @@ impl HarnessWorkspace {
                         {
                             out.push(c);
                         }
-                        Selection::Task { task_id: t.clone(), member_id: Some(wt.id.clone()) }
+                        Selection::Task {
+                            task_id: t.clone(),
+                            member_id: Some(wt.id.clone()),
+                        }
                     }
                     None => Selection::Worktree(wt.id.clone()),
                 };
@@ -102,7 +117,12 @@ impl HarnessWorkspace {
         out
     }
 
-    pub(crate) fn cycle_worktree(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn cycle_worktree(
+        &mut self,
+        forward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let targets = self.navigation_targets();
         let here = self.resolve().map(|r| r.path);
         let at = targets.iter().position(|(_, p)| Some(p) == here.as_ref());
@@ -118,12 +138,20 @@ impl HarnessWorkspace {
     pub(crate) fn next_waiting_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let targets = self.navigation_targets();
         let here = self.resolve().map(|r| r.path);
-        let at = targets.iter().position(|(_, p)| Some(p) == here.as_ref()).unwrap_or(targets.len());
+        let at = targets
+            .iter()
+            .position(|(_, p)| Some(p) == here.as_ref())
+            .unwrap_or(targets.len());
         let waiting = |p: &PathBuf| self.agent_status.get(p) == Some(&AgentState::Waiting);
         // Strictly after the current entry first, wrapping round to it last,
         // so pressing it repeatedly walks every waiting agent in turn.
         let order = (at + 1..targets.len()).chain(0..=at.min(targets.len().saturating_sub(1)));
-        let Some(path) = order.filter_map(|i| targets.get(i)).map(|(_, p)| p).find(|p| waiting(p)).cloned() else {
+        let Some(path) = order
+            .filter_map(|i| targets.get(i))
+            .map(|(_, p)| p)
+            .find(|p| waiting(p))
+            .cloned()
+        else {
             self.set_note("No agent is waiting on you".into());
             cx.notify();
             return;
@@ -137,11 +165,17 @@ impl HarnessWorkspace {
             .find(|e| e.path == path)
             .map(|e| e.agent_kind.clone())
             // A coordinator has no registry entry: it runs the task's agent.
-            .or_else(|| self.coordinator_task_for_path(&path).map(|t| t.agent_kind.clone()))
+            .or_else(|| {
+                self.coordinator_task_for_path(&path)
+                    .map(|t| t.agent_kind.clone())
+            })
             .unwrap_or_default();
-        let nav = super::state::alert_nav_id(&id, &kind);
+        // Root state is Waiting when any tab is. Kind-only navigation would
+        // open the first tab of that kind and dismiss that one, leaving the
+        // tab that is actually waiting.
+        let nav = super::state::alert_nav_id(&id, &kind, self.conductor.waiting_tab(&path));
         self.navigate_to_alert(&nav, window, cx);
-        self.conductor.dismiss(&path);
+        self.dismiss_selected_agent();
     }
 
     pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
