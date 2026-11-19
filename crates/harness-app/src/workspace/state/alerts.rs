@@ -29,6 +29,17 @@ impl HarnessWorkspace {
         }
     }
 
+    pub(crate) fn refresh_forge_repo(&mut self, repo: &Path) {
+        if let Some(poller) = &self._poller {
+            if let Some(branches) = self.forge_status.get_mut(repo) {
+                for status in branches.values_mut() {
+                    status.checks.clear();
+                }
+            }
+            poller.refresh_repo(repo);
+        }
+    }
+
     /// Drop any `Running`/`Waiting` pill whose agent process is gone.
     ///
     /// The pill is a mirror of `.harness/status.json`, and an agent that is

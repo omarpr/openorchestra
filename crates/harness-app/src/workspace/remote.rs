@@ -112,11 +112,7 @@ fn reconcile_action(
     }
 }
 
-/// One fade-out-and-back cycle of the remote-control dot while phones can
-/// reach it.
-pub(crate) const REMOTE_BLINK_PERIOD: f32 = 1.6;
-/// The faintest point of the fade, and the steady level when remote is off.
-pub(crate) const REMOTE_DOT_DIM: f32 = 0.08;
+/// The steady level when remote is off.
 pub(crate) const REMOTE_DOT_OFF: f32 = 0.45;
 /// Repaint cadence for the fade — the same ~15 fps the spinners use, so the
 /// fade reads smooth rather than stepped.
@@ -130,8 +126,7 @@ pub(crate) fn remote_dot_opacity(live: bool, t: f32) -> f32 {
     if !live {
         return REMOTE_DOT_OFF;
     }
-    let phase = (t / REMOTE_BLINK_PERIOD).fract() * std::f32::consts::TAU;
-    REMOTE_DOT_DIM + (1.0 - REMOTE_DOT_DIM) * (0.5 + 0.5 * phase.cos())
+    dot_blink_opacity(t)
 }
 
 pub(crate) struct RemoteRuntime {
@@ -1300,15 +1295,15 @@ mod tests {
 
     #[test]
     fn remote_dot_fades_only_while_reachable() {
-        let p = REMOTE_BLINK_PERIOD;
+        let p = DOT_BLINK_PERIOD;
         let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
         // Reachable: full at the period start, faintest at mid-period, and a
         // smooth ramp between (no jumps).
         assert!(close(remote_dot_opacity(true, 0.0), 1.0));
-        assert!(close(remote_dot_opacity(true, p * 0.5), REMOTE_DOT_DIM));
+        assert!(close(remote_dot_opacity(true, p * 0.5), DOT_BLINK_DIM));
         assert!(close(remote_dot_opacity(true, p), 1.0));
         let quarter = remote_dot_opacity(true, p * 0.25);
-        assert!(quarter > REMOTE_DOT_DIM && quarter < 1.0);
+        assert!(quarter > DOT_BLINK_DIM && quarter < 1.0);
         let step = (0..100)
             .map(|i| {
                 let t = p * i as f32 / 100.0;
@@ -1318,7 +1313,7 @@ mod tests {
         assert!(step < 0.05, "fade jumps by {step} per 1% of the period");
         // Remote off: steady and dimmed, whatever the clock says.
         assert_eq!(remote_dot_opacity(false, 0.1), REMOTE_DOT_OFF);
-        assert_eq!(remote_dot_opacity(false, REMOTE_BLINK_PERIOD * 0.75), REMOTE_DOT_OFF);
+        assert_eq!(remote_dot_opacity(false, p * 0.75), REMOTE_DOT_OFF);
     }
 
     fn mark(key: &str, tab: u64, id: &str) -> Mark {

@@ -2,8 +2,8 @@
 //! and delivers changed results over a channel. Interval + jitter + per-branch
 //! exponential backoff on failure (R7).
 
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -70,6 +70,7 @@ struct BranchState {
 pub struct Poller {
     stop: Arc<AtomicBool>,
     branches: Arc<Mutex<Vec<BranchKey>>>,
+    refresh_repos: Arc<Mutex<HashSet<PathBuf>>>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -85,18 +86,23 @@ impl Poller {
         let (tx, rx) = unbounded();
         let stop = Arc::new(AtomicBool::new(false));
         let branches = Arc::new(Mutex::new(branches));
+        let refresh_repos = Arc::new(Mutex::new(HashSet::new()));
 
         let thread_stop = Arc::clone(&stop);
         let thread_branches = Arc::clone(&branches);
+        let thread_refresh_repos = Arc::clone(&refresh_repos);
         let handle = std::thread::Builder::new()
             .name("forge-poller".into())
-            .spawn(move || poll_loop(forge, thread_branches, config, thread_stop, tx))
+            .spawn(move || {
+                poll_loop(forge, thread_branches, thread_refresh_repos, config, thread_stop, tx)
+            })
             .expect("failed to spawn forge-poller thread");
 
         (
             Poller {
                 stop,
                 branches,
+                refresh_repos,
                 handle: Some(handle),
             },
             rx,
@@ -122,6 +128,11 @@ impl Poller {
         *self.branches.lock().unwrap() = branches;
     }
 
+    /// Refresh a repository's branches and deliver a fresh snapshot for each.
+    pub fn refresh_repo(&self, repo: &Path) {
+        self.refresh_repos.lock().unwrap().insert(repo.to_owned());
+    }
+
     /// Signal the thread to stop and wait for it.
     pub fn stop(mut self) {
         self.shutdown();
@@ -144,6 +155,7 @@ impl Drop for Poller {
 fn poll_loop(
     forge: Arc<dyn Forge>,
     branches: Arc<Mutex<Vec<BranchKey>>>,
+    refresh_repos: Arc<Mutex<HashSet<PathBuf>>>,
     config: PollerConfig,
     stop: Arc<AtomicBool>,
     tx: Sender<ForgeUpdate>,
@@ -162,6 +174,7 @@ fn poll_loop(
         states.retain(|k, _| keys.contains(k));
 
         let now = Instant::now();
+        let refresh = std::mem::take(&mut *refresh_repos.lock().unwrap());
         for key in keys {
             if stop.load(Ordering::Relaxed) {
                 return;
@@ -171,6 +184,10 @@ fn poll_loop(
                 consecutive_failures: 0,
                 last_delivered: None,
             });
+            if refresh.contains(&key.repo_dir) {
+                state.next_due = now;
+                state.last_delivered = None;
+            }
             if state.next_due > now {
                 continue;
             }

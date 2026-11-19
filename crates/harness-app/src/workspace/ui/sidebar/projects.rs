@@ -477,7 +477,7 @@ impl HarnessWorkspace {
         let title = if repo.head_branch.is_empty() { "Checkout" } else { &repo.head_branch };
         let status = self.branch_status(&repo.repo_root, &repo.head_branch);
         let pr = status.and_then(|status| status.pr.as_ref());
-        let ci = status.and_then(|status| ci_badge(hx, status));
+        let ci = status.and_then(|status| ci_badge(hx, status, self.anim_secs()));
         let counts = git_counts(hx, repo.ahead, repo.behind, repo.dirty)
             .map(|chip| chip.flex_shrink(1.0).min_w_0().overflow_hidden());
         let subtitle = project_card_details()

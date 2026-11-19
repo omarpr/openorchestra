@@ -989,14 +989,22 @@ fn pr_badge(hx: &HarnessTheme, pr: &forge::PrInfo) -> impl IntoElement {
         .child(label)
 }
 
-fn ci_badge(hx: &HarnessTheme, status: &BranchStatus) -> Option<impl IntoElement> {
-    let (color, state) = ci_summary(hx, &status.checks)?;
+fn ci_badge(hx: &HarnessTheme, status: &BranchStatus, t: f32) -> Option<impl IntoElement> {
+    let summary = ci_summary(&status.checks)?;
+    let (color, label, state) = match summary {
+        CheckStatus::Running => (hx.amber, "CI Running", "Checks in progress"),
+        CheckStatus::Pass => (hx.green, "CI", "Checks passed"),
+        CheckStatus::Fail => (hx.red, "CI", "Checks failed"),
+        CheckStatus::Skipped => return None,
+    };
     let url = status.pr.as_ref().and_then(|pr| pr.url.as_deref())
         .map(|url| format!("{}/checks", url.trim_end_matches('/')));
     let tooltip = if url.is_some() { format!("{state} · Open checks") } else { state.to_owned() };
     Some(linked_sidebar_chip(hx, color, "sidebar-ci", tooltip, url)
-        .child(div().size(px(5.0)).rounded_full().bg(color))
-        .child("CI"))
+        .gap(px(4.0))
+        .child(div().flex_none().size(px(5.0)).rounded_full().bg(color)
+            .when(summary == CheckStatus::Running, |dot| dot.opacity(dot_blink_opacity(t))))
+        .child(label))
 }
 
 fn linked_sidebar_chip(

@@ -107,6 +107,23 @@ fn delivers_initial_status_and_deduplicates() {
 }
 
 #[test]
+fn refreshing_a_repository_delivers_its_checks_before_the_next_poll() {
+    let forge = Arc::new(ScriptedForge::new(vec![Ok(Some(pr(7)))]));
+    let branch = key("feat/a");
+    let other = BranchKey { repo_dir: PathBuf::from("/repos/other"), ..branch.clone() };
+    let config = PollerConfig { interval: Duration::from_secs(60), ..fast_config() };
+    let (poller, rx) = Poller::spawn(forge, vec![branch.clone(), other], config);
+    let initial = rx.recv_timeout(RECV).unwrap();
+    assert_eq!(initial.key, branch);
+    rx.recv_timeout(RECV).unwrap();
+
+    poller.refresh_repo(&branch.repo_dir);
+    assert_eq!(rx.recv_timeout(RECV).unwrap(), initial);
+    assert!(rx.recv_timeout(QUIET).is_err());
+    poller.stop();
+}
+
+#[test]
 fn delivers_changes() {
     let forge = Arc::new(ScriptedForge::new(vec![
         Ok(None),

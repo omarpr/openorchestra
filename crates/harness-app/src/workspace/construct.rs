@@ -481,8 +481,14 @@ impl HarnessWorkspace {
         cx.spawn(async move |view, cx| loop {
             match git_moved_rx.try_recv() {
                 Ok(path) => {
-                    while git_moved_rx.try_recv().is_ok() {}
                     log::debug!("git moved: {}", path.display());
+                    let remote_updates: std::collections::HashSet<_> =
+                        std::iter::once(path)
+                            .chain(git_moved_rx.try_iter())
+                            .filter_map(|path| {
+                                crate::git_watch::remote_tracking_repo(&path).map(Path::to_owned)
+                            })
+                            .collect();
                     if view
                         .update(cx, |ws, cx| {
                             // Cheap when nothing changed (it compares first).
@@ -490,6 +496,16 @@ impl HarnessWorkspace {
                             // `.git/worktrees`, which needs a watch of its own.
                             let roots = ws.repo_roots.clone();
                             ws.git_watch.watch_repos(&roots);
+                            if !remote_updates.is_empty() {
+                                for root in roots.iter().filter(|root| {
+                                    remote_updates.contains(*root)
+                                        || std::fs::canonicalize(root)
+                                            .is_ok_and(|path| remote_updates.contains(&path))
+                                }) {
+                                    ws.refresh_forge_repo(root);
+                                }
+                                cx.notify();
+                            }
                             ws.refresh_status_live(cx);
                             // A commit or a push moves what the push control
                             // offers, and both land here.

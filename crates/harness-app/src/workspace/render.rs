@@ -2,6 +2,7 @@
 //! widgets (agent pill, CI summary, tool chips).
 
 use super::*;
+use super::ui::sidebar::SidebarSection;
 
 impl Focusable for HarnessWorkspace {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
@@ -449,6 +450,14 @@ pub(crate) const INDICATOR_FRAME: Duration = Duration::from_millis(66);
 /// One full spinner turn, and one breath of the waiting pulse.
 pub(crate) const SPIN_PERIOD: f32 = 1.0;
 pub(crate) const PULSE_PERIOD: f32 = 1.2;
+pub(crate) const DOT_BLINK_PERIOD: f32 = 1.6;
+pub(crate) const DOT_BLINK_DIM: f32 = 0.08;
+
+/// Fade a dot from full opacity to its dimmest point and back.
+pub(crate) fn dot_blink_opacity(t: f32) -> f32 {
+    let phase = (t / DOT_BLINK_PERIOD).fract() * std::f32::consts::TAU;
+    DOT_BLINK_DIM + (1.0 - DOT_BLINK_DIM) * (0.5 + 0.5 * phase.cos())
+}
 
 impl HarnessWorkspace {
     /// Seconds on the indicators' shared clock, so every spinner turns in step.
@@ -456,12 +465,18 @@ impl HarnessWorkspace {
         self.anim_clock.elapsed().as_secs_f32()
     }
 
-    /// Keep the sidebar indicators moving while any agent is running or
-    /// waiting; stop the loop as soon as none is, so an idle app stays idle.
+    /// Keep repainting while a sidebar indicator is animated.
     pub(crate) fn ensure_indicator_ticker(&mut self, cx: &mut Context<Self>) {
         let animating = |ws: &Self| {
             ws.agent_status.values().any(|s| matches!(s, AgentState::Running | AgentState::Waiting))
                 || !ws.ending.is_empty()
+                || (ws.prefs.sidebar_open
+                    && !ws.section_collapsed(SidebarSection::Projects)
+                    && ws.data.repos.iter().any(|repo| {
+                        !ws.prefs.collapsed.contains(&repo.name)
+                            && ws.branch_status(&repo.repo_root, &repo.head_branch)
+                                .is_some_and(|status| ci_summary(&status.checks) == Some(CheckStatus::Running))
+                    }))
                 // The sidebar's A2A connectors: a message dot or flash in
                 // flight, or a delegation pulsing while it is worked on.
                 || ws.a2a_links.is_animating(ws.anim_secs())
@@ -686,7 +701,7 @@ pub(crate) fn sidebar_chip(hx: &HarnessTheme, color: Rgba) -> gpui::Div {
         .items_center()
         .gap(px(2.0))
         .rounded_md()
-        .px_1()
+        .px_1p5()
         .line_height(gpui::rems(0.95))
         .text_size(gpui::rems(0.68))
         .font_family(hx.font_mono)
@@ -695,16 +710,13 @@ pub(crate) fn sidebar_chip(hx: &HarnessTheme, color: Rgba) -> gpui::Div {
         .bg(tint(color, 0.13))
 }
 
-pub(crate) fn ci_summary(hx: &HarnessTheme, checks: &[forge::CheckRun]) -> Option<(Rgba, &'static str)> {
-    if checks.is_empty() {
-        return None;
-    }
+pub(crate) fn ci_summary(checks: &[forge::CheckRun]) -> Option<CheckStatus> {
     if checks.iter().any(|c| c.status == CheckStatus::Fail) {
-        Some((hx.red, "Checks failed"))
+        Some(CheckStatus::Fail)
     } else if checks.iter().any(|c| c.status == CheckStatus::Running) {
-        Some((hx.amber, "Checks in progress"))
+        Some(CheckStatus::Running)
     } else if checks.iter().any(|c| c.status == CheckStatus::Pass) {
-        Some((hx.green, "Checks passed"))
+        Some(CheckStatus::Pass)
     } else {
         None
     }
@@ -784,8 +796,17 @@ impl HarnessWorkspace {
 }
 
 #[cfg(test)]
-mod toast_tests {
-    use super::is_failure;
+mod tests {
+    use super::{CheckStatus, ci_summary, is_failure};
+
+    #[test]
+    fn ci_remains_running_after_some_checks_pass() {
+        let build = forge::CheckRun { name: "build".into(), status: CheckStatus::Pass };
+        let mut test = forge::CheckRun { name: "test".into(), status: CheckStatus::Running };
+        assert_eq!(ci_summary(&[build.clone(), test.clone()]), Some(CheckStatus::Running));
+        test.status = CheckStatus::Pass;
+        assert_eq!(ci_summary(&[build, test]), Some(CheckStatus::Pass));
+    }
 
     #[test]
     fn failures_are_told_apart_from_progress() {
