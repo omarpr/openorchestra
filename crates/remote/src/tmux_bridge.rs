@@ -23,6 +23,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+use crate::store::PendingScreenshot;
+
 /// Input bytes per `send-keys -H` line.
 const KEYS_PER_LINE: usize = 256;
 /// Broadcast buffer (events) per hub; slow subscribers see `Lagged`.
@@ -260,7 +262,10 @@ type Pending = Arc<StdMutex<VecDeque<oneshot::Sender<bool>>>>;
 /// (see [`Hubs::restore_fits_blocking`]).
 type FitRegistry = Arc<StdMutex<HashMap<String, (u16, u16)>>>;
 
-pub(crate) type AuthorizeSend = Box<dyn FnOnce() -> bool + Send>;
+struct ScreenshotSend {
+    file: PendingScreenshot,
+    authorize: Box<dyn FnOnce() -> bool + Send>,
+}
 
 #[derive(Debug)]
 pub(crate) enum SendLineError {
@@ -290,7 +295,7 @@ enum Cmd {
     /// One command keeps other input from landing in between.
     SendLine {
         batches: [Vec<String>; 3],
-        authorize: Option<AuthorizeSend>,
+        screenshot: Option<ScreenshotSend>,
         done: oneshot::Sender<Result<(), SendLineError>>,
     },
     Fit {
@@ -490,34 +495,30 @@ impl SessionHub {
             .map_err(SendLineError::into_io)
     }
 
-    /// Type `text` and press Enter, rechecking `authorize` right before the first write.
-    pub(crate) async fn send_line_checked(
+    /// Deliver a screenshot and caption with a fresh authorization check in the actor.
+    /// Codex recognizes the image when its path is pasted in a separate batch.
+    pub(crate) async fn send_screenshot(
         &self,
-        text: &[u8],
+        text: &str,
+        file: PendingScreenshot,
+        native_image: bool,
         authorize: impl FnOnce() -> bool + Send + 'static,
     ) -> Result<(), SendLineError> {
-        self.send_line_batches(text, &[], Some(Box::new(authorize)))
-            .await
-    }
-
-    /// Paste the image path on its own so Codex can recognize and attach it,
-    /// rechecking `authorize` right before the first write.
-    pub(crate) async fn send_line_with_image_checked(
-        &self,
-        text: &[u8],
-        path: &str,
-        authorize: impl FnOnce() -> bool + Send + 'static,
-    ) -> Result<(), SendLineError> {
-        let paste = format!("\x1b[200~{path}\x1b[201~");
-        self.send_line_batches(text, paste.as_bytes(), Some(Box::new(authorize)))
-            .await
+        let path = file.path().to_string_lossy();
+        let (text, paste) = if native_image {
+            (format!(" {text}"), format!("\x1b[200~{path}\x1b[201~"))
+        } else {
+            (format!("{text} Screenshot file: {path:?}"), String::new())
+        };
+        let screenshot = ScreenshotSend { file, authorize: Box::new(authorize) };
+        self.send_line_batches(text.as_bytes(), paste.as_bytes(), Some(screenshot)).await
     }
 
     async fn send_line_batches(
         &self,
         text: &[u8],
         paste: &[u8],
-        authorize: Option<AuthorizeSend>,
+        screenshot: Option<ScreenshotSend>,
     ) -> Result<(), SendLineError> {
         let (text, enter) = line_keys(&self.pane, text);
         if enter.is_empty() {
@@ -530,7 +531,7 @@ impl SessionHub {
         let batches = [hex_keys(&self.pane, paste), text, enter];
         self.request(Cmd::SendLine {
             batches,
-            authorize,
+            screenshot,
             done,
         })
         .map_err(SendLineError::NotWritten)?;
@@ -684,11 +685,7 @@ impl Actor {
     async fn send_line(
         &mut self,
         [paste, text, enter]: [Vec<String>; 3],
-        authorize: Option<AuthorizeSend>,
     ) -> Result<(), SendLineError> {
-        if authorize.is_some_and(|check| !check()) {
-            return Err(SendLineError::Unauthorized);
-        }
         let mut wrote_any = false;
         for batch in [paste, text].iter().filter(|batch| !batch.is_empty()) {
             match self.exec_tracking_write(batch).await {
@@ -720,10 +717,27 @@ impl Actor {
                 }
                 Cmd::SendLine {
                     batches,
-                    authorize,
+                    screenshot,
                     done,
                 } => {
-                    let _ = done.send(self.send_line(batches, authorize).await);
+                    let result = if let Some(ScreenshotSend { mut file, authorize }) = screenshot {
+                        if done.is_closed() {
+                            continue;
+                        }
+                        if !authorize() {
+                            Err(SendLineError::Unauthorized)
+                        } else {
+                            // Ownership stays in the actor if the HTTP request is canceled.
+                            // Keep the file from the moment a write might expose its path.
+                            file.retain = true;
+                            let result = self.send_line(batches).await;
+                            file.retain = !matches!(result, Err(SendLineError::NotWritten(_)));
+                            result
+                        }
+                    } else {
+                        self.send_line(batches).await
+                    };
+                    let _ = done.send(result);
                 }
                 Cmd::Fit { cols, rows, done } => {
                     let res = match self.fit(cols, rows).await {
@@ -1136,18 +1150,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queued_checked_send_rechecks_auth_and_distinguishes_no_write() {
-        use std::sync::atomic::AtomicBool;
+    async fn screenshot_cleanup_tracks_whether_the_path_may_have_been_written() {
+        use std::future::Future;
+        use std::task::{Context, Waker};
         use tokio::io::AsyncReadExt;
 
+        let dir = tempfile::tempdir().unwrap();
+        let save = || {
+            let file = crate::store::save_screenshot(dir.path(), "png", b"test image").unwrap();
+            let path = file.path().to_path_buf();
+            (file, path)
+        };
         let mut child = tokio::process::Command::new("cat")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
         let stdin = child.stdin.take().unwrap();
-        let mut stdout = child.stdout.take().unwrap();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
         let closed = Arc::new(AtomicBool::new(false));
+        let pending = Pending::default();
         let (cmds, cmd_rx) = mpsc::unbounded_channel();
         let (events, _) = broadcast::channel(8);
         let hub = SessionHub {
@@ -1158,13 +1180,19 @@ mod tests {
             cmds: cmds.clone(),
             closed: closed.clone(),
         };
+        let (canceled, canceled_path) = save();
+        let mut send = Box::pin(hub.send_screenshot("hi", canceled, true, || true));
+        assert!(send.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        assert!(canceled_path.is_file());
+        drop(send);
+
         tokio::spawn(
             Actor {
                 tmux: Tmux::default(),
                 pane: "%1".into(),
                 child,
                 stdin: Some(stdin),
-                pending: Pending::default(),
+                pending: pending.clone(),
                 closed: closed.clone(),
                 cmds: cmds.downgrade(),
                 fits: 0,
@@ -1174,25 +1202,41 @@ mod tests {
             .run(cmd_rx),
         );
 
-        let allowed = Arc::new(AtomicBool::new(true));
-        let check_flag = allowed.clone();
-        // Flip authorization off before the actor processes the command.
-        allowed.store(false, Ordering::SeqCst);
+        let (unauthorized, unauthorized_path) = save();
+        let res = hub.send_screenshot("hi", unauthorized, true, || false).await;
+        assert!(matches!(res, Err(SendLineError::Unauthorized)));
+        assert!(!unauthorized_path.exists());
+        assert!(!canceled_path.exists());
+
+        // The hub closes after queuing but before the first write.
+        let (closed_hub, closed_path) = save();
+        let actor_closed = closed.clone();
         let res = hub
-            .send_line_with_image_checked(b"hi", "/tmp/shot.png", move || {
-                check_flag.load(Ordering::SeqCst)
+            .send_screenshot("hi", closed_hub, false, move || {
+                actor_closed.store(true, Ordering::SeqCst);
+                true
             })
             .await;
-        assert!(matches!(res, Err(SendLineError::Unauthorized)));
-
-        // Closed hub before write reports NotWritten.
-        closed.store(true, Ordering::SeqCst);
-        let res = hub
-            .send_line_with_image_checked(b"hi", "/tmp/shot.png", || true)
-            .await;
         assert!(matches!(res, Err(SendLineError::NotWritten(_))));
+        assert!(!closed_path.exists());
 
+        // Once the path was written, canceling the request must preserve the file.
+        closed.store(false, Ordering::SeqCst);
+        let (written, written_path) = save();
+        let mut send = Box::pin(hub.send_screenshot("hi", written, true, || true));
+        assert!(send.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(2), stdout.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        let paste = format!("\x1b[200~{}\x1b[201~", written_path.display());
+        assert_eq!(line.trim_end(), hex_keys("%1", paste.as_bytes())[0]);
+        drop(send);
+        // Stop the send before other batches by simulating a failed tmux acknowledgment.
+        pending.lock().unwrap().pop_front().unwrap().send(false).unwrap();
         hub.shutdown().await;
+        assert!(written_path.is_file());
         let mut received = Vec::new();
         stdout.read_to_end(&mut received).await.unwrap();
         assert!(received.is_empty(), "expected zero bytes written: {received:?}");

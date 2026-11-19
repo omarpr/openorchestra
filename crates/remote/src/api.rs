@@ -881,36 +881,13 @@ async fn send_reply(
     }
 }
 
-struct TempScreenshot(Option<std::path::PathBuf>);
-
-impl TempScreenshot {
-    fn take(&mut self) -> std::path::PathBuf {
-        self.0.take().expect("screenshot path already taken")
-    }
-
-    async fn remove(mut self) {
-        if let Some(path) = self.0.take() {
-            let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(path)).await;
-        }
-    }
-}
-
-impl Drop for TempScreenshot {
-    fn drop(&mut self) {
-        if let Some(path) = self.0.take() {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-}
-
 async fn save_temp_screenshot(
     state_dir: std::path::PathBuf,
     extension: &'static str,
     bytes: Vec<u8>,
-) -> Result<TempScreenshot, (StatusCode, &'static str)> {
+) -> Result<crate::store::PendingScreenshot, (StatusCode, &'static str)> {
     match tokio::task::spawn_blocking(move || {
         crate::store::save_screenshot(&state_dir, extension, &bytes)
-            .map(|path| TempScreenshot(Some(path)))
     })
     .await
     {
@@ -943,14 +920,11 @@ async fn send_screenshot_reply(
     {
         return Err((StatusCode::SERVICE_UNAVAILABLE, "unavailable"));
     }
-    let mut saved = save_temp_screenshot(state_dir, screenshot.extension, screenshot.bytes).await?;
+    let saved = save_temp_screenshot(state_dir, screenshot.extension, screenshot.bytes).await?;
     let Some(native_image) = screenshot_still_allowed(s, &device.id, id, session, &expected_kind)
     else {
-        saved.remove().await;
         return Err((StatusCode::NOT_FOUND, "not_found"));
     };
-    let path = saved.take();
-    let path_str = path.to_string_lossy().into_owned();
     let text = if text.trim().is_empty() {
         "Please inspect the attached screenshot."
     } else {
@@ -971,24 +945,10 @@ async fn send_screenshot_reply(
         )
         .is_some()
     };
-    let result = if native_image {
-        hub.send_line_with_image_checked(format!(" {text}").as_bytes(), &path_str, authorize)
-            .await
-    } else {
-        let prompt = format!("{text} Screenshot file: {path_str:?}");
-        hub.send_line_checked(prompt.as_bytes(), authorize).await
-    };
-    match result {
+    match hub.send_screenshot(text, saved, native_image, authorize).await {
         Ok(()) => Ok(()),
-        Err(SendLineError::Unauthorized) => {
-            let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(path)).await;
-            Err((StatusCode::NOT_FOUND, "not_found"))
-        }
-        Err(SendLineError::NotWritten(_)) => {
-            let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(path)).await;
-            Err((StatusCode::SERVICE_UNAVAILABLE, "unavailable"))
-        }
-        Err(SendLineError::PartialOrUnknown(_)) => {
+        Err(SendLineError::Unauthorized) => Err((StatusCode::NOT_FOUND, "not_found")),
+        Err(SendLineError::NotWritten(_) | SendLineError::PartialOrUnknown(_)) => {
             Err((StatusCode::SERVICE_UNAVAILABLE, "unavailable"))
         }
     }
@@ -1002,7 +962,7 @@ mod tests {
     use tower::ServiceExt;
 
     const TEST_PNG: &str =
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN0sAAAAASUVORK5CYII=";
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgZGIGAAAOAAfXb+R4AAAAAElFTkSuQmCC";
 
     fn paired_fixture(dir: &FsPath, tmux: crate::Tmux) -> (Shared, String, String, String) {
         use crate::{certs, snapshot_channel, AgentInfo, ServerConfig, Snapshot, Store};
@@ -1196,23 +1156,33 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn cancelled_save_cleans_up_screenshot_file() {
+    #[test]
+    fn cancelled_save_cleans_up_screenshot_file() {
+        use std::future::Future;
+        use std::task::{Context, Waker};
+
         let dir = tempfile::tempdir().unwrap();
         let bytes = STANDARD.decode(TEST_PNG).unwrap();
-        let fut = save_temp_screenshot(dir.path().to_path_buf(), "png", bytes);
-        drop(fut);
-        // Yield to let the blocking task finish if it had started; either way no file remains.
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            // Occupy the only blocking worker so the save is queued when canceled.
+            let (release, hold) = std::sync::mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                let _ = hold.recv();
+            });
+            let mut save = Box::pin(save_temp_screenshot(dir.path().to_path_buf(), "png", bytes));
+            assert!(save.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+            drop(save);
+            release.send(()).unwrap();
+            blocker.await.unwrap();
+            tokio::task::spawn_blocking(|| {}).await.unwrap();
+        });
         let screenshots = dir.path().join("remote/screenshots");
-        if screenshots.exists() {
-            let remaining = std::fs::read_dir(&screenshots)
-                .unwrap()
-                .filter_map(Result::ok)
-                .filter(|e| e.file_name() != ".lock")
-                .count();
-            assert_eq!(remaining, 0);
-        }
+        assert!(screenshots.join(".lock").exists(), "queued save ran");
+        assert_eq!(std::fs::read_dir(screenshots).unwrap().count(), 1);
     }
 
     #[tokio::test]

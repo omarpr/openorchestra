@@ -171,11 +171,31 @@ pub(crate) fn new_id(prefix: &str) -> io::Result<String> {
     Ok(id)
 }
 
+/// Remove a stored screenshot unless delivery may have made its path visible to the agent.
+pub(crate) struct PendingScreenshot {
+    path: PathBuf,
+    pub(crate) retain: bool,
+}
+
+impl PendingScreenshot {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for PendingScreenshot {
+    fn drop(&mut self) {
+        if !self.retain {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 pub(crate) fn save_screenshot(
     state_dir: &Path,
     extension: &str,
     bytes: &[u8],
-) -> io::Result<PathBuf> {
+) -> io::Result<PendingScreenshot> {
     const MAX_STORAGE: u64 = 256 * 1024 * 1024;
     const MAX_FILES: usize = 512;
     const RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -213,7 +233,7 @@ pub(crate) fn save_screenshot(
     }
     let path = dir.join(new_id("screenshot_")?).with_extension(extension);
     write_atomic_private(&path, bytes)?;
-    Ok(path)
+    Ok(PendingScreenshot { path, retain: false })
 }
 
 impl Store {
