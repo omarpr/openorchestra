@@ -144,10 +144,8 @@ impl HarnessWorkspace {
                             .cursor_pointer()
                             .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
                             .child("✕")
-                            .on_click(cx.listener(|ws, _, _, cx| {
-                                ws.settings_open = false;
-                                ws.remote_close_setup();
-                                cx.notify();
+                            .on_click(cx.listener(|ws, _, window, cx| {
+                                ws.close_settings(window, cx);
                             })),
                     ),
             );
@@ -1012,10 +1010,8 @@ impl HarnessWorkspace {
             // own scroll region, and anything the backdrop lets through
             // reaches the editor underneath — both were scrolling at once.
             .on_scroll(|_, _, cx| cx.stop_propagation())
-            .on_click(cx.listener(|ws, _, _, cx| {
-                ws.settings_open = false;
-                ws.remote_close_setup();
-                cx.notify();
+            .on_click(cx.listener(|ws, _, window, cx| {
+                ws.close_settings(window, cx);
             }))
             .child(card.on_click(|_, _, cx| cx.stop_propagation()))
             .when(

@@ -167,7 +167,7 @@ fn about_credits() -> Option<objc2::rc::Retained<objc2::runtime::AnyObject>> {
 /// The standard macOS About panel: the app icon (the logo) at full size, the
 /// name, the version, and the credits above.
 #[cfg(target_os = "macos")]
-fn show_native_about() -> bool {
+pub(crate) fn show_native_about() -> bool {
     use objc2::rc::Retained;
     use objc2::runtime::{AnyClass, AnyObject};
     use objc2::msg_send;

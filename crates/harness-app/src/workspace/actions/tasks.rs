@@ -113,8 +113,9 @@ impl HarnessWorkspace {
         cx.notify();
     }
 
-    pub(crate) fn close_new_task(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn close_new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.new_task = None;
+        self.focus_active_pane(window, cx);
         cx.notify();
     }
 

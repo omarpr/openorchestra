@@ -95,8 +95,8 @@ impl HarnessWorkspace {
                                     .cursor_pointer()
                                     .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
                                     .child("✕")
-                                    .on_click(cx.listener(|ws, _, _, cx| {
-                                        ws.close_new_task(cx);
+                                    .on_click(cx.listener(|ws, _, window, cx| {
+                                        ws.close_new_task(window, cx);
                                     })),
                             ),
                     ),
@@ -194,7 +194,7 @@ impl HarnessWorkspace {
                             .cursor_pointer()
                             .hover(|d| d.border_color(hx.border).text_color(hx.tx0))
                             .child("Cancel")
-                            .on_click(cx.listener(|ws, _, _, cx| ws.close_new_task(cx))),
+                            .on_click(cx.listener(|ws, _, window, cx| ws.close_new_task(window, cx))),
                     )
                     .child(
                         div()
@@ -232,8 +232,8 @@ impl HarnessWorkspace {
             .bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_scroll(|_, _, cx| cx.stop_propagation())
-            .on_click(cx.listener(|ws, _, _, cx| {
-                ws.close_new_task(cx);
+            .on_click(cx.listener(|ws, _, window, cx| {
+                ws.close_new_task(window, cx);
             }))
             .child(card)
             .into_any_element()

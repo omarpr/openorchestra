@@ -208,6 +208,7 @@ qrcode = { version = "0.14.1", default-features = false }
 # revs zed itself pins at v1.28.1. windows-capture (via zed-scap) only
 # compiles on Windows, so it is untested here — replicated for lock fidelity.
 [dev-dependencies]
+futures = "0.3"
 tempfile = "3"
 
 [patch.crates-io]

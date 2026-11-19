@@ -293,7 +293,7 @@ fn main() {
 
         cx.set_global(hx);
 
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        install_menu_actions(cx);
         // Every shortcut binds from one catalog (shortcuts.rs) plus the
         // user's persisted rebindings; the settings screen renders and edits
         // the same data, so the three cannot drift.
@@ -400,19 +400,135 @@ pub fn install_keymap(
     cx.bind_keys([KeyBinding::new("ctrl-q", Quit, None)]);
 }
 
-/// (Re)build the native menu bar. Called after every keymap install because
-/// the menus read their key equivalents from the keymap at set_menus time.
-pub fn install_menus(cx: &mut gpui::App) {
-    // The native macOS menu bar. Set AFTER bind_keys: gpui reads the
-    // keymap when building the menus, which is how "Settings…" shows ⌘,
-    // as its key equivalent without restating it here.
-    //
-    // The Edit menu uses os_action so macOS treats the items as the
-    // standard editing verbs (Services integration, correct enablement).
-    // macOS enables an item only when a handler exists on the current
-    // focus path — Edit items grey out outside an editor, which is the
-    // correct native behavior, not a bug to fix.
-    cx.set_menus(vec![
+fn run_with_harness_workspace(
+    cx: &mut App,
+    on_workspace: impl FnOnce(
+        &mut HarnessWorkspace,
+        &mut gpui::Window,
+        &mut gpui::Context<HarnessWorkspace>,
+    ) + 'static,
+    on_missing: impl FnOnce(&mut App) + 'static,
+) {
+    let target = cx
+        .active_window()
+        .and_then(|w| w.downcast::<HarnessWorkspace>())
+        .or_else(|| {
+            cx.windows()
+                .into_iter()
+                .find_map(|w| w.downcast::<HarnessWorkspace>())
+        });
+    if let Some(window) = target
+        && window
+            .update(cx, |ws, window, cx| on_workspace(ws, window, cx))
+            .is_ok()
+    {
+        return;
+    }
+    on_missing(cx);
+}
+
+fn with_harness_workspace_or(
+    cx: &mut App,
+    on_workspace: impl FnOnce(
+        &mut HarnessWorkspace,
+        &mut gpui::Window,
+        &mut gpui::Context<HarnessWorkspace>,
+    ) + 'static,
+    on_missing: impl FnOnce(&mut App) + 'static,
+) {
+    // `App::dispatch_action` invokes global action listeners while holding the
+    // active `Window` via `Option::take`, so a synchronous `window.update`
+    // inside `cx.on_action` fails with "window not found" (and `cx.windows()`
+    // omits that window). Deferring runs immediately after `update_window`
+    // returns the `Window` to `cx.windows`.
+    if cx.active_window().is_some() {
+        cx.defer(move |cx| run_with_harness_workspace(cx, on_workspace, on_missing));
+    } else {
+        run_with_harness_workspace(cx, on_workspace, on_missing);
+    }
+}
+
+fn with_harness_workspace(
+    cx: &mut App,
+    f: impl FnOnce(
+        &mut HarnessWorkspace,
+        &mut gpui::Window,
+        &mut gpui::Context<HarnessWorkspace>,
+    ) + 'static,
+) {
+    with_harness_workspace_or(cx, f, |_| {});
+}
+
+/// Register app-level fallback handlers for every non-OS menu item.
+///
+/// macOS enables a menu item when `App::is_action_available` finds a listener on
+/// the focused element's dispatch path *or* in `global_action_listeners`. When
+/// no focusable element inside `HarnessWorkspace` has focus (e.g. empty startup
+/// state or right after a modal closes), GPUI's dispatch path starts at the
+/// window root above `HarnessWorkspace`, so listeners attached only to
+/// `HarnessWorkspace`'s `div` would grey out every menu item except `Quit`.
+/// `HarnessWorkspace` handles these first with `stop_propagation()` when focused;
+/// these globals keep the menu items clickable and functional in every state.
+pub fn install_menu_actions(cx: &mut gpui::App) {
+    cx.on_action(|_: &Quit, cx| {
+        with_harness_workspace_or(
+            cx,
+            |ws, _, cx| {
+                ws.request_quit(cx);
+            },
+            |cx| cx.quit(),
+        );
+    });
+    cx.on_action(|_: &About, cx| {
+        with_harness_workspace_or(
+            cx,
+            |_, window, cx| update_check::show_about(window, cx),
+            |_| {
+                #[cfg(target_os = "macos")]
+                update_check::show_native_about();
+            },
+        );
+    });
+    cx.on_action(|_: &CheckForUpdates, cx| {
+        with_harness_workspace(cx, |_, window, cx| {
+            update_check::check_for_updates(window, cx);
+        });
+    });
+    cx.on_action(|_: &OpenSettings, cx| {
+        with_harness_workspace(cx, |ws, window, cx| ws.toggle_settings(window, cx));
+    });
+    cx.on_action(|_: &FirstTimeChecks, cx| {
+        with_harness_workspace(cx, |ws, _, cx| ws.open_first_time_checks(cx));
+    });
+    cx.on_action(|_: &NewTask, cx| {
+        with_harness_workspace(cx, |ws, window, cx| ws.open_new_task(window, cx));
+    });
+    cx.on_action(|_: &NextWorktree, cx| {
+        with_harness_workspace(cx, |ws, window, cx| ws.cycle_worktree(true, window, cx));
+    });
+    cx.on_action(|_: &PreviousWorktree, cx| {
+        with_harness_workspace(cx, |ws, window, cx| ws.cycle_worktree(false, window, cx));
+    });
+    cx.on_action(|_: &NextWaitingAgent, cx| {
+        with_harness_workspace(cx, |ws, window, cx| ws.next_waiting_agent(window, cx));
+    });
+    cx.on_action(|_: &NextTab, cx| {
+        with_harness_workspace(cx, |ws, window, cx| ws.cycle_tab(true, window, cx));
+    });
+    cx.on_action(|_: &PreviousTab, cx| {
+        with_harness_workspace(cx, |ws, window, cx| ws.cycle_tab(false, window, cx));
+    });
+    cx.on_action(|_: &ToggleSidebar, cx| {
+        with_harness_workspace(cx, |ws, _, cx| ws.toggle_sidebar(cx));
+    });
+    cx.on_action(|_: &ToggleTools, cx| {
+        with_harness_workspace(cx, |ws, window, cx| ws.toggle_diff(window, cx));
+    });
+}
+
+/// Build the native menu bar definition.
+pub fn app_menus() -> Vec<gpui::Menu> {
+    vec![
         gpui::Menu {
             name: "openOrchestra".into(),
             disabled: false,
@@ -468,5 +584,306 @@ pub fn install_menus(cx: &mut gpui::App) {
                 ),
             ],
         },
-    ]);
+    ]
+}
+
+/// (Re)build the native menu bar. Called after every keymap install because
+/// the menus read their key equivalents from the keymap at set_menus time.
+pub fn install_menus(cx: &mut gpui::App) {
+    // The native macOS menu bar. Set AFTER bind_keys: gpui reads the
+    // keymap when building the menus, which is how "Settings…" shows ⌘,
+    // as its key equivalent without restating it here.
+    //
+    // The Edit menu uses os_action so macOS treats the items as the
+    // standard editing verbs (Services integration, correct enablement).
+    // macOS enables an item only when a handler exists on the current
+    // focus path — Edit items grey out outside an editor, which is the
+    // correct native behavior, not a bug to fix.
+    cx.set_menus(app_menus());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{
+        AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, DummyKeyboardMapper,
+        ForegroundExecutor, MenuItem, NoopTextSystem, Platform, PlatformDispatcher,
+        PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
+        PlatformWindow, Priority, RunnableVariant, Task, ThermalState, WindowAppearance,
+        WindowParams,
+    };
+    use std::path::Path;
+    use std::rc::Rc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use std::time::Duration;
+
+    struct StubDispatcher;
+
+    impl PlatformDispatcher for StubDispatcher {
+        fn is_main_thread(&self) -> bool {
+            true
+        }
+        fn dispatch(&self, runnable: RunnableVariant, _priority: Priority) {
+            runnable.run();
+        }
+        fn dispatch_on_main_thread(&self, runnable: RunnableVariant, _priority: Priority) {
+            runnable.run();
+        }
+        fn dispatch_after(&self, _duration: Duration, runnable: RunnableVariant) {
+            drop(runnable);
+        }
+        fn spawn_realtime(&self, f: Box<dyn FnOnce() + Send>) {
+            f();
+        }
+    }
+
+    struct StubKeyboardLayout;
+
+    impl PlatformKeyboardLayout for StubKeyboardLayout {
+        fn id(&self) -> &str {
+            "stub"
+        }
+        fn name(&self) -> &str {
+            "Stub"
+        }
+    }
+
+    struct StubPlatform {
+        dispatcher: Arc<dyn PlatformDispatcher>,
+        text_system: Arc<dyn PlatformTextSystem>,
+        quit_called: Arc<AtomicBool>,
+    }
+
+    impl StubPlatform {
+        fn new() -> Self {
+            Self {
+                dispatcher: Arc::new(StubDispatcher),
+                text_system: Arc::new(NoopTextSystem::new()),
+                quit_called: Arc::new(AtomicBool::new(false)),
+            }
+        }
+    }
+
+    impl Platform for StubPlatform {
+        fn platform_info(&self) -> gpui::PlatformInfo {
+            gpui::PlatformInfo {
+                os: gpui::OperatingSystem::Mac,
+                target: gpui::PlatformTarget::Native,
+            }
+        }
+        fn background_executor(&self) -> BackgroundExecutor {
+            BackgroundExecutor::new(self.dispatcher.clone())
+        }
+        fn foreground_executor(&self) -> ForegroundExecutor {
+            ForegroundExecutor::new(self.dispatcher.clone())
+        }
+        fn text_system(&self) -> Arc<dyn PlatformTextSystem> {
+            self.text_system.clone()
+        }
+        fn run(&self, on_finish_launching: Box<dyn 'static + FnOnce()>) {
+            on_finish_launching();
+        }
+        fn quit(&self) {
+            self.quit_called.store(true, Ordering::SeqCst);
+        }
+        fn restart(&self, _binary_path: Option<PathBuf>, _arguments: Vec<std::ffi::OsString>) {}
+        fn activate(&self, _ignoring_other_apps: bool) {}
+        fn hide(&self) {}
+        fn hide_other_apps(&self) {}
+        fn unhide_other_apps(&self) {}
+        fn displays(&self) -> Vec<Rc<dyn PlatformDisplay>> {
+            Vec::new()
+        }
+        fn primary_display(&self) -> Option<Rc<dyn PlatformDisplay>> {
+            None
+        }
+        fn on_displays_changed(&self, _callback: Box<dyn FnMut()>) {}
+        fn active_window(&self) -> Option<AnyWindowHandle> {
+            None
+        }
+        fn open_window(
+            &self,
+            _handle: AnyWindowHandle,
+            _options: WindowParams,
+        ) -> anyhow::Result<Box<dyn PlatformWindow>> {
+            Err(anyhow::anyhow!("stub platform has no windows"))
+        }
+        fn window_appearance(&self) -> WindowAppearance {
+            WindowAppearance::Dark
+        }
+        fn open_url(&self, _url: &str) {}
+        fn on_open_urls(&self, _callback: Box<dyn FnMut(Vec<String>)>) {}
+        fn register_url_scheme(&self, _url: &str) -> Task<gpui::Result<()>> {
+            Task::ready(Ok(()))
+        }
+        fn prompt_for_paths(
+            &self,
+            _options: gpui::PathPromptOptions,
+        ) -> futures::channel::oneshot::Receiver<gpui::Result<Option<Vec<PathBuf>>>> {
+            futures::channel::oneshot::channel().1
+        }
+        fn prompt_for_new_path(
+            &self,
+            _directory: &Path,
+            _suggested_name: Option<&str>,
+        ) -> futures::channel::oneshot::Receiver<gpui::Result<Option<PathBuf>>> {
+            futures::channel::oneshot::channel().1
+        }
+        fn can_select_mixed_files_and_dirs(&self) -> bool {
+            false
+        }
+        fn reveal_path(&self, _path: &Path) {}
+        fn open_with_system(&self, _path: &Path) {}
+        fn on_quit(&self, _callback: Box<dyn FnMut() -> bool>) {}
+        fn on_reopen(&self, _callback: Box<dyn FnMut()>) {}
+        fn on_system_sleep(&self, _callback: Box<dyn FnMut()>) {}
+        fn on_system_wake(&self, _callback: Box<dyn FnMut()>) {}
+        fn set_menus(&self, _menus: Vec<gpui::Menu>, _keymap: &gpui::Keymap) {}
+        fn set_dock_menu(&self, _menu: Vec<MenuItem>, _keymap: &gpui::Keymap) {}
+        fn on_app_menu_action(&self, _callback: Box<dyn FnMut(&dyn gpui::Action)>) {}
+        fn on_will_open_app_menu(&self, _callback: Box<dyn FnMut()>) {}
+        fn on_validate_app_menu_command(
+            &self,
+            _callback: Box<dyn FnMut(&dyn gpui::Action) -> bool>,
+        ) {
+        }
+        fn thermal_state(&self) -> ThermalState {
+            ThermalState::Nominal
+        }
+        fn on_thermal_state_change(&self, _callback: Box<dyn FnMut()>) {}
+        fn prevent_idle_sleep(&self, _reason: &str) -> Task<gpui::Result<gpui::ActivityGuard>> {
+            Task::ready(Ok(gpui::ActivityGuard::noop()))
+        }
+        fn app_path(&self) -> gpui::Result<PathBuf> {
+            Err(anyhow::anyhow!("stub"))
+        }
+        fn path_for_auxiliary_executable(&self, _name: &str) -> gpui::Result<PathBuf> {
+            Err(anyhow::anyhow!("stub"))
+        }
+        fn set_cursor_style(&self, _style: CursorStyle) {}
+        fn hide_cursor_until_mouse_moves(&self) {}
+        fn is_cursor_visible(&self) -> bool {
+            true
+        }
+        fn should_auto_hide_scrollbars(&self) -> bool {
+            false
+        }
+        fn read_from_clipboard(&self) -> Option<ClipboardItem> {
+            None
+        }
+        fn write_to_clipboard(&self, _item: ClipboardItem) {}
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        fn read_from_primary(&self) -> Option<ClipboardItem> {
+            None
+        }
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        fn write_to_primary(&self, _item: ClipboardItem) {}
+        #[cfg(target_os = "macos")]
+        fn read_from_find_pasteboard(&self) -> Option<ClipboardItem> {
+            None
+        }
+        #[cfg(target_os = "macos")]
+        fn write_to_find_pasteboard(&self, _item: ClipboardItem) {}
+        fn write_credentials(
+            &self,
+            _url: &str,
+            _username: &str,
+            _password: &[u8],
+        ) -> Task<gpui::Result<()>> {
+            Task::ready(Ok(()))
+        }
+        fn read_credentials(
+            &self,
+            _url: &str,
+        ) -> Task<gpui::Result<Option<(String, Vec<u8>)>>> {
+            Task::ready(Ok(None))
+        }
+        fn delete_credentials(&self, _url: &str) -> Task<gpui::Result<()>> {
+            Task::ready(Ok(()))
+        }
+        fn keyboard_layout(&self) -> Box<dyn PlatformKeyboardLayout> {
+            Box::new(StubKeyboardLayout)
+        }
+        fn keyboard_mapper(&self) -> Rc<dyn PlatformKeyboardMapper> {
+            Rc::new(DummyKeyboardMapper)
+        }
+        fn on_keyboard_layout_change(&self, _callback: Box<dyn FnMut()>) {}
+    }
+
+    fn collect_menu_actions(
+        menus: &[gpui::Menu],
+        out: &mut Vec<(String, Box<dyn gpui::Action>, bool)>,
+    ) {
+        for menu in menus {
+            for item in &menu.items {
+                match item {
+                    MenuItem::Action {
+                        name,
+                        action,
+                        os_action,
+                        ..
+                    } => {
+                        out.push((
+                            format!("{} → {}", menu.name, name),
+                            action.boxed_clone(),
+                            os_action.is_some(),
+                        ));
+                    }
+                    MenuItem::Submenu(sub) => {
+                        collect_menu_actions(std::slice::from_ref(sub), out);
+                    }
+                    MenuItem::Separator | MenuItem::SystemMenu(_) => {}
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_non_os_menu_item_is_available_without_window_focus() {
+        let platform = Rc::new(StubPlatform::new());
+        let handle = gpui::Application::with_platform(platform).run_embedded(|cx| {
+            install_menu_actions(cx);
+            install_menus(cx);
+        });
+        handle.update(|cx| {
+            let mut items = Vec::new();
+            collect_menu_actions(&app_menus(), &mut items);
+            assert!(!items.is_empty());
+
+            for (label, action, is_os_action) in items {
+                let available = cx.is_action_available(action.as_ref());
+                if is_os_action {
+                    assert!(
+                        !available,
+                        "Edit OS action `{label}` should stay disabled when no editor is focused"
+                    );
+                } else {
+                    assert!(
+                        available,
+                        "menu item `{label}` must remain enabled even when no element is focused"
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn quit_menu_action_dispatches_globally_when_no_window_is_active() {
+        let platform = Rc::new(StubPlatform::new());
+        let quit_called = platform.quit_called.clone();
+        let handle = gpui::Application::with_platform(platform).run_embedded(|cx| {
+            install_menu_actions(cx);
+            install_menus(cx);
+        });
+        handle.update(|cx| {
+            cx.dispatch_action(&Quit);
+        });
+        assert!(
+            quit_called.load(Ordering::SeqCst),
+            "Quit must still execute via global listener when no window is active"
+        );
+    }
 }

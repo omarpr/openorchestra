@@ -405,12 +405,13 @@ impl HarnessWorkspace {
     }
 
     /// Escape in an inline edit field (routed from `menu::Cancel`): abandon it.
-    pub(crate) fn cancel_edit(&mut self, _: &menu::Cancel, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn cancel_edit(&mut self, _: &menu::Cancel, window: &mut Window, cx: &mut Context<Self>) {
         if self.new_task.is_some() {
-            self.close_new_task(cx);
+            self.close_new_task(window, cx);
             return;
         }
         self.edit = None;
+        self.focus_active_pane(window, cx);
         cx.notify();
     }
 

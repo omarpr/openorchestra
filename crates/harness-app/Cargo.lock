@@ -4198,6 +4198,7 @@ dependencies = [
  "file_finder",
  "forge",
  "fs",
+ "futures",
  "git",
  "git_ui",
  "gpui",
