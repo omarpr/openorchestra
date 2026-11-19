@@ -21,6 +21,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use serde_json::{json, Value};
 
@@ -45,6 +46,7 @@ const HOOK_EVENTS: &[&str] = &["UserPromptSubmit", "Stop"];
 pub(crate) const PROGRAM: &str = "codex";
 pub(crate) const DEFAULT_ARGS: &[&str] =
     &["--sandbox", "workspace-write", "--ask-for-approval", "on-request"];
+const NO_DAEMON: &str = "--no-daemon";
 
 pub struct CodexRuntime {
     state_dir: PathBuf,
@@ -249,11 +251,31 @@ impl AgentRuntime for CodexRuntime {
         Some(AgentCommand {
             program: resolve_on_path(PROGRAM)?,
             args: DEFAULT_ARGS.iter().map(|s| s.to_string()).collect(),
-            // The notify hook lives in the user's GLOBAL codex config; this
-            // marker is what scopes it — the shim exits without writing
-            // unless it inherits this from a harness-spawned codex.
+            // The global status hook only writes when it inherits this marker
+            // from a harness-spawned Codex process.
             env: vec![("HARNESS_MANAGED".to_string(), "1".to_string())],
             label: PROGRAM.to_string(),
         })
+    }
+
+    fn prepare_launch(&self, mut command: AgentCommand) -> AgentCommand {
+        // A shared Codex server runs hooks with its own environment, which
+        // lacks this terminal's HARNESS_MANAGED and HARNESS_REMOTE_SESSION.
+        // Keep the server local to the CLI so both reach the hooks. Older CLI
+        // releases reject the flag. Shell-based command overrides own their
+        // arguments and are passed through by the caller.
+        if command.program.file_name() == Some(PROGRAM.as_ref())
+            && !command.args.iter().any(|arg| arg == NO_DAEMON)
+            && Command::new(&command.program)
+                .args([NO_DAEMON, "--version"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        {
+            command.args.push(NO_DAEMON.into());
+        }
+        command
     }
 }

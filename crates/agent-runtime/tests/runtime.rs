@@ -284,6 +284,32 @@ fn settings_default_display_matches_what_the_spawn_actually_runs() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn codex_uses_its_own_server_when_the_cli_supports_it() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let program = dir.path().join("codex");
+    let runtime = agent_runtime::CodexRuntime::new(dir.path());
+    let args = vec!["resume".into(), "--last".into()];
+    let command = agent_runtime::AgentCommand {
+        program: program.clone(),
+        args: args.clone(),
+        env: vec![("HARNESS_MANAGED".into(), "1".into())],
+        label: "codex".into(),
+    };
+
+    fs::write(&program, "#!/bin/sh\nexit 2\n").unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(runtime.prepare_launch(command.clone()).args, args);
+
+    fs::write(&program, "#!/bin/sh\n[ \"$1\" = --no-daemon ] && [ \"$2\" = --version ]\n").unwrap();
+    let prepared = runtime.prepare_launch(command);
+    assert_eq!(prepared.args, ["resume", "--last", "--no-daemon"]);
+    assert_eq!(runtime.prepare_launch(prepared.clone()).args, prepared.args);
+}
+
 #[test]
 fn unknown_agent_kinds_still_get_a_runnable_adapter() {
     let rt = agent_runtime::runtime_for(
