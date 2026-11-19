@@ -252,6 +252,7 @@ impl TerminalPane {
             let built = builder_task.await;
             pane.update_in(cx, |pane, window, cx| match built {
                 Ok(builder) => {
+                    let had_focus = pane.focus_handle(cx).is_focused(window);
                     let terminal = cx.new(|cx| builder.subscribe(cx));
                     // Respawn a shell when the process exits (don't leave a dead pane).
                     cx.subscribe(&terminal, |pane, _term, event: &TerminalEvent, cx| {
@@ -274,7 +275,9 @@ impl TerminalPane {
                     });
                     let handle = view.focus_handle(cx);
                     pane.view = Some(view);
-                    window.focus(&handle, cx);
+                    if had_focus {
+                        window.focus(&handle, cx);
+                    }
                     cx.notify();
                     true
                 }
@@ -462,6 +465,7 @@ impl Render for TerminalPane {
                     })
             }
             None => div()
+                .track_focus(&self.focus_handle)
                 .size_full()
                 .bg(hx.bg0)
                 .p_2()

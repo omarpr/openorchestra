@@ -23,12 +23,15 @@ impl HarnessWorkspace {
         // Every card, main rows included — each with the compare ref its own
         // repo resolved, so a worktree is never measured against another repo's
         // upstream.
-        let mut targets: Vec<(PathBuf, String)> = Vec::new();
+        let mut targets = HashMap::new();
         for repo in &self.data.repos {
-            targets.push((repo.repo_root.clone(), repo.compare_ref.clone()));
+            targets.insert(repo.repo_root.clone(), Some(repo.compare_ref.clone()));
             for wt in &repo.worktrees {
-                targets.push((wt.path.clone(), repo.compare_ref.clone()));
+                targets.insert(wt.path.clone(), Some(repo.compare_ref.clone()));
             }
+        }
+        for member in self.data.tasks.iter().flat_map(|task| &task.members) {
+            targets.entry(member.path.clone()).or_insert(None);
         }
         if targets.is_empty() {
             return;
@@ -46,6 +49,8 @@ impl HarnessWorkspace {
                         // `unwrap_or_default` turned that into a clean `~0` card
                         // until the next tick.
                         .filter_map(|(path, compare_ref)| {
+                            let compare_ref = compare_ref
+                                .unwrap_or_else(|| crate::data::checkout_compare_ref(&git, &path));
                             let s = git.status(&path, Some(&compare_ref)).ok()?;
                             // The branch is re-read too. It used to come only
                             // from `refresh()`, i.e. structural changes, so a
@@ -71,7 +76,7 @@ impl HarnessWorkspace {
                 // repaint the window every few seconds for nothing.
                 if apply_live_status(&mut ws.data, computed) {
                     ws.sync_forge_branches();
-                    ws.remote_refresh(cx);
+                    // The periodic remote refresh publishes branch labels.
                     cx.notify();
                 }
                 if ws.status_rerun {
@@ -348,6 +353,7 @@ mod live_status_tests {
                 members: vec![TaskMemberView {
                     worktree_id: "wt1".into(),
                     repo: "app".into(),
+                    repo_root: Some(PathBuf::from("/r/app")),
                     branch: "feat/old".into(),
                     path: PathBuf::from("/r/app-wt1"),
                     ahead: 0,
@@ -393,6 +399,17 @@ mod live_status_tests {
         assert_eq!(keys[0].branch, keys[1].branch);
         assert_eq!(keys[0].repo_dir, PathBuf::from("/r/app"));
         assert_eq!(keys[1].repo_dir, PathBuf::from("/r/api"));
+    }
+
+    #[test]
+    fn forge_polling_keeps_active_tasks_when_their_projects_are_archived() {
+        let mut data = data();
+        data.repos.clear();
+        assert!(apply_live_status(&mut data, vec![st("/r/app-wt1", Some("feat/new"), 0)]));
+        assert_eq!(data.forge_branches(), [forge::BranchKey {
+            repo_dir: PathBuf::from("/r/app"),
+            branch: "feat/new".into(),
+        }]);
     }
 
     #[test]

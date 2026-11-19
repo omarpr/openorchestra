@@ -17,6 +17,7 @@ pub struct WorktreeView {
 pub struct TaskMemberView {
     pub worktree_id: String,
     pub repo: String,
+    pub repo_root: Option<PathBuf>,
     pub branch: String,
     pub path: PathBuf,
     pub ahead: usize,
@@ -59,17 +60,16 @@ impl WorkspaceData {
     /// Poll a checkout's current branch in its own repository.
     pub fn forge_branches(&self) -> Vec<forge::BranchKey> {
         let mut seen = std::collections::HashSet::new();
-        self.repos
-            .iter()
-            .flat_map(|repo| {
-                std::iter::once(&repo.head_branch)
-                    .chain(repo.worktrees.iter().map(|wt| &wt.branch))
-                    .filter(|branch| !branch.is_empty() && branch.as_str() != "HEAD")
-                    .map(|branch| forge::BranchKey {
-                        repo_dir: repo.repo_root.clone(),
-                        branch: branch.clone(),
-                    })
-            })
+        let project_branches = self.repos.iter().flat_map(|repo| {
+            std::iter::once(&repo.head_branch)
+                .chain(repo.worktrees.iter().map(|wt| &wt.branch))
+                .map(|branch| (&repo.repo_root, branch))
+        });
+        let task_branches = self.tasks.iter().flat_map(|task| &task.members)
+            .filter_map(|member| Some((member.repo_root.as_ref()?, &member.branch)));
+        project_branches.chain(task_branches)
+            .filter(|(_, branch)| !branch.is_empty() && branch.as_str() != "HEAD")
+            .map(|(repo, branch)| forge::BranchKey { repo_dir: repo.clone(), branch: branch.clone() })
             .filter(|key| seen.insert(key.clone()))
             .collect()
     }
@@ -103,9 +103,12 @@ impl WorkspaceData {
         // branch on each worktree so its PR and phone label do not jump back.
         let known_branches: std::collections::HashMap<&Path, &str> = previous
             .into_iter()
-            .flat_map(|data| &data.repos)
-            .flat_map(|repo| &repo.worktrees)
-            .map(|wt| (wt.path.as_path(), wt.branch.as_str()))
+            .flat_map(|data| {
+                data.repos.iter().flat_map(|repo| &repo.worktrees)
+                    .map(|wt| (wt.path.as_path(), wt.branch.as_str()))
+                    .chain(data.tasks.iter().flat_map(|task| &task.members)
+                        .map(|member| (member.path.as_path(), member.branch.as_str())))
+            })
             .collect();
         let mut repos: Vec<RepoView> = Vec::new();
         for root in repo_roots {
@@ -135,13 +138,15 @@ impl WorkspaceData {
             for m in &task.members {
                 let (ahead, behind, member_dirty) = counts(&m.path);
                 dirty += member_dirty;
-                if let Some(entry) = registry.get(&m.worktree_id) {
+                let entry = registry.get(&m.worktree_id);
+                if let Some(entry) = entry {
                     initials = entry.avatar.initials.clone();
                     color = entry.avatar.color;
                 }
                 members.push(TaskMemberView {
                     worktree_id: m.worktree_id.clone(),
                     repo: m.repo.clone(),
+                    repo_root: entry.map(|entry| entry.repo_root.clone()),
                     branch: known_branches.get(m.path.as_path()).copied().unwrap_or(&m.branch).to_owned(),
                     path: m.path.clone(),
                     ahead,
@@ -167,22 +172,24 @@ impl WorkspaceData {
     }
 }
 
-fn new_repo_view(git: &GitWorktrees<SystemRunner>, name: &str, root: &Path, (ahead, behind, dirty): Counts) -> RepoView {
+pub(crate) fn checkout_compare_ref(git: &GitWorktrees<SystemRunner>, root: &Path) -> String {
     let default_branch = git
         .default_branch(root)
         .unwrap_or_else(|_| "main".to_string());
-    let head_branch = git.current_branch(root).unwrap_or_default();
     let origin_ref = format!("origin/{default_branch}");
-    let compare_ref = if git.ref_exists(root, &origin_ref) {
+    if git.ref_exists(root, &origin_ref) {
         origin_ref
     } else {
         default_branch
-    };
+    }
+}
+
+fn new_repo_view(git: &GitWorktrees<SystemRunner>, name: &str, root: &Path, (ahead, behind, dirty): Counts) -> RepoView {
     RepoView {
         name: name.to_string(),
         repo_root: root.to_path_buf(),
-        head_branch,
-        compare_ref,
+        head_branch: git.current_branch(root).unwrap_or_default(),
+        compare_ref: checkout_compare_ref(git, root),
         ahead,
         behind,
         dirty,

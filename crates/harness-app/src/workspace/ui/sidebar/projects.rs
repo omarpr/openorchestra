@@ -240,7 +240,8 @@ impl HarnessWorkspace {
             Some(t) => Selection::Task { task_id: t.clone(), member_id: Some(wt.id.clone()) },
             None => Selection::Worktree(wt.id.clone()),
         };
-        let pr = self.branch_status(repo_root, &wt.branch).and_then(|status| status.pr.as_ref());
+        let status = self.branch_status(repo_root, &wt.branch);
+        let pr = status.and_then(|status| status.pr.as_ref());
         // Match on where the selection actually lands, not its exact shape: a
         // task selected from TASKS, a restore, or the conductor can carry
         // `member_id: None` (the home member) or a bare `Worktree` id, and an
@@ -300,7 +301,8 @@ impl HarnessWorkspace {
                     .child(branch.to_string()))
             })
             .children(pr.map(|pr| pr_badge(hx, pr)))
-            .children(counts);
+            .children(counts.map(|chip| chip.flex_shrink(1.0).min_w_0().overflow_hidden()))
+            .children(status.and_then(|status| ci_badge(hx, status, self.anim_secs())));
         project_card()
             .id(gpui::SharedString::from(format!("project-wt-{}", wt.id)))
             .mx_1()

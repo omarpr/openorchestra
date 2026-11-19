@@ -986,6 +986,8 @@ fn pr_badge(hx: &HarnessTheme, pr: &forge::PrInfo) -> impl IntoElement {
     };
     let label = format!("#{number}", number = pr.number);
     linked_sidebar_chip(hx, color, "sidebar-pr", format!("{state} PR {label} · {}", pr.title), pr.url.clone())
+        .gap(px(4.0))
+        .child(svg().path("icons/github.svg").size(px(11.0)).flex_none().text_color(color))
         .child(label)
 }
 
@@ -1282,6 +1284,7 @@ mod tests {
         TaskMemberView {
             worktree_id: format!("{repo}-id"),
             repo: repo.to_string(),
+            repo_root: Some(PathBuf::from(format!("/r/{repo}"))),
             branch: branch.to_string(),
             path: PathBuf::from(format!("/wt/{repo}")),
             ahead: 0,

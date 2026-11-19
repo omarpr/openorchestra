@@ -474,8 +474,10 @@ impl HarnessWorkspace {
                     && !ws.section_collapsed(SidebarSection::Projects)
                     && ws.data.repos.iter().any(|repo| {
                         !ws.prefs.collapsed.contains(&repo.name)
-                            && ws.branch_status(&repo.repo_root, &repo.head_branch)
-                                .is_some_and(|status| ci_summary(&status.checks) == Some(CheckStatus::Running))
+                            && std::iter::once(&repo.head_branch)
+                                .chain(repo.worktrees.iter().map(|wt| &wt.branch))
+                                .any(|branch| ws.branch_status(&repo.repo_root, branch)
+                                    .is_some_and(|status| ci_summary(&status.checks) == Some(CheckStatus::Running)))
                     }))
                 // The sidebar's A2A connectors: a message dot or flash in
                 // flight, or a delegation pulsing while it is worked on.
