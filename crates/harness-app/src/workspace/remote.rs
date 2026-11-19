@@ -641,7 +641,7 @@ impl HarnessWorkspace {
                 format!("main:{}", repo.name),
                 repo.repo_root.clone(),
                 repo.name.clone(),
-                "main".to_string(),
+                String::new(),
                 repo.head_branch.clone(),
             ));
             for w in &repo.worktrees {

@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 import { AgentIcon } from "./AgentIcon";
 import { StatusPill } from "./StatusPill";
 
-/** `showWhere` off when a group header above already names the project and task. */
+/** Grouped cards use the group heading for their project and task. */
 export function AgentCard({
   agent,
   selected = false,
@@ -23,7 +23,9 @@ export function AgentCard({
     return () => clearInterval(t);
   }, []);
   const since = agent.status === "running" || agent.status === "waiting" ? timeSince(agent.status_since, now) : "";
-  const where = showWhere ? [agent.project, agent.worktree].filter(Boolean).join(" · ") : "";
+  const title = tabTitle(agent);
+  const branch = agent.branch !== agent.worktree && agent.branch !== title ? agent.branch : null;
+  const where = (showWhere ? [agent.project, agent.worktree, branch] : [branch]).filter(Boolean).join(" · ");
   return (
     <a
       href={agentHref(agent.id)}
@@ -38,7 +40,7 @@ export function AgentCard({
       <div className="flex items-center justify-between gap-2">
         <span className="flex min-w-0 items-center gap-2">
           <AgentIcon kind={agent.agent_kind} />
-          <span className="truncate font-medium">{tabTitle(agent)}</span>
+          <span className="truncate font-medium">{title}</span>
         </span>
         <span className="flex shrink-0 items-center gap-1.5 whitespace-nowrap">
           <StatusPill status={agent.status} />

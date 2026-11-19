@@ -57,11 +57,16 @@ export function AgentHeader({
 /** "project · branch · Claude Code", each part truncating on its own. */
 function Where({ agent }: { agent: Agent }) {
   const sep = <span className="shrink-0 whitespace-pre text-muted-foreground"> · </span>;
+  const location = agent.branch ?? agent.worktree;
   return (
     <>
       <span className="min-w-0 max-w-[35%] shrink-0 truncate whitespace-pre">{agent.project}</span>
-      {sep}
-      <span className="min-w-0 truncate">{agent.branch ?? agent.worktree}</span>
+      {location && (
+        <>
+          {sep}
+          <span className="min-w-0 truncate">{location}</span>
+        </>
+      )}
       {sep}
       <span className="min-w-0 max-w-[35%] shrink-0 truncate whitespace-pre">
         {agentName(agent.agent_kind) || tabTitle(agent)}
