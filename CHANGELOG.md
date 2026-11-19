@@ -12,6 +12,15 @@ Unreleased is empty.
 
 ## Unreleased
 
+### Fixed
+
+- Keep native macOS menu items (`About openOrchestra`, `Check for updates…`,
+  `Settings…`, `First-time Checks…`, `Go`, and `View`) enabled and responsive
+  even when no pane or editor is focused, and restore workspace focus after
+  closing dialogs.
+- Run startup tool-requirement checks off the UI thread so the desktop window
+  opens and responds immediately without waiting on CLI version probes.
+
 ## 1.2.0 - 2026-11-18
 
 ### Added
