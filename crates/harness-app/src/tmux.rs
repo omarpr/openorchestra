@@ -219,6 +219,20 @@ pub fn live_sessions() -> Vec<String> {
     }
 }
 
+/// Give a freshly spawned client time to create its session before eviction can detach it.
+pub(crate) fn wait_for_session(name: &str) {
+    let target = format!("={name}");
+    let deadline = std::time::Instant::now() + LIST_TIMEOUT;
+    while let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
+        if run_bounded(&["has-session", "-t", &target], remaining)
+            .is_none_or(|out| out.status.success())
+        {
+            return;
+        }
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(50)));
+    }
+}
+
 /// `(session_name, pane_pid)` for every pane the tmux server holds. Empty on
 /// any error (no server, tmux missing) — the resource band then attributes
 /// nothing to worktrees and shows the base-app total only.

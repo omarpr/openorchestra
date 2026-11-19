@@ -207,6 +207,7 @@ impl HarnessWorkspace {
             diff_gen: 0,
             diff_pending: false,
             pane_clock: 0,
+            pending_agent_launches: Default::default(),
             panes_state,
             panes_path,
             has_tmux,

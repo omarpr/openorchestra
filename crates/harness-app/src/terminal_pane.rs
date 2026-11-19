@@ -36,7 +36,7 @@ use agent_runtime::AgentCommand;
 
 use gpui::{
     App, AppContext, Context, Entity, ExternalPaths, FocusHandle, Focusable, IntoElement,
-    KeyDownEvent, Keystroke, MouseDownEvent, Render, ScrollEvent, Styled, WeakEntity, Window,
+    KeyDownEvent, Keystroke, MouseDownEvent, Render, ScrollEvent, Styled, Task, WeakEntity, Window,
     div, prelude::*, px,
 };
 use settings::Settings;
@@ -113,7 +113,7 @@ impl TerminalPane {
             held_keys: Vec::new(),
             cancelling_copy_mode: false,
         };
-        this.spawn(agent, session, window, cx);
+        this.spawn(agent, session, window, cx).detach();
         this
     }
 
@@ -151,11 +151,12 @@ impl TerminalPane {
         session: Option<TerminalSession>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Task<bool> {
         self.tmux_backed = session.is_some();
         self.tmux_session = session.as_ref().map(|s| s.name.clone());
-        self.spawn(agent, session, window, cx);
+        let task = self.spawn(agent, session, window, cx);
         cx.notify();
+        task
     }
 
     fn spawn(
@@ -164,7 +165,7 @@ impl TerminalPane {
         session: Option<TerminalSession>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Task<bool> {
         // No pty-level env on any path: every agent invocation is a shell line
         // with its env inlined as a command prefix, which both survives the trip
         // through tmux and takes precedence over the user's rc files.
@@ -249,7 +250,7 @@ impl TerminalPane {
 
         cx.spawn_in(window, async move |pane, cx| {
             let built = builder_task.await;
-            let _ = pane.update_in(cx, |pane, window, cx| match built {
+            pane.update_in(cx, |pane, window, cx| match built {
                 Ok(builder) => {
                     let terminal = cx.new(|cx| builder.subscribe(cx));
                     // Respawn a shell when the process exits (don't leave a dead pane).
@@ -275,14 +276,16 @@ impl TerminalPane {
                     pane.view = Some(view);
                     window.focus(&handle, cx);
                     cx.notify();
+                    true
                 }
                 Err(error) => {
                     pane.error = Some(format!("failed to spawn terminal: {error:#}"));
                     cx.notify();
+                    false
                 }
-            });
+            })
+            .unwrap_or(false)
         })
-        .detach();
     }
 
     /// After a scroll or click, follow tmux's copy-mode state until the pane
@@ -394,7 +397,7 @@ impl Render for TerminalPane {
             self.respawn_pending = false;
             // Respawn a plain shell, not the agent: quitting the agent is a
             // deliberate act, and relaunching it would trap the user in a loop.
-            self.spawn(None, None, window, cx);
+            self.spawn(None, None, window, cx).detach();
         }
         let hx = theme(cx).clone();
         match &self.view {

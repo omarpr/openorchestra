@@ -623,6 +623,8 @@ pub struct HarnessWorkspace {
     diff_pending: bool,
     /// Monotonic tick for pane LRU ordering.
     pane_clock: u64,
+    /// Agent tabs whose terminal or tmux session is still starting.
+    pending_agent_launches: std::collections::HashSet<u64>,
     /// Persisted open-tab records for reattaching tmux sessions on reopen.
     panes_state: crate::panes_state::PanesState,
     panes_path: PathBuf,
