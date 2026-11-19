@@ -189,6 +189,38 @@ fn opencode_needs_no_config_injection() {
     assert!(rt.on_spawn(wt.path()).is_ok());
 }
 
+#[test]
+fn concurrent_opencode_launches_install_complete_shims() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path();
+    let ready = std::sync::Barrier::new(16);
+    std::thread::scope(|scope| {
+        for _ in 0..16 {
+            scope.spawn(|| {
+                let runtime = OpenCodeRuntime::new(path).with_state_dir(path);
+                ready.wait();
+                runtime.on_spawn(path).unwrap();
+            });
+        }
+    });
+
+    let shims = path.join("shims");
+    let plugin = shims.join("opencode-remote");
+    let package: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(plugin.join("package.json")).unwrap()).unwrap();
+    assert_eq!(package["exports"]["./tui"], "./tui.js");
+    assert_eq!(
+        std::fs::read_to_string(plugin.join("tui.js")).unwrap(),
+        include_str!("../shims/opencode-remote-tui.js"),
+    );
+    assert_eq!(
+        std::fs::read_to_string(shims.join("opencode-remote-launch.mjs")).unwrap(),
+        include_str!("../shims/opencode-remote-launch.mjs"),
+    );
+    assert_eq!(std::fs::read_dir(shims).unwrap().count(), 2);
+    assert_eq!(std::fs::read_dir(plugin).unwrap().count(), 2);
+}
+
 // ---- Claude Code adapter ---------------------------------------------------
 
 #[test]

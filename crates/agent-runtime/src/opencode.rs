@@ -24,6 +24,7 @@
 //! is doing something", never a false `Waiting`.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -77,7 +78,6 @@ impl OpenCodeRuntime {
         self.state_dir = Some(state_dir.into());
         self
     }
-
 }
 
 impl Drop for OpenCodeRuntime {
@@ -103,17 +103,19 @@ impl AgentRuntime for OpenCodeRuntime {
     fn on_spawn(&self, _worktree_root: &Path) -> std::io::Result<()> {
         if let Some(dir) = &self.state_dir {
             let shims = dir.join("shims");
-            fs::create_dir_all(shims.join("opencode-remote"))?;
-            for (name, content) in [
-                ("opencode-remote/package.json", TUI_PACKAGE),
-                ("opencode-remote/tui.js", TUI_PLUGIN),
-                ("opencode-remote-launch.mjs", LAUNCHER),
+            let plugin = shims.join("opencode-remote");
+            fs::create_dir_all(&plugin)?;
+            for (dir, name, content) in [
+                (&plugin, "package.json", TUI_PACKAGE),
+                (&plugin, "tui.js", TUI_PLUGIN),
+                (&shims, "opencode-remote-launch.mjs", LAUNCHER),
             ] {
-                let file = shims.join(name);
+                let file = dir.join(name);
                 if fs::read_to_string(&file).ok().as_deref() != Some(content) {
-                    let tmp = file.with_extension("tmp");
-                    fs::write(&tmp, content)?;
-                    fs::rename(tmp, file)?;
+                    // Other launches can install the same shim concurrently.
+                    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+                    tmp.write_all(content.as_bytes())?;
+                    tmp.persist(file)?;
                 }
             }
         }
