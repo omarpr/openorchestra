@@ -1054,6 +1054,57 @@ fn harness_status_shim_refuses_to_write_without_agent_slug() {
 }
 
 #[test]
+fn status_shim_ignores_inherited_tab_env_outside_its_worktree() {
+    // A nested agent inherits the parent tab's env. Running in another
+    // worktree, it must report there, untagged, and leave the parent alone.
+    let state = tempfile::tempdir().unwrap();
+    let parent = tempfile::tempdir().unwrap();
+    let nested = tempfile::tempdir().unwrap();
+    let shim = agent_runtime::materialize_harness_status_shim(state.path()).unwrap();
+    let run = |cwd: &std::path::Path| {
+        std::process::Command::new("node")
+            .arg(&shim)
+            .arg("running")
+            .current_dir(cwd)
+            .env("HARNESS_MANAGED", "1")
+            .env("HARNESS_AGENT", "cursor-agent")
+            .env("HARNESS_AGENT_WORKTREE", parent.path())
+            .env("HARNESS_AGENT_TAB_ID", "7")
+            .env_remove("HARNESS_REMOTE_SESSION")
+            .env_remove("CLAUDE_PROJECT_DIR")
+            .env_remove("CODEX_PROJECT_DIR")
+            .output()
+    };
+    let Ok(out) = run(nested.path()) else {
+        eprintln!("node not installed — skipping inherited tab env test");
+        return;
+    };
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        !parent.path().join(".harness").exists(),
+        "nested agent wrote into the parent tab's worktree"
+    );
+    let status: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(nested.path().join(".harness/status.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(status.get("tabId").is_none(), "nested status kept the parent tab id");
+    assert!(!nested.path().join(".harness/status-tab-7.json").exists());
+
+    // A subdirectory of the tab's own worktree still reports as that tab.
+    let sub = parent.path().join("src");
+    std::fs::create_dir(&sub).unwrap();
+    let out = run(&sub).unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let tagged: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(parent.path().join(".harness/status-tab-7.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(tagged["tabId"], 7);
+    assert!(!sub.join(".harness").exists());
+}
+
+#[test]
 fn harness_status_shim_uses_codex_project_dir_over_cwd() {
     let state = tempfile::tempdir().unwrap();
     let launch_cwd = tempfile::tempdir().unwrap();

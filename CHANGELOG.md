@@ -35,6 +35,8 @@ Unreleased is empty.
 
 ### Fixed
 
+- An agent started from inside an agent tab but working in another worktree
+  now reports status for that worktree instead of the parent tab.
 - The Review Overview tab shows the CLI and model chosen in Settings as soon
   as they change.
 - With Review Overview focused, ⌘W closes its tab and ⌘Q quits openOrchestra.
