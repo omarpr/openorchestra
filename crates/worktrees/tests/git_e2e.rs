@@ -55,7 +55,10 @@ fn reads_the_checked_out_branch_before_the_first_commit() {
     let worktrees = GitWorktrees::new(SystemRunner);
     assert_eq!(worktrees.current_branch(repo.path()).unwrap(), "main");
 
-    git(repo.path(), &["commit", "--allow-empty", "-m", "first commit"]);
+    git(
+        repo.path(),
+        &["commit", "--allow-empty", "-m", "first commit"],
+    );
     git(repo.path(), &["checkout", "--detach"]);
     assert_eq!(worktrees.current_branch(repo.path()).unwrap(), "HEAD");
 }
@@ -65,7 +68,11 @@ fn projects_can_create_worktrees_with_the_same_name_and_branch() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     let registry = Registry::new_at(root.join("registry.json"));
-    let mut manager = Manager::new(registry, GitWorktrees::new(SystemRunner), root.join("worktrees"));
+    let mut manager = Manager::new(
+        registry,
+        GitWorktrees::new(SystemRunner),
+        root.join("worktrees"),
+    );
     let mut tasks = TaskStore::new_at(root.join("tasks.json"));
     let tasks_root = root.join("tasks");
 
@@ -99,14 +106,23 @@ fn projects_can_create_worktrees_with_the_same_name_and_branch() {
         assert_eq!(task.name, "Settings");
         assert_eq!(task.slug, id);
         let worktree = &task.members[0];
-        assert_eq!(worktree.path, root.join("worktrees").join(project).join(&id));
-        assert_eq!(git_out(&worktree.path, &["branch", "--show-current"]).trim(), "feat/settings");
+        assert_eq!(
+            worktree.path,
+            root.join("worktrees").join(project).join(&id)
+        );
+        assert_eq!(
+            git_out(&worktree.path, &["branch", "--show-current"]).trim(),
+            "feat/settings"
+        );
         write_task_brief(&tasks_root, &task.slug, project).unwrap();
     }
 
     let tasks = TaskStore::load(root.join("tasks.json")).unwrap();
     for task in tasks.tasks() {
-        assert_eq!(read_task_brief(&tasks_root, &task.slug).as_deref(), Some(task.home_repo.as_str()));
+        assert_eq!(
+            read_task_brief(&tasks_root, &task.slug).as_deref(),
+            Some(task.home_repo.as_str())
+        );
     }
 }
 
@@ -120,19 +136,22 @@ fn task_with_multiple_projects_uses_the_home_projects_branch_in_its_slug() {
         root.join("worktrees"),
     );
     let mut tasks = TaskStore::new_at(root.join("tasks.json"));
-    let members = [("frontend", "feature/settings-ui"), ("backend", "bugfix/settings")]
-        .into_iter()
-        .map(|(project, branch)| {
-            let repo_root = root.join(project);
-            init_repo(&repo_root);
-            CreateTaskMember {
-                repo: project.into(),
-                repo_root,
-                branch: branch.into(),
-                base_ref: Some("main".into()),
-            }
-        })
-        .collect();
+    let members = [
+        ("frontend", "feature/settings-ui"),
+        ("backend", "bugfix/settings"),
+    ]
+    .into_iter()
+    .map(|(project, branch)| {
+        let repo_root = root.join(project);
+        init_repo(&repo_root);
+        CreateTaskMember {
+            repo: project.into(),
+            repo_root,
+            branch: branch.into(),
+            base_ref: Some("main".into()),
+        }
+    })
+    .collect();
     let id = create_task(
         &mut manager,
         &mut tasks,
@@ -154,7 +173,10 @@ fn task_with_multiple_projects_uses_the_home_projects_branch_in_its_slug() {
         let entry = manager.registry.get(&member.worktree_id).unwrap();
         assert_eq!(entry.task_id.as_deref(), Some(id.as_str()));
         assert_eq!(entry.task_slug, id);
-        assert_eq!(git_out(&member.path, &["branch", "--show-current"]).trim(), member.branch);
+        assert_eq!(
+            git_out(&member.path, &["branch", "--show-current"]).trim(),
+            member.branch
+        );
     }
 }
 
@@ -192,7 +214,9 @@ fn task_creation_rolls_back_after_a_later_member_fails() {
 
     git(&b, &["branch", "feat/settings"]);
     assert!(create_task(&mut manager, &mut tasks, request.clone())
-        .unwrap_err().to_string().contains("already exists"));
+        .unwrap_err()
+        .to_string()
+        .contains("already exists"));
     assert!(!root.join("worktrees/a").exists());
     git(&b, &["branch", "-D", "feat/settings"]);
 
@@ -275,8 +299,13 @@ fn full_lifecycle_create_status_diff_archive_delete() {
     assert!(adds >= 2, "committed add + uncommitted line");
     // The summary carries no bodies; a file's diff is fetched when asked for,
     // against the base the summary already pinned.
-    let body = mgr.git().file_diff(&nav_path, &diff.base, "new.rs", false, None);
-    assert!(body.contains("new.rs"), "the file's body is fetched on demand");
+    let body = mgr
+        .git()
+        .file_diff(&nav_path, &diff.base, "new.rs", false, None);
+    assert!(
+        body.contains("new.rs"),
+        "the file's body is fetched on demand"
+    );
     assert!(
         !body.contains("README.md"),
         "a per-file fetch must not drag in the rest of the changeset"
@@ -346,8 +375,11 @@ fn exclude_locally_hides_harness_files_in_a_real_worktree() {
         "precondition: harness files show as changes before excluding"
     );
 
-    g.exclude_locally(&wt, &[".harness/", ".codex/", ".claude/settings.local.json"])
-        .unwrap();
+    g.exclude_locally(
+        &wt,
+        &[".harness/", ".codex/", ".claude/settings.local.json"],
+    )
+    .unwrap();
 
     assert_eq!(
         git_out(&wt, &["status", "--porcelain"]).trim(),
@@ -368,11 +400,16 @@ fn exclude_locally_is_idempotent_and_preserves_the_users_entries() {
     fs::write(&exclude, "# the user's own entry\nmy-scratch/\n").unwrap();
 
     g.exclude_locally(&repo_root, &[".harness/"]).unwrap();
-    g.exclude_locally(&repo_root, &[".harness/", ".codex/"]).unwrap();
-    g.exclude_locally(&repo_root, &[".harness/", ".codex/"]).unwrap();
+    g.exclude_locally(&repo_root, &[".harness/", ".codex/"])
+        .unwrap();
+    g.exclude_locally(&repo_root, &[".harness/", ".codex/"])
+        .unwrap();
 
     let text = fs::read_to_string(&exclude).unwrap();
-    assert!(text.contains("my-scratch/"), "the user's entries must survive: {text}");
+    assert!(
+        text.contains("my-scratch/"),
+        "the user's entries must survive: {text}"
+    );
     assert_eq!(
         text.matches(".harness/").count(),
         1,
@@ -407,16 +444,19 @@ fn concurrent_adapter_excludes_merge_in_the_common_directory() {
     init_repo(&repo);
     let git = GitWorktrees::new(SystemRunner);
     let worktree = tmp.path().join("linked");
-    git.add_worktree(&repo, &worktree, "feat/linked", None).unwrap();
+    git.add_worktree(&repo, &worktree, "feat/linked", None)
+        .unwrap();
     let start = std::sync::Barrier::new(2);
     std::thread::scope(|scope| {
         scope.spawn(|| {
             start.wait();
-            git.exclude_locally(&repo, &[".harness/", ".codex/"]).unwrap();
+            git.exclude_locally(&repo, &[".harness/", ".codex/"])
+                .unwrap();
         });
         scope.spawn(|| {
             start.wait();
-            git.exclude_locally(&worktree, &[".harness/", ".claude/settings.local.json"]).unwrap();
+            git.exclude_locally(&worktree, &[".harness/", ".claude/settings.local.json"])
+                .unwrap();
         });
     });
     let exclude = fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
@@ -434,7 +474,10 @@ fn init_repo_with_origin(tmp: &Path) -> (std::path::PathBuf, std::path::PathBuf)
 
     let work = tmp.join("app");
     init_repo(&work);
-    git(&work, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(
+        &work,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
     git(&work, &["push", "-u", "origin", "main"]);
     (origin, work)
 }
@@ -474,7 +517,10 @@ fn a_never_published_branch_reports_no_upstream_and_publishes_with_u() {
 
     // No upstream yet, so the count falls back to "what publishing would send".
     let st = g.push_state(&wt, "origin/main");
-    assert_eq!(st.upstream, None, "an unpublished branch has no tracking ref");
+    assert_eq!(
+        st.upstream, None,
+        "an unpublished branch has no tracking ref"
+    );
     assert_eq!(st.unpushed, 1);
     assert_eq!(g.default_remote(&wt).as_deref(), Some("origin"));
 
@@ -513,7 +559,8 @@ fn a_worktree_branched_off_a_remote_ref_does_not_inherit_its_upstream() {
     let g = GitWorktrees::new(SystemRunner);
 
     let wt = tmp.path().join("wt");
-    g.add_worktree(&work, &wt, "feat/from-remote", Some("origin/main")).unwrap();
+    g.add_worktree(&work, &wt, "feat/from-remote", Some("origin/main"))
+        .unwrap();
 
     assert_eq!(
         git_out(&wt, &["config", "--get", "branch.feat/from-remote.merge"]).trim(),
@@ -545,9 +592,13 @@ fn an_upstream_pointing_at_another_branch_is_not_treated_as_published() {
     let g = GitWorktrees::new(SystemRunner);
 
     let wt = tmp.path().join("legacy");
-    g.add_worktree(&work, &wt, "feat/legacy", Some("origin/main")).unwrap();
+    g.add_worktree(&work, &wt, "feat/legacy", Some("origin/main"))
+        .unwrap();
     git(&wt, &["config", "branch.feat/legacy.remote", "origin"]);
-    git(&wt, &["config", "branch.feat/legacy.merge", "refs/heads/main"]);
+    git(
+        &wt,
+        &["config", "branch.feat/legacy.merge", "refs/heads/main"],
+    );
 
     // Precondition: git really does resolve an upstream here.
     assert_eq!(
@@ -579,7 +630,11 @@ fn untracked_files_appear_in_the_diff_without_being_staged() {
     let g = GitWorktrees::new(SystemRunner);
 
     fs::write(repo_root.join("README.md"), "base\nedited\n").unwrap();
-    fs::write(repo_root.join("brand-new.rs"), "fn main() {}\nfn other() {}\n").unwrap();
+    fs::write(
+        repo_root.join("brand-new.rs"),
+        "fn main() {}\nfn other() {}\n",
+    )
+    .unwrap();
     fs::write(repo_root.join(".gitignore"), "ignored.log\n").unwrap();
     fs::write(repo_root.join("ignored.log"), "noise\n").unwrap();
     git(&repo_root, &["add", ".gitignore"]);
@@ -587,11 +642,24 @@ fn untracked_files_appear_in_the_diff_without_being_staged() {
 
     let diff = g.diff_including_untracked(&repo_root, "HEAD").unwrap();
     let paths: Vec<&str> = diff.files.iter().map(|f| f.path.as_str()).collect();
-    assert!(paths.contains(&"README.md"), "tracked edit still listed: {paths:?}");
-    assert!(paths.contains(&"brand-new.rs"), "untracked file listed: {paths:?}");
-    assert!(!paths.contains(&"ignored.log"), ".gitignore respected: {paths:?}");
+    assert!(
+        paths.contains(&"README.md"),
+        "tracked edit still listed: {paths:?}"
+    );
+    assert!(
+        paths.contains(&"brand-new.rs"),
+        "untracked file listed: {paths:?}"
+    );
+    assert!(
+        !paths.contains(&"ignored.log"),
+        ".gitignore respected: {paths:?}"
+    );
 
-    let new_file = diff.files.iter().find(|f| f.path == "brand-new.rs").unwrap();
+    let new_file = diff
+        .files
+        .iter()
+        .find(|f| f.path == "brand-new.rs")
+        .unwrap();
     assert_eq!(new_file.change, Change::Added);
     assert_eq!(new_file.adds, 2, "both lines counted");
     assert_eq!(new_file.dels, 0);
@@ -600,7 +668,10 @@ fn untracked_files_appear_in_the_diff_without_being_staged() {
         "flagged untracked, so its body is fetched with --no-index"
     );
     let body = g.file_diff(&repo_root, &diff.base, "brand-new.rs", true, None);
-    assert!(body.contains("brand-new.rs"), "content reaches the scrollable view");
+    assert!(
+        body.contains("brand-new.rs"),
+        "content reaches the scrollable view"
+    );
 
     // Looking at a diff must not stage anything: `git add -N` would have made
     // this work for free and left the user's index modified.
@@ -625,7 +696,10 @@ fn a_flood_of_untracked_files_is_capped_and_reported() {
 
     let diff = g.diff_including_untracked(&repo_root, "HEAD").unwrap();
     assert_eq!(diff.files.len(), worktrees::MAX_UNTRACKED_FILES, "capped");
-    assert_eq!(diff.untracked_elided, extra, "and says how many it left out");
+    assert_eq!(
+        diff.untracked_elided, extra,
+        "and says how many it left out"
+    );
 }
 
 #[test]
@@ -657,7 +731,9 @@ fn a_renamed_files_body_is_fetched_as_a_rename_not_as_a_fresh_file() {
     git(&repo_root, &["commit", "-m", "add old.rs"]);
 
     let g = GitWorktrees::new(SystemRunner);
-    let base = git_out(&repo_root, &["rev-parse", "HEAD"]).trim().to_string();
+    let base = git_out(&repo_root, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
 
     git(&repo_root, &["mv", "old.rs", "new.rs"]);
     fs::write(repo_root.join("new.rs"), format!("{body}line 40\n")).unwrap();
@@ -675,7 +751,13 @@ fn a_renamed_files_body_is_fetched_as_a_rename_not_as_a_fresh_file() {
         "the summary records where it came from"
     );
 
-    let with_old = g.file_diff(&repo_root, &base, "new.rs", false, renamed.renamed_from.as_deref());
+    let with_old = g.file_diff(
+        &repo_root,
+        &base,
+        "new.rs",
+        false,
+        renamed.renamed_from.as_deref(),
+    );
     assert!(
         with_old.contains("rename from old.rs") && with_old.contains("rename to new.rs"),
         "naming both ends yields a rename, got:\n{with_old}"
@@ -700,7 +782,10 @@ fn background_queries_do_not_run_config_commands() {
     let marker = tmp.path().join("ran");
     let hook = tmp.path().join("fsmonitor.sh");
     fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
-    git(&root, &["config", "core.fsmonitor", &hook.to_string_lossy()]);
+    git(
+        &root,
+        &["config", "core.fsmonitor", &hook.to_string_lossy()],
+    );
     git(&root, &["config", "diff.external", &hook.to_string_lossy()]);
     fs::write(root.join("README.md"), "changed\n").unwrap();
 
@@ -709,7 +794,10 @@ fn background_queries_do_not_run_config_commands() {
     assert_eq!(status.dirty_files, 1);
     let _ = g.diff(&root, "main");
     let _ = g.file_diff(&root, "main", "README.md", false, None);
-    assert!(!marker.exists(), "a config-named command ran during a background query");
+    assert!(
+        !marker.exists(),
+        "a config-named command ran during a background query"
+    );
 }
 
 /// A remote named like an option must never reach `git push` as a flag.
@@ -732,7 +820,11 @@ fn a_remote_named_like_an_option_is_never_offered_or_pushed_to() {
     fs::write(&cfg, text).unwrap();
 
     let g = GitWorktrees::new(SystemRunner);
-    assert_eq!(g.default_remote(&root), None, "a dash-named remote must not be offered");
+    assert_eq!(
+        g.default_remote(&root),
+        None,
+        "a dash-named remote must not be offered"
+    );
     let name = format!("--receive-pack=touch {}", marker.display());
     assert!(g.push(&root, Some((&name, "main"))).is_err());
     assert!(!marker.exists());

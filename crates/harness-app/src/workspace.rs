@@ -29,12 +29,15 @@ use worktrees::{
     Change, CreateTaskMember, CreateTaskRequest, GitWorktrees, HookEnv, HookLayer, HookScriptPhase,
     HooksConfig, Manager, Registry, SystemRunner, TaskHooks, TaskStore, clear_local_hooks,
     create_task, ensure_hook_script, local_hooks_base, migrate_worktrees_to_tasks, task_name_slug,
-    visible_setup_shell_line, write_task_agent_context, write_task_brief, write_visible_setup_runner,
+    visible_setup_shell_line, write_task_agent_context, write_task_brief,
+    write_visible_setup_runner,
 };
 
 use crate::data::{UnifiedDiff, WorkspaceData, compute_diff};
 use crate::review_overview::models::ModelCatalog;
-use crate::review_overview::{ReviewCli, ReviewFollowup, ReviewPreferences, ReviewRun, StoredReviewOverview};
+use crate::review_overview::{
+    ReadingStep, ReviewCli, ReviewFollowup, ReviewPreferences, ReviewRun, StoredReviewOverview,
+};
 use crate::terminal_pane::TerminalPane;
 use crate::theme::{HarnessTheme, theme, tint};
 
@@ -142,6 +145,9 @@ struct OverviewTab {
     preferences: ReviewPreferences,
     status: OverviewStatus,
     last_report: Option<Arc<StoredReviewOverview>>,
+    reading_steps: Vec<ReadingStep>,
+    /// The step whose file was opened most recently from the reading-order path.
+    last_reading_step: Option<usize>,
 }
 
 #[derive(Default)]
@@ -208,7 +214,11 @@ fn reordered<T: PartialEq + Clone>(items: &[T], dragged: T, onto: T) -> Vec<T> {
 /// (missing or unreadable file) while this build has entries falls back to
 /// this build's list, so a reorder never empties it.
 fn reorder_base<T: Clone>(disk: Vec<T>, current: &[T]) -> Vec<T> {
-    if disk.is_empty() { current.to_vec() } else { disk }
+    if disk.is_empty() {
+        current.to_vec()
+    } else {
+        disk
+    }
 }
 
 /// Reorder panel geometry at the default 16 px rem: its width, a row's
@@ -234,7 +244,8 @@ fn reorder_panel_origin(
 ) -> (f32, f32) {
     let m = REORDER_PANEL_MARGIN;
     let scale = (rem / 16.0).max(1.0);
-    let panel_h = (rows as f32 * REORDER_ROW_H * scale).min(list_max_h) + REORDER_PANEL_CHROME_H * scale;
+    let panel_h =
+        (rows as f32 * REORDER_ROW_H * scale).min(list_max_h) + REORDER_PANEL_CHROME_H * scale;
     let x = origin.0.min(window.0 - REORDER_PANEL_W - m).max(m);
     let y = origin.1.min(window.1 - panel_h - m).max(m);
     (x, y)
@@ -249,7 +260,11 @@ fn same_members<T: PartialEq>(a: &[T], b: &[T]) -> bool {
 /// [`reorder_base`]), save it, and return the store as saved. `Ok(None)` when
 /// nothing changed (same or unknown ids). An unreadable file is an error and
 /// is left untouched rather than overwritten.
-fn move_task_on_disk(current: &TaskStore, dragged: &str, onto: &str) -> std::io::Result<Option<TaskStore>> {
+fn move_task_on_disk(
+    current: &TaskStore,
+    dragged: &str,
+    onto: &str,
+) -> std::io::Result<Option<TaskStore>> {
     let mut fresh = TaskStore::load(current.path())?;
     if fresh.tasks().is_empty() {
         fresh = current.clone();
@@ -282,7 +297,11 @@ fn shifted<T: PartialEq + Clone>(items: &[T], item: &T, up: bool) -> Vec<T> {
     let Some(i) = out.iter().position(|x| x == item) else {
         return out;
     };
-    let j = if up { i.checked_sub(1) } else { Some(i + 1).filter(|j| *j < out.len()) };
+    let j = if up {
+        i.checked_sub(1)
+    } else {
+        Some(i + 1).filter(|j| *j < out.len())
+    };
     if let Some(j) = j {
         out.swap(i, j);
     }
@@ -538,7 +557,6 @@ pub(crate) struct Resolved {
     /// When set, DIFF is the unified multi-member changeset for this task.
     task_id: Option<String>,
 }
-
 
 pub struct HarnessWorkspace {
     manager: Manager<SystemRunner>,
@@ -813,7 +831,10 @@ pub struct HarnessWorkspace {
     /// The last press on a sort dropdown's button (which menu, where), so the
     /// open menu's outside handler leaves that press to the button
     /// (`ports_panel::dismisses`).
-    ports_sort_trigger_press: Option<(crate::workspace::ui::ports_panel::SortMenu, gpui::Point<Pixels>)>,
+    ports_sort_trigger_press: Option<(
+        crate::workspace::ui::ports_panel::SortMenu,
+        gpui::Point<Pixels>,
+    )>,
     /// Project roots the user archived — hidden from the active list but kept so
     /// they can be restored. Persisted to `archived.json`; never deletes files.
     archived_repos: Vec<PathBuf>,
@@ -847,20 +868,20 @@ const RESOURCE_HISTORY: usize = 60;
 // constructor, shared types, the Render/Focusable roots, and free
 // helpers live here.
 mod actions;
-mod navigation;
 mod agents;
 mod construct;
 mod diff_rows;
+mod navigation;
 mod prefs;
 mod render;
 pub(crate) use agents::*;
 pub(crate) use diff_rows::*;
 pub(crate) use prefs::*;
 pub(crate) use render::*;
-pub(crate) mod lifecycle;
 mod a2a;
 mod agent_restart;
 mod coordinator;
+pub(crate) mod lifecycle;
 pub(crate) mod remote;
 mod state;
 mod ui;
@@ -949,4 +970,3 @@ mod slugify_tests {
         assert_eq!(task_name_slug("  Hello, World!  "), "hello-world");
     }
 }
-

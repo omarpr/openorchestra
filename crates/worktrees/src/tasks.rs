@@ -316,8 +316,14 @@ pub fn create_task<R: CommandRunner>(
     let task_id = Task::id_for(&slug);
 
     for m in &req.members {
-        if manager.git().ref_exists(&m.repo_root, &format!("refs/heads/{}", m.branch)) {
-            return Err(TaskError::Worktree(format!("branch {:?} already exists in {}", m.branch, m.repo)));
+        if manager
+            .git()
+            .ref_exists(&m.repo_root, &format!("refs/heads/{}", m.branch))
+        {
+            return Err(TaskError::Worktree(format!(
+                "branch {:?} already exists in {}",
+                m.branch, m.repo
+            )));
         }
     }
 
@@ -336,7 +342,9 @@ pub fn create_task<R: CommandRunner>(
                 agent_kind: req.agent_kind.clone(),
             })?;
             created.push(worktree_id.clone());
-            let entry = manager.registry.get_mut(&worktree_id)
+            let entry = manager
+                .registry
+                .get_mut(&worktree_id)
                 .ok_or_else(|| TaskError::Worktree(format!("missing {worktree_id}")))?;
             entry.task_id = Some(task_id.clone());
             entry.name = req.name.clone();
@@ -375,12 +383,21 @@ pub fn create_task<R: CommandRunner>(
             }
         }
         if registry_saved || !failures.is_empty() {
-            failures.extend(manager.registry.save().err().map(|error| format!("saving registry: {error}")));
+            failures.extend(
+                manager
+                    .registry
+                    .save()
+                    .err()
+                    .map(|error| format!("saving registry: {error}")),
+            );
         }
         return if failures.is_empty() {
             Err(error)
         } else {
-            Err(TaskError::Worktree(format!("{error}; rollback failed: {}", failures.join("; "))))
+            Err(TaskError::Worktree(format!(
+                "{error}; rollback failed: {}",
+                failures.join("; ")
+            )))
         };
     }
     Ok(task_id)
@@ -633,7 +650,10 @@ pub fn task_agent_context_with_a2a(
 ///
 /// Returns `Ok(None)` when there is nothing to inject (solo task, no brief).
 /// Never writes into a project worktree.
-pub fn write_task_agent_context(task: &Task, tasks_root: &Path) -> Result<Option<PathBuf>, TaskError> {
+pub fn write_task_agent_context(
+    task: &Task,
+    tasks_root: &Path,
+) -> Result<Option<PathBuf>, TaskError> {
     write_task_agent_context_with_a2a(task, tasks_root, None)
 }
 
@@ -658,7 +678,10 @@ pub fn write_task_agent_context_with_a2a(
 }
 
 /// Ensure task context exists; return its path when applicable.
-pub fn ensure_task_agent_context(task: &Task, tasks_root: &Path) -> Result<Option<PathBuf>, TaskError> {
+pub fn ensure_task_agent_context(
+    task: &Task,
+    tasks_root: &Path,
+) -> Result<Option<PathBuf>, TaskError> {
     if !task_needs_agent_context(task, tasks_root) {
         return Ok(None);
     }
@@ -832,7 +855,10 @@ mod tests {
     #[test]
     fn every_repo_is_listed_as_a_specialist() {
         let md = task_agent_context_with_a2a(&two_member_task(), Some(&test_a2a()), None);
-        let repos = md.split("Repos (each has its own specialist agent):").nth(1).unwrap();
+        let repos = md
+            .split("Repos (each has its own specialist agent):")
+            .nth(1)
+            .unwrap();
         assert!(repos.contains("- jam `/wt/jam/auth`"));
         assert!(repos.contains("- api `/wt/api/auth`"));
     }

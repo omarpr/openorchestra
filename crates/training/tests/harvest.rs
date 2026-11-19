@@ -11,10 +11,12 @@ use training::{
     build_record, harvest, labeled, parse_session, read_session, HarvestRequest, Outcome,
     SessionError, Turn, SUPPORTED_FORMAT_VERSION,
 };
-use worktrees::{AgentKind, Avatar, Diff, DiffFile, Change, WorktreeEntry};
+use worktrees::{AgentKind, Avatar, Change, Diff, DiffFile, WorktreeEntry};
 
 fn fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures").join(name)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join(name)
 }
 
 fn entry() -> WorktreeEntry {
@@ -51,17 +53,29 @@ fn parses_a_real_pi_session() {
     assert!(matches!(&s.turns[0], Turn::User { text } if text == "run the probe"));
 
     match &s.turns[1] {
-        Turn::Assistant { tool_calls, stop_reason, .. } => {
+        Turn::Assistant {
+            tool_calls,
+            stop_reason,
+            ..
+        } => {
             assert_eq!(tool_calls.len(), 1);
             assert_eq!(tool_calls[0].name, "bash");
-            assert_eq!(tool_calls[0].arguments["command"], "echo harness-lifecycle-probe");
+            assert_eq!(
+                tool_calls[0].arguments["command"],
+                "echo harness-lifecycle-probe"
+            );
             assert_eq!(stop_reason.as_deref(), Some("toolUse"));
         }
         other => panic!("expected an assistant tool call, got {other:?}"),
     }
 
     match &s.turns[2] {
-        Turn::ToolResult { tool_name, text, is_error, .. } => {
+        Turn::ToolResult {
+            tool_name,
+            text,
+            is_error,
+            ..
+        } => {
             assert_eq!(tool_name, "bash");
             assert!(text.contains("harness-lifecycle-probe"));
             assert!(!is_error);
@@ -109,7 +123,10 @@ fn refuses_an_unsupported_session_format_version() {
     // failing loudly is the only safe option.
     let future = r#"{"type":"session","version":99,"id":"s1","timestamp":"t","cwd":"/w"}"#;
     let err = parse_session(future, Path::new("future.jsonl")).unwrap_err();
-    assert!(matches!(err, SessionError::UnsupportedVersion { version: 99, .. }));
+    assert!(matches!(
+        err,
+        SessionError::UnsupportedVersion { version: 99, .. }
+    ));
     assert!(err.to_string().contains("v99"));
 }
 
@@ -149,8 +166,14 @@ fn a_parent_cycle_terminates_instead_of_hanging() {
 
 #[test]
 fn outcome_labels_follow_the_forge_and_the_archive_flag() {
-    assert_eq!(Outcome::derive(Some(PrState::Merged), true), Outcome::Merged);
-    assert_eq!(Outcome::derive(Some(PrState::Closed), true), Outcome::Abandoned);
+    assert_eq!(
+        Outcome::derive(Some(PrState::Merged), true),
+        Outcome::Merged
+    );
+    assert_eq!(
+        Outcome::derive(Some(PrState::Closed), true),
+        Outcome::Abandoned
+    );
     assert_eq!(Outcome::derive(Some(PrState::Open), false), Outcome::Open);
     assert_eq!(Outcome::derive(Some(PrState::Draft), false), Outcome::Open);
     // Archived with no PR: the user threw it away.
@@ -251,7 +274,12 @@ fn harvest_works_without_a_diff() {
 fn a_worktree_with_no_session_file_is_reported_not_skipped() {
     let mut e = entry();
     e.session_file = None;
-    let err = harvest(&HarvestRequest { entry: &e, pr_state: None, diff: None }).unwrap_err();
+    let err = harvest(&HarvestRequest {
+        entry: &e,
+        pr_state: None,
+        diff: None,
+    })
+    .unwrap_err();
     assert!(err.to_string().contains("no recorded session file"));
 }
 
@@ -263,7 +291,11 @@ fn only_decided_outcomes_survive_the_training_filter() {
         let mut e2 = e.clone();
         e2.archived = archived;
         build_record(
-            &HarvestRequest { entry: &e2, pr_state: pr, diff: None },
+            &HarvestRequest {
+                entry: &e2,
+                pr_state: pr,
+                diff: None,
+            },
             session.clone(),
         )
     };
@@ -294,7 +326,8 @@ fn records_round_trip_through_jsonl() {
 
     let text = std::fs::read_to_string(&out).unwrap();
     assert_eq!(text.lines().count(), 1, "one compact object per line");
-    let back: training::TrainingRecord = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    let back: training::TrainingRecord =
+        serde_json::from_str(text.lines().next().unwrap()).unwrap();
     assert_eq!(back, record);
 
     // Atomic write leaves no residue.

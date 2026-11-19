@@ -87,10 +87,7 @@ pub fn agent_card_for_member(
                 member.repo,
                 member.path.display()
             ),
-            tags: vec![
-                format!("repo:{}", member.repo),
-                format!("role:{role}"),
-            ],
+            tags: vec![format!("repo:{}", member.repo), format!("role:{role}")],
         }],
         capabilities: Capabilities { streaming: true },
         security_schemes: security_schemes(),
@@ -122,10 +119,7 @@ pub fn orchestrator_card(
     card.skills[0].description =
         "Delegate work to sibling specialist agents via A2A; do not edit sibling trees directly."
             .into();
-    card.skills[0].tags = vec![
-        format!("repo:{}", home.repo),
-        "role:orchestrator".into(),
-    ];
+    card.skills[0].tags = vec![format!("repo:{}", home.repo), "role:orchestrator".into()];
     let sibling_urls: Vec<String> = siblings
         .iter()
         .filter(|m| !m.is_coordinator)

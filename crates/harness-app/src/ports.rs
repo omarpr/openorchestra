@@ -149,19 +149,31 @@ impl PortRow {
     /// What the row is called: the container when there is one, else the
     /// process.
     pub fn display_name(&self) -> &str {
-        self.container.as_ref().map(|c| c.label.as_str()).unwrap_or(&self.name)
+        self.container
+            .as_ref()
+            .map(|c| c.label.as_str())
+            .unwrap_or(&self.name)
     }
 }
 
 /// Order rows in place.
 pub fn sort_rows(rows: &mut [PortRow], by: PortSort) {
-    let flip = |o: std::cmp::Ordering| if by.order == SortOrder::Desc { o.reverse() } else { o };
+    let flip = |o: std::cmp::Ordering| {
+        if by.order == SortOrder::Desc {
+            o.reverse()
+        } else {
+            o
+        }
+    };
     let tiebreak = |a: &PortRow, b: &PortRow| (a.port, a.pid).cmp(&(b.port, b.pid));
     match by.field {
         SortField::Port => rows.sort_by(|a, b| flip(tiebreak(a, b))),
         // Equal names (several `node` servers) read low port first either way.
         SortField::Name => rows.sort_by(|a, b| {
-            let (x, y) = (a.display_name().to_lowercase(), b.display_name().to_lowercase());
+            let (x, y) = (
+                a.display_name().to_lowercase(),
+                b.display_name().to_lowercase(),
+            );
             flip(x.cmp(&y)).then_with(|| tiebreak(a, b))
         }),
     }
@@ -178,7 +190,9 @@ pub fn parse_lsof(out: &str) -> Vec<Listener> {
     let mut pid: Option<u32> = None;
     let mut found = Vec::new();
     for line in out.lines() {
-        let Some(tag) = line.chars().next() else { continue };
+        let Some(tag) = line.chars().next() else {
+            continue;
+        };
         let rest = &line[tag.len_utf8()..];
         match tag {
             'p' => pid = rest.parse().ok(),
@@ -186,9 +200,15 @@ pub fn parse_lsof(out: &str) -> Vec<Listener> {
                 let (Some(pid), Some((addr, port))) = (pid, rest.rsplit_once(':')) else {
                     continue;
                 };
-                let Ok(port) = port.parse::<u16>() else { continue };
+                let Ok(port) = port.parse::<u16>() else {
+                    continue;
+                };
                 let addr = addr.trim_start_matches('[').trim_end_matches(']');
-                found.push(Listener { pid, addr: addr.to_string(), port });
+                found.push(Listener {
+                    pid,
+                    addr: addr.to_string(),
+                    port,
+                });
             }
             _ => {}
         }
@@ -209,7 +229,11 @@ pub fn parse_ps_paths(out: &str) -> Vec<ProcPath> {
             if path.is_empty() {
                 return None;
             }
-            Some(ProcPath { pid, parent: (ppid != 0).then_some(ppid), path: path.to_string() })
+            Some(ProcPath {
+                pid,
+                parent: (ppid != 0).then_some(ppid),
+                path: path.to_string(),
+            })
         })
         .collect()
 }
@@ -221,7 +245,11 @@ pub const DOCKER_PS_FORMAT: &str = "{{.Names}}\t{{.Image}}\t{{.Ports}}\t{{.Label
 
 /// Parse `docker ps --format DOCKER_PS_FORMAT` output.
 pub fn parse_docker_ps(out: &str) -> Vec<Container> {
-    let opt = |v: Option<&str>| v.map(str::trim).filter(|v| !v.is_empty()).map(str::to_string);
+    let opt = |v: Option<&str>| {
+        v.map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    };
     out.lines()
         .filter_map(|line| {
             let mut f = line.split('\t');
@@ -231,7 +259,12 @@ pub fn parse_docker_ps(out: &str) -> Vec<Container> {
             }
             let image = f.next().unwrap_or("").trim().to_string();
             let mut published: Vec<(u16, u16)> = Vec::new();
-            for mapping in f.next().unwrap_or("").split(", ").filter_map(parse_published) {
+            for mapping in f
+                .next()
+                .unwrap_or("")
+                .split(", ")
+                .filter_map(parse_published)
+            {
                 for pair in mapping {
                     if !published.contains(&pair) {
                         published.push(pair);
@@ -284,14 +317,23 @@ fn parse_published(entry: &str) -> Option<Vec<(u16, u16)>> {
 }
 
 /// App bundles whose processes publish container ports on the host.
-const ENGINE_BUNDLES: &[&str] =
-    &["/OrbStack.app/", "/Docker.app/", "/Rancher Desktop.app/", "/Podman Desktop.app/"];
+const ENGINE_BUNDLES: &[&str] = &[
+    "/OrbStack.app/",
+    "/Docker.app/",
+    "/Rancher Desktop.app/",
+    "/Podman Desktop.app/",
+];
 
 /// Executables that publish container ports when not inside one of those
 /// bundles: Docker Desktop's backend and proxy, Lima's host agent (Colima),
 /// and Podman machine's gvproxy.
-const ENGINE_EXECUTABLES: &[&str] =
-    &["com.docker.backend", "com.docker.vpnkit", "vpnkit-bridge", "limactl", "gvproxy"];
+const ENGINE_EXECUTABLES: &[&str] = &[
+    "com.docker.backend",
+    "com.docker.vpnkit",
+    "vpnkit-bridge",
+    "limactl",
+    "gvproxy",
+];
 
 /// Whether a process is a container engine publishing ports, by identity: an
 /// executable inside a known engine's app bundle, or a known engine
@@ -325,7 +367,12 @@ fn basename(path: &str) -> &str {
 
 /// Split listeners into the selected task's and everything else's.
 pub fn classify(s: &PortsSample, scopes: &[Scope]) -> PortsView {
-    let path_of = |pid: u32| s.procs.iter().find(|p| p.pid == pid).map(|p| p.path.as_str());
+    let path_of = |pid: u32| {
+        s.procs
+            .iter()
+            .find(|p| p.pid == pid)
+            .map(|p| p.path.as_str())
+    };
     let edges: Vec<(u32, Option<u32>)> = s.procs.iter().map(|p| (p.pid, p.parent)).collect();
 
     // pid -> scope label, for every process under one of the scopes' panes.
@@ -373,7 +420,11 @@ pub fn classify(s: &PortsSample, scopes: &[Scope]) -> PortsView {
     for ((port, pid), mut addrs) in grouped {
         addrs.sort();
         let path = path_of(pid).unwrap_or("");
-        let name = if path.is_empty() { "?".to_string() } else { basename(path).to_string() };
+        let name = if path.is_empty() {
+            "?".to_string()
+        } else {
+            basename(path).to_string()
+        };
         // An agent CLI's own listener (Claude Code's IDE bridge, …) is never the
         // user's app, in this task or any other session.
         if agents.contains(name.to_ascii_lowercase().as_str()) {
@@ -383,7 +434,15 @@ pub fn classify(s: &PortsSample, scopes: &[Scope]) -> PortsView {
         let cwd = s.cwds.get(&pid).cloned();
         if let Some(label) = owner.get(&pid) {
             let member = member_of(label);
-            view.task.push(PortRow { port, addrs, pid, name, member, container: None, cwd });
+            view.task.push(PortRow {
+                port,
+                addrs,
+                pid,
+                name,
+                member,
+                container: None,
+                cwd,
+            });
             continue;
         }
         if pid == s.app_pid || SYSTEM_PREFIXES.iter().any(|p| path.starts_with(p)) {
@@ -415,7 +474,9 @@ pub fn classify(s: &PortsSample, scopes: &[Scope]) -> PortsView {
             // match this way.
             None if !is_engine => {
                 let scope = cwd.as_ref().and_then(|d| {
-                    scopes.iter().find(|sc| sc.path.as_ref().is_some_and(|p| d.starts_with(p)))
+                    scopes
+                        .iter()
+                        .find(|sc| sc.path.as_ref().is_some_and(|p| d.starts_with(p)))
                 });
                 (None, scope)
             }
@@ -424,9 +485,25 @@ pub fn classify(s: &PortsSample, scopes: &[Scope]) -> PortsView {
         match scope {
             Some(sc) => {
                 let member = member_of(&sc.label);
-                view.task.push(PortRow { port, addrs, pid, name, member, container, cwd });
+                view.task.push(PortRow {
+                    port,
+                    addrs,
+                    pid,
+                    name,
+                    member,
+                    container,
+                    cwd,
+                });
             }
-            None => view.other.push(PortRow { port, addrs, pid, name, member: None, container, cwd }),
+            None => view.other.push(PortRow {
+                port,
+                addrs,
+                pid,
+                name,
+                member: None,
+                container,
+                cwd,
+            }),
         }
     }
     view
@@ -439,7 +516,9 @@ pub fn classify(s: &PortsSample, scopes: &[Scope]) -> PortsView {
 fn container_scope<'a>(c: &Container, scopes: &'a [Scope]) -> (Option<&'a Scope>, bool) {
     // Path::starts_with is per component: `feat-xy` is not inside `feat-x`.
     let inside = |dir: &PathBuf| {
-        scopes.iter().find(|sc| sc.path.as_ref().is_some_and(|p| dir.starts_with(p)))
+        scopes
+            .iter()
+            .find(|sc| sc.path.as_ref().is_some_and(|p| dir.starts_with(p)))
     };
     if let Some(wd) = &c.working_dir {
         return (inside(wd), false);
@@ -463,7 +542,10 @@ const MIN_NAME_MATCH: usize = 4;
 
 /// Lowercase alphanumerics only, so `comic-chat` and `comicchat` compare equal.
 fn squash(s: &str) -> String {
-    s.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_lowercase()).collect()
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
 }
 
 /// Whether a tmux session belongs to the scope with this prefix. Session
@@ -591,12 +673,21 @@ fn sample_using(
     has_tmux: bool,
 ) -> Option<PortsSample> {
     // lsof exits 1 when nothing matches; its stdout is still the answer.
-    let listeners = parse_lsof(&run("lsof", &["-nP", "-w", "-iTCP", "-sTCP:LISTEN", "-F", "pcn"])?);
+    let listeners = parse_lsof(&run(
+        "lsof",
+        &["-nP", "-w", "-iTCP", "-sTCP:LISTEN", "-F", "pcn"],
+    )?);
     let procs = parse_ps_paths(&run("ps", &["-axo", "pid=,ppid=,comm="])?);
     let session_panes = if has_tmux {
-        run("tmux", &["list-panes", "-a", "-F", "#{session_name} #{pane_pid}"])
-            .map(|s| crate::tmux::parse_session_panes(&s)).unwrap_or_default()
-    } else { Vec::new() };
+        run(
+            "tmux",
+            &["list-panes", "-a", "-F", "#{session_name} #{pane_pid}"],
+        )
+        .map(|s| crate::tmux::parse_session_panes(&s))
+        .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let engine_listening = listeners.iter().any(|l| {
         procs
             .iter()
@@ -622,27 +713,54 @@ fn sample_using(
     // seconds would be background network traffic, so containers are listed
     // only through a local socket; otherwise rows stay plain engine rows.
     let local_endpoint = || {
-        run("docker", &["context", "inspect", "--format", "{{.Endpoints.docker.Host}}"])
-            .map(|host| host.trim().to_string())
-            .filter(|host| is_local_docker_endpoint(host))
+        run(
+            "docker",
+            &[
+                "context",
+                "inspect",
+                "--format",
+                "{{.Endpoints.docker.Host}}",
+            ],
+        )
+        .map(|host| host.trim().to_string())
+        .filter(|host| is_local_docker_endpoint(host))
     };
     // `-H` pins the listing to the endpoint just checked: the two commands
     // are separate processes, and without it `docker ps` would resolve the
     // active context again, which may have switched to a remote one since.
     let containers = match engine_listening.then(local_endpoint).flatten() {
-        Some(host) => run("docker", &["-H", &host, "ps", "--no-trunc", "--format", DOCKER_PS_FORMAT])
-            .map(|out| parse_docker_ps(&out))
-            .unwrap_or_default(),
+        Some(host) => run(
+            "docker",
+            &[
+                "-H",
+                &host,
+                "ps",
+                "--no-trunc",
+                "--format",
+                DOCKER_PS_FORMAT,
+            ],
+        )
+        .map(|out| parse_docker_ps(&out))
+        .unwrap_or_default(),
         None => Vec::new(),
     };
-    Some(PortsSample { app_pid: std::process::id(), listeners, procs, session_panes, containers, cwds })
+    Some(PortsSample {
+        app_pid: std::process::id(),
+        listeners,
+        procs,
+        session_panes,
+        containers,
+        cwds,
+    })
 }
 
 /// Remaining scan budget, if any. A zero-duration command timeout is not
 /// useful: skip the optional operation instead.
 fn time_left(deadline: std::time::Instant) -> Option<std::time::Duration> {
-    deadline.checked_duration_since(std::time::Instant::now())
-        .filter(|left| !left.is_zero()).map(|left| left.min(SCAN_TIMEOUT))
+    deadline
+        .checked_duration_since(std::time::Instant::now())
+        .filter(|left| !left.is_zero())
+        .map(|left| left.min(SCAN_TIMEOUT))
 }
 
 /// A Docker endpoint that stays on this machine: a Unix socket (or a Windows
@@ -712,7 +830,11 @@ fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration) -> Option
             }
         }
         if exited && stdout.eof && stderr.eof {
-            return Some(Ran { code, stdout: stdout.text(), stderr: stderr.text() });
+            return Some(Ran {
+                code,
+                stdout: stdout.text(),
+                stderr: stderr.text(),
+            });
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
@@ -748,7 +870,11 @@ impl<R: std::io::Read + std::os::fd::AsRawFd> NonBlocking<R> {
             let flags = libc::fcntl(fd, libc::F_GETFL);
             libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
         }
-        Self { pipe, buf: Vec::new(), eof: false }
+        Self {
+            pipe,
+            buf: Vec::new(),
+            eof: false,
+        }
     }
 
     /// Read whatever is available now, without waiting.
@@ -774,15 +900,28 @@ mod tests {
     use super::*;
 
     fn l(pid: u32, addr: &str, port: u16) -> Listener {
-        Listener { pid, addr: addr.into(), port }
+        Listener {
+            pid,
+            addr: addr.into(),
+            port,
+        }
     }
 
     fn p(pid: u32, parent: u32, path: &str) -> ProcPath {
-        ProcPath { pid, parent: (parent != 0).then_some(parent), path: path.into() }
+        ProcPath {
+            pid,
+            parent: (parent != 0).then_some(parent),
+            path: path.into(),
+        }
     }
 
     fn scope(prefix: &str, label: &str) -> Scope {
-        Scope { label: label.into(), session_prefix: prefix.into(), path: None, repo: None }
+        Scope {
+            label: label.into(),
+            session_prefix: prefix.into(),
+            path: None,
+            repo: None,
+        }
     }
 
     #[test]
@@ -820,7 +959,11 @@ quiet-1\tbusybox\t\t\t\t\n";
         PortsSample {
             app_pid: 1,
             listeners: ports.iter().map(|&p| l(41084, "*", p)).collect(),
-            procs: vec![p(41084, 0, "/Applications/OrbStack.app/Contents/MacOS/OrbStack")],
+            procs: vec![p(
+                41084,
+                0,
+                "/Applications/OrbStack.app/Contents/MacOS/OrbStack",
+            )],
             session_panes: vec![],
             containers,
             cwds: Default::default(),
@@ -839,14 +982,20 @@ quiet-1\tbusybox\t\t\t\t\n";
     #[test]
     fn parse_docker_ps_keeps_bind_sources_not_volume_names() {
         let out = "a\timg\t0.0.0.0:1->1/tcp\t\t\t\t/wt/comic-chat/x/data,named_vol\n";
-        assert_eq!(parse_docker_ps(out)[0].binds, vec![PathBuf::from("/wt/comic-chat/x/data")]);
+        assert_eq!(
+            parse_docker_ps(out)[0].binds,
+            vec![PathBuf::from("/wt/comic-chat/x/data")]
+        );
     }
 
     #[test]
     fn classify_puts_a_container_with_a_bind_mount_from_the_task_in_the_task() {
         let mut c = container("whatever-1", 7000, 7000, None);
         c.binds = vec![PathBuf::from("/wt/comic-chat/x/data")];
-        let v = classify(&engine_sample(vec![c], &[7000]), &[repo_scope("comic-chat", "/wt/comic-chat/x")]);
+        let v = classify(
+            &engine_sample(vec![c], &[7000]),
+            &[repo_scope("comic-chat", "/wt/comic-chat/x")],
+        );
         assert_eq!(v.task.len(), 1);
         assert!(!v.task[0].container.as_ref().unwrap().matched_by_name);
     }
@@ -854,7 +1003,10 @@ quiet-1\tbusybox\t\t\t\t\n";
     #[test]
     fn classify_matches_a_plain_container_by_repo_name_and_says_so() {
         let c = container("comicchat-ergo", 8067, 8067, None);
-        let v = classify(&engine_sample(vec![c], &[8067]), &[repo_scope("comic-chat", "/wt/comic-chat/x")]);
+        let v = classify(
+            &engine_sample(vec![c], &[8067]),
+            &[repo_scope("comic-chat", "/wt/comic-chat/x")],
+        );
         assert_eq!(v.task.len(), 1);
         assert!(v.task[0].container.as_ref().unwrap().matched_by_name);
     }
@@ -867,7 +1019,10 @@ quiet-1\tbusybox\t\t\t\t\n";
         let short = container("ui-thing", 3000, 3000, None);
         let v = classify(
             &engine_sample(vec![compose, short], &[5432, 3000]),
-            &[repo_scope("comic-chat", "/wt/comic-chat/x"), repo_scope("ui", "/wt/ui/x")],
+            &[
+                repo_scope("comic-chat", "/wt/comic-chat/x"),
+                repo_scope("ui", "/wt/ui/x"),
+            ],
         );
         assert!(v.task.is_empty(), "{:?}", v.task);
         assert_eq!(v.other.len(), 2);
@@ -879,13 +1034,25 @@ quiet-1\tbusybox\t\t\t\t\n";
         assert_eq!(cs.len(), 4);
         assert_eq!(cs[0].name, "urbital-db-1");
         assert_eq!(cs[0].image, "postgres:16");
-        assert_eq!(cs[0].published, vec![(5433, 5432)], "v4 and v6 bindings are one mapping");
+        assert_eq!(
+            cs[0].published,
+            vec![(5433, 5432)],
+            "v4 and v6 bindings are one mapping"
+        );
         assert_eq!(cs[0].compose_project.as_deref(), Some("urbital"));
         assert_eq!(cs[0].compose_service.as_deref(), Some("db"));
         assert_eq!(cs[0].working_dir, Some(PathBuf::from("/wt/urbital/feat-x")));
-        assert_eq!(cs[1].published, vec![(8067, 8067), (8089, 8089)], "unpublished ports skipped");
+        assert_eq!(
+            cs[1].published,
+            vec![(8067, 8067), (8089, 8089)],
+            "unpublished ports skipped"
+        );
         assert_eq!(cs[1].compose_project, None, "empty label is None");
-        assert_eq!(cs[2].published, vec![(8000, 9000), (8001, 9001), (8002, 9002)], "ranges expand, udp skipped");
+        assert_eq!(
+            cs[2].published,
+            vec![(8000, 9000), (8001, 9001), (8002, 9002)],
+            "ranges expand, udp skipped"
+        );
         assert!(cs[3].published.is_empty());
     }
 
@@ -894,14 +1061,21 @@ quiet-1\tbusybox\t\t\t\t\n";
         let s = PortsSample {
             app_pid: 1,
             listeners: vec![l(41084, "*", 8067), l(41084, "127.0.0.1", 32222)],
-            procs: vec![p(41084, 0, "/Applications/OrbStack.app/Contents/MacOS/OrbStack")],
+            procs: vec![p(
+                41084,
+                0,
+                "/Applications/OrbStack.app/Contents/MacOS/OrbStack",
+            )],
             session_panes: vec![],
             containers: vec![container("comicchat-ergo", 8067, 6667, None)],
             cwds: Default::default(),
         };
         let v = classify(&s, &[]);
         assert_eq!(v.other.len(), 2);
-        let c = v.other[0].container.as_ref().expect("8067 is a container port");
+        let c = v.other[0]
+            .container
+            .as_ref()
+            .expect("8067 is a container port");
         assert_eq!(c.label, "comicchat-ergo");
         assert_eq!(c.container_port, 6667);
         assert_eq!(v.other[1].container, None, "engine's own port stays plain");
@@ -916,7 +1090,11 @@ quiet-1\tbusybox\t\t\t\t\n";
             app_pid: 1,
             listeners: vec![l(41084, "127.0.0.1", 8080), l(7, "::1", 8080)],
             procs: vec![
-                p(41084, 0, "/Applications/OrbStack.app/Contents/MacOS/OrbStack"),
+                p(
+                    41084,
+                    0,
+                    "/Applications/OrbStack.app/Contents/MacOS/OrbStack",
+                ),
                 p(7, 0, "/opt/homebrew/bin/node"),
             ],
             session_panes: vec![],
@@ -940,7 +1118,11 @@ quiet-1\tbusybox\t\t\t\t\n";
             app_pid: 1,
             listeners: vec![l(41084, "127.0.0.1", 8080), l(7, "::1", 8080)],
             procs: vec![
-                p(41084, 0, "/Applications/OrbStack.app/Contents/MacOS/OrbStack"),
+                p(
+                    41084,
+                    0,
+                    "/Applications/OrbStack.app/Contents/MacOS/OrbStack",
+                ),
                 p(7, 0, "/Users/me/src/podman-tools/bin/web"),
             ],
             session_panes: vec![],
@@ -951,10 +1133,16 @@ quiet-1\tbusybox\t\t\t\t\n";
         assert_eq!(v.task.len(), 1, "{v:?}");
         assert_eq!(v.task[0].pid, 7);
         assert_eq!(v.task[0].container, None);
-        assert!(is_engine_path("/Applications/OrbStack.app/Contents/Frameworks/OrbStack Helper.app/Contents/MacOS/OrbStack Helper"));
-        assert!(is_engine_path("/Applications/Docker.app/Contents/MacOS/com.docker.backend"));
+        assert!(is_engine_path(
+            "/Applications/OrbStack.app/Contents/Frameworks/OrbStack Helper.app/Contents/MacOS/OrbStack Helper"
+        ));
+        assert!(is_engine_path(
+            "/Applications/Docker.app/Contents/MacOS/com.docker.backend"
+        ));
         assert!(is_engine_path("/opt/homebrew/bin/limactl"));
-        assert!(is_engine_path("/opt/homebrew/Cellar/podman/5.2/libexec/podman/gvproxy"));
+        assert!(is_engine_path(
+            "/opt/homebrew/Cellar/podman/5.2/libexec/podman/gvproxy"
+        ));
         assert!(!is_engine_path("/Users/me/src/podman-tools/bin/web"));
         assert!(!is_engine_path("/Users/me/lima-notes/server"));
     }
@@ -964,7 +1152,10 @@ quiet-1\tbusybox\t\t\t\t\n";
         // a on 127.0.0.1:8080 and b on 192.168.1.5:8080: one engine holds
         // both sockets, so the port can't say which container it is.
         let s = engine_sample(
-            vec![container("a-1", 8080, 80, None), container("b-1", 8080, 81, None)],
+            vec![
+                container("a-1", 8080, 80, None),
+                container("b-1", 8080, 81, None),
+            ],
             &[8080],
         );
         let v = classify(&s, &[]);
@@ -977,7 +1168,11 @@ quiet-1\tbusybox\t\t\t\t\n";
         let s = PortsSample {
             app_pid: 1,
             listeners: vec![l(41084, "*", 5433), l(41084, "*", 8081)],
-            procs: vec![p(41084, 0, "/Applications/OrbStack.app/Contents/MacOS/OrbStack")],
+            procs: vec![p(
+                41084,
+                0,
+                "/Applications/OrbStack.app/Contents/MacOS/OrbStack",
+            )],
             session_panes: vec![],
             containers: vec![
                 container("urbital-db-1", 5433, 5432, Some("/wt/urbital/feat-x")),
@@ -995,7 +1190,11 @@ quiet-1\tbusybox\t\t\t\t\n";
         assert_eq!(v.task.len(), 1);
         assert_eq!(v.task[0].port, 5433);
         assert_eq!(v.task[0].container.as_ref().unwrap().label, "db · urbital");
-        assert_eq!(v.other.len(), 1, "a sibling folder with a shared name prefix is not inside");
+        assert_eq!(
+            v.other.len(),
+            1,
+            "a sibling folder with a shared name prefix is not inside"
+        );
         assert_eq!(v.other[0].port, 8081);
     }
 
@@ -1027,7 +1226,11 @@ quiet-1\tbusybox\t\t\t\t\n";
 
     #[test]
     fn sort_rows_by_port_both_ways() {
-        let mut rows = vec![row(5173, "node", None), row(3000, "node", None), row(8080, "ruby", None)];
+        let mut rows = vec![
+            row(5173, "node", None),
+            row(3000, "node", None),
+            row(8080, "ruby", None),
+        ];
         sort_rows(&mut rows, by(SortField::Port, SortOrder::Desc));
         assert_eq!(ports(&rows), vec![8080, 5173, 3000]);
         sort_rows(&mut rows, by(SortField::Port, SortOrder::Asc));
@@ -1054,8 +1257,16 @@ quiet-1\tbusybox\t\t\t\t\n";
     fn port_sort_persists_and_defaults_to_port_ascending() {
         let json = serde_json::to_string(&by(SortField::Name, SortOrder::Desc)).unwrap();
         assert_eq!(json, r#"{"field":"name","order":"desc"}"#);
-        assert_eq!(serde_json::from_str::<PortSort>(&json).unwrap(), by(SortField::Name, SortOrder::Desc));
-        assert_eq!(serde_json::from_str::<PortSort>(r#"{"field":"name"}"#).unwrap().order, SortOrder::Asc);
+        assert_eq!(
+            serde_json::from_str::<PortSort>(&json).unwrap(),
+            by(SortField::Name, SortOrder::Desc)
+        );
+        assert_eq!(
+            serde_json::from_str::<PortSort>(r#"{"field":"name"}"#)
+                .unwrap()
+                .order,
+            SortOrder::Asc
+        );
         assert_eq!(PortSort::default(), by(SortField::Port, SortOrder::Asc));
     }
 
@@ -1076,7 +1287,10 @@ quiet-1\tbusybox\t\t\t\t\n";
     fn a_timed_out_listener_scan_is_no_sample_but_an_empty_one_is() {
         // `None` from the runner = timed out or failed to start.
         let timed_out = |cmd: &str, _: &[&str]| (cmd != "lsof").then(String::new);
-        assert!(sample_using(timed_out, false).is_none(), "keep the last sample; retry next tick");
+        assert!(
+            sample_using(timed_out, false).is_none(),
+            "keep the last sample; retry next tick"
+        );
         let empty = |_: &str, _: &[&str]| Some(String::new());
         let s = sample_using(empty, false).expect("an empty scan is a real answer");
         assert!(s.listeners.is_empty());
@@ -1086,13 +1300,28 @@ quiet-1\tbusybox\t\t\t\t\n";
     fn run_bounded_does_not_wait_on_a_helper_holding_stdout() {
         // The shell exits at once; its background sleep keeps stdout open.
         let t0 = std::time::Instant::now();
-        let out = run_bounded("sh", &["-c", "sleep 3 & echo hi"], std::time::Duration::from_millis(300));
-        assert!(t0.elapsed() < std::time::Duration::from_millis(1500), "{:?}", t0.elapsed());
+        let out = run_bounded(
+            "sh",
+            &["-c", "sleep 3 & echo hi"],
+            std::time::Duration::from_millis(300),
+        );
+        assert!(
+            t0.elapsed() < std::time::Duration::from_millis(1500),
+            "{:?}",
+            t0.elapsed()
+        );
         assert!(out.is_none(), "output never completed within the deadline");
         // A command that finishes in time still returns its output and code.
-        let ok = run_bounded("sh", &["-c", "echo hi; echo oops >&2; exit 3"], std::time::Duration::from_secs(2))
-            .expect("finished in time");
-        assert_eq!((ok.code, ok.stdout.as_str(), ok.stderr.as_str()), (Some(3), "hi\n", "oops\n"));
+        let ok = run_bounded(
+            "sh",
+            &["-c", "echo hi; echo oops >&2; exit 3"],
+            std::time::Duration::from_secs(2),
+        )
+        .expect("finished in time");
+        assert_eq!(
+            (ok.code, ok.stdout.as_str(), ok.stderr.as_str()),
+            (Some(3), "hi\n", "oops\n")
+        );
     }
 
     /// A fake runner: an OrbStack listener, and `endpoint` as the active
@@ -1106,7 +1335,9 @@ quiet-1\tbusybox\t\t\t\t\n";
             let listing = "db-1\tpg\t0.0.0.0:5433->5432/tcp\t\t\t\t\n".to_string();
             Some(match (cmd, args) {
                 ("lsof", ["-nP", ..]) => "p41084\nf9\nn*:5433\n".to_string(),
-                ("ps", _) => "41084 1 /Applications/OrbStack.app/Contents/MacOS/OrbStack\n".to_string(),
+                ("ps", _) => {
+                    "41084 1 /Applications/OrbStack.app/Contents/MacOS/OrbStack\n".to_string()
+                }
                 ("docker", ["context", ..]) => format!("{endpoint}\n"),
                 ("docker", ["ps", ..]) | ("docker", ["-H", _, "ps", ..]) => listing,
                 _ => String::new(),
@@ -1119,10 +1350,18 @@ quiet-1\tbusybox\t\t\t\t\n";
         let calls = std::cell::RefCell::new(Vec::new());
         let s = sample_using(engine_runner("ssh://me@build-box", &calls), false).unwrap();
         assert!(s.containers.is_empty());
-        assert!(!calls.borrow().iter().any(|c| c.contains(" ps ")), "{:?}", calls.borrow());
+        assert!(
+            !calls.borrow().iter().any(|c| c.contains(" ps ")),
+            "{:?}",
+            calls.borrow()
+        );
 
         let calls = std::cell::RefCell::new(Vec::new());
-        let s = sample_using(engine_runner("unix:///Users/me/.orbstack/run/docker.sock", &calls), false).unwrap();
+        let s = sample_using(
+            engine_runner("unix:///Users/me/.orbstack/run/docker.sock", &calls),
+            false,
+        )
+        .unwrap();
         assert_eq!(s.containers.len(), 1);
     }
 
@@ -1131,10 +1370,23 @@ quiet-1\tbusybox\t\t\t\t\n";
         // If the active context changed between the two docker processes, an
         // unpinned `docker ps` would resolve the new one. With -H it can't.
         let calls = std::cell::RefCell::new(Vec::new());
-        sample_using(engine_runner("unix:///Users/me/.orbstack/run/docker.sock", &calls), false).unwrap();
-        let ps: Vec<String> = calls.borrow().iter().filter(|c| c.contains(" ps ")).cloned().collect();
+        sample_using(
+            engine_runner("unix:///Users/me/.orbstack/run/docker.sock", &calls),
+            false,
+        )
+        .unwrap();
+        let ps: Vec<String> = calls
+            .borrow()
+            .iter()
+            .filter(|c| c.contains(" ps "))
+            .cloned()
+            .collect();
         assert_eq!(ps.len(), 1, "{ps:?}");
-        assert!(ps[0].starts_with("docker -H unix:///Users/me/.orbstack/run/docker.sock ps "), "{}", ps[0]);
+        assert!(
+            ps[0].starts_with("docker -H unix:///Users/me/.orbstack/run/docker.sock ps "),
+            "{}",
+            ps[0]
+        );
     }
 
     #[test]
@@ -1161,7 +1413,11 @@ quiet-1\tbusybox\t\t\t\t\n";
             "import os, sys, time\nos.setpgrp()\ntime.sleep(0.8)\ntry:\n    print('late', flush=True)\n    r = 'open'\nexcept BrokenPipeError:\n    r = 'closed'\nopen(sys.argv[1], 'w').write(r)\n",
         )
         .unwrap();
-        let cmd = format!("python3 '{}' '{}' & echo hi", script.display(), mark.display());
+        let cmd = format!(
+            "python3 '{}' '{}' & echo hi",
+            script.display(),
+            mark.display()
+        );
         let out = run_bounded("sh", &["-c", &cmd], std::time::Duration::from_millis(300));
         assert!(out.is_none());
         for _ in 0..40 {
@@ -1180,22 +1436,44 @@ quiet-1\tbusybox\t\t\t\t\n";
             stdout: out.into(),
             stderr: err.into(),
         };
-        assert_eq!(accepted("ps", ran(Some(0), "1 0 /sbin/launchd\n", "")).as_deref(), Some("1 0 /sbin/launchd\n"));
+        assert_eq!(
+            accepted("ps", ran(Some(0), "1 0 /sbin/launchd\n", "")).as_deref(),
+            Some("1 0 /sbin/launchd\n")
+        );
         // lsof's documented "nothing matched" (and a pid gone mid-scan).
         assert_eq!(accepted("lsof", ran(Some(1), "", "")).as_deref(), Some(""));
         // lsof's other status-1 failures say why on stderr.
-        assert_eq!(accepted("lsof", ran(Some(1), "", "lsof: unacceptable port specification\n")), None);
+        assert_eq!(
+            accepted(
+                "lsof",
+                ran(Some(1), "", "lsof: unacceptable port specification\n")
+            ),
+            None
+        );
         // Killed by a signal before writing anything: no exit code.
         assert_eq!(accepted("lsof", ran(None, "", "")), None);
-        assert_eq!(accepted("ps", ran(Some(1), "", "")), None, "status 1 is only lsof's no-match");
-        assert_eq!(accepted("docker", ran(Some(1), "", "Cannot connect to the Docker daemon\n")), None);
+        assert_eq!(
+            accepted("ps", ran(Some(1), "", "")),
+            None,
+            "status 1 is only lsof's no-match"
+        );
+        assert_eq!(
+            accepted(
+                "docker",
+                ran(Some(1), "", "Cannot connect to the Docker daemon\n")
+            ),
+            None
+        );
     }
 
     #[test]
     fn one_scan_at_a_time_with_one_follow_up_kept() {
         let mut gate = ScanGate::default();
         assert!(gate.try_start(true), "idle: start");
-        assert!(!gate.try_start(true), "busy: a refresh is queued, not started");
+        assert!(
+            !gate.try_start(true),
+            "busy: a refresh is queued, not started"
+        );
         assert!(!gate.try_start(true), "still just one queued");
         assert!(!gate.try_start(false), "a poll tick while busy is skipped");
         assert!(gate.finish(), "the queued refresh runs next");
@@ -1209,14 +1487,24 @@ quiet-1\tbusybox\t\t\t\t\n";
     fn a_sample_is_current_only_within_one_scan_cycle() {
         use std::time::Duration;
         assert!(is_current(Duration::from_secs(0)));
-        assert!(is_current(Duration::from_secs(9)), "a 3 s poll plus a slow scan");
-        assert!(!is_current(Duration::from_secs(11)), "kept from before the tab was hidden, or scans failing");
+        assert!(
+            is_current(Duration::from_secs(9)),
+            "a 3 s poll plus a slow scan"
+        );
+        assert!(
+            !is_current(Duration::from_secs(11)),
+            "kept from before the tab was hidden, or scans failing"
+        );
     }
 
     #[test]
     fn tab_label_counts_only_while_visible() {
         assert_eq!(tab_label(2, true), "Ports · 2");
-        assert_eq!(tab_label(2, false), "Ports", "a hidden tab's sample is stale");
+        assert_eq!(
+            tab_label(2, false),
+            "Ports",
+            "a hidden tab's sample is stale"
+        );
         assert_eq!(tab_label(0, true), "Ports");
     }
 
@@ -1224,7 +1512,10 @@ quiet-1\tbusybox\t\t\t\t\n";
     fn parse_lsof_cwd_maps_pid_to_folder() {
         let out = "p93830\nfcwd\nn/Users/omar/projects/comic-chat\np1260\nfcwd\nn/\np7\nfcwd\nn/a folder/with spaces\n";
         let m = parse_lsof_cwd(out);
-        assert_eq!(m.get(&93830), Some(&PathBuf::from("/Users/omar/projects/comic-chat")));
+        assert_eq!(
+            m.get(&93830),
+            Some(&PathBuf::from("/Users/omar/projects/comic-chat"))
+        );
         assert_eq!(m.get(&1260), Some(&PathBuf::from("/")));
         assert_eq!(m.get(&7), Some(&PathBuf::from("/a folder/with spaces")));
     }
@@ -1243,17 +1534,36 @@ quiet-1\tbusybox\t\t\t\t\n";
 
     #[test]
     fn classify_puts_an_orphaned_server_in_the_task_its_folder_is_in() {
-        let s = cwd_sample(93830, "/opt/homebrew/bin/bun", "/Users/omar/projects/comic-chat/apps/web", 3000);
-        let v = classify(&s, &[repo_scope("comic-chat", "/Users/omar/projects/comic-chat")]);
+        let s = cwd_sample(
+            93830,
+            "/opt/homebrew/bin/bun",
+            "/Users/omar/projects/comic-chat/apps/web",
+            3000,
+        );
+        let v = classify(
+            &s,
+            &[repo_scope("comic-chat", "/Users/omar/projects/comic-chat")],
+        );
         assert_eq!(v.task.len(), 1, "{v:?}");
-        assert_eq!(v.task[0].cwd, Some(PathBuf::from("/Users/omar/projects/comic-chat/apps/web")));
+        assert_eq!(
+            v.task[0].cwd,
+            Some(PathBuf::from("/Users/omar/projects/comic-chat/apps/web"))
+        );
     }
 
     #[test]
     fn classify_ignores_an_engine_s_working_folder() {
         // OrbStack happens to run from some project folder; that says nothing.
-        let s = cwd_sample(41084, "/Applications/OrbStack.app/Contents/MacOS/OrbStack", "/Users/omar/projects/comic-chat/ios", 32222);
-        let v = classify(&s, &[repo_scope("comic-chat", "/Users/omar/projects/comic-chat")]);
+        let s = cwd_sample(
+            41084,
+            "/Applications/OrbStack.app/Contents/MacOS/OrbStack",
+            "/Users/omar/projects/comic-chat/ios",
+            32222,
+        );
+        let v = classify(
+            &s,
+            &[repo_scope("comic-chat", "/Users/omar/projects/comic-chat")],
+        );
         assert!(v.task.is_empty());
         assert_eq!(v.other.len(), 1);
     }
@@ -1261,15 +1571,24 @@ quiet-1\tbusybox\t\t\t\t\n";
     #[test]
     fn classify_keeps_a_server_from_a_sibling_folder_out() {
         let s = cwd_sample(5, "/x/node", "/Users/omar/projects/comic-chat-old", 4000);
-        let v = classify(&s, &[repo_scope("comic-chat", "/Users/omar/projects/comic-chat")]);
+        let v = classify(
+            &s,
+            &[repo_scope("comic-chat", "/Users/omar/projects/comic-chat")],
+        );
         assert!(v.task.is_empty());
-        assert_eq!(v.other[0].cwd, Some(PathBuf::from("/Users/omar/projects/comic-chat-old")));
+        assert_eq!(
+            v.other[0].cwd,
+            Some(PathBuf::from("/Users/omar/projects/comic-chat-old"))
+        );
     }
 
     #[test]
     fn parse_lsof_ignores_garbage() {
         assert!(parse_lsof("n*:x\nhello\np\n").is_empty());
-        assert!(parse_lsof("n*:80\n").is_empty(), "a name before any pid has no owner");
+        assert!(
+            parse_lsof("n*:80\n").is_empty(),
+            "a name before any pid has no owner"
+        );
     }
 
     #[test]
@@ -1279,7 +1598,11 @@ quiet-1\tbusybox\t\t\t\t\n";
         assert_eq!(procs.len(), 2);
         assert_eq!(procs[0].pid, 41084);
         assert_eq!(procs[0].parent, Some(1));
-        assert!(procs[0].path.ends_with("MacOS/OrbStack Helper"), "{}", procs[0].path);
+        assert!(
+            procs[0].path.ends_with("MacOS/OrbStack Helper"),
+            "{}",
+            procs[0].path
+        );
         assert_eq!(procs[1].parent, None);
     }
 
@@ -1335,7 +1658,10 @@ quiet-1\tbusybox\t\t\t\t\n";
         let s = PortsSample {
             app_pid: 1,
             listeners: vec![l(101, "127.0.0.1", 54000)],
-            procs: vec![p(100, 50, "/bin/zsh"), p(101, 100, "/x/claude.app/Contents/MacOS/claude")],
+            procs: vec![
+                p(100, 50, "/bin/zsh"),
+                p(101, 100, "/x/claude.app/Contents/MacOS/claude"),
+            ],
             session_panes: vec![("oo-abc_1".into(), 100)],
             containers: vec![],
             cwds: Default::default(),
@@ -1351,7 +1677,10 @@ quiet-1\tbusybox\t\t\t\t\n";
         let s = PortsSample {
             app_pid: 1,
             listeners: vec![l(900, "127.0.0.1", 50465), l(901, "*", 9000)],
-            procs: vec![p(900, 0, "/x/claude.app/Contents/MacOS/claude"), p(901, 0, "/x/node")],
+            procs: vec![
+                p(900, 0, "/x/claude.app/Contents/MacOS/claude"),
+                p(901, 0, "/x/node"),
+            ],
             session_panes: vec![],
             containers: vec![],
             cwds: Default::default(),
@@ -1372,10 +1701,22 @@ quiet-1\tbusybox\t\t\t\t\n";
                 l(1741, "*", 8080),
             ],
             procs: vec![
-                p(1403, 0, "/System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter"),
+                p(
+                    1403,
+                    0,
+                    "/System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter",
+                ),
                 p(1260, 0, "/usr/libexec/rapportd"),
-                p(1, 0, "/Applications/openOrchestra.app/Contents/MacOS/openOrchestra"),
-                p(1741, 0, "/Applications/OrbStack.app/Contents/MacOS/OrbStack"),
+                p(
+                    1,
+                    0,
+                    "/Applications/openOrchestra.app/Contents/MacOS/openOrchestra",
+                ),
+                p(
+                    1741,
+                    0,
+                    "/Applications/OrbStack.app/Contents/MacOS/OrbStack",
+                ),
             ],
             session_panes: vec![],
             containers: vec![],
@@ -1417,7 +1758,11 @@ quiet-1\tbusybox\t\t\t\t\n";
         let row = found.expect("port 18765 not found");
         assert_eq!(row.pid, pid);
         assert_eq!(row.addrs, vec!["127.0.0.1".to_string()]);
-        assert!(row.name.to_ascii_lowercase().starts_with("python"), "{}", row.name);
+        assert!(
+            row.name.to_ascii_lowercase().starts_with("python"),
+            "{}",
+            row.name
+        );
     }
 
     /// Live: every published container port on this machine is labelled.
@@ -1426,12 +1771,18 @@ quiet-1\tbusybox\t\t\t\t\n";
     #[ignore]
     fn live_sample_labels_running_containers() {
         let s = sample(false).expect("scan finished");
-        assert!(!s.containers.is_empty(), "no containers seen; is an engine running?");
+        assert!(
+            !s.containers.is_empty(),
+            "no containers seen; is an engine running?"
+        );
         let v = classify(&s, &[]);
         // Only a port exactly one container publishes is attributable; two
         // containers on one port number stay unlabelled by design.
         let publishers = |port: u16| {
-            s.containers.iter().filter(|c| c.published.iter().any(|(h, _)| *h == port)).count()
+            s.containers
+                .iter()
+                .filter(|c| c.published.iter().any(|(h, _)| *h == port))
+                .count()
         };
         for c in &s.containers {
             for (host, inner) in &c.published {
@@ -1461,8 +1812,16 @@ quiet-1\tbusybox\t\t\t\t\n";
         let s = PortsSample {
             app_pid: 1,
             listeners: vec![l(11, "*", 3000), l(21, "*", 4000)],
-            procs: vec![p(10, 0, "/bin/zsh"), p(11, 10, "/x/node"), p(20, 0, "/bin/zsh"), p(21, 20, "/x/node")],
-            session_panes: vec![("harness_main-api_7".into(), 10), ("harness_main-api_admin_7".into(), 20)],
+            procs: vec![
+                p(10, 0, "/bin/zsh"),
+                p(11, 10, "/x/node"),
+                p(20, 0, "/bin/zsh"),
+                p(21, 20, "/x/node"),
+            ],
+            session_panes: vec![
+                ("harness_main-api_7".into(), 10),
+                ("harness_main-api_admin_7".into(), 20),
+            ],
             containers: vec![],
             cwds: Default::default(),
         };
@@ -1476,13 +1835,21 @@ quiet-1\tbusybox\t\t\t\t\n";
         let s = PortsSample {
             app_pid: 1,
             listeners: vec![l(201, "*", 4000), l(301, "*", 3000)],
-            procs: vec![p(200, 0, "/bin/zsh"), p(201, 200, "/x/node"), p(300, 0, "/bin/zsh"), p(301, 300, "/x/node")],
+            procs: vec![
+                p(200, 0, "/bin/zsh"),
+                p(201, 200, "/x/node"),
+                p(300, 0, "/bin/zsh"),
+                p(301, 300, "/x/node"),
+            ],
             session_panes: vec![("oo-api_1".into(), 200), ("oo-web_1".into(), 300)],
             containers: vec![],
             cwds: Default::default(),
         };
         let v = classify(&s, &[scope("oo-api_", "api"), scope("oo-web_", "web")]);
         let members: Vec<_> = v.task.iter().map(|r| (r.port, r.member.clone())).collect();
-        assert_eq!(members, vec![(3000, Some("web".into())), (4000, Some("api".into()))]);
+        assert_eq!(
+            members,
+            vec![(3000, Some("web".into())), (4000, Some("api".into()))]
+        );
     }
 }

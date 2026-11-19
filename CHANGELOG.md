@@ -12,6 +12,71 @@ Unreleased is empty.
 
 ## Unreleased
 
+### Added
+
+- Open **Overview** from the Review panel to generate a review with Codex,
+  Claude Code, pi, or Grok. It reviews branch commits and local changes,
+  including staged, unstaged, and untracked files. For a multi-repository task,
+  it uses each repository's configured base. You can cancel a run or refresh
+  the report.
+- Review Overview shows a recommended reading order when the report provides
+  one. Each step says what to look for, marks your place as you follow it, and
+  links to changed files in the editor. The writeup also links recognized
+  file references to the editor.
+- Choose the review CLI and model in Settings → Diff. **Chat about this**
+  opens the report in a fresh agent tab with the same CLI and model for
+  Codex, Claude Code, and pi.
+- Grok is a built-in agent in Settings → Agents and appears in the agent
+  picker when enabled. It uses the locally installed `grok` CLI and opens a
+  plain shell if the CLI is missing from `PATH`. Grok starts in auto permission
+  mode, receives task context, and can resume the latest session in the
+  current directory. Grok's status and notifications require trusting the
+  folder in Grok. Shared Grok tabs show the Grok name and icon on the phone.
+
+### Fixed
+
+- The Review Overview tab shows the CLI and model chosen in Settings as soon
+  as they change.
+- With Review Overview focused, ⌘W closes its tab and ⌘Q quits openOrchestra.
+- The sidebar shows pull request and CI badges for open pull requests,
+  including drafts, opened by the signed-in GitHub user.
+- Renamed worktree rows in the Projects sidebar leave the second line for Git
+  and pull request badges. Hover over the row to see its branch.
+- Review Overview restores the last completed report and its tab after a
+  restart, even when an older build shares the same pane settings.
+- Review Overview reports a missing CLI when generating a report or opening
+  **Chat about this**. If the CLI was removed after generation, the completed
+  report stays available.
+- An agent tab recovered at startup shows the status that tab last saved.
+- Review model lists open from the last saved catalog. **Reload models** asks
+  the CLI for an updated list.
+- Agent status, alerts, and waiting-tab navigation follow the tab that produced
+  them when several agents share a worktree. The collapsed Conductor badge
+  counts running agent tabs.
+- Notifications can arrive while another agent tab is selected, the app window
+  is inactive, or a maximized tools panel covers the center pane.
+- A closed or exited agent clears its own activity. Running agents keep their
+  status when a tmux pane listing fails.
+- Closing a file preview keeps the neighboring tab selected. Clicking an
+  already open file in the Explorer brings that file's tab forward.
+- An untracked file named `-` is included in a Review Overview diff, and a
+  failed untracked diff with no patch counts as an omission. The report shows
+  patch omissions and truncation, and explains when the snapshot uses an empty
+  tree or falls back to uncommitted changes because it cannot find a merge base.
+- Built-in Codex launches use `--no-daemon` when supported so the Conductor
+  and notifications receive Codex's status updates.
+- Closing the active tab selects the next tab to the right, or the tab to the
+  left when closing the last one.
+
+### Security
+
+- Review Overview configures each CLI to restrict tool access during its
+  one-shot snapshot review.
+
+### Known Issues
+
+- Opening an agent tab while a file tab is open can return focus to the editor.
+
 ## 1.2.1 - 2026-11-19
 
 ### Fixed

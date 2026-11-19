@@ -22,6 +22,7 @@ mod bus;
 mod claude_code;
 mod codex;
 mod configurable;
+mod grok;
 mod kimi;
 mod opencode;
 mod pi;
@@ -36,6 +37,7 @@ pub use configurable::{
     harness_status_shim_command, harness_status_shim_path, materialize_harness_status_shim,
     ConfigurableRuntime, HookInstall, SignalProfile,
 };
+pub use grok::GrokRuntime;
 pub use kimi::KimiRuntime;
 pub use opencode::OpenCodeRuntime;
 pub use pi::PiRuntime;
@@ -48,7 +50,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-pub use status_watch::{AgentState, ToolCall, status_path};
+pub use status_watch::{status_path, AgentState, ToolCall};
 pub use worktrees::AgentKind;
 
 /// Why an agent is waiting, when it tells us (§4.5).
@@ -147,7 +149,7 @@ pub fn fidelity_for(kind: &AgentKind) -> WaitFidelity {
         AgentKind::Pi => WaitFidelity::BestEffort,
         AgentKind::OpenCode => WaitFidelity::Exact,
         AgentKind::Codex => WaitFidelity::BestEffort,
-        AgentKind::ClaudeCode => WaitFidelity::Exact,
+        AgentKind::ClaudeCode | AgentKind::Grok => WaitFidelity::Exact,
         AgentKind::Kimi | AgentKind::Other(_) => WaitFidelity::TerminalOnly,
     }
 }
@@ -233,6 +235,7 @@ pub fn default_invocation(kind: &AgentKind) -> (&str, &'static [&'static str]) {
         AgentKind::ClaudeCode => (claude_code::PROGRAM, claude_code::DEFAULT_ARGS),
         AgentKind::Codex => (codex::PROGRAM, codex::DEFAULT_ARGS),
         AgentKind::Kimi => (kimi::PROGRAM, kimi::DEFAULT_ARGS),
+        AgentKind::Grok => (grok::PROGRAM, grok::DEFAULT_ARGS),
         other => (other.as_str(), &[]),
     }
 }
@@ -245,13 +248,14 @@ pub fn default_invocation(kind: &AgentKind) -> (&str, &'static [&'static str]) {
 ///
 /// - Claude Code `--continue`: "most recent conversation in the current directory".
 /// - pi `--continue`: "most recent session for the current directory".
+/// - Grok `--continue`: "most recent session for the current working directory".
 /// - Codex `resume --last`: `resume` filters by cwd unless `--all` is given.
 /// - OpenCode `--continue` is "the last session" of a *project*, which sibling
 ///   worktrees of one repo can share, so it is not used.
 pub fn continue_args(kind: &AgentKind, args: &[String]) -> Option<Vec<String>> {
     let owned = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     match kind {
-        AgentKind::ClaudeCode | AgentKind::Pi => {
+        AgentKind::ClaudeCode | AgentKind::Pi | AgentKind::Grok => {
             let mut out = args.to_vec();
             out.push("--continue".into());
             Some(out)
@@ -347,11 +351,17 @@ fn update_agent_hooks(
         serde_json::json!({})
     } else {
         serde_json::from_str(&existing).map_err(|error| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("{} does not parse: {error}", path.display()))
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} does not parse: {error}", path.display()),
+            )
         })?
     };
     if !root.is_object() {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "hooks.json is not an object"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "hooks.json is not an object",
+        ));
     }
     let previous = root.clone();
     update(&mut root)?;
@@ -427,16 +437,15 @@ pub fn runtime_for_with_signal(
 ) -> Box<dyn AgentRuntime> {
     match kind {
         AgentKind::Pi => Box::new(PiRuntime::new(state_dir)),
-        AgentKind::OpenCode => Box::new(OpenCodeRuntime::new(worktree_root).with_state_dir(state_dir)),
+        AgentKind::OpenCode => {
+            Box::new(OpenCodeRuntime::new(worktree_root).with_state_dir(state_dir))
+        }
         AgentKind::ClaudeCode => Box::new(ClaudeCodeRuntime::new(state_dir)),
         AgentKind::Codex => Box::new(CodexRuntime::new(state_dir)),
         AgentKind::Kimi => Box::new(KimiRuntime),
+        AgentKind::Grok => Box::new(GrokRuntime::new(state_dir)),
         other => match signal {
-            Some(profile) => Box::new(ConfigurableRuntime::new(
-                other.clone(),
-                state_dir,
-                profile,
-            )),
+            Some(profile) => Box::new(ConfigurableRuntime::new(other.clone(), state_dir, profile)),
             None => Box::new(TerminalOnlyRuntime::new(other.clone())),
         },
     }

@@ -45,13 +45,17 @@ fn main_resolved(r: &crate::data::RepoView) -> Resolved {
 }
 
 impl HarnessWorkspace {
-
     pub(crate) fn resolve(&self) -> Option<Resolved> {
         let primary = self.data.repos.first()?;
         let main_of = main_resolved;
         match &self.selection {
             Selection::Main(repo) => {
-                let r = self.data.repos.iter().find(|x| &x.name == repo).unwrap_or(primary);
+                let r = self
+                    .data
+                    .repos
+                    .iter()
+                    .find(|x| &x.name == repo)
+                    .unwrap_or(primary);
                 Some(main_of(r))
             }
             Selection::Worktree(id) => {
@@ -82,10 +86,9 @@ impl HarnessWorkspace {
                 }
                 Some(main_of(primary))
             }
-            Selection::Task {
-                task_id,
-                member_id,
-            } => self.resolve_task(task_id, member_id.as_deref()),
+            Selection::Task { task_id, member_id } => {
+                self.resolve_task(task_id, member_id.as_deref())
+            }
         }
     }
 
@@ -107,7 +110,7 @@ impl HarnessWorkspace {
     }
 
     fn resolve_task(&self, task_id: &str, member_id: Option<&str>) -> Option<Resolved> {
-        use super::coordinator::{task_focus, TaskFocus};
+        use super::coordinator::{TaskFocus, task_focus};
         let task = self.task_store.get(task_id)?;
         let home = task.home_member()?;
         let compare_ref_of = |repo: &str| {
@@ -228,10 +231,7 @@ impl HarnessWorkspace {
         if let Some(info) = self.task_brokers.get(task_id) {
             pairs.push(("HARNESS_A2A_URL".into(), info.base_url.clone()));
             pairs.push(("HARNESS_A2A_KEY".into(), info.api_key.clone()));
-            pairs.push((
-                "HARNESS_A2A_TENANT".into(),
-                member.worktree_id.clone(),
-            ));
+            pairs.push(("HARNESS_A2A_TENANT".into(), member.worktree_id.clone()));
         }
         pairs
     }
@@ -366,9 +366,18 @@ pub(crate) struct AgentLaunchPrep {
 impl AgentLaunchPrep {
     /// Run filesystem-dependent setup (`on_spawn`, local git excludes, task
     /// context, `$PATH` lookup, and `prepare_launch`) off the UI thread.
-    pub(crate) fn resolve(self, review: Option<ReviewFollowup>) -> Option<agent_runtime::AgentCommand> {
+    ///
+    /// A missing CLI still falls back to a shell for an ordinary agent tab. A
+    /// review follow-up does not: the report would never be applied, and the
+    /// caller reports that the CLI is unavailable instead.
+    pub(crate) fn resolve(self, review: Option<ReviewFollowup>) -> ResolvedLaunch {
+        let kind_label = super::agents::agent_display(&self.kind);
         if let Err(e) = self.runtime.on_spawn(&self.path) {
-            log::warn!("{} setup failed for {}: {e}", self.kind, self.path.display());
+            log::warn!(
+                "{} setup failed for {}: {e}",
+                self.kind,
+                self.path.display()
+            );
         }
         // The harness runs inside the user's own repository, so anything it
         // drops there would otherwise show up as uncommitted changes in their
@@ -389,7 +398,10 @@ impl AgentLaunchPrep {
         let mut runtime_cmd = self.runtime.command(&self.path);
         let tab_env = [
             ("HARNESS_AGENT_TAB_ID".to_string(), self.tab_id.to_string()),
-            ("HARNESS_AGENT_WORKTREE".to_string(), self.path.to_string_lossy().into_owned()),
+            (
+                "HARNESS_AGENT_WORKTREE".to_string(),
+                self.path.to_string_lossy().into_owned(),
+            ),
         ];
         if let Some(cmd) = runtime_cmd.as_mut() {
             cmd.env.extend(tab_env.clone());
@@ -425,14 +437,24 @@ impl AgentLaunchPrep {
                     path.to_string_lossy().into_owned(),
                 ));
             }
-            return Some(self.runtime.prepare_launch(agent_runtime::AgentCommand {
-                program: shell.into(),
-                args,
-                env,
-                label: self.kind.as_str().to_string(),
-            }));
+            return ResolvedLaunch {
+                command: Some(self.runtime.prepare_launch(agent_runtime::AgentCommand {
+                    program: shell.into(),
+                    args,
+                    env,
+                    label: self.kind.as_str().to_string(),
+                })),
+                review_cli_missing: false,
+                kind_label,
+            };
         }
-        if runtime_cmd.is_none() {
+        let review_cli_missing = review.is_some() && runtime_cmd.is_none();
+        if review_cli_missing {
+            log::info!(
+                "{} not on PATH — the review follow-up was not opened",
+                self.kind
+            );
+        } else if runtime_cmd.is_none() {
             log::info!("{} not on PATH — falling back to a plain shell", self.kind);
         }
         if let (Some(cmd), Some(path)) = (runtime_cmd.as_mut(), context_path.as_ref()) {
@@ -442,20 +464,34 @@ impl AgentLaunchPrep {
         // folder, where the CLI can scope that to the folder (see
         // `continue_args`). User overrides above are free-form lines and start
         // fresh.
-        if review.is_none() && self.continue_next_agent
+        if review.is_none()
+            && self.continue_next_agent
             && let Some(cmd) = runtime_cmd.as_mut()
             && let Some(args) = agent_runtime::continue_args(&self.kind, &cmd.args)
         {
             cmd.args = args;
         }
-        runtime_cmd.map(|cmd| {
+        let command = runtime_cmd.map(|cmd| {
             let mut cmd = self.runtime.prepare_launch(cmd);
             if let Some(review) = review {
                 review.apply(&mut cmd);
             }
             cmd
-        })
+        });
+        ResolvedLaunch {
+            command,
+            review_cli_missing,
+            kind_label,
+        }
     }
+}
+
+/// What [`AgentLaunchPrep::resolve`] decided to run.
+pub(crate) struct ResolvedLaunch {
+    pub(crate) command: Option<agent_runtime::AgentCommand>,
+    /// The follow-up CLI is not installed. The caller must not open a shell.
+    pub(crate) review_cli_missing: bool,
+    pub(crate) kind_label: String,
 }
 
 #[cfg(test)]
@@ -484,11 +520,69 @@ mod main_resolve_tests {
         // the branch, not collapse to HEAD (which is just Uncommitted again).
         let r = main_resolved(&repo("feat/ports-panel"));
         assert_eq!(r.compare_ref, "origin/master");
-        assert_eq!(DiffBase::DefaultBranch.label(&r.compare_ref), "vs origin/master");
+        assert_eq!(
+            DiffBase::DefaultBranch.label(&r.compare_ref),
+            "vs origin/master"
+        );
         assert_ne!(
             diff_base_ref(DiffBase::DefaultBranch, &r.compare_ref),
             diff_base_ref(DiffBase::Uncommitted, &r.compare_ref),
             "the two menu choices must differ"
         );
+    }
+}
+
+#[cfg(test)]
+mod launch_prep_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    struct MissingCli;
+
+    impl agent_runtime::AgentRuntime for MissingCli {
+        fn kind(&self) -> AgentKind {
+            AgentKind::Codex
+        }
+        fn fidelity(&self) -> agent_runtime::WaitFidelity {
+            agent_runtime::WaitFidelity::Exact
+        }
+        fn signal_kind(&self) -> agent_runtime::SignalKind {
+            agent_runtime::SignalKind::None
+        }
+        fn on_spawn(&self, _: &Path) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn command(&self, _: &Path) -> Option<agent_runtime::AgentCommand> {
+            None
+        }
+    }
+
+    fn prep() -> AgentLaunchPrep {
+        AgentLaunchPrep {
+            tab_id: 3,
+            kind: AgentKind::Codex,
+            path: PathBuf::from("/tmp/openorchestra-missing-cli"),
+            runtime: Box::new(MissingCli),
+            task: None,
+            tasks_root: PathBuf::from("/tmp"),
+            override_cmd: None,
+            continue_next_agent: false,
+        }
+    }
+
+    #[test]
+    fn a_missing_review_cli_is_not_a_shell() {
+        let review = ReviewFollowup::new(&ReviewPreferences::default(), "report", &[], &[]);
+        let resolved = prep().resolve(Some(review));
+        assert!(resolved.review_cli_missing);
+        assert!(resolved.command.is_none());
+        assert_eq!(resolved.kind_label, "Codex");
+    }
+
+    #[test]
+    fn a_missing_cli_without_a_review_still_falls_back_to_a_shell() {
+        let resolved = prep().resolve(None);
+        assert!(!resolved.review_cli_missing);
+        assert!(resolved.command.is_none());
     }
 }

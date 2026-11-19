@@ -32,8 +32,7 @@
 mod session;
 
 pub use session::{
-    parse_session, read_session, Session, SessionError, ToolCall, Turn,
-    SUPPORTED_FORMAT_VERSION,
+    parse_session, read_session, Session, SessionError, ToolCall, Turn, SUPPORTED_FORMAT_VERSION,
 };
 
 use std::io::Write;

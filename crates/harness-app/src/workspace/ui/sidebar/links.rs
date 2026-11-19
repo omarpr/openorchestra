@@ -62,11 +62,19 @@ impl LinkEvent {
 pub(crate) enum LinkVisual {
     Idle,
     /// A delegation to this repo is in flight; `pulse` is 0..=1.
-    Active { pulse: f32 },
+    Active {
+        pulse: f32,
+    },
     /// A message dot `progress` (0..1) of the way along the connector.
-    Travel { kind: LinkEventKind, progress: f32 },
+    Travel {
+        kind: LinkEventKind,
+        progress: f32,
+    },
     /// Afterglow of a returned result; `fade` runs 1 → 0.
-    Flash { ok: bool, fade: f32 },
+    Flash {
+        ok: bool,
+        fade: f32,
+    },
 }
 
 fn is_active_state(state: &str) -> bool {
@@ -99,7 +107,12 @@ fn terminal_kind(state: &str) -> Option<LinkEventKind> {
 /// `failed`/`rejected` is `Up` not ok. Anything else emits nothing. An id
 /// first seen already finished (sent and done between two polls) gets both:
 /// the `Down` now and its `Up` once that has travelled.
-pub(crate) fn diff_snapshots(task_id: &str, prev: &[A2aRow], next: &[A2aRow], now: f32) -> Vec<LinkEvent> {
+pub(crate) fn diff_snapshots(
+    task_id: &str,
+    prev: &[A2aRow],
+    next: &[A2aRow],
+    now: f32,
+) -> Vec<LinkEvent> {
     let mut out = Vec::new();
     for (id, tenant, state) in next.iter().filter(|(_, t, _)| is_delegation(t)) {
         let mut push = |kind, started| {
@@ -302,11 +315,17 @@ mod tests {
         let refs: Vec<&LinkEvent> = ev.iter().collect();
         assert!(matches!(
             link_visual(false, &refs, 4.5),
-            LinkVisual::Travel { kind: LinkEventKind::Down, .. }
+            LinkVisual::Travel {
+                kind: LinkEventKind::Down,
+                ..
+            }
         ));
         assert!(matches!(
             link_visual(false, &refs, 5.5),
-            LinkVisual::Travel { kind: LinkEventKind::Up { ok: true }, .. }
+            LinkVisual::Travel {
+                kind: LinkEventKind::Up { ok: true },
+                ..
+            }
         ));
         // Failed/rejected the same way, not ok.
         let ev = diff_snapshots("t", &[], &[row("a2", "wt-b", "rejected")], 0.0);
@@ -320,8 +339,13 @@ mod tests {
         assert!(diff_snapshots("t", &rows, &rows, 1.0).is_empty());
         // submitted → working is progress, not a message on the wire.
         assert!(
-            diff_snapshots("t", &[row("a1", "wt-a", "submitted")], &[row("a1", "wt-a", "working")], 1.0)
-                .is_empty()
+            diff_snapshots(
+                "t",
+                &[row("a1", "wt-a", "submitted")],
+                &[row("a1", "wt-a", "working")],
+                1.0
+            )
+            .is_empty()
         );
     }
 
@@ -355,7 +379,10 @@ mod tests {
         };
         assert!(matches!(
             link_visual(false, &[&old, &down], 1.5),
-            LinkVisual::Travel { kind: LinkEventKind::Down, .. }
+            LinkVisual::Travel {
+                kind: LinkEventKind::Down,
+                ..
+            }
         ));
     }
 
@@ -393,12 +420,20 @@ mod tests {
         assert!(is_in_flight_delegation("wt-a", "working"));
         assert!(diff_snapshots("t", &[], &[row("c1", coord, "working")], 0.0).is_empty());
         assert!(
-            diff_snapshots("t", &[row("c1", coord, "working")], &[row("c1", coord, "completed")], 1.0)
-                .is_empty()
+            diff_snapshots(
+                "t",
+                &[row("c1", coord, "working")],
+                &[row("c1", coord, "completed")],
+                1.0
+            )
+            .is_empty()
         );
         let mut tr = LinkTracker::default();
         tr.observe("t", vec![row("c1", coord, "working")], 0.0);
-        assert!(!tr.any_active(), "a coordinator-bound row keeps nothing pulsing");
+        assert!(
+            !tr.any_active(),
+            "a coordinator-bound row keeps nothing pulsing"
+        );
         assert!(!tr.is_animating(0.1));
     }
 
@@ -423,6 +458,9 @@ mod tests {
         let (x, y) = dot_position(1, 1.0, LinkEventKind::Down);
         assert!((x - ELBOW_END_X).abs() < 1e-3 && (y - mid).abs() < 1e-3);
         // Up starts at the row and ends at the tile.
-        assert_eq!(dot_position(1, 1.0, LinkEventKind::Up { ok: true }), (SPINE_X, 0.0));
+        assert_eq!(
+            dot_position(1, 1.0, LinkEventKind::Up { ok: true }),
+            (SPINE_X, 0.0)
+        );
     }
 }

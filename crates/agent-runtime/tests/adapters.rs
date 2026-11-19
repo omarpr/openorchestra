@@ -16,8 +16,8 @@ static CODEX_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 use agent_runtime::sse::SseStream;
 use agent_runtime::{
     AgentKind, AgentRuntime, AgentSignal, AgentState, ClaudeCodeRuntime, CodexRuntime,
-    ConfigurableRuntime, HookInstall, KimiRuntime, OpenCodeRuntime, SignalKind, SignalProfile,
-    WaitFidelity, WaitReason,
+    ConfigurableRuntime, GrokRuntime, HookInstall, KimiRuntime, OpenCodeRuntime, SignalKind,
+    SignalProfile, WaitFidelity, WaitReason,
 };
 
 const RECV: Duration = Duration::from_secs(10);
@@ -72,7 +72,9 @@ event: session.idle\ndata: {\"type\":\"session.idle\"}\n\n";
 #[test]
 fn sse_client_reads_plain_event_stream() {
     let port = serve_once(EVENTS, false);
-    let events: Vec<_> = SseStream::connect("127.0.0.1", port, "/event").unwrap().collect();
+    let events: Vec<_> = SseStream::connect("127.0.0.1", port, "/event")
+        .unwrap()
+        .collect();
     assert_eq!(events.len(), 3, "{events:#?}");
     assert_eq!(events[0].event.as_deref(), Some("session.updated"));
     assert_eq!(events[1].event.as_deref(), Some("permission.updated"));
@@ -85,15 +87,22 @@ fn sse_client_handles_chunked_transfer_encoding() {
     // A streaming endpoint normally responds chunked, and the chunk boundaries
     // do not respect event boundaries — the client must reassemble.
     let port = serve_once(EVENTS, true);
-    let events: Vec<_> = SseStream::connect("127.0.0.1", port, "/event").unwrap().collect();
+    let events: Vec<_> = SseStream::connect("127.0.0.1", port, "/event")
+        .unwrap()
+        .collect();
     assert_eq!(events.len(), 3, "{events:#?}");
     assert_eq!(events[1].event.as_deref(), Some("permission.updated"));
 }
 
 #[test]
 fn sse_client_joins_multiline_data_and_skips_comments() {
-    let port = serve_once(": keep-alive\ndata: one\ndata: two\n\nid: 7\ndata: three\n\n", false);
-    let events: Vec<_> = SseStream::connect("127.0.0.1", port, "/event").unwrap().collect();
+    let port = serve_once(
+        ": keep-alive\ndata: one\ndata: two\n\nid: 7\ndata: three\n\n",
+        false,
+    );
+    let events: Vec<_> = SseStream::connect("127.0.0.1", port, "/event")
+        .unwrap()
+        .collect();
     assert_eq!(events.len(), 2, "{events:#?}");
     assert_eq!(events[0].data, "one\ntwo");
     assert_eq!(events[1].data, "three");
@@ -174,7 +183,10 @@ fn opencode_streams_normalized_signals_from_a_live_server() {
     let waiting = rx.recv_timeout(RECV).unwrap();
     assert_eq!(waiting.state, AgentState::Waiting);
     assert_eq!(waiting.reason, WaitReason::PermissionPrompt);
-    assert!(waiting.should_notify(rt.fidelity()), "Exact + Waiting must notify");
+    assert!(
+        waiting.should_notify(rt.fidelity()),
+        "Exact + Waiting must notify"
+    );
 
     let idle = rx.recv_timeout(RECV).unwrap();
     assert_eq!(idle.state, AgentState::Idle);
@@ -207,7 +219,8 @@ fn concurrent_opencode_launches_install_complete_shims() {
     let shims = path.join("shims");
     let plugin = shims.join("opencode-remote");
     let package: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(plugin.join("package.json")).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(plugin.join("package.json")).unwrap())
+            .unwrap();
     assert_eq!(package["exports"]["./tui"], "./tui.js");
     assert_eq!(
         std::fs::read_to_string(plugin.join("tui.js")).unwrap(),
@@ -230,7 +243,9 @@ fn claude_code_never_touches_the_tracked_settings_file() {
     // anyone else's checkout. settings.local.json is the untracked override.
     let state = tempfile::tempdir().unwrap();
     let wt = tempfile::tempdir().unwrap();
-    ClaudeCodeRuntime::new(state.path()).on_spawn(wt.path()).unwrap();
+    ClaudeCodeRuntime::new(state.path())
+        .on_spawn(wt.path())
+        .unwrap();
 
     assert!(wt.path().join(".claude/settings.local.json").exists());
     assert!(
@@ -247,7 +262,9 @@ fn adapters_declare_what_they_write_into_the_worktree() {
     let wt = tempfile::tempdir().unwrap();
 
     let claude = ClaudeCodeRuntime::new(state.path());
-    assert!(claude.ignored_paths().contains(&".claude/settings.local.json"));
+    assert!(claude
+        .ignored_paths()
+        .contains(&".claude/settings.local.json"));
     assert!(claude.ignored_paths().contains(&".harness/"));
 
     let codex = CodexRuntime::new(state.path());
@@ -256,6 +273,12 @@ fn adapters_declare_what_they_write_into_the_worktree() {
     // OpenCode and Kimi write nothing, and must not claim otherwise.
     assert!(OpenCodeRuntime::new(wt.path()).ignored_paths().is_empty());
     assert!(KimiRuntime.ignored_paths().is_empty());
+
+    let grok = GrokRuntime::new(state.path());
+    assert!(grok
+        .ignored_paths()
+        .contains(&".grok/hooks/openorchestra.json"));
+    assert!(grok.ignored_paths().contains(&".harness/"));
 }
 
 #[test]
@@ -266,9 +289,10 @@ fn claude_code_writes_notification_hooks_pointing_at_the_shim() {
     rt.on_spawn(wt.path()).unwrap();
 
     assert!(rt.shim_path().exists(), "shim must be materialized");
-    let settings: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(wt.path().join(".claude/settings.local.json")).unwrap())
-            .unwrap();
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(wt.path().join(".claude/settings.local.json")).unwrap(),
+    )
+    .unwrap();
 
     // Every lifecycle edge is hooked: without UserPromptSubmit/PreToolUse a
     // working agent looks IDLE for its entire turn, which is exactly the bug
@@ -305,12 +329,17 @@ fn claude_code_preserves_the_users_own_settings_and_hooks() {
     )
     .unwrap();
 
-    ClaudeCodeRuntime::new(state.path()).on_spawn(wt.path()).unwrap();
+    ClaudeCodeRuntime::new(state.path())
+        .on_spawn(wt.path())
+        .unwrap();
 
     let text = std::fs::read_to_string(wt.path().join(".claude/settings.local.json")).unwrap();
     let settings: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert_eq!(settings["model"], "opus", "unrelated settings must survive");
-    assert!(text.contains("echo user-hook"), "the user's own hook must survive");
+    assert!(
+        text.contains("echo user-hook"),
+        "the user's own hook must survive"
+    );
     assert!(text.contains("UserPromptSubmit"), "ours must be added");
 }
 
@@ -324,9 +353,10 @@ fn claude_code_on_spawn_is_idempotent() {
     rt.on_spawn(wt.path()).unwrap();
     rt.on_spawn(wt.path()).unwrap();
 
-    let settings: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(wt.path().join(".claude/settings.local.json")).unwrap())
-            .unwrap();
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(wt.path().join(".claude/settings.local.json")).unwrap(),
+    )
+    .unwrap();
     for event in ["UserPromptSubmit", "PreToolUse", "Notification", "Stop"] {
         assert_eq!(
             settings["hooks"][event].as_array().unwrap().len(),
@@ -377,11 +407,20 @@ fn codex_migrates_off_the_legacy_notify_line() {
     let doc: toml::Value = toml::from_str(&text).expect("config must stay parseable");
     assert!(doc.get("notify").is_none(), "root notify must be removed");
     assert!(
-        doc["mcp_servers"]["node_repl"]["env"].get("notify").is_none(),
+        doc["mcp_servers"]["node_repl"]["env"]
+            .get("notify")
+            .is_none(),
         "the stray nested notify must be removed too"
     );
-    assert_eq!(doc["model"].as_str(), Some("gpt-5"), "unrelated config survives");
-    assert_eq!(doc["mcp_servers"]["node_repl"]["env"]["PATH"].as_str(), Some("/usr/bin"));
+    assert_eq!(
+        doc["model"].as_str(),
+        Some("gpt-5"),
+        "unrelated config survives"
+    );
+    assert_eq!(
+        doc["mcp_servers"]["node_repl"]["env"]["PATH"].as_str(),
+        Some("/usr/bin")
+    );
 }
 
 // ---- Codex + Kimi: honest degradation (R11) --------------------------------
@@ -420,11 +459,15 @@ fn codex_installs_status_hooks_and_stays_idempotent() {
     rt.on_spawn(wt.path()).unwrap();
     rt.on_spawn(wt.path()).unwrap();
 
-    assert!(rt.shim_path().exists(), "the hook shim must be materialized");
+    assert!(
+        rt.shim_path().exists(),
+        "the hook shim must be materialized"
+    );
     let shim = rt.shim_path().display().to_string();
-    let hooks: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(codex_home.path().join("hooks.json")).unwrap())
-            .unwrap();
+    let hooks: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(codex_home.path().join("hooks.json")).unwrap(),
+    )
+    .unwrap();
 
     // Both turn edges installed, and running on_spawn twice must not stack them.
     for event in ["UserPromptSubmit", "Stop"] {
@@ -466,7 +509,11 @@ fn auto_injects_cursor_hooks_without_requiring_a_launch_command() {
     let state = tempfile::tempdir().unwrap();
     let wt = tempfile::tempdir().unwrap();
     let hooks = cursor_home.path().join("hooks.json");
-    std::fs::write(&hooks, r#"{"version":1,"hooks":{"stop":[{"command":"my-existing-hook"}]}}"#).unwrap();
+    std::fs::write(
+        &hooks,
+        r#"{"version":1,"hooks":{"stop":[{"command":"my-existing-hook"}]}}"#,
+    )
+    .unwrap();
     unsafe { std::env::set_var("HARNESS_CURSOR_HOME", cursor_home.path()) };
     let runtime = ConfigurableRuntime::new(
         AgentKind::Other("cursor".into()),
@@ -479,9 +526,21 @@ fn auto_injects_cursor_hooks_without_requiring_a_launch_command() {
     let config: serde_json::Value = serde_json::from_slice(&std::fs::read(hooks).unwrap()).unwrap();
     assert_eq!(config["hooks"]["stop"][0]["command"], "my-existing-hook");
     assert_eq!(config["hooks"]["stop"].as_array().unwrap().len(), 2);
-    assert_eq!(config["hooks"]["beforeSubmitPrompt"].as_array().unwrap().len(), 1);
-    assert!(config["hooks"]["beforeSubmitPrompt"][0]["command"].as_str().unwrap().contains("harness-status.mjs"));
-    assert_eq!(HookInstall::Auto.effective("arbitrary-agent"), HookInstall::None);
+    assert_eq!(
+        config["hooks"]["beforeSubmitPrompt"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(config["hooks"]["beforeSubmitPrompt"][0]["command"]
+        .as_str()
+        .unwrap()
+        .contains("harness-status.mjs"));
+    assert_eq!(
+        HookInstall::Auto.effective("arbitrary-agent"),
+        HookInstall::None
+    );
 }
 
 #[test]
@@ -506,16 +565,163 @@ fn codex_preserves_the_users_own_hooks() {
 
     CodexRuntime::new(state.path()).on_spawn(wt.path()).unwrap();
 
-    let hooks: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(codex_home.path().join("hooks.json")).unwrap())
-            .unwrap();
+    let hooks: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(codex_home.path().join("hooks.json")).unwrap(),
+    )
+    .unwrap();
     // The user's SessionStart hook is untouched.
-    assert_eq!(hook_commands(&hooks, "SessionStart"), vec!["/usr/local/bin/mine.sh"]);
+    assert_eq!(
+        hook_commands(&hooks, "SessionStart"),
+        vec!["/usr/local/bin/mine.sh"]
+    );
     // Their UserPromptSubmit hook survives, and ours is added beside it.
     let ups = hook_commands(&hooks, "UserPromptSubmit");
-    assert!(ups.iter().any(|c| c == "/usr/local/bin/mine.sh"), "foreign hook kept: {ups:?}");
-    assert!(ups.iter().any(|c| c.contains("codex-hook.mjs")), "our hook added: {ups:?}");
+    assert!(
+        ups.iter().any(|c| c == "/usr/local/bin/mine.sh"),
+        "foreign hook kept: {ups:?}"
+    );
+    assert!(
+        ups.iter().any(|c| c.contains("codex-hook.mjs")),
+        "our hook added: {ups:?}"
+    );
     assert_eq!(ups.len(), 2, "exactly the two, no clobber: {ups:?}");
+}
+
+#[test]
+fn grok_writes_its_own_hook_file_and_not_claude_settings() {
+    let state = tempfile::tempdir().unwrap();
+    let wt = tempfile::tempdir().unwrap();
+    let rt = GrokRuntime::new(state.path());
+    rt.on_spawn(wt.path()).unwrap();
+
+    assert!(rt.shim_path().exists(), "shim must be materialized");
+    assert!(
+        state.path().join("shims/claude-code-status.mjs").exists(),
+        "the grok shim imports the shared classifier"
+    );
+    let hook = wt.path().join(".grok/hooks/openorchestra.json");
+    assert!(hook.exists());
+    assert!(
+        !wt.path().join(".claude/settings.local.json").exists(),
+        "grok must not write Claude's settings"
+    );
+
+    let settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&hook).unwrap()).unwrap();
+    for event in ["UserPromptSubmit", "PreToolUse", "Notification", "Stop"] {
+        let entries = settings["hooks"][event].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "{event} must be hooked exactly once");
+        assert!(
+            entries[0].get("matcher").is_none(),
+            "{event} must not carry a matcher"
+        );
+    }
+    let command = settings["hooks"]["Notification"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(command.contains(&rt.shim_path().display().to_string()));
+    assert_eq!(rt.signal_kind(), SignalKind::StatusFile);
+    assert_eq!(rt.fidelity(), WaitFidelity::Exact);
+    assert_eq!(rt.kind(), AgentKind::Grok);
+}
+
+#[test]
+fn grok_preserves_other_hooks_in_its_file_and_stays_idempotent() {
+    let state = tempfile::tempdir().unwrap();
+    let wt = tempfile::tempdir().unwrap();
+    let dir = wt.path().join(".grok/hooks");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("openorchestra.json"),
+        r#"{"note":"keep","hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo user-hook"}]}]}}"#,
+    )
+    .unwrap();
+
+    let rt = GrokRuntime::new(state.path());
+    rt.on_spawn(wt.path()).unwrap();
+    rt.on_spawn(wt.path()).unwrap();
+
+    let text = std::fs::read_to_string(dir.join("openorchestra.json")).unwrap();
+    let settings: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(settings["note"], "keep");
+    assert!(text.contains("echo user-hook"));
+    for event in ["UserPromptSubmit", "PreToolUse", "Notification", "Stop"] {
+        assert_eq!(
+            settings["hooks"][event].as_array().unwrap().len(),
+            1,
+            "{event}: one entry, not one per spawn"
+        );
+    }
+}
+
+#[test]
+fn grok_shim_maps_task_complete_to_idle_and_stamps_grok() {
+    let shim = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shims/grok-status.mjs");
+    let url = format!("file://{}", shim.display());
+    let check = std::process::Command::new("node")
+        .arg("--input-type=module")
+        .arg("-e")
+        .arg(format!(
+            r#"import {{ classify }} from "{url}";
+const cases = [
+  [{{hook_event_name:"Notification", notification_type:"task_complete"}}, "idle"],
+  [{{hook_event_name:"Notification", notification_type:"permission_prompt"}}, "waiting"],
+  [{{hook_event_name:"Stop"}}, "idle"],
+  [{{hook_event_name:"UserPromptSubmit"}}, "running"],
+];
+for (const [payload, want] of cases) {{
+  const got = classify(payload);
+  if (got !== want) {{
+    console.error(JSON.stringify(payload), got, "!=", want);
+    process.exit(1);
+  }}
+}}"#
+        ))
+        .output();
+    match check {
+        Ok(out) => assert!(
+            out.status.success(),
+            "classify: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ),
+        Err(_) => {
+            eprintln!("node not installed — skipping grok shim check");
+            return;
+        }
+    }
+
+    let wt = tempfile::tempdir().unwrap();
+    let mut child = std::process::Command::new("node")
+        .arg(&shim)
+        .current_dir(wt.path())
+        .env_remove("HARNESS_AGENT_WORKTREE")
+        .env_remove("HARNESS_AGENT_TAB_ID")
+        .env_remove("HARNESS_REMOTE_SESSION")
+        .env_remove("TMUX_PANE")
+        .env_remove("CLAUDE_PROJECT_DIR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("node");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"hook_event_name":"Notification","notification_type":"task_complete"}"#)
+        .unwrap();
+    let finished = child.wait_with_output().unwrap();
+    assert!(
+        finished.status.success(),
+        "shim: {}",
+        String::from_utf8_lossy(&finished.stderr)
+    );
+    let status: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(wt.path().join(".harness/status.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(status["agent"], "grok");
+    assert_eq!(status["state"], "idle");
 }
 
 #[test]
@@ -568,18 +774,25 @@ fn shims_are_syntactically_valid_javascript() {
     unsafe { std::env::set_var("HARNESS_CODEX_HOME", codex_home.path()) };
     let state = tempfile::tempdir().unwrap();
     let wt = tempfile::tempdir().unwrap();
-    ClaudeCodeRuntime::new(state.path()).on_spawn(wt.path()).unwrap();
+    ClaudeCodeRuntime::new(state.path())
+        .on_spawn(wt.path())
+        .unwrap();
+    GrokRuntime::new(state.path()).on_spawn(wt.path()).unwrap();
     CodexRuntime::new(state.path()).on_spawn(wt.path()).unwrap();
 
     for shim in [
         ClaudeCodeRuntime::new(state.path()).shim_path(),
+        GrokRuntime::new(state.path()).shim_path(),
         CodexRuntime::new(state.path()).shim_path(),
         agent_runtime::harness_status_shim_path(state.path()),
     ] {
         if !shim.exists() {
             agent_runtime::materialize_harness_status_shim(state.path()).unwrap();
         }
-        let out = std::process::Command::new("node").arg("--check").arg(&shim).output();
+        let out = std::process::Command::new("node")
+            .arg("--check")
+            .arg(&shim)
+            .output();
         match out {
             Ok(out) => assert!(
                 out.status.success(),
@@ -605,7 +818,10 @@ fn configurable_runtime_installs_claude_local_hooks_with_agent_env() {
     assert_eq!(rt.signal_kind(), SignalKind::StatusFile);
     rt.on_spawn(wt.path()).unwrap();
 
-    assert!(rt.shim_path().exists(), "universal shim must be materialized");
+    assert!(
+        rt.shim_path().exists(),
+        "universal shim must be materialized"
+    );
     let settings: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(wt.path().join(".claude/settings.local.json")).unwrap(),
     )
@@ -613,7 +829,10 @@ fn configurable_runtime_installs_claude_local_hooks_with_agent_env() {
     let shim = rt.shim_path().display().to_string();
     for event in ["UserPromptSubmit", "PreToolUse", "Notification", "Stop"] {
         let blob = settings["hooks"][event].to_string();
-        assert!(blob.contains(&shim), "{event} must call universal shim: {blob}");
+        assert!(
+            blob.contains(&shim),
+            "{event} must call universal shim: {blob}"
+        );
         assert!(
             blob.contains("harness-status.mjs"),
             "{event} must use harness-status.mjs"
@@ -621,7 +840,9 @@ fn configurable_runtime_installs_claude_local_hooks_with_agent_env() {
     }
     let cmd = rt.command(wt.path()).unwrap();
     assert!(
-        cmd.env.iter().any(|(k, v)| k == "HARNESS_MANAGED" && v == "1"),
+        cmd.env
+            .iter()
+            .any(|(k, v)| k == "HARNESS_MANAGED" && v == "1"),
         "managed marker required: {:?}",
         cmd.env
     );
@@ -648,9 +869,10 @@ fn configurable_runtime_codex_hooks_are_idempotent() {
     rt.on_spawn(wt.path()).unwrap();
     rt.on_spawn(wt.path()).unwrap(); // idempotent
 
-    let hooks: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(codex_home.path().join("hooks.json")).unwrap())
-            .unwrap();
+    let hooks: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(codex_home.path().join("hooks.json")).unwrap(),
+    )
+    .unwrap();
     let shim = rt.shim_path().display().to_string();
     for event in ["UserPromptSubmit", "Stop"] {
         let cmds = hook_commands(&hooks, event);
@@ -686,9 +908,10 @@ fn configurable_codex_hooks_coexist_with_builtin_codex_hook() {
     );
     custom.on_spawn(wt.path()).unwrap();
 
-    let hooks: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(codex_home.path().join("hooks.json")).unwrap())
-            .unwrap();
+    let hooks: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(codex_home.path().join("hooks.json")).unwrap(),
+    )
+    .unwrap();
     for event in ["UserPromptSubmit", "Stop"] {
         let cmds = hook_commands(&hooks, event);
         assert!(
@@ -696,7 +919,8 @@ fn configurable_codex_hooks_coexist_with_builtin_codex_hook() {
             "{event} must still have the built-in codex hook: {cmds:?}"
         );
         assert!(
-            cmds.iter().any(|c| c.contains("harness-status.mjs") && c.contains("cursor-agent")),
+            cmds.iter()
+                .any(|c| c.contains("harness-status.mjs") && c.contains("cursor-agent")),
             "{event} must have the gated custom hook: {cmds:?}"
         );
         assert_eq!(cmds.len(), 2, "{event} must keep both entries: {cmds:?}");
@@ -766,7 +990,11 @@ fn harness_status_shim_writes_agent_field_when_managed() {
         eprintln!("node not installed — skipping shim write test");
         return;
     };
-    assert!(out.status.success(), "shim stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "shim stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let status: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(wt.path().join(".harness/status.json")).unwrap(),
     )
@@ -845,7 +1073,11 @@ fn harness_status_shim_uses_codex_project_dir_over_cwd() {
         eprintln!("node not installed — skipping CODEX_PROJECT_DIR test");
         return;
     };
-    assert!(out.status.success(), "shim stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "shim stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         project.path().join(".harness/status.json").exists(),
         "status must land in CODEX_PROJECT_DIR"
@@ -890,7 +1122,11 @@ fn harness_status_shim_uses_payload_cwd_for_codex_hooks() {
         .write_all(payload.to_string().as_bytes())
         .unwrap();
     let out = child.wait_with_output().unwrap();
-    assert!(out.status.success(), "shim stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "shim stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let status: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(project.path().join(".harness/status.json")).unwrap(),
     )
@@ -918,7 +1154,11 @@ fn claude_code_shim_records_the_tool_about_to_run() {
             .stdin(std::process::Stdio::piped())
             .spawn()
             .ok()?;
-        child.stdin.take()?.write_all(payload.to_string().as_bytes()).ok()?;
+        child
+            .stdin
+            .take()?
+            .write_all(payload.to_string().as_bytes())
+            .ok()?;
         child.wait().ok()?;
         let text = std::fs::read_to_string(wt.path().join(".harness/status.json")).ok()?;
         serde_json::from_str::<serde_json::Value>(&text).ok()
@@ -938,7 +1178,10 @@ fn claude_code_shim_records_the_tool_about_to_run() {
     assert_eq!(status["tool"]["name"], "Edit");
     assert_eq!(status["tool"]["id"], "toolu_1");
     assert_eq!(status["tool"]["input"]["file_path"], "/src/main.rs");
-    assert!(status["tool"]["input"].get("old_string").is_none(), "file contents never land on disk");
+    assert!(
+        status["tool"]["input"].get("old_string").is_none(),
+        "file contents never land on disk"
+    );
 
     let status = run(serde_json::json!({ "hook_event_name": "Stop" })).unwrap();
     assert_eq!(status["state"], "idle");
@@ -948,7 +1191,9 @@ fn claude_code_shim_records_the_tool_about_to_run() {
 /// Run both Claude-shaped shims' `classify` on one hook payload via node.
 /// `None` when node is not installed.
 fn shim_classify(shim: &str, payload: &str) -> Option<String> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("shims").join(shim);
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("shims")
+        .join(shim);
     let script = format!(
         "import {{ classify }} from {:?}; process.stdout.write(classify(JSON.parse(process.argv[1])));",
         format!("file://{}", path.display())
@@ -957,7 +1202,11 @@ fn shim_classify(shim: &str, payload: &str) -> Option<String> {
         .args(["--input-type=module", "-e", &script, payload])
         .output()
         .ok()?;
-    assert!(out.status.success(), "node stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "node stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     Some(String::from_utf8(out.stdout).unwrap())
 }
 
@@ -969,10 +1218,22 @@ fn shim_classify(shim: &str, payload: &str) -> Option<String> {
 #[test]
 fn claude_idle_reminder_is_idle_but_permission_prompt_waits() {
     let cases = [
-        (r#"{"hook_event_name":"Notification","notification_type":"idle_prompt","message":"Claude is waiting for your input"}"#, "idle"),
-        (r#"{"hook_event_name":"Notification","message":"Claude is waiting for your input"}"#, "idle"),
-        (r#"{"hook_event_name":"Notification","notification_type":"permission_prompt","message":"Claude needs your permission to use Bash"}"#, "waiting"),
-        (r#"{"hook_event_name":"Notification","message":"Claude needs your approval"}"#, "waiting"),
+        (
+            r#"{"hook_event_name":"Notification","notification_type":"idle_prompt","message":"Claude is waiting for your input"}"#,
+            "idle",
+        ),
+        (
+            r#"{"hook_event_name":"Notification","message":"Claude is waiting for your input"}"#,
+            "idle",
+        ),
+        (
+            r#"{"hook_event_name":"Notification","notification_type":"permission_prompt","message":"Claude needs your permission to use Bash"}"#,
+            "waiting",
+        ),
+        (
+            r#"{"hook_event_name":"Notification","message":"Claude needs your approval"}"#,
+            "waiting",
+        ),
         (r#"{"hook_event_name":"Stop"}"#, "idle"),
         (r#"{"hook_event_name":"UserPromptSubmit"}"#, "running"),
     ];

@@ -5,6 +5,7 @@ const AGENTS: Record<string, { name: string; conversationWhilePending?: boolean 
   pi: { name: "pi" },
   codex: { name: "Codex", conversationWhilePending: true },
   kimi: { name: "Kimi" },
+  grok: { name: "Grok" },
   opencode: { name: "OpenCode", conversationWhilePending: true },
 };
 

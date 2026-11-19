@@ -46,6 +46,7 @@ fn agent_kind_serializes_as_the_documented_wire_strings() {
         (AgentKind::Codex, "codex"),
         (AgentKind::ClaudeCode, "claude-code"),
         (AgentKind::Kimi, "kimi"),
+        (AgentKind::Grok, "grok"),
     ] {
         assert_eq!(serde_json::to_string(&kind).unwrap(), format!("\"{wire}\""));
         assert_eq!(
@@ -62,7 +63,10 @@ fn unknown_agent_kind_round_trips_losslessly() {
     // "unknown" — that would repoint the worktree at the wrong CLI.
     let kind: AgentKind = serde_json::from_str("\"some-future-agent\"").unwrap();
     assert_eq!(kind, AgentKind::Other("some-future-agent".to_string()));
-    assert_eq!(serde_json::to_string(&kind).unwrap(), "\"some-future-agent\"");
+    assert_eq!(
+        serde_json::to_string(&kind).unwrap(),
+        "\"some-future-agent\""
+    );
     assert_eq!(kind.as_str(), "some-future-agent");
 }
 
@@ -120,8 +124,14 @@ fn rename_and_avatar_are_registry_only() {
     // Branch (git state) is untouched by a rename.
     assert_eq!(reg.get("app/nav").unwrap().branch, "feat/nav");
 
-    reg.set_avatar("app/nav", Avatar { initials: "NR".into(), color: 3 })
-        .unwrap();
+    reg.set_avatar(
+        "app/nav",
+        Avatar {
+            initials: "NR".into(),
+            color: 3,
+        },
+    )
+    .unwrap();
     assert_eq!(reg.get("app/nav").unwrap().avatar.color, 3);
 
     assert_eq!(
@@ -139,7 +149,11 @@ fn grouped_by_repo_preserves_order_and_skips_archived() {
     reg.mark_archived("lib/parse").unwrap();
 
     let groups = reg.grouped_by_repo();
-    assert_eq!(groups.len(), 1, "archived lib/parse hides its only repo group");
+    assert_eq!(
+        groups.len(),
+        1,
+        "archived lib/parse hides its only repo group"
+    );
     assert_eq!(groups[0].repo, "app");
     assert_eq!(groups[0].entries.len(), 2);
 }

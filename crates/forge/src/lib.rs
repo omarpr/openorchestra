@@ -3,7 +3,7 @@
 //! GitHub CLI:
 //!
 //! ```text
-//! gh pr list --head <branch> --state all --json number,state,isDraft,title,url
+//! gh pr list --head <branch> --author @me --state all --json number,state,isDraft,title,url
 //! gh pr checks <branch> --json name,state,bucket
 //! ```
 //!
@@ -95,9 +95,15 @@ pub trait Forge: Send + Sync {
     /// hide PR/CI badges entirely (R7) and should not bother polling.
     fn available(&self) -> bool;
 
-    /// The PR associated with `branch`, or `None` if the branch has no PR.
-    fn pr_for_branch(&self, repo_dir: &Path, branch: &str)
-        -> Result<Option<PrInfo>, ForgeError>;
+    /// The signed-in user's pull request for `branch`.
+    ///
+    /// An open pull request wins when the branch has several. When every one
+    /// of that user's pull requests is merged or closed, the most recent is
+    /// returned so outcome labeling can still tell those apart. `None` means
+    /// that user has no pull request on the branch. Someone else's does not
+    /// count. The sidebar poller drops merged and closed results; they are
+    /// not a badge.
+    fn pr_for_branch(&self, repo_dir: &Path, branch: &str) -> Result<Option<PrInfo>, ForgeError>;
 
     /// CI check runs for `branch`'s PR. A branch with a PR but no configured
     /// checks yields `Ok(vec![])`.
@@ -109,8 +115,7 @@ pub trait Forge: Send + Sync {
     /// The only *mutating* forge call, so it is deliberately explicit rather
     /// than something a poller could ever trigger: creating a PR is
     /// outward-facing and must stay a thing the user asked for.
-    fn create_pr(&self, repo_dir: &Path, req: &CreatePrRequest)
-        -> Result<PrInfo, ForgeError>;
+    fn create_pr(&self, repo_dir: &Path, req: &CreatePrRequest) -> Result<PrInfo, ForgeError>;
 }
 
 /// A request to open a pull request.

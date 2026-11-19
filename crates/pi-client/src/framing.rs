@@ -101,7 +101,10 @@ mod size_tests {
         let mut input = vec![b'x'; MAX_RECORD + 10];
         input.extend_from_slice(b"\n{\"ok\":true}\n");
         let mut reader = BufReader::new(Cursor::new(input));
-        assert_eq!(read_record(&mut reader).unwrap().as_deref(), Some(r#"{"ok":true}"#));
+        assert_eq!(
+            read_record(&mut reader).unwrap().as_deref(),
+            Some(r#"{"ok":true}"#)
+        );
         assert!(read_record(&mut reader).unwrap().is_none());
     }
 }

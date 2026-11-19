@@ -57,7 +57,12 @@ export default function (pi: ExtensionAPI) {
 	let agentActive = false;
 	let dialogDepth = 0; // >0 while any extension UI dialog is open
 	let lastWritten: string | undefined;
-	const tabId = Number(process.env.HARNESS_AGENT_TAB_ID);
+	// Tabs created before HARNESS_AGENT_TAB_ID existed still carry the tmux
+	// session name. Same fallback as shims/remote-tab.mjs.
+	const tabId = Number(
+		process.env.HARNESS_AGENT_TAB_ID ??
+			/^harness_[A-Za-z0-9_-]+_(\d+)$/.exec(process.env.HARNESS_REMOTE_SESSION ?? "")?.[1],
+	);
 
 	const currentState = (): HarnessState =>
 		dialogDepth > 0 ? "waiting" : agentActive ? "running" : "idle";

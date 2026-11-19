@@ -173,7 +173,9 @@ impl HarnessWorkspace {
                     probed.1.upstream,
                     probed.1.unpushed
                 );
-                if ws.resolve().is_some_and(|r| r.path == probed.0) && ws.push_state.as_ref() != Some(&probed) {
+                if ws.resolve().is_some_and(|r| r.path == probed.0)
+                    && ws.push_state.as_ref() != Some(&probed)
+                {
                     ws.push_state = Some(probed);
                     cx.notify();
                 }
@@ -194,7 +196,9 @@ impl HarnessWorkspace {
         if self.pushing {
             return;
         }
-        let Some((_, state)) = self.push_state.clone() else { return };
+        let Some((_, state)) = self.push_state.clone() else {
+            return;
+        };
         let Some(r) = self.resolve() else { return };
         if state.unpushed == 0 {
             return;
@@ -277,7 +281,10 @@ pub(crate) struct LiveStatus {
 /// A path that no longer matches a card is dropped: the worktree was deleted
 /// while its status was in flight, and `refresh()` has already rebuilt the
 /// list without it.
-pub(crate) fn apply_live_status(data: &mut crate::data::WorkspaceData, computed: Vec<LiveStatus>) -> bool {
+pub(crate) fn apply_live_status(
+    data: &mut crate::data::WorkspaceData,
+    computed: Vec<LiveStatus>,
+) -> bool {
     fn set<T: PartialEq>(slot: &mut T, value: T, changed: &mut bool) {
         if *slot != value {
             *slot = value;
@@ -286,7 +293,14 @@ pub(crate) fn apply_live_status(data: &mut crate::data::WorkspaceData, computed:
     }
     let mut changed = false;
     for st in computed {
-        log::trace!("status {}: {:?} ↑{} ↓{} ~{}", st.path.display(), st.branch, st.ahead, st.behind, st.dirty);
+        log::trace!(
+            "status {}: {:?} ↑{} ↓{} ~{}",
+            st.path.display(),
+            st.branch,
+            st.ahead,
+            st.behind,
+            st.dirty
+        );
         for repo in &mut data.repos {
             if repo.repo_root == st.path {
                 set(&mut repo.ahead, st.ahead, &mut changed);
@@ -323,7 +337,7 @@ pub(crate) fn apply_live_status(data: &mut crate::data::WorkspaceData, computed:
 
 #[cfg(test)]
 mod live_status_tests {
-    use super::{apply_live_status, LiveStatus};
+    use super::{LiveStatus, apply_live_status};
     use crate::data::{RepoView, TaskMemberView, TaskView, WorkspaceData, WorktreeView};
     use std::path::PathBuf;
 
@@ -367,20 +381,35 @@ mod live_status_tests {
     }
 
     fn st(path: &str, branch: Option<&str>, dirty: usize) -> LiveStatus {
-        LiveStatus { path: PathBuf::from(path), branch: branch.map(Into::into), ahead: 1, behind: 0, dirty }
+        LiveStatus {
+            path: PathBuf::from(path),
+            branch: branch.map(Into::into),
+            ahead: 1,
+            behind: 0,
+            dirty,
+        }
     }
 
     #[test]
     fn a_branch_switch_reaches_every_card_that_shows_it() {
         let mut d = data();
-        assert!(apply_live_status(&mut d, vec![st("/r/app-wt1", Some("feat/new"), 2), st("/r/app", Some("dev"), 0)]));
+        assert!(apply_live_status(
+            &mut d,
+            vec![
+                st("/r/app-wt1", Some("feat/new"), 2),
+                st("/r/app", Some("dev"), 0)
+            ]
+        ));
         assert_eq!(d.repos[0].head_branch, "dev");
         assert_eq!(d.repos[0].worktrees[0].branch, "feat/new");
         assert_eq!(d.tasks[0].members[0].branch, "feat/new");
         assert_eq!(d.tasks[0].members[0].dirty, 2);
         assert_eq!(d.tasks[0].dirty, 2);
         assert_eq!(
-            d.forge_branches().iter().map(|key| key.branch.as_str()).collect::<Vec<_>>(),
+            d.forge_branches()
+                .iter()
+                .map(|key| key.branch.as_str())
+                .collect::<Vec<_>>(),
             ["dev", "feat/new"],
         );
     }
@@ -405,11 +434,17 @@ mod live_status_tests {
     fn forge_polling_keeps_active_tasks_when_their_projects_are_archived() {
         let mut data = data();
         data.repos.clear();
-        assert!(apply_live_status(&mut data, vec![st("/r/app-wt1", Some("feat/new"), 0)]));
-        assert_eq!(data.forge_branches(), [forge::BranchKey {
-            repo_dir: PathBuf::from("/r/app"),
-            branch: "feat/new".into(),
-        }]);
+        assert!(apply_live_status(
+            &mut data,
+            vec![st("/r/app-wt1", Some("feat/new"), 0)]
+        ));
+        assert_eq!(
+            data.forge_branches(),
+            [forge::BranchKey {
+                repo_dir: PathBuf::from("/r/app"),
+                branch: "feat/new".into(),
+            }]
+        );
     }
 
     #[test]
@@ -423,6 +458,9 @@ mod live_status_tests {
     fn an_unchanged_answer_reports_no_change() {
         let mut d = data();
         apply_live_status(&mut d, vec![st("/r/app-wt1", Some("feat/new"), 2)]);
-        assert!(!apply_live_status(&mut d, vec![st("/r/app-wt1", Some("feat/new"), 2)]));
+        assert!(!apply_live_status(
+            &mut d,
+            vec![st("/r/app-wt1", Some("feat/new"), 2)]
+        ));
     }
 }

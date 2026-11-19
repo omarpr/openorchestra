@@ -112,7 +112,10 @@ pub fn status_path(root: &Path, tab_id: Option<u64>) -> PathBuf {
 }
 
 fn status_filename(tab_id: Option<u64>) -> String {
-    tab_id.map_or_else(|| "status.json".into(), |id| format!("status-tab-{id}.json"))
+    tab_id.map_or_else(
+        || "status.json".into(),
+        |id| format!("status-tab-{id}.json"),
+    )
 }
 
 fn status_tab(path: &Path) -> Option<Option<u64>> {
@@ -120,7 +123,11 @@ fn status_tab(path: &Path) -> Option<Option<u64>> {
     if name == "status.json" {
         return Some(None);
     }
-    let id = name.strip_prefix("status-tab-")?.strip_suffix(".json")?.parse().ok()?;
+    let id = name
+        .strip_prefix("status-tab-")?
+        .strip_suffix(".json")?
+        .parse()
+        .ok()?;
     (status_filename(Some(id)) == name).then_some(Some(id))
 }
 
@@ -251,7 +258,8 @@ impl StatusWatcher {
         // Watch the directory (not the file): atomic temp+rename replaces the
         // inode, which would silently detach a file-level watch.
         let mut registry = self.registry.lock().unwrap();
-        self.watcher.watch(&harness_dir, RecursiveMode::NonRecursive)?;
+        self.watcher
+            .watch(&harness_dir, RecursiveMode::NonRecursive)?;
         let mut entry = WatchEntry {
             worktree_root: root,
             last_emitted: HashMap::new(),
@@ -315,9 +323,11 @@ fn handle_fs_event(registry: &Registry, tx: &Sender<StatusEvent>, event: &Event)
     for path in &event.paths {
         if let Some(entry) = registry.get_mut(path) {
             entry.refresh_dir(path, tx);
-        } else if let Some((entry, tab_id)) = path.parent()
+        } else if let Some((entry, tab_id)) = path
+            .parent()
             .and_then(|dir| registry.get_mut(dir))
-            .zip(status_tab(path)) {
+            .zip(status_tab(path))
+        {
             entry.refresh_file(path, tab_id, tx);
         }
     }
@@ -326,8 +336,13 @@ fn handle_fs_event(registry: &Registry, tx: &Sender<StatusEvent>, event: &Event)
 impl WatchEntry {
     fn refresh_dir(&mut self, dir: &Path, tx: &Sender<StatusEvent>) {
         let mut tabs: Vec<_> = self.last_emitted.keys().filter_map(|&id| id).collect();
-        tabs.extend(std::fs::read_dir(dir).into_iter().flatten().flatten()
-            .filter_map(|entry| status_tab(&entry.path()).flatten()));
+        tabs.extend(
+            std::fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|entry| status_tab(&entry.path()).flatten()),
+        );
         tabs.sort_unstable();
         tabs.dedup();
         self.refresh_file(&dir.join("status.json"), None, tx);
@@ -340,11 +355,37 @@ impl WatchEntry {
         let (status, keep) = match read_status(path) {
             // The tagged status.json mirrors a dedicated tab file. Publishing
             // both would count that tab twice and repeat notifications.
-            ReadOutcome::Parsed(s) if tab_id.is_none() && s.tab_id.is_some() => return,
+            // A tagged status.json is a mirror of a tab file. If an untagged
+            // status was already delivered, dropping the mirror leaves that
+            // legacy record in place, so a later Idle on the tab file does
+            // not clear the root's Running.
+            ReadOutcome::Parsed(s) if tab_id.is_none() && s.tab_id.is_some() => {
+                if self
+                    .last_emitted
+                    .get(&None)
+                    .is_some_and(|previous| previous.state != AgentState::Unknown)
+                {
+                    self.last_emitted.insert(None, AgentStatus::unknown());
+                    let _ = tx.send(StatusEvent {
+                        worktree_root: self.worktree_root.clone(),
+                        tab_id: None,
+                        status: AgentStatus::unknown(),
+                    });
+                }
+                return;
+            }
             ReadOutcome::Parsed(s) => (s, true),
-            ReadOutcome::Missing if tab_id.is_some() && self.last_emitted.remove(&tab_id).is_none() => return,
+            ReadOutcome::Missing
+                if tab_id.is_some() && self.last_emitted.remove(&tab_id).is_none() =>
+            {
+                return
+            }
             ReadOutcome::Missing => (AgentStatus::unknown(), tab_id.is_none()),
-            ReadOutcome::Malformed if tab_id.is_none() && !self.last_emitted.contains_key(&None) => (AgentStatus::unknown(), true),
+            ReadOutcome::Malformed
+                if tab_id.is_none() && !self.last_emitted.contains_key(&None) =>
+            {
+                (AgentStatus::unknown(), true)
+            }
             ReadOutcome::Malformed => return,
         };
         if self.last_emitted.get(&tab_id) == Some(&status) {

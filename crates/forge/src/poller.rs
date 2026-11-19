@@ -100,7 +100,14 @@ impl Poller {
         let handle = std::thread::Builder::new()
             .name("forge-poller".into())
             .spawn(move || {
-                poll_loop(forge, thread_branches, thread_refresh_repos, config, thread_stop, tx)
+                poll_loop(
+                    forge,
+                    thread_branches,
+                    thread_refresh_repos,
+                    config,
+                    thread_stop,
+                    tx,
+                )
             })
             .expect("failed to spawn forge-poller thread");
 
@@ -173,7 +180,10 @@ fn poll_loop(
     let mut rng = Xorshift64::seeded();
     let mut states: HashMap<BranchKey, BranchState> = HashMap::new();
     // Responsive-stop tick; actual poll cadence is per-branch `next_due`.
-    let tick = config.interval.min(Duration::from_millis(200)).max(Duration::from_millis(1));
+    let tick = config
+        .interval
+        .min(Duration::from_millis(200))
+        .max(Duration::from_millis(1));
 
     while !stop.load(Ordering::Relaxed) {
         let keys: Vec<BranchKey> = branches.lock().unwrap().clone();
@@ -226,8 +236,13 @@ fn poll_loop(
 }
 
 fn poll_branch(forge: &dyn Forge, key: &BranchKey) -> Result<BranchStatus, ForgeError> {
-    let pr = forge.pr_for_branch(&key.repo_dir, &key.branch)?;
-    // No PR -> no checks call; saves half the gh invocations for fresh branches.
+    // The left-nav badge is only an open pull request. A draft counts: GitHub
+    // reports it as OPEN. Merged and closed pull requests stay available from
+    // `pr_for_branch` for outcome labeling, but they are not a badge and do
+    // not need a checks poll.
+    let pr = forge
+        .pr_for_branch(&key.repo_dir, &key.branch)?
+        .filter(|pr| matches!(pr.state, PrState::Open | PrState::Draft));
     let checks = if pr.is_some() {
         forge.checks_for_branch(&key.repo_dir, &key.branch)?
     } else {
@@ -237,9 +252,17 @@ fn poll_branch(forge: &dyn Forge, key: &BranchKey) -> Result<BranchStatus, Forge
 }
 
 fn success_schedule(config: &PollerConfig, status: &BranchStatus) -> (Duration, Duration) {
-    let interval = if status.checks.iter().any(|check| check.status == CheckStatus::Running) {
+    let interval = if status
+        .checks
+        .iter()
+        .any(|check| check.status == CheckStatus::Running)
+    {
         config.running_interval
-    } else if status.pr.as_ref().is_some_and(|pr| matches!(pr.state, PrState::Open | PrState::Draft)) {
+    } else if status
+        .pr
+        .as_ref()
+        .is_some_and(|pr| matches!(pr.state, PrState::Open | PrState::Draft))
+    {
         config.open_pr_interval
     } else {
         return (config.interval, config.jitter);
@@ -250,9 +273,7 @@ fn success_schedule(config: &PollerConfig, status: &BranchStatus) -> (Duration, 
 
 fn backoff(config: &PollerConfig, failures: u32) -> Duration {
     let shift = failures.saturating_sub(1).min(16);
-    let stepped = config
-        .initial_backoff
-        .saturating_mul(1u32 << shift);
+    let stepped = config.initial_backoff.saturating_mul(1u32 << shift);
     stepped.min(config.max_backoff)
 }
 
@@ -316,15 +337,30 @@ mod tests {
                 url: None,
             }),
             checks: vec![
-                CheckRun { name: "build".into(), status: CheckStatus::Pass },
-                CheckRun { name: "test".into(), status: CheckStatus::Running },
+                CheckRun {
+                    name: "build".into(),
+                    status: CheckStatus::Pass,
+                },
+                CheckRun {
+                    name: "test".into(),
+                    status: CheckStatus::Running,
+                },
             ],
         };
-        assert_eq!(success_schedule(&config, &status), (Duration::from_secs(5), Duration::from_secs(1)));
+        assert_eq!(
+            success_schedule(&config, &status),
+            (Duration::from_secs(5), Duration::from_secs(1))
+        );
         status.checks[1].status = CheckStatus::Pass;
-        assert_eq!(success_schedule(&config, &status), (Duration::from_secs(20), Duration::from_secs(4)));
+        assert_eq!(
+            success_schedule(&config, &status),
+            (Duration::from_secs(20), Duration::from_secs(4))
+        );
         status.pr.as_mut().unwrap().state = PrState::Merged;
-        assert_eq!(success_schedule(&config, &status), (config.interval, config.jitter));
+        assert_eq!(
+            success_schedule(&config, &status),
+            (config.interval, config.jitter)
+        );
     }
 
     #[test]

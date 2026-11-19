@@ -67,9 +67,28 @@ mod tests {
         // pin moves, compare `want` with the upstream directories
         // (crates/grammars/src/*/config.toml) and update both lists.
         let mut want = vec![
-            "bash", "c", "cpp", "css", "diff", "env", "gitcommit", "go", "gomod", "gowork",
-            "javascript", "jsdoc", "json", "jsonc", "markdown", "markdown-inline", "python",
-            "regex", "rust", "tsx", "typescript", "yaml",
+            "bash",
+            "c",
+            "cpp",
+            "css",
+            "diff",
+            "env",
+            "gitcommit",
+            "go",
+            "gomod",
+            "gowork",
+            "javascript",
+            "jsdoc",
+            "json",
+            "jsonc",
+            "markdown",
+            "markdown-inline",
+            "python",
+            "regex",
+            "rust",
+            "tsx",
+            "typescript",
+            "yaml",
         ];
         let mut names: Vec<&str> = curated().into_iter().map(|(n, _)| n).collect();
         let listed = names.len();

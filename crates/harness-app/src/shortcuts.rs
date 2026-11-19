@@ -180,12 +180,18 @@ pub fn bindings_with(
             .and_then(|keys| {
                 let predicate = e.scope.context().map(|c| {
                     std::rc::Rc::new(
-                        gpui::KeyBindingContextPredicate::parse(c)
-                            .expect("catalog context parses"),
+                        gpui::KeyBindingContextPredicate::parse(c).expect("catalog context parses"),
                     )
                 });
-                KeyBinding::load(keys, binding.action().boxed_clone(), predicate, false, None, cx)
-                    .ok()
+                KeyBinding::load(
+                    keys,
+                    binding.action().boxed_clone(),
+                    predicate,
+                    false,
+                    None,
+                    cx,
+                )
+                .ok()
             });
         // An invalid stored chord keeps the default binding.
         out.push(rebound.unwrap_or(binding));
@@ -203,16 +209,36 @@ pub fn entries() -> Vec<Entry> {
 
     vec![
         // ---- Global ------------------------------------------------------
-        Entry::new(s("cmd-t"), Scope::Global, "New terminal tab", crate::NewTerminal),
-        Entry::new(s("cmd-e"), Scope::Global, "Open the editor tab (IDE)", crate::NewEditor),
-        Entry::new(s("cmd-shift-c"), Scope::Global, "New agent chat tab", crate::NewChat),
+        Entry::new(
+            s("cmd-t"),
+            Scope::Global,
+            "New terminal tab",
+            crate::NewTerminal,
+        ),
+        Entry::new(
+            s("cmd-e"),
+            Scope::Global,
+            "Open the editor tab (IDE)",
+            crate::NewEditor,
+        ),
+        Entry::new(
+            s("cmd-shift-c"),
+            Scope::Global,
+            "New agent chat tab",
+            crate::NewChat,
+        ),
         Entry::new(
             s("cmd-c"),
             Scope::Global,
             "Copy selected diff lines (in the diff panel)",
             crate::CopyDiffSelection,
         ),
-        Entry::new(s("cmd-,"), Scope::Global, "Open settings", crate::OpenSettings),
+        Entry::new(
+            s("cmd-,"),
+            Scope::Global,
+            "Open settings",
+            crate::OpenSettings,
+        ),
         // ⌘W layers by context depth: this global binding closes the harness
         // tab (terminal, agent, chat); the Workspace-scoped one below closes
         // the active FILE when focus is inside an editor tab, which is what
@@ -220,11 +246,31 @@ pub fn entries() -> Vec<Entry> {
         Entry::new(s("cmd-w"), Scope::Global, "Close tab", crate::CloseTab),
         Entry::new(s("cmd-q"), Scope::Global, "Quit", crate::Quit),
         Entry::new(s("cmd-n"), Scope::Global, "New task", crate::NewTask),
-        Entry::new(s("cmd-alt-down"), Scope::Global, "Next worktree", crate::NextWorktree),
-        Entry::new(s("cmd-alt-up"), Scope::Global, "Previous worktree", crate::PreviousWorktree),
-        Entry::new(s("cmd-shift-a"), Scope::Global, "Jump to the next agent waiting on you", crate::NextWaitingAgent),
+        Entry::new(
+            s("cmd-alt-down"),
+            Scope::Global,
+            "Next worktree",
+            crate::NextWorktree,
+        ),
+        Entry::new(
+            s("cmd-alt-up"),
+            Scope::Global,
+            "Previous worktree",
+            crate::PreviousWorktree,
+        ),
+        Entry::new(
+            s("cmd-shift-a"),
+            Scope::Global,
+            "Jump to the next agent waiting on you",
+            crate::NextWaitingAgent,
+        ),
         Entry::new(s("cmd-shift-]"), Scope::Global, "Next tab", crate::NextTab),
-        Entry::new(s("cmd-shift-["), Scope::Global, "Previous tab", crate::PreviousTab),
+        Entry::new(
+            s("cmd-shift-["),
+            Scope::Global,
+            "Previous tab",
+            crate::PreviousTab,
+        ),
         Entry::new(s("cmd-1"), Scope::Global, "Tab 1", crate::ActivateTab1),
         Entry::new(s("cmd-2"), Scope::Global, "Tab 2", crate::ActivateTab2),
         Entry::new(s("cmd-3"), Scope::Global, "Tab 3", crate::ActivateTab3),
@@ -233,16 +279,35 @@ pub fn entries() -> Vec<Entry> {
         Entry::new(s("cmd-6"), Scope::Global, "Tab 6", crate::ActivateTab6),
         Entry::new(s("cmd-7"), Scope::Global, "Tab 7", crate::ActivateTab7),
         Entry::new(s("cmd-8"), Scope::Global, "Tab 8", crate::ActivateTab8),
-        Entry::new(s("cmd-9"), Scope::Global, "Last tab", crate::ActivateLastTab),
+        Entry::new(
+            s("cmd-9"),
+            Scope::Global,
+            "Last tab",
+            crate::ActivateLastTab,
+        ),
         // ⌘B is the left panel everywhere: the sidebar here, and zed's own
         // file-tree dock inside the Editor tab (its Ide-scoped binding below
         // is deeper, so it wins there).
-        Entry::new(s("cmd-b"), Scope::Global, "Toggle the sidebar", crate::ToggleSidebar),
-        Entry::new(s("cmd-shift-b"), Scope::Global, "Toggle the tools panel", crate::ToggleTools),
+        Entry::new(
+            s("cmd-b"),
+            Scope::Global,
+            "Toggle the sidebar",
+            crate::ToggleSidebar,
+        ),
+        Entry::new(
+            s("cmd-shift-b"),
+            Scope::Global,
+            "Toggle the tools panel",
+            crate::ToggleTools,
+        ),
         // The root-level enter: submits search, confirms menus — anything
         // deeper (a full buffer's Newline, a picker's Confirm) outranks it.
-        Entry::new(s("enter"), Scope::Global, "Confirm / submit search", menu::Confirm),
-
+        Entry::new(
+            s("enter"),
+            Scope::Global,
+            "Confirm / submit search",
+            menu::Confirm,
+        ),
         // ---- Hosted workspace (file tabs / ⌘P / search) ------------------
         // Global, not Workspace: ⌘P has to work from a terminal or Review
         // too, where no zed "Workspace" key context is in the focus path. The
@@ -301,7 +366,12 @@ pub fn entries() -> Vec<Entry> {
         // Scoped to the IdeWorkspace context, which is deeper than the
         // harness root, so inside the Editor tab these chords drive *its*
         // docks while everywhere else they keep their tools-panel meaning.
-        Entry::new(s("cmd-b"), Scope::Ide, "Toggle the file tree dock", ::workspace::ToggleLeftDock),
+        Entry::new(
+            s("cmd-b"),
+            Scope::Ide,
+            "Toggle the file tree dock",
+            ::workspace::ToggleLeftDock,
+        ),
         Entry::new(
             s("cmd-shift-e"),
             Scope::Ide,
@@ -314,7 +384,12 @@ pub fn entries() -> Vec<Entry> {
             "Toggle the git panel",
             zed_actions::git_panel::ToggleFocus,
         ),
-        Entry::new(s("cmd-j"), Scope::Ide, "Toggle the bottom dock", ::workspace::ToggleBottomDock),
+        Entry::new(
+            s("cmd-j"),
+            Scope::Ide,
+            "Toggle the bottom dock",
+            ::workspace::ToggleBottomDock,
+        ),
         Entry::new(
             s("cmd-shift-r"),
             Scope::Global,
@@ -335,7 +410,6 @@ pub fn entries() -> Vec<Entry> {
             "Preview markdown to the side",
             zed_actions::preview::markdown::OpenPreviewToTheSide,
         ),
-
         // ---- Find in file (⌘F) ---------------------------------------------
         // The BufferSearchBar is already installed on every pane toolbar
         // (workspace_host.rs) and `search::init` runs in main.rs — until now
@@ -393,17 +467,47 @@ pub fn entries() -> Vec<Entry> {
         Entry::new(s("cmd-a"), Scope::Editor, "Select all", ed::SelectAll),
         Entry::new(s("escape"), Scope::Editor, "Clear selection", ed::Cancel),
         Entry::new(s("enter"), Scope::EditorFull, "New line", ed::Newline),
-        Entry::new(s("backspace"), Scope::Editor, "Delete backwards", ed::Backspace),
+        Entry::new(
+            s("backspace"),
+            Scope::Editor,
+            "Delete backwards",
+            ed::Backspace,
+        ),
         Entry::new(s("delete"), Scope::Editor, "Delete forwards", ed::Delete),
         Entry::new(s("tab"), Scope::Editor, "Indent / accept", ed::Tab),
-        Entry::new(s("up"), Scope::Editor, "Move up", zed_actions::editor::MoveUp),
-        Entry::new(s("down"), Scope::Editor, "Move down", zed_actions::editor::MoveDown),
+        Entry::new(
+            s("up"),
+            Scope::Editor,
+            "Move up",
+            zed_actions::editor::MoveUp,
+        ),
+        Entry::new(
+            s("down"),
+            Scope::Editor,
+            "Move down",
+            zed_actions::editor::MoveDown,
+        ),
         Entry::new(s("left"), Scope::Editor, "Move left", ed::MoveLeft),
         Entry::new(s("right"), Scope::Editor, "Move right", ed::MoveRight),
         Entry::new(s("shift-up"), Scope::Editor, "Select up", ed::SelectUp),
-        Entry::new(s("shift-down"), Scope::Editor, "Select down", ed::SelectDown),
-        Entry::new(s("shift-left"), Scope::Editor, "Select left", ed::SelectLeft),
-        Entry::new(s("shift-right"), Scope::Editor, "Select right", ed::SelectRight),
+        Entry::new(
+            s("shift-down"),
+            Scope::Editor,
+            "Select down",
+            ed::SelectDown,
+        ),
+        Entry::new(
+            s("shift-left"),
+            Scope::Editor,
+            "Select left",
+            ed::SelectLeft,
+        ),
+        Entry::new(
+            s("shift-right"),
+            Scope::Editor,
+            "Select right",
+            ed::SelectRight,
+        ),
         Entry::new(
             s("cmd-left"),
             Scope::Editor,
@@ -421,13 +525,27 @@ pub fn entries() -> Vec<Entry> {
                 stop_at_soft_wraps: true,
             },
         ),
-        Entry::new(s("cmd-up"), Scope::Editor, "Start of file", ed::MoveToBeginning),
+        Entry::new(
+            s("cmd-up"),
+            Scope::Editor,
+            "Start of file",
+            ed::MoveToBeginning,
+        ),
         Entry::new(s("cmd-down"), Scope::Editor, "End of file", ed::MoveToEnd),
         // Inline blame is on by default (current line, after the code); these
         // control it when it gets loud.
-        Entry::new(s("cmd-alt-b"), Scope::Editor, "Toggle inline git blame", ed::ToggleGitBlameInline),
-        Entry::new(s("cmd-alt-g"), Scope::Editor, "Toggle git blame gutter", ::git::Blame),
-
+        Entry::new(
+            s("cmd-alt-b"),
+            Scope::Editor,
+            "Toggle inline git blame",
+            ed::ToggleGitBlameInline,
+        ),
+        Entry::new(
+            s("cmd-alt-g"),
+            Scope::Editor,
+            "Toggle git blame gutter",
+            ::git::Blame,
+        ),
         // ---- Inline inputs ------------------------------------------------
         // Rename / avatar / agent-command / review-comment / new-task dialog
         // fields are single-line editors. Enter reaches the global
@@ -436,7 +554,6 @@ pub fn entries() -> Vec<Entry> {
         // deeper predicate rebinds it to Cancel so escape abandons the edit.
         // Placed AFTER the Editor escape so catalog order gives it priority.
         Entry::new(s("escape"), Scope::Input, "Cancel the edit", menu::Cancel),
-
         // ---- Find bar (the `> Editor` half) ---------------------------------
         // The query box IS an editor, so these tie with the Editor-scoped
         // escape (clear selection) and tab (indent) on context depth. Without
@@ -455,13 +572,27 @@ pub fn entries() -> Vec<Entry> {
             "Back to the buffer",
             ::search::buffer_search::FocusEditor,
         ),
-
         // ---- Pickers ------------------------------------------------------
         // Without this, ⌘P opens the file finder and only ⌘P closes it again —
         // escape inside the picker's text box would hit the Editor binding.
-        Entry::new(s("escape"), Scope::Picker, "Close the file finder", menu::Cancel),
-        Entry::new(s("enter"), Scope::Picker, "Open selected file", menu::Confirm),
-        Entry::new(s("up"), Scope::Picker, "Previous match", menu::SelectPrevious),
+        Entry::new(
+            s("escape"),
+            Scope::Picker,
+            "Close the file finder",
+            menu::Cancel,
+        ),
+        Entry::new(
+            s("enter"),
+            Scope::Picker,
+            "Open selected file",
+            menu::Confirm,
+        ),
+        Entry::new(
+            s("up"),
+            Scope::Picker,
+            "Previous match",
+            menu::SelectPrevious,
+        ),
         Entry::new(s("down"), Scope::Picker, "Next match", menu::SelectNext),
     ]
 }
@@ -472,7 +603,12 @@ pub fn display_keys(keys: &str) -> String {
     let mut out = String::new();
     let mut key = keys;
     // Modifiers first, in the conventional macOS order.
-    for (name, sym) in [("ctrl-", "⌃"), ("alt-", "⌥"), ("shift-", "⇧"), ("cmd-", "⌘")] {
+    for (name, sym) in [
+        ("ctrl-", "⌃"),
+        ("alt-", "⌥"),
+        ("shift-", "⇧"),
+        ("cmd-", "⌘"),
+    ] {
         if keys.contains(name) {
             out.push_str(sym);
         }
@@ -528,21 +664,24 @@ mod tests {
     #[test]
     fn overrides_rebind_and_bad_chords_fall_back() {
         let mut ov = std::collections::BTreeMap::new();
-        ov.insert(key_id(Scope::Global, "New terminal tab"), "cmd-y".to_string());
+        ov.insert(
+            key_id(Scope::Global, "New terminal tab"),
+            "cmd-y".to_string(),
+        );
         // Note: Keystroke::parse is lenient enough that almost any string
         // parses (words become key sequences), so the invalid-chord fallback
         // in entries_with is belt-and-braces, not a testable path.
         let all = entries_with(&ov);
-        let term = all
-            .iter()
-            .find(|e| e.what == "New terminal tab")
-            .unwrap();
+        let term = all.iter().find(|e| e.what == "New terminal tab").unwrap();
         assert_eq!(term.keys, "cmd-y", "override must rebind");
         assert!(term.binding.is_some());
         // A stored chord that does not parse is shown as the default.
         let mut bad = std::collections::BTreeMap::new();
         bad.insert(key_id(Scope::Global, "New terminal tab"), "   ".to_string());
-        let term = entries_with(&bad).into_iter().find(|e| e.what == "New terminal tab").unwrap();
+        let term = entries_with(&bad)
+            .into_iter()
+            .find(|e| e.what == "New terminal tab")
+            .unwrap();
         assert_eq!(term.keys, "cmd-t");
         let undo = all
             .iter()

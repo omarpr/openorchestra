@@ -33,9 +33,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::{
-    resolve_on_path, AgentCommand, AgentKind, AgentRuntime, SignalKind, WaitFidelity,
-};
+use crate::{resolve_on_path, AgentCommand, AgentKind, AgentRuntime, SignalKind, WaitFidelity};
 
 /// The hook shim, materialized next to the other agent assets.
 ///
@@ -144,7 +142,11 @@ impl ClaudeCodeRuntime {
                     continue;
                 };
                 let shim_marker = shim.display().to_string();
-                list.retain(|e| !serde_json::to_string(e).unwrap_or_default().contains(&shim_marker));
+                list.retain(|e| {
+                    !serde_json::to_string(e)
+                        .unwrap_or_default()
+                        .contains(&shim_marker)
+                });
                 if let Some(add) = entries.as_array() {
                     list.extend(add.iter().cloned());
                 }

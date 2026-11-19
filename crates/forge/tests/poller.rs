@@ -112,7 +112,10 @@ fn delivers_initial_status_and_deduplicates() {
 fn refreshing_a_repository_delivers_its_checks_before_the_next_poll() {
     let forge = Arc::new(ScriptedForge::new(vec![Ok(Some(pr(7)))]));
     let branch = key("feat/a");
-    let other = BranchKey { repo_dir: PathBuf::from("/repos/other"), ..branch.clone() };
+    let other = BranchKey {
+        repo_dir: PathBuf::from("/repos/other"),
+        ..branch.clone()
+    };
     let config = PollerConfig {
         interval: Duration::from_secs(60),
         open_pr_interval: Duration::from_secs(60),
@@ -130,11 +133,34 @@ fn refreshing_a_repository_delivers_its_checks_before_the_next_poll() {
 }
 
 #[test]
+fn merged_and_closed_prs_are_not_delivered_as_badges() {
+    for state in [PrState::Merged, PrState::Closed] {
+        let mut info = pr(10);
+        info.state = state;
+        let forge = Arc::new(ScriptedForge::new(vec![Ok(Some(info))]));
+        let (poller, rx) = Poller::spawn(forge, vec![key("feat/a")], fast_config());
+        let status = rx.recv_timeout(RECV).unwrap().result.unwrap();
+        assert_eq!(status.pr, None, "{state:?} is not a badge");
+        assert!(status.checks.is_empty(), "{state:?} does not poll checks");
+        poller.stop();
+    }
+}
+
+#[test]
+fn a_draft_pr_is_still_a_badge() {
+    let mut info = pr(3);
+    info.state = PrState::Draft;
+    let forge = Arc::new(ScriptedForge::new(vec![Ok(Some(info))]));
+    let (poller, rx) = Poller::spawn(forge, vec![key("feat/a")], fast_config());
+    let status = rx.recv_timeout(RECV).unwrap().result.unwrap();
+    assert_eq!(status.pr.unwrap().state, PrState::Draft);
+    assert_eq!(status.checks.len(), 1);
+    poller.stop();
+}
+
+#[test]
 fn delivers_changes() {
-    let forge = Arc::new(ScriptedForge::new(vec![
-        Ok(None),
-        Ok(Some(pr(7))),
-    ]));
+    let forge = Arc::new(ScriptedForge::new(vec![Ok(None), Ok(Some(pr(7)))]));
     let (poller, rx) = Poller::spawn(forge, vec![key("feat/a")], fast_config());
 
     let first = rx.recv_timeout(RECV).unwrap().result.unwrap();
@@ -174,7 +200,11 @@ fn unavailable_forge_polls_nothing() {
     let mut forge = ScriptedForge::new(vec![Ok(None)]);
     forge.available = false;
     let forge = Arc::new(forge);
-    let (poller, rx) = Poller::spawn(Arc::clone(&forge) as Arc<dyn Forge>, vec![key("feat/a")], fast_config());
+    let (poller, rx) = Poller::spawn(
+        Arc::clone(&forge) as Arc<dyn Forge>,
+        vec![key("feat/a")],
+        fast_config(),
+    );
 
     // Thread exits immediately: channel disconnects without any updates.
     match rx.recv_timeout(RECV) {

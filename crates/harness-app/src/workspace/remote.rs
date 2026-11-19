@@ -255,10 +255,20 @@ impl RemoteRuntime {
             .remove(&(root.to_path_buf(), kind.to_string()));
     }
 
-    pub(crate) fn record_signal(&mut self, root: &Path, kind: &str, state: AgentState, tool: Option<String>) {
-        let entry = self.signals.entry((root.to_owned(), kind.to_owned()))
+    pub(crate) fn record_signal(
+        &mut self,
+        root: &Path,
+        kind: &str,
+        state: AgentState,
+        tool: Option<String>,
+    ) {
+        let entry = self
+            .signals
+            .entry((root.to_owned(), kind.to_owned()))
             .or_insert_with(|| (state, SystemTime::now(), None));
-        if entry.0 != state { entry.1 = SystemTime::now(); }
+        if entry.0 != state {
+            entry.1 = SystemTime::now();
+        }
         entry.0 = state;
         entry.2 = tool;
     }
@@ -454,8 +464,9 @@ pub(crate) fn build_snapshot(
                 .map(|k| (src.root.clone(), k.clone()));
             let transcript = key.as_ref().and_then(|k| session_files.get(k)).cloned();
             let (status, status_since, tool) = match key.as_ref().and_then(|k| signals.get(k)) {
-                Some((state, at, tool)) if *state != AgentState::Unknown =>
-                    (state.to_string(), Some(rfc3339(*at)), tool.clone()),
+                Some((state, at, tool)) if *state != AgentState::Unknown => {
+                    (state.to_string(), Some(rfc3339(*at)), tool.clone())
+                }
                 _ => (AgentState::Unknown.to_string(), None, None),
             };
             agents.push(AgentInfo {
@@ -523,7 +534,9 @@ pub(crate) fn fill_from_disk(
 }
 
 fn apply_tab_record(agent: &mut AgentInfo, state_dir: &Path) {
-    if !matches!(agent.agent_kind.as_deref(), Some("claude-code" | "codex")) { return; }
+    if !matches!(agent.agent_kind.as_deref(), Some("claude-code" | "codex")) {
+        return;
+    }
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct TabRecord {
@@ -536,9 +549,15 @@ fn apply_tab_record(agent: &mut AgentInfo, state_dir: &Path) {
     }
     let stem = oo_remote::session_file_stem(&agent.session);
     let path = state_dir.join("remote/tabs").join(format!("{stem}.json"));
-    let Ok(bytes) = std::fs::read(path) else { return };
-    let Ok(record) = serde_json::from_slice::<TabRecord>(&bytes) else { return };
-    if agent.agent_kind.as_ref() != Some(&record.agent) { return; }
+    let Ok(bytes) = std::fs::read(path) else {
+        return;
+    };
+    let Ok(record) = serde_json::from_slice::<TabRecord>(&bytes) else {
+        return;
+    };
+    if agent.agent_kind.as_ref() != Some(&record.agent) {
+        return;
+    }
     agent.status = record.state.to_string();
     agent.status_since = Some(record.status_since.unwrap_or(record.timestamp));
     agent.tool = record.tool.map(|t| t.name);
@@ -560,7 +579,9 @@ impl HarnessWorkspace {
             agent_runtime::ClaudeCodeRuntime::new(&self.remote.state_dir).materialize_shim(),
             agent_runtime::CodexRuntime::new(&self.remote.state_dir).materialize_shim(),
         ] {
-            if let Err(e) = result { log::warn!("remote: refreshing agent hook: {e}"); }
+            if let Err(e) = result {
+                log::warn!("remote: refreshing agent hook: {e}");
+            }
         }
         // A previous run that was killed (not quit) can leave shell tabs
         // switched to record their commands. With Remote off nothing should.
@@ -619,7 +640,8 @@ impl HarnessWorkspace {
         // started before this launch.
         for e in self.manager.registry.active() {
             if let Some(file) = &e.session_file {
-                self.remote.record_session(&e.path, e.agent_kind.as_str(), file);
+                self.remote
+                    .record_session(&e.path, e.agent_kind.as_str(), file);
             }
         }
         self.remote_refresh(cx);
@@ -729,14 +751,20 @@ impl HarnessWorkspace {
         self.remote_stop(cx);
         self.remote.serve = RemoteServe::Off;
         self.set_note(
-            "New certificate made \u{2014} add each device again (Add a device) to trust it".to_string(),
+            "New certificate made \u{2014} add each device again (Add a device) to trust it"
+                .to_string(),
         );
         cx.notify();
     }
 
     /// Let devices connect from (`trust`) or stop them connecting from the
     /// network with `key`.
-    pub(crate) fn remote_set_network_trust(&mut self, key: &str, trust: bool, cx: &mut Context<Self>) {
+    pub(crate) fn remote_set_network_trust(
+        &mut self,
+        key: &str,
+        trust: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(server) = &self.remote.server else {
             return;
         };
@@ -766,7 +794,10 @@ impl HarnessWorkspace {
     }
 
     pub(crate) fn remote_live(&self) -> bool {
-        matches!(self.remote.serve, RemoteServe::Serving | RemoteServe::OtherBuild)
+        matches!(
+            self.remote.serve,
+            RemoteServe::Serving | RemoteServe::OtherBuild
+        )
     }
 
     /// Current opacity for every remote dot (they blink in step).
@@ -947,7 +978,13 @@ impl HarnessWorkspace {
             .map(super::ui::settings_remote::qr_cells)
             .unwrap_or_default();
         self.remote.ui.setup_url = url;
-        self.remote.ui.setup_known = self.remote.file.devices.iter().map(|d| d.id.clone()).collect();
+        self.remote.ui.setup_known = self
+            .remote
+            .file
+            .devices
+            .iter()
+            .map(|d| d.id.clone())
+            .collect();
         // Adding a device here means trusting this network: devices only
         // connect from trusted ones.
         if let Some(server) = &self.remote.server {
@@ -966,14 +1003,26 @@ impl HarnessWorkspace {
     /// A device that paired while "Add a device" was not open (that dialog
     /// announces its own): say so, so an unexpected one gets noticed.
     fn remote_note_new_devices(&mut self) {
-        let ids: HashSet<String> = self.remote.file.devices.iter().map(|d| d.id.clone()).collect();
+        let ids: HashSet<String> = self
+            .remote
+            .file
+            .devices
+            .iter()
+            .map(|d| d.id.clone())
+            .collect();
         let Some(prev) = self.remote.known_devices.replace(ids) else {
             return;
         };
         if self.remote.ui.setup_open {
             return;
         }
-        if let Some(d) = self.remote.file.devices.iter().find(|d| !prev.contains(&d.id)) {
+        if let Some(d) = self
+            .remote
+            .file
+            .devices
+            .iter()
+            .find(|d| !prev.contains(&d.id))
+        {
             self.set_note(format!(
                 "New device paired: \u{2018}{}\u{2019} \u{2014} revoke it in Settings \u{2192} Remote if that wasn\u{2019}t you",
                 d.name
@@ -1287,7 +1336,10 @@ mod tests {
         let before = [device("d_1", "iPad")];
         assert!(newly_paired(&known, &before).is_none());
         let after = [device("d_1", "iPad"), device("d_2", "iPhone")];
-        assert_eq!(newly_paired(&known, &after).map(|d| d.name.as_str()), Some("iPhone"));
+        assert_eq!(
+            newly_paired(&known, &after).map(|d| d.name.as_str()),
+            Some("iPhone")
+        );
         // A revoke while the panel is open is not a pairing.
         assert!(newly_paired(&known, &[]).is_none());
     }
@@ -1350,9 +1402,15 @@ mod tests {
     fn chip_click_leads_to_settings_while_remote_is_off() {
         assert_eq!(chip_click(true, false), ChipClick::Toggle);
         assert_eq!(chip_click(true, true), ChipClick::Toggle);
-        assert_eq!(chip_click(false, false), ChipClick::OpenSettings { mark: true });
+        assert_eq!(
+            chip_click(false, false),
+            ChipClick::OpenSettings { mark: true }
+        );
         // Never unmarks while off: the click is about getting it reachable.
-        assert_eq!(chip_click(false, true), ChipClick::OpenSettings { mark: false });
+        assert_eq!(
+            chip_click(false, true),
+            ChipClick::OpenSettings { mark: false }
+        );
     }
 
     #[test]
@@ -1365,7 +1423,10 @@ mod tests {
         assert_eq!(remote_chip(true, false, false), Some(RemoteChip::Off));
         assert_eq!(remote_chip(true, false, true), Some(RemoteChip::Off));
         assert_eq!(remote_chip(true, true, true), Some(RemoteChip::OnLive));
-        assert_eq!(remote_chip(true, true, false), Some(RemoteChip::OnUnreachable));
+        assert_eq!(
+            remote_chip(true, true, false),
+            Some(RemoteChip::OnUnreachable)
+        );
     }
 
     #[test]
@@ -1379,8 +1440,18 @@ mod tests {
         let wt = source("wt1", "/r/wt1", &[(3, "pi", Some("pi"))]);
         let f = file(vec![mark("wt1", 3, "r_x")]);
         let rows = remote_agent_rows(&[main, wt], &f);
-        let got: Vec<_> = rows.iter().map(|r| (r.key.as_str(), r.tab_id, r.marked)).collect();
-        assert_eq!(got, [("main:proj", 1, false), ("main:proj", 2, false), ("wt1", 3, true)]);
+        let got: Vec<_> = rows
+            .iter()
+            .map(|r| (r.key.as_str(), r.tab_id, r.marked))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("main:proj", 1, false),
+                ("main:proj", 2, false),
+                ("wt1", 3, true)
+            ]
+        );
         assert_eq!(rows[0].kind.as_deref(), Some("claude-code"));
         assert_eq!(rows[1].kind, None);
         assert_eq!(rows[0].project, "proj");
@@ -1439,7 +1510,10 @@ mod tests {
             &[(7, "claude", Some("claude")), (8, "❯_ shell", None)],
         )];
         let at = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        let signals = HashMap::from([((PathBuf::from("/r/proj"), "claude".into()), (AgentState::Waiting, at, Some("Bash".into())))]);
+        let signals = HashMap::from([(
+            (PathBuf::from("/r/proj"), "claude".into()),
+            (AgentState::Waiting, at, Some("Bash".into())),
+        )]);
 
         let snap = build_snapshot(&f, &sources, &signals, &HashMap::new());
 
@@ -1473,17 +1547,43 @@ mod tests {
         let tabs = dir.path().join("remote/tabs");
         std::fs::create_dir_all(&tabs).unwrap();
         let f = file(vec![mark("k", 1, "a"), mark("k", 2, "b")]);
-        let sources = [source("k", "/same", &[(1, "Claude", Some("claude-code")), (2, "Codex", Some("codex"))])];
+        let sources = [source(
+            "k",
+            "/same",
+            &[
+                (1, "Claude", Some("claude-code")),
+                (2, "Codex", Some("codex")),
+            ],
+        )];
         let mut snap = build_snapshot(&f, &sources, &HashMap::new(), &HashMap::new());
         for (agent, (kind, state, path)) in snap.agents.iter_mut().zip([
-            ("claude-code", "idle", "/c.jsonl"), ("codex", "running", "/x.jsonl"),
+            ("claude-code", "idle", "/c.jsonl"),
+            ("codex", "running", "/x.jsonl"),
         ]) {
             let data = serde_json::json!({"agent": kind, "state": state, "timestamp": "2026-11-18T12:00:00Z", "sessionFile": path});
-            std::fs::write(tabs.join(format!("{}.json", agent.session)), data.to_string()).unwrap();
+            std::fs::write(
+                tabs.join(format!("{}.json", agent.session)),
+                data.to_string(),
+            )
+            .unwrap();
         }
-        for agent in &mut snap.agents { apply_tab_record(agent, dir.path()); }
-        assert_eq!((snap.agents[0].status.as_str(), snap.agents[0].transcript.as_deref()), ("idle", Some(Path::new("/c.jsonl"))));
-        assert_eq!((snap.agents[1].status.as_str(), snap.agents[1].transcript.as_deref()), ("running", Some(Path::new("/x.jsonl"))));
+        for agent in &mut snap.agents {
+            apply_tab_record(agent, dir.path());
+        }
+        assert_eq!(
+            (
+                snap.agents[0].status.as_str(),
+                snap.agents[0].transcript.as_deref()
+            ),
+            ("idle", Some(Path::new("/c.jsonl")))
+        );
+        assert_eq!(
+            (
+                snap.agents[1].status.as_str(),
+                snap.agents[1].transcript.as_deref()
+            ),
+            ("running", Some(Path::new("/x.jsonl")))
+        );
     }
 
     #[test]
@@ -1492,9 +1592,15 @@ mod tests {
         let sources = [source(
             "wt-1",
             "/w/1",
-            &[(3, "codex", Some("codex")), (4, "claude", Some("claude-code"))],
+            &[
+                (3, "codex", Some("codex")),
+                (4, "claude", Some("claude-code")),
+            ],
         )];
-        let status = HashMap::from([((PathBuf::from("/w/1"), "codex".into()), (AgentState::Running, UNIX_EPOCH, None))]);
+        let status = HashMap::from([(
+            (PathBuf::from("/w/1"), "codex".into()),
+            (AgentState::Running, UNIX_EPOCH, None),
+        )]);
         let snap = build_snapshot(&f, &sources, &status, &HashMap::new());
         let ids: Vec<_> = snap.agents.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, ["r_a", "r_b"]);
@@ -1533,7 +1639,11 @@ mod tests {
         tabs: &[(u64, &str, Option<&str>)],
         entries: &[(&str, &str, &str)],
     ) -> Vec<Option<PathBuf>> {
-        let f = file(tabs.iter().map(|(id, _, _)| mark("k", *id, &format!("r{id}"))).collect());
+        let f = file(
+            tabs.iter()
+                .map(|(id, _, _)| mark("k", *id, &format!("r{id}")))
+                .collect(),
+        );
         let sources = [source("k", "/R", tabs)];
         let sf = sessions(entries);
         let snap = build_snapshot(&f, &sources, &HashMap::new(), &sf);
@@ -1548,7 +1658,10 @@ mod tests {
         );
         assert_eq!(
             got,
-            [Some(PathBuf::from("/c.jsonl")), Some(PathBuf::from("/p.jsonl"))]
+            [
+                Some(PathBuf::from("/c.jsonl")),
+                Some(PathBuf::from("/p.jsonl"))
+            ]
         );
     }
 
@@ -1577,7 +1690,10 @@ mod tests {
         let sources = [source(
             "k",
             "/R",
-            &[(1, "c1", Some("claude-code")), (2, "c2", Some("claude-code"))],
+            &[
+                (1, "c1", Some("claude-code")),
+                (2, "c2", Some("claude-code")),
+            ],
         )];
         let sf = sessions(&[("/R", "claude-code", "/c.jsonl")]);
         let snap = build_snapshot(&f, &sources, &HashMap::new(), &sf);
@@ -1589,12 +1705,18 @@ mod tests {
             source("k", "/R", &[(1, "c1", Some("claude-code"))]),
             source("j", "/S", &[(2, "c2", Some("claude-code"))]),
         ];
-        let sf = sessions(&[("/R", "claude-code", "/c.jsonl"), ("/S", "claude-code", "/s.jsonl")]);
+        let sf = sessions(&[
+            ("/R", "claude-code", "/c.jsonl"),
+            ("/S", "claude-code", "/s.jsonl"),
+        ]);
         let snap = build_snapshot(&f, &sources, &HashMap::new(), &sf);
         let got: Vec<_> = snap.agents.into_iter().map(|a| a.transcript).collect();
         assert_eq!(
             got,
-            [Some(PathBuf::from("/c.jsonl")), Some(PathBuf::from("/s.jsonl"))]
+            [
+                Some(PathBuf::from("/c.jsonl")),
+                Some(PathBuf::from("/s.jsonl"))
+            ]
         );
     }
 
@@ -1621,7 +1743,8 @@ mod tests {
         // The new tab's first signal records its own file.
         rt.record_session(Path::new("/R"), "claude-code", Path::new("/new.jsonl"));
         assert_eq!(
-            rt.session_files.get(&(PathBuf::from("/R"), "claude-code".to_string())),
+            rt.session_files
+                .get(&(PathBuf::from("/R"), "claude-code".to_string())),
             Some(&PathBuf::from("/new.jsonl"))
         );
     }
@@ -1654,14 +1777,26 @@ mod tests {
         let agent = TabKind::Agent(AgentKind::Pi);
         assert_eq!(
             remote_menu_item(&TabKind::Shell, false),
-            Some(("Allow remote control", Some("Gives paired devices this shell")))
+            Some((
+                "Allow remote control",
+                Some("Gives paired devices this shell")
+            ))
         );
         assert_eq!(
             remote_menu_item(&TabKind::Shell, true),
-            Some(("Stop remote control", Some("Gives paired devices this shell")))
+            Some((
+                "Stop remote control",
+                Some("Gives paired devices this shell")
+            ))
         );
-        assert_eq!(remote_menu_item(&agent, false), Some(("Allow remote control", None)));
-        assert_eq!(remote_menu_item(&agent, true), Some(("Stop remote control", None)));
+        assert_eq!(
+            remote_menu_item(&agent, false),
+            Some(("Allow remote control", None))
+        );
+        assert_eq!(
+            remote_menu_item(&agent, true),
+            Some(("Stop remote control", None))
+        );
         for k in [TabKind::Chat, TabKind::Diff, TabKind::Editor] {
             assert_eq!(remote_menu_item(&k, false), None);
         }

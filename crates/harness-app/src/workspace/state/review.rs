@@ -11,7 +11,17 @@ impl OverviewTab {
         cx: &mut Context<HarnessWorkspace>,
     ) {
         self.preferences = saved.preferences.clone();
-        let text = saved.report.markdown.clone();
+        let parsed = crate::review_overview::reading_order(
+            &saved.report.markdown,
+            &saved.report.files,
+            saved.report.scope.len() > 1,
+        );
+        let text = parsed
+            .as_ref()
+            .map(|order| order.markdown.clone())
+            .unwrap_or_else(|| saved.report.markdown.clone());
+        self.reading_steps = parsed.map(|order| order.steps).unwrap_or_default();
+        self.last_reading_step = None;
         let markdown = cx.new(|cx| markdown::Markdown::new(text.into(), None, None, cx));
         self.last_report = Some(Arc::clone(&saved));
         self.status = OverviewStatus::Ready { markdown, saved };
@@ -21,49 +31,86 @@ impl OverviewTab {
 impl HarnessWorkspace {
     pub(crate) fn ensure_review_model_catalog(&mut self, cx: &mut Context<Self>) {
         let cli = self.prefs.review_overview.cli;
-        if !self.review_model_catalogs.contains_key(&cli) {
-            self.load_review_model_catalog(cli, cx);
+        if self.review_model_catalogs.contains_key(&cli) {
+            return;
         }
+        // Opening Diff settings must not spawn `codex debug models`. That
+        // command can reach the network when Codex's own cache is cold.
+        // Reload models is the path that asks the CLI, and it stores the answer.
+        let Some(models) = crate::review_overview::models::read_cache(&self.state_dir, cli) else {
+            return;
+        };
+        self.review_model_catalogs
+            .insert(cli, ModelCatalog::Ready(models));
+        cx.notify();
     }
 
     pub(crate) fn load_review_model_catalog(&mut self, cli: ReviewCli, cx: &mut Context<Self>) {
-        if matches!(self.review_model_catalogs.get(&cli), Some(ModelCatalog::Loading)) {
+        if matches!(
+            self.review_model_catalogs.get(&cli),
+            Some(ModelCatalog::Loading)
+        ) {
             return;
         }
-        let cwd = self.resolve().map(|r| r.path).unwrap_or_else(|| self.data_dir.clone());
-        self.review_model_catalogs.insert(cli, ModelCatalog::Loading);
+        let cwd = self
+            .resolve()
+            .map(|r| r.path)
+            .unwrap_or_else(|| self.data_dir.clone());
+        let state_dir = self.state_dir.clone();
+        self.review_model_catalogs
+            .insert(cli, ModelCatalog::Loading);
         cx.spawn(async move |view, cx| {
-            let result = cx.background_spawn(async move {
-                crate::review_overview::models::discover(cli, &cwd)
-            }).await;
+            let result = cx
+                .background_spawn(async move {
+                    let result = crate::review_overview::models::discover(cli, &cwd);
+                    if let Ok(models) = &result {
+                        let _ =
+                            crate::review_overview::models::write_cache(&state_dir, cli, models);
+                    }
+                    result
+                })
+                .await;
             let _ = view.update(cx, |ws, cx| {
-                ws.review_model_catalogs.insert(cli, match result {
-                    Ok(models) => ModelCatalog::Ready(models),
-                    Err(error) => ModelCatalog::Failed(error),
-                });
+                ws.review_model_catalogs.insert(
+                    cli,
+                    match result {
+                        Ok(models) => ModelCatalog::Ready(models),
+                        Err(error) => ModelCatalog::Failed(error),
+                    },
+                );
                 cx.notify();
             });
-        }).detach();
+        })
+        .detach();
         cx.notify();
     }
 
     pub(crate) fn run_review_overview(&mut self, cx: &mut Context<Self>) {
         let Some(r) = self.resolve() else { return };
-        let repos = if let Some(task) = r.task_id.as_deref().and_then(|id| self.task_store.get(id)) {
-            task.members.iter().map(|member| ReviewRepo {
-                name: member.repo.clone(),
-                path: member.path.clone(),
-                compare_ref: self.data.repos.iter()
-                    .find(|repo| repo.name == member.repo)
-                    .map(|repo| repo.compare_ref.clone())
-                    .unwrap_or_else(|| "HEAD".into()),
-            }).collect()
+        let repos = if let Some(task) = r.task_id.as_deref().and_then(|id| self.task_store.get(id))
+        {
+            task.members
+                .iter()
+                .map(|member| ReviewRepo {
+                    name: member.repo.clone(),
+                    path: member.path.clone(),
+                    compare_ref: self
+                        .data
+                        .repos
+                        .iter()
+                        .find(|repo| repo.name == member.repo)
+                        .map(|repo| repo.compare_ref.clone())
+                        .unwrap_or_else(|| "HEAD".into()),
+                })
+                .collect()
         } else {
             let project = self.data.repos.iter().find(|repo| {
                 repo.repo_root == r.path || repo.worktrees.iter().any(|entry| entry.path == r.path)
             });
             vec![ReviewRepo {
-                name: project.map(|repo| repo.name.clone()).unwrap_or_else(|| r.branch.clone()),
+                name: project
+                    .map(|repo| repo.name.clone())
+                    .unwrap_or_else(|| r.branch.clone()),
                 path: r.path.clone(),
                 compare_ref: r.compare_ref,
             }]
@@ -73,9 +120,13 @@ impl HarnessWorkspace {
             repos,
             preferences: self.prefs.review_overview.clone(),
         };
-        let Some(pane) = self.panes.get_mut(&r.key) else { return };
+        let Some(pane) = self.panes.get_mut(&r.key) else {
+            return;
+        };
         let id = pane.active;
-        let Some(overview) = review_overview_tab(pane, id) else { return };
+        let Some(overview) = review_overview_tab(pane, id) else {
+            return;
+        };
         if matches!(overview.status, OverviewStatus::Running(_)) {
             return;
         }
@@ -87,10 +138,16 @@ impl HarnessWorkspace {
         cx.notify();
         cx.spawn(async move |view, cx| {
             let cancelled = Arc::clone(&worker);
-            let result = cx.background_spawn(async move { request.run(cancelled) }).await;
+            let result = cx
+                .background_spawn(async move { request.run(cancelled) })
+                .await;
             let _ = view.update(cx, |ws, cx| {
-                let Some(pane) = ws.panes.get_mut(&r.key) else { return };
-                let Some(overview) = review_overview_tab(pane, id) else { return };
+                let Some(pane) = ws.panes.get_mut(&r.key) else {
+                    return;
+                };
+                let Some(overview) = review_overview_tab(pane, id) else {
+                    return;
+                };
                 if !matches!(&overview.status, OverviewStatus::Running(run) if run.owns(&worker)) {
                     return;
                 }
@@ -107,31 +164,70 @@ impl HarnessWorkspace {
                 }
                 cx.notify();
             });
-        }).detach();
+        })
+        .detach();
     }
 
     pub(crate) fn cancel_review_overview(&mut self, cx: &mut Context<Self>) {
         let Some(r) = self.resolve() else { return };
-        let Some(pane) = self.panes.get_mut(&r.key) else { return };
-        let Some(overview) = review_overview_tab(pane, pane.active) else { return };
+        let Some(pane) = self.panes.get_mut(&r.key) else {
+            return;
+        };
+        let Some(overview) = review_overview_tab(pane, pane.active) else {
+            return;
+        };
         if matches!(overview.status, OverviewStatus::Running(_)) {
             overview.status = OverviewStatus::Cancelled;
             cx.notify();
         }
     }
 
+    /// Open a reading-order file the same way a path in the writeup does, and
+    /// leave that step marked so the path shows where the review is.
+    pub(crate) fn open_reading_order_file(
+        &mut self,
+        step: usize,
+        root: PathBuf,
+        relative: String,
+        line: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(resolved) = self.resolve()
+            && let Some(pane) = self.panes.get_mut(&resolved.key)
+            && let Some(overview) = review_overview_tab(pane, pane.active)
+        {
+            overview.last_reading_step = Some(step);
+        }
+        if !root.join(&relative).is_file() {
+            self.set_note(format!("{relative} is no longer in the working tree"));
+            cx.notify();
+            return;
+        }
+        self.exit_hooks_edit(window, cx);
+        self.open_workspace_file(&root, &relative, line, window, cx);
+    }
+
     pub(crate) fn chat_about_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(r) = self.resolve() else { return };
-        let Some(tab) = self.panes.get(&r.key).and_then(PaneSet::active_tab) else { return };
-        let TabContent::ReviewOverview(overview) = &tab.content else { return };
-        let OverviewStatus::Ready { saved, .. } =
-            &overview.status else { return };
+        let Some(tab) = self.panes.get(&r.key).and_then(PaneSet::active_tab) else {
+            return;
+        };
+        let TabContent::ReviewOverview(overview) = &tab.content else {
+            return;
+        };
+        let OverviewStatus::Ready { saved, .. } = &overview.status else {
+            return;
+        };
         let report = &saved.report;
-        if !report.generated {
+        if !report.generated || saved.preferences.cli.agent_kind().is_none() {
             return;
         }
         let followup = ReviewFollowup::new(
-            &saved.preferences, &report.markdown, &report.scope, &report.limitations,
+            &saved.preferences,
+            &report.markdown,
+            &report.scope,
+            &report.limitations,
         );
         self.open_review_chat(followup, window, cx);
     }
@@ -149,10 +245,14 @@ impl HarnessWorkspace {
     /// Copies the *code*, not the diff decoration: no gutter numbers and no
     /// +/- markers, so a pasted selection compiles.
     pub(crate) fn copy_diff_selection(&mut self, cx: &mut Context<Self>) {
-        let Some((file, from, to)) = self.diff_selection.clone() else { return };
+        let Some((file, from, to)) = self.diff_selection.clone() else {
+            return;
+        };
         // Reads the rows the selection was made against rather than re-parsing:
         // you cannot have selected lines in a body that was never drawn.
-        let Some(rows) = self.cached_rows(&file) else { return };
+        let Some(rows) = self.cached_rows(&file) else {
+            return;
+        };
         let text: Vec<String> = rows
             .iter()
             .enumerate()
@@ -169,13 +269,17 @@ impl HarnessWorkspace {
     }
 
     /// Begin, extend, or clear a row selection within one file's diff.
-    pub(crate) fn select_diff_row(&mut self, file: &str, row: usize, extend: bool, cx: &mut Context<Self>) {
+    pub(crate) fn select_diff_row(
+        &mut self,
+        file: &str,
+        row: usize,
+        extend: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.diff_selection = match (self.diff_selection.take(), extend) {
             // Shift-click extends, but only within the same file — a range
             // spanning two bodies would have no meaning.
-            (Some((f, from, _)), true) if f == file => {
-                Some((f, from.min(row), from.max(row)))
-            }
+            (Some((f, from, _)), true) if f == file => Some((f, from.min(row), from.max(row))),
             _ => Some((file.to_string(), row, row)),
         };
         cx.notify();
@@ -229,18 +333,30 @@ impl HarnessWorkspace {
     }
 
     /// Enter in the comment popover (routed from `menu::Confirm`).
-    pub(crate) fn confirm_comment(&mut self, _: &menu::Confirm, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn confirm_comment(
+        &mut self,
+        _: &menu::Confirm,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.commit_comment(cx);
     }
 
     /// Escape in the comment popover (routed from `menu::Cancel`): abandon it.
-    pub(crate) fn cancel_comment(&mut self, _: &menu::Cancel, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn cancel_comment(
+        &mut self,
+        _: &menu::Cancel,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.comment_draft = None;
         cx.notify();
     }
 
     pub(crate) fn commit_comment(&mut self, cx: &mut Context<Self>) {
-        let Some(draft) = self.comment_draft.take() else { return };
+        let Some(draft) = self.comment_draft.take() else {
+            return;
+        };
         let body = draft.editor.read(cx).text(cx);
         if let Some(r) = self.resolve() {
             self.review.set(&r.key, &draft.file, draft.line, &body);
@@ -408,7 +524,12 @@ impl HarnessWorkspace {
                             // Per member, so a multi-repo task honours the
                             // setting in every one of its repos.
                             let compare = diff_base_ref(diff_base, &compare).to_string();
-                            (m.worktree_id.clone(), m.repo.clone(), m.path.clone(), compare)
+                            (
+                                m.worktree_id.clone(),
+                                m.repo.clone(),
+                                m.path.clone(),
+                                compare,
+                            )
                         })
                         .collect()
                 })
@@ -416,10 +537,7 @@ impl HarnessWorkspace {
             cx.spawn(async move |view, cx| {
                 let computed = cx
                     .background_spawn(async move {
-                        UnifiedDiff::from_members(
-                            &GitWorktrees::new(SystemRunner),
-                            &members,
-                        )
+                        UnifiedDiff::from_members(&GitWorktrees::new(SystemRunner), &members)
                     })
                     .await;
                 let _ = view.update(cx, |ws, cx| {

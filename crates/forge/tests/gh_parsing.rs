@@ -15,8 +15,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use forge::{
-    CheckStatus, CommandOutput, CommandRunner, CreatePrRequest, Forge, ForgeError, GhCli,
-    PrState,
+    CheckStatus, CommandOutput, CommandRunner, CreatePrRequest, Forge, ForgeError, GhCli, PrState,
 };
 
 const PR_OPEN: &str = include_str!("../fixtures/pr_open.json");
@@ -71,7 +70,10 @@ impl CommandRunner for FakeRunner {
                     stderr: String::new(),
                 })
             } else {
-                Err(io::Error::new(io::ErrorKind::NotFound, "gh: command not found"))
+                Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "gh: command not found",
+                ))
             };
         }
         let key = args.join(" ");
@@ -88,7 +90,7 @@ fn repo() -> &'static Path {
 }
 
 const VIEW_ARGS: &str =
-    "pr list --head feat/nav --state all --json number,state,isDraft,title,url";
+    "pr list --head feat/nav --author @me --state all --json number,state,isDraft,title,url";
 const CHECKS_ARGS: &str = "pr checks --json name,state,bucket -- feat/nav";
 
 // ---- pr_for_branch ---------------------------------------------------------
@@ -100,7 +102,10 @@ fn open_pr_parses() {
     assert_eq!(pr.number, 128);
     assert_eq!(pr.state, PrState::Open);
     assert_eq!(pr.title, "Add worktree navigation sidebar");
-    assert_eq!(pr.url.as_deref(), Some("https://github.com/example/openorchestra/pull/128"));
+    assert_eq!(
+        pr.url.as_deref(),
+        Some("https://github.com/example/openorchestra/pull/128")
+    );
 }
 
 #[test]
@@ -201,7 +206,8 @@ fn passing_checks_parse_even_with_pending_exit_code_8() {
 
 #[test]
 fn unknown_bucket_falls_back_to_state() {
-    let gh = GhCli::with_runner(FakeRunner::new(true).ok(CHECKS_ARGS, 0, CHECKS_UNKNOWN_BUCKET, ""));
+    let gh =
+        GhCli::with_runner(FakeRunner::new(true).ok(CHECKS_ARGS, 0, CHECKS_UNKNOWN_BUCKET, ""));
     let checks = gh.checks_for_branch(repo(), "feat/nav").unwrap();
     assert_eq!(checks[0].status, CheckStatus::Pass); // state SUCCESS
     assert_eq!(checks[1].status, CheckStatus::Running); // unknown everything
@@ -249,8 +255,7 @@ const LIVE_PR_CLOSED: &str = include_str!("../fixtures/live/pr_list_head_closed.
 const LIVE_PR_FORK: &str = include_str!("../fixtures/live/pr_list_head_fork.json");
 /// `gh pr list --head` on a branch with no PR: an empty array, exit 0.
 const LIVE_PR_NONE: &str = include_str!("../fixtures/live/pr_list_head_none.json");
-const LIVE_CHECKS_MIXED: &str =
-    include_str!("../fixtures/live/pr_checks_pass_fail_skipping.json");
+const LIVE_CHECKS_MIXED: &str = include_str!("../fixtures/live/pr_checks_pass_fail_skipping.json");
 const LIVE_CHECKS_PENDING: &str = include_str!("../fixtures/live/pr_checks_pending.json");
 
 fn live_pr(stdout: &str) -> forge::PrInfo {
@@ -380,10 +385,21 @@ fn create_pr_passes_every_user_value_as_a_flag_argument() {
     impl CommandRunner for Capture {
         fn run(&self, _: Option<&Path>, _: &str, args: &[&str]) -> io::Result<CommandOutput> {
             if args == ["--version"] {
-                return Ok(CommandOutput { status: Some(0), stdout: "gh 2".into(), stderr: String::new() });
+                return Ok(CommandOutput {
+                    status: Some(0),
+                    stdout: "gh 2".into(),
+                    stderr: String::new(),
+                });
             }
-            self.0.lock().unwrap().extend(args.iter().map(|a| a.to_string()));
-            Ok(CommandOutput { status: Some(0), stdout: "[]".into(), stderr: String::new() })
+            self.0
+                .lock()
+                .unwrap()
+                .extend(args.iter().map(|a| a.to_string()));
+            Ok(CommandOutput {
+                status: Some(0),
+                stdout: "[]".into(),
+                stderr: String::new(),
+            })
         }
     }
     let gh = GhCli::with_runner(Capture(std::sync::Mutex::new(Vec::new())));
@@ -395,9 +411,19 @@ fn create_pr_passes_every_user_value_as_a_flag_argument() {
     let _ = gh.create_pr(repo(), &req);
 
     let gh_args = gh.runner().0.lock().unwrap().clone();
-    let head = gh_args.iter().position(|a| a == "--head").expect("--head present");
-    assert_eq!(gh_args[head + 1], "--not-a-flag", "branch is a flag *value*");
-    let title = gh_args.iter().position(|a| a == "--title").expect("--title present");
+    let head = gh_args
+        .iter()
+        .position(|a| a == "--head")
+        .expect("--head present");
+    assert_eq!(
+        gh_args[head + 1],
+        "--not-a-flag",
+        "branch is a flag *value*"
+    );
+    let title = gh_args
+        .iter()
+        .position(|a| a == "--title")
+        .expect("--title present");
     assert_eq!(gh_args[title + 1], "-also-not");
     assert!(gh_args.contains(&"--draft".to_string()));
 }

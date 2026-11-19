@@ -107,7 +107,9 @@ impl HarnessWorkspace {
                             .child("Copy")
                             .on_click(cx.listener(move |ws, _, _, cx| {
                                 cx.stop_propagation();
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone()));
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    copy.clone(),
+                                ));
                                 ws.set_note(format!("copied {copy}"));
                                 cx.notify();
                             })),
@@ -218,18 +220,16 @@ impl HarnessWorkspace {
         // The pairing steps open in their own dialog over Settings
         // (`render_add_phone_dialog`).
         if serving {
-            col =
-                col.child(
-                    div()
-                        .flex()
-                        .pb_1()
-                        .child(button(hx, "Add a device").id("remote-add-device").on_click(
-                            cx.listener(|ws, _, _, cx| {
-                                cx.stop_propagation();
-                                ws.remote_open_setup(cx);
-                            }),
-                        )),
-                );
+            col = col.child(
+                div().flex().pb_1().child(
+                    button(hx, "Add a device")
+                        .id("remote-add-device")
+                        .on_click(cx.listener(|ws, _, _, cx| {
+                            cx.stop_propagation();
+                            ws.remote_open_setup(cx);
+                        })),
+                ),
+            );
         } else {
             col = col.child(div().pb_1().text_xs().text_color(hx.tx2).child(if enabled {
                 "Available once Remote control is listening."
@@ -266,7 +266,9 @@ impl HarnessWorkspace {
                 let tab_id = row.tab_id;
                 toggles = toggles.child(
                     div()
-                        .id(gpui::SharedString::from(format!("remote-agent-{i}-{label}")))
+                        .id(gpui::SharedString::from(format!(
+                            "remote-agent-{i}-{label}"
+                        )))
                         .child(chip(label.to_string(), row.marked == on, hx))
                         .on_click(cx.listener(move |ws, _, _, cx| {
                             cx.stop_propagation();
@@ -284,44 +286,38 @@ impl HarnessWorkspace {
                     .pb_1()
                     .child(div().flex_none().w(px(14.0)).child(icon))
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .text_xs()
-                            .child(
-                                // Both texts give way (with …) before the
-                                // On/Off buttons do.
-                                div()
-                                    .flex()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .gap_1p5()
-                                    .child(
-                                        div()
-                                            .flex_shrink_0()
-                                            .max_w(px(160.0))
-                                            .overflow_hidden()
-                                            .text_ellipsis()
-                                            .whitespace_nowrap()
-                                            .text_color(hx.tx0)
-                                            .child(display_title(&row.title, row.kind.is_none())),
-                                    )
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .overflow_hidden()
-                                            .text_ellipsis()
-                                            .whitespace_nowrap()
-                                            .text_color(hx.tx2)
-                                            .child(if row.worktree.is_empty() {
-                                                row.project.clone()
-                                            } else {
-                                                format!("{} · {}", row.project, row.worktree)
-                                            }),
-                                    ),
-                            ),
+                        div().flex_1().min_w_0().flex().flex_col().text_xs().child(
+                            // Both texts give way (with …) before the
+                            // On/Off buttons do.
+                            div()
+                                .flex()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .gap_1p5()
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .max_w(px(160.0))
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .text_color(hx.tx0)
+                                        .child(display_title(&row.title, row.kind.is_none())),
+                                )
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .text_color(hx.tx2)
+                                        .child(if row.worktree.is_empty() {
+                                            row.project.clone()
+                                        } else {
+                                            format!("{} · {}", row.project, row.worktree)
+                                        }),
+                                ),
+                        ),
                     )
                     .child(toggles),
             );
@@ -412,16 +408,13 @@ impl HarnessWorkspace {
                                     .text_color(hx.tx0)
                                     .child(d.name.clone()),
                             )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(hx.tx2)
-                                    .child(if oo_remote::auth::is_idle_expired(d, now) {
-                                        "expired \u{2014} unused for 30 days; pair it again".to_string()
-                                    } else {
-                                        last_seen_text(d.last_seen.as_deref(), now)
-                                    }),
-                            ),
+                            .child(div().text_xs().text_color(hx.tx2).child(
+                                if oo_remote::auth::is_idle_expired(d, now) {
+                                    "expired \u{2014} unused for 30 days; pair it again".to_string()
+                                } else {
+                                    last_seen_text(d.last_seen.as_deref(), now)
+                                },
+                            )),
                     )
                     .child(
                         div()
@@ -671,15 +664,17 @@ impl HarnessWorkspace {
             .child(trust)
             .child(pair)
             .child(
-                div().flex().child(
-                    button(hx, "Done")
-                        .id("remote-setup-done")
-                        .on_click(cx.listener(|ws, _, _, cx| {
-                            cx.stop_propagation();
-                            ws.remote_close_setup();
-                            cx.notify();
-                        })),
-                ),
+                div()
+                    .flex()
+                    .child(
+                        button(hx, "Done")
+                            .id("remote-setup-done")
+                            .on_click(cx.listener(|ws, _, _, cx| {
+                                cx.stop_propagation();
+                                ws.remote_close_setup();
+                                cx.notify();
+                            })),
+                    ),
             )
     }
 }
@@ -688,7 +683,10 @@ impl HarnessWorkspace {
 /// prefix would repeat it.
 pub(crate) fn display_title(title: &str, shell: bool) -> String {
     if shell {
-        let t = title.trim_start_matches('\u{276F}').trim_start_matches('_').trim_start();
+        let t = title
+            .trim_start_matches('\u{276F}')
+            .trim_start_matches('_')
+            .trim_start();
         if !t.is_empty() {
             return t.to_string();
         }
@@ -825,7 +823,10 @@ pub(crate) fn setup_error(status: Option<&ServerStatus>) -> Option<&str> {
     status.and_then(|s| s.setup_error.as_deref())
 }
 
-pub(crate) fn serving_urls<'a>(serve: &RemoteServe, status: Option<&'a ServerStatus>) -> &'a [String] {
+pub(crate) fn serving_urls<'a>(
+    serve: &RemoteServe,
+    status: Option<&'a ServerStatus>,
+) -> &'a [String] {
     match (serve, status) {
         (RemoteServe::Serving, Some(st)) => &st.urls,
         _ => &[],
@@ -944,12 +945,21 @@ mod tests {
             shown_urls(&urls, Some(ip("192.168.86.26")), false),
             (vec!["https://192.168.86.26:7443/".to_string()], 2)
         );
-        assert_eq!(shown_urls(&urls, Some(ip("192.168.86.26")), true), (urls.clone(), 0));
+        assert_eq!(
+            shown_urls(&urls, Some(ip("192.168.86.26")), true),
+            (urls.clone(), 0)
+        );
         // No match (or no main connection): the first address.
-        assert_eq!(shown_urls(&urls, Some(ip("10.0.0.9")), false).0, vec![urls[0].clone()]);
+        assert_eq!(
+            shown_urls(&urls, Some(ip("10.0.0.9")), false).0,
+            vec![urls[0].clone()]
+        );
         assert_eq!(shown_urls(&urls, None, false).0, vec![urls[0].clone()]);
         // "192.168.86.2" must not match "192.168.86.26".
-        assert_eq!(shown_urls(&urls, Some(ip("192.168.86.2")), false).0, vec![urls[0].clone()]);
+        assert_eq!(
+            shown_urls(&urls, Some(ip("192.168.86.2")), false).0,
+            vec![urls[0].clone()]
+        );
         assert_eq!(shown_urls(&urls[..1], None, false), (urls[..1].to_vec(), 0));
     }
 
@@ -964,7 +974,10 @@ mod tests {
             ..ServerStatus::default()
         };
         // The URLs themselves are listed one per row below, each copyable.
-        assert_eq!(status_line(&RemoteServe::Serving, Some(&st), false), "Listening on");
+        assert_eq!(
+            status_line(&RemoteServe::Serving, Some(&st), false),
+            "Listening on"
+        );
         assert_eq!(
             serving_urls(&RemoteServe::Serving, Some(&st)),
             ["https://mac.local:7443/", "https://192.168.1.20:7443/"]

@@ -22,7 +22,10 @@ const TAIL_BYTES: u64 = 256 * 1024;
 
 /// The current activity: the announced tool while its result hasn't landed in
 /// the transcript, otherwise whatever the transcript's newest step says.
-pub fn current(tool: Option<&agent_runtime::ToolCall>, transcript: Option<&Path>) -> Option<String> {
+pub fn current(
+    tool: Option<&agent_runtime::ToolCall>,
+    transcript: Option<&Path>,
+) -> Option<String> {
     let tail = transcript.and_then(read_tail);
     if let Some(tool) = tool {
         let finished = match (&tool.id, &tail) {
@@ -47,7 +50,9 @@ fn read_tail(path: &Path) -> Option<String> {
     let text = String::from_utf8_lossy(&buf);
     // A mid-file start lands inside a line; drop that partial first line.
     Some(if start > 0 {
-        text.split_once('\n').map_or("", |(_, rest)| rest).to_string()
+        text.split_once('\n')
+            .map_or("", |(_, rest)| rest)
+            .to_string()
     } else {
         text.into_owned()
     })
@@ -124,7 +129,13 @@ fn command_head(cmd: &str) -> String {
     // Bare paths read badly; keep only the binary's name.
     let head = head
         .split(' ')
-        .map(|w| if w.contains('/') { w.rsplit('/').next().unwrap_or(w) } else { w })
+        .map(|w| {
+            if w.contains('/') {
+                w.rsplit('/').next().unwrap_or(w)
+            } else {
+                w
+            }
+        })
         .collect::<Vec<_>>()
         .join(" ");
     clip(&head, 24)
@@ -134,8 +145,12 @@ pub fn describe_tool(name: &str, input: &Value) -> String {
     let file = |key| file_name(input, key);
     match name {
         "Read" => file("file_path").map_or("Reading".into(), |f| format!("Reading {f}")),
-        "Edit" | "MultiEdit" => file("file_path").map_or("Editing".into(), |f| format!("Editing {f}")),
-        "NotebookEdit" => file("notebook_path").map_or("Editing a notebook".into(), |f| format!("Editing {f}")),
+        "Edit" | "MultiEdit" => {
+            file("file_path").map_or("Editing".into(), |f| format!("Editing {f}"))
+        }
+        "NotebookEdit" => {
+            file("notebook_path").map_or("Editing a notebook".into(), |f| format!("Editing {f}"))
+        }
         "Write" => file("file_path").map_or("Writing".into(), |f| format!("Writing {f}")),
         "Bash" => match input.get("command").and_then(Value::as_str) {
             Some(cmd) if !command_head(cmd).is_empty() => format!("Running {}", command_head(cmd)),
@@ -180,8 +195,14 @@ mod tests {
 
     #[test]
     fn a_tool_in_flight_is_described() {
-        let tail = tool("Edit", serde_json::json!({ "file_path": "/a/b/workspace.rs" }));
-        assert_eq!(activity_from_tail(&tail).as_deref(), Some("Editing workspace.rs"));
+        let tail = tool(
+            "Edit",
+            serde_json::json!({ "file_path": "/a/b/workspace.rs" }),
+        );
+        assert_eq!(
+            activity_from_tail(&tail).as_deref(),
+            Some("Editing workspace.rs")
+        );
     }
 
     #[test]
@@ -204,15 +225,27 @@ mod tests {
                 "message": { "content": [{ "type": "text", "text": "sub" }] }
             }))
             + "not json at all\n";
-        assert_eq!(activity_from_tail(&tail).as_deref(), Some("Searching for “fn main”"));
+        assert_eq!(
+            activity_from_tail(&tail).as_deref(),
+            Some("Searching for “fn main”")
+        );
     }
 
     #[test]
     fn shell_commands_show_the_program_not_the_noise() {
-        assert_eq!(command_head("cd /very/long/path && RUST_LOG=1 cargo test -q"), "cargo test");
+        assert_eq!(
+            command_head("cd /very/long/path && RUST_LOG=1 cargo test -q"),
+            "cargo test"
+        );
         assert_eq!(command_head("/usr/bin/git status --short"), "git status");
-        let tail = tool("Bash", serde_json::json!({ "command": "cd /x && make run" }));
-        assert_eq!(activity_from_tail(&tail).as_deref(), Some("Running make run"));
+        let tail = tool(
+            "Bash",
+            serde_json::json!({ "command": "cd /x && make run" }),
+        );
+        assert_eq!(
+            activity_from_tail(&tail).as_deref(),
+            Some("Running make run")
+        );
     }
 
     #[test]
@@ -226,13 +259,19 @@ mod tests {
             "type": "assistant",
             "message": { "content": [{ "type": "text", "text": "done" }] }
         }));
-        assert_eq!(activity_from_tail(&text).as_deref(), Some("Writing a reply"));
+        assert_eq!(
+            activity_from_tail(&text).as_deref(),
+            Some("Writing a reply")
+        );
     }
 
     #[test]
     fn mcp_tools_name_the_tool() {
         let tail = tool("mcp__github__create_pull_request", serde_json::json!({}));
-        assert_eq!(activity_from_tail(&tail).as_deref(), Some("Using create pull request"));
+        assert_eq!(
+            activity_from_tail(&tail).as_deref(),
+            Some("Using create pull request")
+        );
     }
 
     #[test]
@@ -244,15 +283,25 @@ mod tests {
             id: Some("toolu_9".into()),
             input: serde_json::json!({ "command": "cargo build" }),
         };
-        std::fs::write(&path, tool("Read", serde_json::json!({ "file_path": "/old.rs" }))).unwrap();
-        assert_eq!(current(Some(&call), Some(&path)).as_deref(), Some("Running cargo build"));
+        std::fs::write(
+            &path,
+            tool("Read", serde_json::json!({ "file_path": "/old.rs" })),
+        )
+        .unwrap();
+        assert_eq!(
+            current(Some(&call), Some(&path)).as_deref(),
+            Some("Running cargo build")
+        );
 
         let done = line(serde_json::json!({
             "type": "user",
             "message": { "content": [{ "type": "tool_result", "tool_use_id": "toolu_9" }] }
         }));
         std::fs::write(&path, done).unwrap();
-        assert_eq!(current(Some(&call), Some(&path)).as_deref(), Some("Thinking"));
+        assert_eq!(
+            current(Some(&call), Some(&path)).as_deref(),
+            Some("Thinking")
+        );
         assert_eq!(current(None, None), None);
     }
 

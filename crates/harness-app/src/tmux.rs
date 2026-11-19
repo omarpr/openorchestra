@@ -103,11 +103,21 @@ pub fn client_args(
 ) -> Vec<String> {
     if attach_only {
         return vec![
-            "set-option".into(), "-t".into(), session.into(), "status".into(), "off".into(),
+            "set-option".into(),
+            "-t".into(),
+            session.into(),
+            "status".into(),
+            "off".into(),
             ";".into(),
-            "set-option".into(), "-t".into(), session.into(), "mouse".into(), "on".into(),
+            "set-option".into(),
+            "-t".into(),
+            session.into(),
+            "mouse".into(),
+            "on".into(),
             ";".into(),
-            "attach-session".into(), "-t".into(), session.into(),
+            "attach-session".into(),
+            "-t".into(),
+            session.into(),
         ];
     }
     let mut args = vec![
@@ -137,9 +147,17 @@ pub fn client_args(
     }
     args.extend([
         ";".into(),
-        "set-option".into(), "-t".into(), session.into(), "status".into(), "off".into(),
+        "set-option".into(),
+        "-t".into(),
+        session.into(),
+        "status".into(),
+        "off".into(),
         ";".into(),
-        "set-option".into(), "-t".into(), session.into(), "mouse".into(), "on".into(),
+        "set-option".into(),
+        "-t".into(),
+        session.into(),
+        "mouse".into(),
+        "on".into(),
     ]);
     if let Some(cmd) = command {
         // Mark the session as an agent's, so a restart can tell a running
@@ -149,12 +167,18 @@ pub fn client_args(
         // re-marks it, which is harmless.
         args.extend([
             ";".into(),
-            "set-option".into(), "-t".into(), session.into(), AGENT_OPTION.into(), cmd.label.clone(),
+            "set-option".into(),
+            "-t".into(),
+            session.into(),
+            AGENT_OPTION.into(),
+            cmd.label.clone(),
         ]);
     }
     args.extend([
         ";".into(),
-        "attach-session".into(), "-t".into(), session.into(),
+        "attach-session".into(),
+        "-t".into(),
+        session.into(),
     ]);
     args
 }
@@ -233,23 +257,40 @@ pub(crate) fn wait_for_session(name: &str) {
     }
 }
 
-/// `(session_name, pane_pid)` for every pane the tmux server holds. Empty on
-/// any error (no server, tmux missing) — the resource band then attributes
-/// nothing to worktrees and shows the base-app total only.
-pub fn list_session_panes() -> Vec<(String, u32)> {
-    let out = run_bounded(&["list-panes", "-a", "-F", "#{session_name} #{pane_pid}"], LIST_TIMEOUT);
+/// `(session_name, pane_pid)` for every pane the tmux server holds.
+///
+/// `Err` when tmux is missing, the server does not answer, or the command
+/// fails. An empty `Ok` means tmux answered and has no panes. Callers that
+/// decide an agent is dead must not treat those the same: an empty list is
+/// evidence, a failure is not.
+pub fn list_session_panes() -> Result<Vec<(String, u32)>, ()> {
+    panes_from_listing(run_bounded(
+        &["list-panes", "-a", "-F", "#{session_name} #{pane_pid}"],
+        LIST_TIMEOUT,
+    ))
+}
+
+fn panes_from_listing(out: Option<std::process::Output>) -> Result<Vec<(String, u32)>, ()> {
     match out {
-        Some(o) if o.status.success() => {
-            parse_session_panes(&String::from_utf8_lossy(&o.stdout))
-        }
-        _ => Vec::new(),
+        Some(output) if output.status.success() => Ok(parse_session_panes(
+            &String::from_utf8_lossy(&output.stdout),
+        )),
+        _ => Err(()),
     }
 }
 
 /// `(session_name, pane_start_command)` for every pane the tmux server holds.
 /// Tab-separated: a start command can contain spaces but never a tab of ours.
 pub fn session_start_commands() -> Vec<(String, String)> {
-    let out = run_bounded(&["list-panes", "-a", "-F", "#{session_name}\t#{pane_start_command}"], LIST_TIMEOUT);
+    let out = run_bounded(
+        &[
+            "list-panes",
+            "-a",
+            "-F",
+            "#{session_name}\t#{pane_start_command}",
+        ],
+        LIST_TIMEOUT,
+    );
     match out {
         Some(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
             .lines()
@@ -285,11 +326,12 @@ pub fn orphan_tab_ids(worktree_key: &str, live: &[String], known: &[u64]) -> Vec
 /// build cannot name; such a session still reattaches, as a shell tab.
 pub fn agent_from_start_command(cmd: &str) -> Option<(AgentKind, &'static str)> {
     use AgentKind as K;
-    const PROGRAMS: [(&str, K); 5] = [
+    const PROGRAMS: [(&str, K); 6] = [
         ("claude", K::ClaudeCode),
         ("codex", K::Codex),
         ("opencode", K::OpenCode),
         ("kimi", K::Kimi),
+        ("grok", K::Grok),
         ("pi", K::Pi),
     ];
     PROGRAMS.into_iter().find_map(|(prog, kind)| {
@@ -315,14 +357,18 @@ pub struct PaneInfo {
 /// stopped on a hiccup.
 pub fn pane_commands() -> Option<Vec<PaneInfo>> {
     let out = run_bounded(
-        &["list-panes", "-a", "-F", "#{session_name}\t#{pane_current_command}\t#{@oo_agent}\t#{pane_start_command}"],
+        &[
+            "list-panes",
+            "-a",
+            "-F",
+            "#{session_name}\t#{pane_current_command}\t#{@oo_agent}\t#{pane_start_command}",
+        ],
         LIST_TIMEOUT,
     )?;
     if !out.status.success() {
         // No server at all is a real answer: nothing is running.
         let err = String::from_utf8_lossy(&out.stderr);
-        return (err.contains("no server running") || err.contains("No such file"))
-            .then(Vec::new);
+        return (err.contains("no server running") || err.contains("No such file")).then(Vec::new);
     }
     Some(
         String::from_utf8_lossy(&out.stdout)
@@ -334,7 +380,11 @@ pub fn pane_commands() -> Option<Vec<PaneInfo>> {
                 let tag = it.next().unwrap_or("");
                 let start = it.next().unwrap_or("");
                 let agent_session = !tag.is_empty() || agent_from_start_command(start).is_some();
-                Some(PaneInfo { session, current, agent_session })
+                Some(PaneInfo {
+                    session,
+                    current,
+                    agent_session,
+                })
             })
             .collect(),
     )
@@ -352,16 +402,18 @@ pub fn is_shell(command: &str) -> bool {
 /// Which of `expected` pane keys have no agent running. A key has a running
 /// agent when one of its sessions was started with an agent command and is
 /// not back at its shell (the agent quit, leaving the session's shell).
-pub fn missing_agent_keys(expected: &[String], panes: &[PaneInfo]) -> std::collections::BTreeSet<String> {
+pub fn missing_agent_keys(
+    expected: &[String],
+    panes: &[PaneInfo],
+) -> std::collections::BTreeSet<String> {
     expected
         .iter()
         .filter(|key| {
             let prefix = session_prefix(key);
             !panes.iter().any(|p| {
-                p.session
-                    .strip_prefix(&prefix)
-                    .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
-                    && p.agent_session
+                p.session.strip_prefix(&prefix).is_some_and(|rest| {
+                    !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
+                }) && p.agent_session
                     && !is_shell(&p.current)
             })
         })
@@ -400,7 +452,10 @@ pub fn run_bounded(args: &[&str], timeout: std::time::Duration) -> Option<std::p
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                log::warn!("tmux {} timed out after {timeout:?}", args.first().unwrap_or(&""));
+                log::warn!(
+                    "tmux {} timed out after {timeout:?}",
+                    args.first().unwrap_or(&"")
+                );
                 return None;
             }
         }
@@ -413,7 +468,11 @@ pub fn run_bounded(args: &[&str], timeout: std::time::Duration) -> Option<std::p
     if let Some(mut err) = child.stderr.take() {
         let _ = err.read_to_end(&mut stderr);
     }
-    Some(std::process::Output { status, stdout, stderr })
+    Some(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 /// Listing/killing sessions: these run on the UI thread during restore.
@@ -427,8 +486,11 @@ const SEND_KEYS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3)
 /// skipped if the text did not go through, so a half-delivered line is never
 /// submitted (and Enter alone never submits what the user was typing).
 pub fn send_keys(session: &str, command: &str) -> bool {
-    let typed = run_bounded(&["send-keys", "-t", session, "-l", command], SEND_KEYS_TIMEOUT)
-        .is_some_and(|o| o.status.success());
+    let typed = run_bounded(
+        &["send-keys", "-t", session, "-l", command],
+        SEND_KEYS_TIMEOUT,
+    )
+    .is_some_and(|o| o.status.success());
     if !typed {
         log::warn!("send-keys to {session} failed or timed out; not pressing Enter");
         return false;
@@ -498,7 +560,8 @@ mod tests {
         let n = session_name("acme/fix.bug:v2", 7);
         assert!(n.starts_with("harness_"), "got {n}");
         assert!(
-            n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+            n.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
             "illegal char in {n}"
         );
         assert!(n.ends_with("_7"), "tab id should be in the name: {n}");
@@ -512,8 +575,35 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_pane_listing_is_not_an_empty_session_list() {
+        let failed = std::process::Command::new("sh")
+            .args(["-c", "exit 1"])
+            .output()
+            .unwrap();
+        let empty = std::process::Command::new("sh")
+            .args(["-c", "true"])
+            .output()
+            .unwrap();
+        let rows = std::process::Command::new("sh")
+            .args(["-c", "printf 'harness_wt_1 4321\\n'"])
+            .output()
+            .unwrap();
+        assert!(panes_from_listing(None).is_err());
+        assert!(panes_from_listing(Some(failed)).is_err());
+        assert_eq!(
+            panes_from_listing(Some(empty)).unwrap(),
+            Vec::<(String, u32)>::new()
+        );
+        assert_eq!(
+            panes_from_listing(Some(rows)).unwrap(),
+            vec![("harness_wt_1".to_string(), 4321)]
+        );
+    }
+
+    #[test]
     fn parse_session_panes_pairs_names_with_pids_and_skips_junk() {
-        let out = "harness_wtA_1 4321\nharness_wtA_2 4400\nmy-session 12\n\n  \nbroken-line\nname 99x\n";
+        let out =
+            "harness_wtA_1 4321\nharness_wtA_2 4400\nmy-session 12\n\n  \nbroken-line\nname 99x\n";
         let panes = parse_session_panes(out);
         assert_eq!(
             panes,
@@ -571,8 +661,16 @@ mod tests {
         let a = client_args("harness_k_7", Path::new("/repo"), Some(&c), false, &[]);
         let first_sep = a.iter().position(|x| x == ";").expect("command separator");
         let (program, args) = worktrees::interactive_login_command(&agent_script(&c));
-        assert_eq!(a[first_sep - 3], program, "must be the user's shell, not sh: {a:?}");
-        assert_eq!(a[first_sep - 2], args[0], "must be login + interactive: {a:?}");
+        assert_eq!(
+            a[first_sep - 3],
+            program,
+            "must be the user's shell, not sh: {a:?}"
+        );
+        assert_eq!(
+            a[first_sep - 2],
+            args[0],
+            "must be login + interactive: {a:?}"
+        );
         assert_ne!(a[first_sep - 3], "sh", "sh reorders PATH via path_helper");
         assert_ne!(a[first_sep - 2], "-lc", "-lc skips .zshrc");
     }
@@ -581,14 +679,18 @@ mod tests {
     // the sub-slice `set-option -t NAME status off` must appear, and the session
     // must never be told `status on` (a change that would outlive the pane).
     fn hides_status_bar(a: &[String], session: &str) -> bool {
-        a.windows(5).any(|w| w == ["set-option", "-t", session, "status", "off"])
-            && !a.windows(5).any(|w| w == ["set-option", "-t", session, "status", "on"])
+        a.windows(5)
+            .any(|w| w == ["set-option", "-t", session, "status", "off"])
+            && !a
+                .windows(5)
+                .any(|w| w == ["set-option", "-t", session, "status", "on"])
     }
 
     // Scroll works in a tmux pane only when the session requests mouse
     // reporting; the client sets it per-session, scoped like `status off`.
     fn enables_mouse(a: &[String], session: &str) -> bool {
-        a.windows(5).any(|w| w == ["set-option", "-t", session, "mouse", "on"])
+        a.windows(5)
+            .any(|w| w == ["set-option", "-t", session, "mouse", "on"])
     }
 
     #[test]
@@ -609,7 +711,10 @@ mod tests {
         // Ends by attaching as the pane's foreground client.
         assert_eq!(a[a.len() - 3], "attach-session");
         assert_eq!(a[a.len() - 1], "harness_k_7");
-        assert!(hides_status_bar(&a, "harness_k_7"), "status bar not hidden: {a:?}");
+        assert!(
+            hides_status_bar(&a, "harness_k_7"),
+            "status bar not hidden: {a:?}"
+        );
     }
 
     #[test]
@@ -623,7 +728,10 @@ mod tests {
             !a.iter().any(|x| x == "-lc" || x == "-lic"),
             "shell tab must not be wrapped in a `-c` shell: {a:?}"
         );
-        assert!(hides_status_bar(&a, "harness_k_9"), "status bar not hidden: {a:?}");
+        assert!(
+            hides_status_bar(&a, "harness_k_9"),
+            "status bar not hidden: {a:?}"
+        );
     }
 
     #[test]
@@ -640,7 +748,10 @@ mod tests {
             .filter(|(i, _)| i > &0 && a[i - 1] == "-e")
             .map(|(_, v)| v)
             .collect();
-        assert_eq!(es, vec!["HARNESS_BRANCH=feat/x", "HARNESS_WORKTREE=/wt/a b"]);
+        assert_eq!(
+            es,
+            vec!["HARNESS_BRANCH=feat/x", "HARNESS_WORKTREE=/wt/a b"]
+        );
         // On new-session, before the command sequence separator.
         let first_sep = a.iter().position(|x| x == ";").expect("separator");
         assert!(a[..first_sep].iter().any(|x| x == "-e"), "{a:?}");
@@ -661,15 +772,28 @@ mod tests {
         assert_eq!(
             a,
             vec![
-                "set-option", "-t", "harness_k_7", "status", "off",
+                "set-option",
+                "-t",
+                "harness_k_7",
+                "status",
+                "off",
                 ";",
-                "set-option", "-t", "harness_k_7", "mouse", "on",
+                "set-option",
+                "-t",
+                "harness_k_7",
+                "mouse",
+                "on",
                 ";",
-                "attach-session", "-t", "harness_k_7",
+                "attach-session",
+                "-t",
+                "harness_k_7",
             ]
         );
         // No new-session on restore: it would attach early and trap the pane.
-        assert!(!a.iter().any(|x| x == "new-session"), "restore must not re-create: {a:?}");
+        assert!(
+            !a.iter().any(|x| x == "new-session"),
+            "restore must not re-create: {a:?}"
+        );
     }
 
     #[test]
@@ -680,11 +804,20 @@ mod tests {
         let fresh_agent = client_args("harness_k_1", Path::new("/repo"), Some(&c), false, &[]);
         let fresh_shell = client_args("harness_k_2", Path::new("/repo"), None, false, &[]);
         let restored = client_args("harness_k_3", Path::new("/repo"), None, true, &[]);
-        assert!(enables_mouse(&fresh_agent, "harness_k_1"), "{fresh_agent:?}");
-        assert!(enables_mouse(&fresh_shell, "harness_k_2"), "{fresh_shell:?}");
+        assert!(
+            enables_mouse(&fresh_agent, "harness_k_1"),
+            "{fresh_agent:?}"
+        );
+        assert!(
+            enables_mouse(&fresh_shell, "harness_k_2"),
+            "{fresh_shell:?}"
+        );
         assert!(enables_mouse(&restored, "harness_k_3"), "{restored:?}");
         // Scoped to our session only — never a global `set -g`.
-        assert!(!fresh_agent.iter().any(|x| x == "-g"), "must not touch global config");
+        assert!(
+            !fresh_agent.iter().any(|x| x == "-g"),
+            "must not touch global config"
+        );
     }
 
     #[test]
@@ -729,9 +862,20 @@ mod tests {
     #[test]
     fn agent_is_read_from_the_quoted_program_in_the_start_command() {
         let claude = r#"/bin/zsh -lic "HARNESS_TASK_CONTEXT='/x/agent-context.md' '/Users/u/.local/bin/claude' '--permission-mode' 'auto'; exec \"\$SHELL\" -li""#;
-        assert_eq!(agent_from_start_command(claude).map(|a| a.0), Some(AgentKind::ClaudeCode));
+        assert_eq!(
+            agent_from_start_command(claude).map(|a| a.0),
+            Some(AgentKind::ClaudeCode)
+        );
         let pi = r#"/bin/zsh -lic "'/opt/bin/pi' '--mode' 'tui'; exec \"\$SHELL\" -li""#;
-        assert_eq!(agent_from_start_command(pi).map(|a| a.0), Some(AgentKind::Pi));
+        assert_eq!(
+            agent_from_start_command(pi).map(|a| a.0),
+            Some(AgentKind::Pi)
+        );
+        let grok = r#"/bin/zsh -lic "'/Users/u/.grok/bin/grok' '--permission-mode' 'auto'; exec \"\$SHELL\" -li""#;
+        assert_eq!(
+            agent_from_start_command(grok).map(|a| a.0),
+            Some(AgentKind::Grok)
+        );
         assert_eq!(agent_from_start_command(""), None);
         // A path that merely contains a program name is not that program.
         assert_eq!(agent_from_start_command("'/home/pilot/run.sh'"), None);
@@ -756,7 +900,10 @@ mod tests {
             &["-L", &sock, "wait-for", "never"],
             std::time::Duration::from_millis(300),
         );
-        let _ = run_bounded(&["-L", &sock, "kill-server"], std::time::Duration::from_secs(2));
+        let _ = run_bounded(
+            &["-L", &sock, "kill-server"],
+            std::time::Duration::from_secs(2),
+        );
         assert!(got.is_none(), "a hung tmux client must time out");
         assert!(start.elapsed() < std::time::Duration::from_secs(2));
     }
@@ -772,21 +919,58 @@ mod tests {
         let expected = vec![key.clone()];
         // Running: an agent session whose foreground is the agent (Claude
         // shows its version as the process name).
-        assert!(missing_agent_keys(&expected, &[row("harness_task-t-member-repo-t_7", "2.1.325", true)]).is_empty());
+        assert!(
+            missing_agent_keys(
+                &expected,
+                &[row("harness_task-t-member-repo-t_7", "2.1.325", true)]
+            )
+            .is_empty()
+        );
         // The agent quit: same session, back at its shell.
-        assert_eq!(missing_agent_keys(&expected, &[row("harness_task-t-member-repo-t_7", "zsh", true)]).len(), 1);
-        assert_eq!(missing_agent_keys(&expected, &[row("harness_task-t-member-repo-t_7", "-zsh", true)]).len(), 1);
+        assert_eq!(
+            missing_agent_keys(
+                &expected,
+                &[row("harness_task-t-member-repo-t_7", "zsh", true)]
+            )
+            .len(),
+            1
+        );
+        assert_eq!(
+            missing_agent_keys(
+                &expected,
+                &[row("harness_task-t-member-repo-t_7", "-zsh", true)]
+            )
+            .len(),
+            1
+        );
         // Only a shell tab (e.g. after a reboot), even one running something.
-        assert_eq!(missing_agent_keys(&expected, &[row("harness_task-t-member-repo-t_3", "cargo", false)]).len(), 1);
+        assert_eq!(
+            missing_agent_keys(
+                &expected,
+                &[row("harness_task-t-member-repo-t_3", "cargo", false)]
+            )
+            .len(),
+            1
+        );
         // Another key's agent does not count.
-        assert_eq!(missing_agent_keys(&expected, &[row("harness_task-t-member-other-t_7", "2.1.325", true)]).len(), 1);
+        assert_eq!(
+            missing_agent_keys(
+                &expected,
+                &[row("harness_task-t-member-other-t_7", "2.1.325", true)]
+            )
+            .len(),
+            1
+        );
         // Nothing at all.
         assert_eq!(missing_agent_keys(&expected, &[]).len(), 1);
     }
 
     #[test]
     fn agent_sessions_are_tagged_shell_sessions_are_not() {
-        let tagged = |args: &[String]| args.windows(2).any(|w| w[0] == AGENT_OPTION && w[1] == "pi");
+        let tagged = |args: &[String]| {
+            args.windows(2)
+                .any(|w| w[0] == AGENT_OPTION && w[1] == "pi")
+        };
         let agent = client_args("s_1", Path::new("/tmp"), Some(&cmd()), false, &[]);
         assert!(tagged(&agent), "{agent:?}");
         // The tag is set before attaching (attach-session blocks until detach).
@@ -842,14 +1026,23 @@ mod tests {
 
         let key = "task:t:member:repo/t".to_string();
         let session = session_name(&key, 7);
-        let cmd = AgentCommand { program: fake.clone(), args: vec![], env: vec![], label: "claude".into() };
+        let cmd = AgentCommand {
+            program: fake.clone(),
+            args: vec![],
+            env: vec![],
+            label: "claude".into(),
+        };
         let mut args = client_args(&session, dir.path(), Some(&cmd), false, &[]);
         // Everything before attach-session (which needs a terminal).
         let attach = args.iter().position(|a| a == "attach-session").unwrap();
         args.truncate(attach - 1);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         let out = run_bounded(&argv, Duration::from_secs(5)).expect("tmux ran");
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
 
         let wait_for = |want_missing: bool| {
             let deadline = Instant::now() + Duration::from_secs(15);
@@ -859,17 +1052,30 @@ mod tests {
                 if missing.contains(&key) == want_missing {
                     return panes;
                 }
-                assert!(Instant::now() < deadline, "never became missing={want_missing}: {panes:?}");
+                assert!(
+                    Instant::now() < deadline,
+                    "never became missing={want_missing}: {panes:?}"
+                );
                 std::thread::sleep(Duration::from_millis(200));
             }
         };
         let running = wait_for(false);
-        assert!(running.iter().any(|p| p.session == session && p.agent_session), "{running:?}");
+        assert!(
+            running
+                .iter()
+                .any(|p| p.session == session && p.agent_session),
+            "{running:?}"
+        );
 
         // The agent quits: the session falls back to its login shell.
         std::fs::write(&quit, "").unwrap();
         let after = wait_for(true);
-        assert!(after.iter().any(|p| p.session == session && is_shell(&p.current)), "{after:?}");
+        assert!(
+            after
+                .iter()
+                .any(|p| p.session == session && is_shell(&p.current)),
+            "{after:?}"
+        );
 
         let _ = run_bounded(&["kill-server"], Duration::from_secs(2));
     }

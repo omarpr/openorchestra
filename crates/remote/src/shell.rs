@@ -187,7 +187,10 @@ pub fn collect(state_dir: &Path, live: &HashSet<String>, now: SystemTime) -> io:
     if !dir.is_dir() {
         return Ok(());
     }
-    let live: HashSet<_> = live.iter().map(|session| crate::session_file_stem(session)).collect();
+    let live: HashSet<_> = live
+        .iter()
+        .map(|session| crate::session_file_stem(session))
+        .collect();
     for entry in fs::read_dir(&dir)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();

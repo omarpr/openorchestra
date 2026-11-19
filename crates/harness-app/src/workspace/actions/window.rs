@@ -8,7 +8,12 @@ impl HarnessWorkspace {
     ///
     /// 6px wide with a 1px visible line: narrower than this and it is fiddly to
     /// grab, wider and it reads as a gap in the chrome.
-    pub(crate) fn splitter(&self, hx: &HarnessTheme, target: Drag, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn splitter(
+        &self,
+        hx: &HarnessTheme,
+        target: Drag,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         // Both remaining splitters are vertical dividers between columns.
         let vertical = true;
         let active = self.drag.map(|d| d.target) == Some(target);
@@ -44,7 +49,11 @@ impl HarnessWorkspace {
                     }
                     ws.drag = Some(DragState {
                         target,
-                        start: if vertical { ev.position.x } else { ev.position.y },
+                        start: if vertical {
+                            ev.position.x
+                        } else {
+                            ev.position.y
+                        },
                         start_value,
                     });
                     cx.notify();
@@ -239,8 +248,15 @@ impl HarnessWorkspace {
     }
 
     /// One captured chord while a shortcut row is armed.
-    pub(crate) fn rebind_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.rebinding.clone() else { return };
+    pub(crate) fn rebind_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(id) = self.rebinding.clone() else {
+            return;
+        };
         let ks = &event.keystroke;
         if ks.key == "escape" && !ks.modifiers.modified() {
             self.rebinding = None;
@@ -327,7 +343,9 @@ impl HarnessWorkspace {
                 ::theme::GlobalTheme::update_theme(cx, zed.clone());
                 // Parsing is not coloring (see harness_zed_theme::install):
                 // the registry's HighlightMaps rebuild from the new theme.
-                ::workspace::AppState::global(cx).languages.set_theme(zed.clone());
+                ::workspace::AppState::global(cx)
+                    .languages
+                    .set_theme(zed.clone());
                 let hx = crate::harness_zed_theme::harness_from_zed(&zed, font_ui, font_mono);
                 cx.set_global(hx);
                 name

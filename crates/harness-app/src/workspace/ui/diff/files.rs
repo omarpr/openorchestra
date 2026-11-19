@@ -31,7 +31,14 @@ impl HarnessWorkspace {
             files.flex_1()
         };
         if self.diff.files.is_empty() {
-            files = files.child(div().px_2().py_1().text_xs().text_color(hx.tx2).child("no changes vs merge-base"));
+            files = files.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_xs()
+                    .text_color(hx.tx2)
+                    .child("no changes vs merge-base"),
+            );
         } else if !self.unified_diff.files.is_empty() {
             // Unified task diff: group by project instead of prefixing every
             // path with the repo name.
@@ -193,8 +200,7 @@ impl HarnessWorkspace {
                         .tooltip(tip("edit file"))
                         .hover(|d| d.text_color(hx.accent))
                         .child(
-                            ::ui::Icon::new(::ui::IconName::File)
-                                .size(::ui::IconSize::Indicator),
+                            ::ui::Icon::new(::ui::IconName::File).size(::ui::IconSize::Indicator),
                         )
                         .on_click(cx.listener(move |ws, _, window, cx| {
                             cx.stop_propagation();
@@ -251,28 +257,31 @@ impl HarnessWorkspace {
                         _ => label.text_ellipsis_middle().child(display_path.to_string()),
                     }
                 })
-                .when(open && crate::markdown_preview::is_markdown(&md_check), |d| {
-                    let previewing =
-                        self.md_preview.as_ref().is_some_and(|(f, _)| f == &md_path);
-                    let p = md_path.clone();
-                    d.child(
-                        div()
-                            .id(("md-toggle", i))
-                            .flex_none()
-                            .px_1()
-                            .rounded_md()
-                            .text_xs()
-                            .text_color(if previewing { hx.accent } else { hx.tx2 })
-                            .cursor_pointer()
-                            .tooltip(tip("Toggle Markdown preview"))
-                            .hover(|h| h.bg(hx.surface_hover))
-                            .child(if previewing { "◨" } else { "◧" })
-                            .on_click(cx.listener(move |ws, _, _, cx| {
-                                cx.stop_propagation();
-                                ws.toggle_md_preview(&p, cx);
-                            })),
-                    )
-                })
+                .when(
+                    open && crate::markdown_preview::is_markdown(&md_check),
+                    |d| {
+                        let previewing =
+                            self.md_preview.as_ref().is_some_and(|(f, _)| f == &md_path);
+                        let p = md_path.clone();
+                        d.child(
+                            div()
+                                .id(("md-toggle", i))
+                                .flex_none()
+                                .px_1()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(if previewing { hx.accent } else { hx.tx2 })
+                                .cursor_pointer()
+                                .tooltip(tip("Toggle Markdown preview"))
+                                .hover(|h| h.bg(hx.surface_hover))
+                                .child(if previewing { "◨" } else { "◧" })
+                                .on_click(cx.listener(move |ws, _, _, cx| {
+                                    cx.stop_propagation();
+                                    ws.toggle_md_preview(&p, cx);
+                                })),
+                        )
+                    },
+                )
                 .child(
                     div()
                         .flex_none()
@@ -358,8 +367,15 @@ impl HarnessWorkspace {
         // collapses to a ~30px strip with the pane empty beneath it. It looks
         // like the diff failed to load; it is actually the list doing exactly
         // what an auto height asks of it.
-        let container =
-            div().id("diff-focused").flex().flex_col().flex_1().h_full().min_w_0().min_h_0().p_1();
+        let container = div()
+            .id("diff-focused")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .h_full()
+            .min_w_0()
+            .min_h_0()
+            .p_1();
         match self.md_preview.as_ref().filter(|(f, _)| f == &file) {
             Some((_, md)) => container
                 .overflow_scroll()

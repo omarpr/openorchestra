@@ -5,13 +5,19 @@ use super::super::*;
 
 impl HarnessWorkspace {
     /// Push `feat/{slug}` into the branch field placeholder when the name changes.
-    pub(crate) fn sync_new_task_branch_placeholder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn sync_new_task_branch_placeholder(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let auto = self.new_task.as_ref().map(|dialog| {
             let name = dialog.name.read(cx).text(cx);
             format!("feat/{}", task_name_slug(name.trim()))
         });
         let Some(auto) = auto else { return };
-        let Some(dialog) = self.new_task.as_mut() else { return };
+        let Some(dialog) = self.new_task.as_mut() else {
+            return;
+        };
         if dialog.auto_branch_shown == auto {
             return;
         }
@@ -46,178 +52,190 @@ impl HarnessWorkspace {
                 .child(label.to_string())
         };
 
-        let card = div()
-            .id("new-task-card")
-            .w(px(480.0))
-            .max_h(px(640.0))
-            .flex()
-            .flex_col()
-            .gap_3()
-            .p_4()
-            .rounded_lg()
-            .bg(hx.surface2)
-            .border_1()
-            .border_color(hx.border2)
-            .shadow_lg()
-            .key_context("HarnessInput")
-            .on_action(cx.listener(Self::confirm_edit))
-            .on_action(cx.listener(Self::cancel_edit))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
-            )
-            .on_click(|_, _, cx| cx.stop_propagation())
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_lg()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(hx.tx0)
-                            .child(if is_worktree { "New worktree" } else { "New task" }),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .child(self.render_new_task_info(hx, is_worktree))
-                            .child(
-                                div()
-                                    .id("new-task-close")
-                                    .px_2()
-                                    .rounded_md()
-                                    .text_sm()
-                                    .text_color(hx.tx2)
-                                    .cursor_pointer()
-                                    .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
-                                    .child("✕")
-                                    .on_click(cx.listener(|ws, _, window, cx| {
-                                        ws.close_new_task(window, cx);
-                                    })),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(field_label("Name"))
-                    .child(self.render_input(hx, name_editor, cx)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(field_label(if is_worktree { "Brief (optional)" } else { "Brief" }))
-                    .child(self.render_multiline_input(hx, brief_editor, cx))
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .text_color(hx.tx2)
-                            .child(if is_worktree {
+        let card =
+            div()
+                .id("new-task-card")
+                .w(px(480.0))
+                .max_h(px(640.0))
+                .flex()
+                .flex_col()
+                .gap_3()
+                .p_4()
+                .rounded_lg()
+                .bg(hx.surface2)
+                .border_1()
+                .border_color(hx.border2)
+                .shadow_lg()
+                .key_context("HarnessInput")
+                .on_action(cx.listener(Self::confirm_edit))
+                .on_action(cx.listener(Self::cancel_edit))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
+                )
+                .on_click(|_, _, cx| cx.stop_propagation())
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_lg()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(hx.tx0)
+                                .child(if is_worktree {
+                                    "New worktree"
+                                } else {
+                                    "New task"
+                                }),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(self.render_new_task_info(hx, is_worktree))
+                                .child(
+                                    div()
+                                        .id("new-task-close")
+                                        .px_2()
+                                        .rounded_md()
+                                        .text_sm()
+                                        .text_color(hx.tx2)
+                                        .cursor_pointer()
+                                        .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
+                                        .child("✕")
+                                        .on_click(cx.listener(|ws, _, window, cx| {
+                                            ws.close_new_task(window, cx);
+                                        })),
+                                ),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(field_label("Name"))
+                        .child(self.render_input(hx, name_editor, cx)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(field_label(if is_worktree {
+                            "Brief (optional)"
+                        } else {
+                            "Brief"
+                        }))
+                        .child(self.render_multiline_input(hx, brief_editor, cx))
+                        .child(div().text_size(px(10.0)).text_color(hx.tx2).child(
+                            if is_worktree {
                                 "Given to the agent as its starting prompt."
                             } else {
                                 "Shared with every agent as the starting prompt."
-                            }),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(field_label("Branch"))
-                    .child(self.render_input(hx, branch_editor, cx))
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .text_color(hx.tx2)
-                            .child("Leave empty to use the placeholder name."),
-                    ),
-            )
-            .child(match &worktree_for {
-                // One project, fixed by where `+` was clicked: shown, not picked.
-                Some(repo) => div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(field_label("Project"))
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_family(hx.font_mono)
-                            .text_color(hx.tx1)
-                            .child(repo.clone()),
-                    ),
-                None => div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .min_h_0()
-                    .child(field_label("Projects"))
-                    .child(
-                        div()
-                            .id("new-task-projects")
-                            .flex()
-                            .flex_col()
-                            .min_h_0()
-                            .max_h(px(180.0))
-                            .overflow_y_scroll()
-                            .child(self.render_new_task_members(hx, cx)),
-                    ),
-            })
-            .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .mt_1()
-                    .child(
-                        div()
-                            .id("new-task-cancel")
-                            .flex_1()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .h(px(34.0))
-                            .rounded_md()
-                            .border_1()
-                            .border_color(hx.border2)
-                            .bg(hx.surface)
-                            .text_sm()
-                            .text_color(hx.tx0)
-                            .cursor_pointer()
-                            .hover(|d| d.border_color(hx.border).text_color(hx.tx0))
-                            .child("Cancel")
-                            .on_click(cx.listener(|ws, _, window, cx| ws.close_new_task(window, cx))),
-                    )
-                    .child(
-                        div()
-                            .id("new-task-create")
-                            .flex_1()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .h(px(34.0))
-                            .rounded_md()
-                            .border_1()
-                            .border_color(hx.accent)
-                            .bg(tint(hx.accent, 0.16))
-                            .text_sm()
-                            .text_color(hx.accent)
-                            .cursor_pointer()
-                            .hover(|d| d.border_color(hx.accent).text_color(hx.accent))
-                            .child(if is_worktree { "Create worktree" } else { "Create" })
-                            .on_click(cx.listener(|ws, _, window, cx| {
-                                ws.submit_new_task(window, cx);
-                            })),
-                    ),
-            );
+                            },
+                        )),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(field_label("Branch"))
+                        .child(self.render_input(hx, branch_editor, cx))
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(hx.tx2)
+                                .child("Leave empty to use the placeholder name."),
+                        ),
+                )
+                .child(match &worktree_for {
+                    // One project, fixed by where `+` was clicked: shown, not picked.
+                    Some(repo) => div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(field_label("Project"))
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_family(hx.font_mono)
+                                .text_color(hx.tx1)
+                                .child(repo.clone()),
+                        ),
+                    None => div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .min_h_0()
+                        .child(field_label("Projects"))
+                        .child(
+                            div()
+                                .id("new-task-projects")
+                                .flex()
+                                .flex_col()
+                                .min_h_0()
+                                .max_h(px(180.0))
+                                .overflow_y_scroll()
+                                .child(self.render_new_task_members(hx, cx)),
+                        ),
+                })
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .mt_1()
+                        .child(
+                            div()
+                                .id("new-task-cancel")
+                                .flex_1()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .h(px(34.0))
+                                .rounded_md()
+                                .border_1()
+                                .border_color(hx.border2)
+                                .bg(hx.surface)
+                                .text_sm()
+                                .text_color(hx.tx0)
+                                .cursor_pointer()
+                                .hover(|d| d.border_color(hx.border).text_color(hx.tx0))
+                                .child("Cancel")
+                                .on_click(
+                                    cx.listener(|ws, _, window, cx| ws.close_new_task(window, cx)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("new-task-create")
+                                .flex_1()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .h(px(34.0))
+                                .rounded_md()
+                                .border_1()
+                                .border_color(hx.accent)
+                                .bg(tint(hx.accent, 0.16))
+                                .text_sm()
+                                .text_color(hx.accent)
+                                .cursor_pointer()
+                                .hover(|d| d.border_color(hx.accent).text_color(hx.accent))
+                                .child(if is_worktree {
+                                    "Create worktree"
+                                } else {
+                                    "Create"
+                                })
+                                .on_click(cx.listener(|ws, _, window, cx| {
+                                    ws.submit_new_task(window, cx);
+                                })),
+                        ),
+                );
 
         div()
             .id("new-task-backdrop")
@@ -260,7 +278,11 @@ impl HarnessWorkspace {
             .child("ⓘ")
     }
 
-    fn render_new_task_members(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_new_task_members(
+        &self,
+        hx: &HarnessTheme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         // One row per project, previewing the post-create member list: checkbox
         // for include, and a Home radio only while a single project is in. With
         // two or more the task's coordinator leads and every repo is a peer, so

@@ -142,7 +142,9 @@ impl AgentRuntime for OpenCodeRuntime {
             launcher.to_str(),
             command.program.to_str(),
         ) {
-            command.args.splice(..0, [launcher.to_owned(), program.to_owned()]);
+            command
+                .args
+                .splice(..0, [launcher.to_owned(), program.to_owned()]);
             command.program = node;
         }
         command

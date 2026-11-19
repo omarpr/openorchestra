@@ -65,11 +65,18 @@ impl WorkspaceData {
                 .chain(repo.worktrees.iter().map(|wt| &wt.branch))
                 .map(|branch| (&repo.repo_root, branch))
         });
-        let task_branches = self.tasks.iter().flat_map(|task| &task.members)
+        let task_branches = self
+            .tasks
+            .iter()
+            .flat_map(|task| &task.members)
             .filter_map(|member| Some((member.repo_root.as_ref()?, &member.branch)));
-        project_branches.chain(task_branches)
+        project_branches
+            .chain(task_branches)
             .filter(|(_, branch)| !branch.is_empty() && branch.as_str() != "HEAD")
-            .map(|(repo, branch)| forge::BranchKey { repo_dir: repo.clone(), branch: branch.clone() })
+            .map(|(repo, branch)| forge::BranchKey {
+                repo_dir: repo.clone(),
+                branch: branch.clone(),
+            })
             .filter(|key| seen.insert(key.clone()))
             .collect()
     }
@@ -87,7 +94,8 @@ impl WorkspaceData {
         repo_roots: &[std::path::PathBuf],
         previous: Option<&WorkspaceData>,
     ) -> Self {
-        let mut known: std::collections::HashMap<PathBuf, Counts> = std::collections::HashMap::new();
+        let mut known: std::collections::HashMap<PathBuf, Counts> =
+            std::collections::HashMap::new();
         if let Some(prev) = previous {
             for r in &prev.repos {
                 known.insert(r.repo_root.clone(), (r.ahead, r.behind, r.dirty));
@@ -104,10 +112,16 @@ impl WorkspaceData {
         let known_branches: std::collections::HashMap<&Path, &str> = previous
             .into_iter()
             .flat_map(|data| {
-                data.repos.iter().flat_map(|repo| &repo.worktrees)
+                data.repos
+                    .iter()
+                    .flat_map(|repo| &repo.worktrees)
                     .map(|wt| (wt.path.as_path(), wt.branch.as_str()))
-                    .chain(data.tasks.iter().flat_map(|task| &task.members)
-                        .map(|member| (member.path.as_path(), member.branch.as_str())))
+                    .chain(
+                        data.tasks
+                            .iter()
+                            .flat_map(|task| &task.members)
+                            .map(|member| (member.path.as_path(), member.branch.as_str())),
+                    )
             })
             .collect();
         let mut repos: Vec<RepoView> = Vec::new();
@@ -121,7 +135,11 @@ impl WorkspaceData {
                 rv.worktrees.push(WorktreeView {
                     id: entry.id.clone(),
                     name: entry.name.clone(),
-                    branch: known_branches.get(entry.path.as_path()).copied().unwrap_or(&entry.branch).to_owned(),
+                    branch: known_branches
+                        .get(entry.path.as_path())
+                        .copied()
+                        .unwrap_or(&entry.branch)
+                        .to_owned(),
                     path: entry.path.clone(),
                     task_id: entry.task_id.clone(),
                 });
@@ -147,7 +165,11 @@ impl WorkspaceData {
                     worktree_id: m.worktree_id.clone(),
                     repo: m.repo.clone(),
                     repo_root: entry.map(|entry| entry.repo_root.clone()),
-                    branch: known_branches.get(m.path.as_path()).copied().unwrap_or(&m.branch).to_owned(),
+                    branch: known_branches
+                        .get(m.path.as_path())
+                        .copied()
+                        .unwrap_or(&m.branch)
+                        .to_owned(),
                     path: m.path.clone(),
                     ahead,
                     behind,
@@ -184,7 +206,12 @@ pub(crate) fn checkout_compare_ref(git: &GitWorktrees<SystemRunner>, root: &Path
     }
 }
 
-fn new_repo_view(git: &GitWorktrees<SystemRunner>, name: &str, root: &Path, (ahead, behind, dirty): Counts) -> RepoView {
+fn new_repo_view(
+    git: &GitWorktrees<SystemRunner>,
+    name: &str,
+    root: &Path,
+    (ahead, behind, dirty): Counts,
+) -> RepoView {
     RepoView {
         name: name.to_string(),
         repo_root: root.to_path_buf(),
@@ -204,7 +231,8 @@ fn new_repo_view(git: &GitWorktrees<SystemRunner>, name: &str, root: &Path, (ahe
 /// Carries the changed-file list and its counts, not the bodies; see
 /// [`compute_file_diff`] for one file's text.
 pub fn compute_diff(git: &GitWorktrees<SystemRunner>, path: &Path, compare_ref: &str) -> Diff {
-    git.diff_including_untracked(path, compare_ref).unwrap_or_default()
+    git.diff_including_untracked(path, compare_ref)
+        .unwrap_or_default()
 }
 
 /// One file's unified diff, fetched on demand.

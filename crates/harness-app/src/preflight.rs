@@ -61,7 +61,7 @@ impl Check {
 /// `pi` is still one of them — it is what the native chat pane speaks — but it
 /// no longer leads, because nothing here needs *pi* specifically and a screen
 /// that names one vendor reads as a requirement rather than an example.
-pub(crate) const AGENTS: [&str; 5] = ["claude", "codex", "opencode", "kimi", "pi"];
+pub(crate) const AGENTS: [&str; 6] = ["claude", "codex", "opencode", "kimi", "grok", "pi"];
 
 /// Probe every tool. `lookup` returns the version string for a binary on PATH,
 /// or `None` when it is absent.
@@ -70,8 +70,8 @@ pub(crate) const AGENTS: [&str; 5] = ["claude", "codex", "opencode", "kimi", "pi
 /// can be asserted on a machine that has any mix of these installed.
 pub fn probe(lookup: impl Fn(&str, &str) -> Option<String>) -> Vec<Check> {
     // Any one agent is enough — they are peers, and the harness is useful with
-    // whichever one you actually use. Reporting five separate "missing" rows
-    // would imply you need all of them.
+    // whichever one you actually use. A missing row per CLI would imply you
+    // need all of them.
     let agent_found = AGENTS
         .iter()
         .find_map(|a| lookup(a, "--version").map(|v| format!("{a} {v}")));
@@ -98,8 +98,8 @@ pub fn probe(lookup: impl Fn(&str, &str) -> Option<String>) -> Vec<Check> {
             name: "an agent CLI",
             severity: Severity::Recommended,
             found: agent_found,
-            cost: "agent tabs fall back to a plain shell — Claude Code, Codex, OpenCode or Kimi, \
-                   any one of them is enough",
+            cost: "agent tabs fall back to a plain shell — Claude Code, Codex, OpenCode, Kimi \
+                   or Grok, any one of them is enough",
             fix: "npm install -g @anthropic-ai/claude-code",
             version_flag: "--version",
         },
@@ -176,17 +176,30 @@ mod tests {
         assert_eq!(tmux.version_flag, "-V");
         // Everything else does answer the long flag.
         for c in checks.iter().filter(|c| c.name != "tmux") {
-            assert_eq!(c.version_flag, "--version", "{} should use --version", c.name);
+            assert_eq!(
+                c.version_flag, "--version",
+                "{} should use --version",
+                c.name
+            );
         }
     }
 
     #[test]
     fn git_or_tmux_missing_blocks_and_nothing_else_does() {
-        assert!(blocked(&with(&["tmux", "pi", "gh", "rust-analyzer"])), "no git must block");
-        assert!(blocked(&with(&["git", "pi", "gh", "rust-analyzer"])), "no tmux must block");
+        assert!(
+            blocked(&with(&["tmux", "pi", "gh", "rust-analyzer"])),
+            "no git must block"
+        );
+        assert!(
+            blocked(&with(&["git", "pi", "gh", "rust-analyzer"])),
+            "no tmux must block"
+        );
         // Everything required present: the rest only degrades features.
         assert!(!blocked(&with(&["git", "tmux"])));
-        assert!(any_missing(&with(&["git", "tmux"])), "but they are still reported");
+        assert!(
+            any_missing(&with(&["git", "tmux"])),
+            "but they are still reported"
+        );
     }
 
     #[test]
@@ -201,8 +214,16 @@ mod tests {
             agent.fix
         );
         // pi is supported, not required — the screen must not read as if it were.
-        assert!(!agent.cost.contains("pi"), "cost still advertises pi: {:?}", agent.cost);
-        assert!(!agent.fix.contains("pi-coding-agent"), "fix still installs pi: {:?}", agent.fix);
+        assert!(
+            !agent.cost.contains("pi"),
+            "cost still advertises pi: {:?}",
+            agent.cost
+        );
+        assert!(
+            !agent.fix.contains("pi-coding-agent"),
+            "fix still installs pi: {:?}",
+            agent.fix
+        );
     }
 
     #[test]
@@ -220,7 +241,12 @@ mod tests {
             );
         }
         let none = with(&["git", "tmux"]);
-        assert!(none.iter().find(|c| c.name == "an agent CLI").unwrap().missing());
+        assert!(
+            none.iter()
+                .find(|c| c.name == "an agent CLI")
+                .unwrap()
+                .missing()
+        );
     }
 
     #[test]

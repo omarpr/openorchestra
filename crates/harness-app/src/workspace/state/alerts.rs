@@ -9,7 +9,10 @@ impl HarnessWorkspace {
     pub(crate) fn apply_forge(&mut self, update: ForgeUpdate, cx: &mut Context<Self>) {
         match update.result {
             Ok(status) => {
-                self.forge_status.entry(update.key.repo_dir).or_default().insert(update.key.branch, status);
+                self.forge_status
+                    .entry(update.key.repo_dir)
+                    .or_default()
+                    .insert(update.key.branch, status);
             }
             Err(_) => {
                 if let Some(branches) = self.forge_status.get_mut(&update.key.repo_dir) {
@@ -69,29 +72,36 @@ impl HarnessWorkspace {
         self.liveness_pending = true;
         let has_tmux = self.has_tmux;
         cx.spawn(async move |view, cx| {
-            let dead = cx.background_spawn(async move {
-                dead.extend(dead_agents(candidates, has_tmux));
-                dead
-            }).await;
+            let dead = cx
+                .background_spawn(async move {
+                    dead.extend(dead_agents(candidates, has_tmux));
+                    dead
+                })
+                .await;
             let _ = view.update(cx, |ws, cx| {
                 ws.liveness_pending = false;
                 if dead.is_empty() {
                     return;
                 }
                 for target in dead {
-                    if matches!(ws.conductor.state(&target), Some(AgentState::Running | AgentState::Waiting)) {
+                    if matches!(
+                        ws.conductor.state(&target),
+                        Some(AgentState::Running | AgentState::Waiting)
+                    ) {
                         ws.stop_agent(&target);
                     }
                 }
                 ws.remote_refresh(cx);
                 cx.notify();
             });
-        }).detach();
+        })
+        .detach();
     }
 
     pub(crate) fn stop_agent(&mut self, target: &AgentTarget) {
         self.conductor.stopped(target);
-        self.agent_status.insert(target.root.clone(), self.conductor.root_state(&target.root));
+        self.agent_status
+            .insert(target.root.clone(), self.conductor.root_state(&target.root));
     }
 
     /// The pane key for a main checkout, worktree, or task coordinator.
@@ -122,31 +132,75 @@ impl HarnessWorkspace {
 
     fn agent_tab(&self, root: &Path, tab_id: u64) -> Option<&Tab> {
         let key = self.pane_key_for_path(root)?;
-        self.panes.get(&key)?.tabs.iter().find(|tab| tab.id == tab_id && tab.agent.is_some())
+        self.panes
+            .get(&key)?
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id && tab.agent.is_some())
     }
 
     /// An evicted pane may still have live tmux tabs in its persisted record.
     fn has_agent_tab(&self, root: &Path, tab_id: u64) -> bool {
-        let Some(key) = self.pane_key_for_path(root) else { return false };
+        let Some(key) = self.pane_key_for_path(root) else {
+            return false;
+        };
         if let Some(pane) = self.panes.get(&key) {
-            return pane.tabs.iter().any(|tab| tab.id == tab_id && tab.agent.is_some());
+            return pane
+                .tabs
+                .iter()
+                .any(|tab| tab.id == tab_id && tab.agent.is_some());
         }
-        self.has_tmux && self.panes_state.worktrees.get(&key).is_some_and(|pane| {
-            pane.tabs.iter().any(|tab| tab.id == tab_id && matches!(tab.kind, crate::panes_state::TabRecordKind::Agent(_)))
-        })
+        self.has_tmux
+            && self.panes_state.worktrees.get(&key).is_some_and(|pane| {
+                pane.tabs.iter().any(|tab| {
+                    tab.id == tab_id
+                        && matches!(tab.kind, crate::panes_state::TabRecordKind::Agent(_))
+                })
+            })
     }
 
     pub(crate) fn selected_agent(&self) -> Option<(AgentTarget, &AgentKind)> {
         let active = self.resolve()?;
         let tab = self.panes.get(&active.key)?.active_tab()?;
-        Some((AgentTarget::new(&active.path, Some(tab.id)), tab.agent.as_ref()?))
+        Some((
+            AgentTarget::new(&active.path, Some(tab.id)),
+            tab.agent.as_ref()?,
+        ))
     }
 
     pub(crate) fn dismiss_selected_agent(&mut self) {
         if let Some((target, kind)) = self.selected_agent() {
-            let target = self.conductor.selection_target(target, kind);
+            let target = self.agent_selection_target(target, kind);
             self.conductor.dismiss(&target);
         }
+    }
+
+    /// Agent tabs of `kind` currently open under `root`.
+    fn agent_tabs_of_kind(&self, root: &Path, kind: &AgentKind) -> usize {
+        let Some(key) = self.pane_key_for_path(root) else {
+            return 0;
+        };
+        self.panes
+            .get(&key)
+            .map(|pane| {
+                pane.tabs
+                    .iter()
+                    .filter(|tab| tab.agent.as_ref() == Some(kind))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// The conductor record for the selected tab. A legacy untagged record is
+    /// used only when this tab is the only one of its kind: otherwise a tab
+    /// that has not reported yet would dismiss a sibling's wait.
+    pub(crate) fn agent_selection_target(
+        &self,
+        target: AgentTarget,
+        kind: &AgentKind,
+    ) -> AgentTarget {
+        let sole = self.agent_tabs_of_kind(&target.root, kind) <= 1;
+        self.conductor.selection_target(target, kind, sole)
     }
 
     /// Fold one raw sample into the current worktree list, producing the
@@ -171,9 +225,7 @@ impl HarnessWorkspace {
                     .task_id
                     .as_ref()
                     .map(|tid| {
-                        crate::tmux::session_prefix(&a2a_broker::task_member_pane_key(
-                            tid, &w.id,
-                        ))
+                        crate::tmux::session_prefix(&a2a_broker::task_member_pane_key(tid, &w.id))
                     })
                     .unwrap_or_else(|| crate::tmux::session_prefix(&w.id));
                 attributables.push(Attributable {
@@ -207,7 +259,12 @@ impl HarnessWorkspace {
         cx.notify();
     }
 
-    pub(crate) fn apply_agent(&mut self, signal: AgentSignal, window_active: bool, cx: &mut Context<Self>) {
+    pub(crate) fn apply_agent(
+        &mut self,
+        signal: AgentSignal,
+        window_active: bool,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(id) = signal.tab_id {
             if !self.has_agent_tab(&signal.worktree_root, id) {
                 return;
@@ -215,12 +272,29 @@ impl HarnessWorkspace {
         } else if signal.state == AgentState::Unknown {
             let target = AgentTarget::new(&signal.worktree_root, None);
             self.stop_agent(&target);
+            // The phone cache is one entry per root and kind. Clearing it is
+            // right when this legacy signal is that kind's only tab. A sibling
+            // tab of the same kind shares the entry, so its last state stays.
+            if self.agent_tabs_of_kind(&signal.worktree_root, &signal.kind) <= 1 {
+                self.remote.record_signal(
+                    &signal.worktree_root,
+                    signal.kind.as_str(),
+                    AgentState::Unknown,
+                    None,
+                );
+                self.remote_refresh(cx);
+            }
             cx.notify();
             return;
         }
         let target = AgentTarget::new(&signal.worktree_root, signal.tab_id);
         let tool = signal.tool.as_ref().map(|t| t.name.clone());
-        self.remote.record_signal(&signal.worktree_root, signal.kind.as_str(), signal.state, tool);
+        self.remote.record_signal(
+            &signal.worktree_root,
+            signal.kind.as_str(),
+            signal.state,
+            tool,
+        );
 
         if let Some(session) = &signal.session_file {
             self.remote
@@ -261,7 +335,8 @@ impl HarnessWorkspace {
             label.clone(),
             now,
         );
-        self.agent_status.insert(target.root.clone(), self.conductor.root_state(&target.root));
+        self.agent_status
+            .insert(target.root.clone(), self.conductor.root_state(&target.root));
 
         let alert = if previous != Some(signal.state) && signal.should_notify(fidelity) {
             Some(crate::notifier::AgentAlert::NeedsAttention)
@@ -278,15 +353,29 @@ impl HarnessWorkspace {
                 AgentAlert::NeedsAttention => (format!("{agent} needs your attention!"), false),
                 AgentAlert::Finished => (format!("{agent} finished — your turn"), true),
             };
-            self.conductor.announce(&target, label, text, nav.clone(), bow, now);
+            self.conductor
+                .announce(&target, label, text, nav.clone(), bow, now);
             // A different tab in the same worktree or an inactive app window
             // can still need a native notification.
-            let visible = window_active && self.selected_agent().is_some_and(|(selected, kind)| {
-                selected.root == target.root && kind == &signal.kind
-                    && target.tab_id.is_none_or(|id| selected.tab_id == Some(id))
-            });
+            // A maximized tools panel omits the center pane, so the selected
+            // agent tab is not on screen even though it is the active tab.
+            let center_visible = !(self.prefs.diff_open && self.tools_maximized);
+            let visible = window_active
+                && center_visible
+                && self.selected_agent().is_some_and(|(selected, kind)| {
+                    selected.root == target.root
+                        && kind == &signal.kind
+                        && target.tab_id.is_none_or(|id| selected.tab_id == Some(id))
+                });
             if !visible {
-                crate::notifier::notify_agent(&agent, &worktree, &repo, &nav, alert, &self.prefs.notify_sound);
+                crate::notifier::notify_agent(
+                    &agent,
+                    &worktree,
+                    &repo,
+                    &nav,
+                    alert,
+                    &self.prefs.notify_sound,
+                );
             }
         }
         self.remote_refresh(cx);
@@ -301,7 +390,12 @@ impl HarnessWorkspace {
     /// `Selection::Worktree` the handler used before resolved to the worktree
     /// but not to its task, and the pane kept whatever tab was last active,
     /// so "View" often landed on a shell instead of the agent asking for you.
-    pub(crate) fn navigate_to_alert(&mut self, nav: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn navigate_to_alert(
+        &mut self,
+        nav: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let mut parts = nav.split(ALERT_AGENT_SEP);
         let target = parts.next().unwrap_or_default();
         let agent = parts.next();
@@ -317,12 +411,16 @@ impl HarnessWorkspace {
                 .find(|w| w.id == target)
                 .and_then(|w| w.task_id.clone());
             match task_id {
-                Some(task_id) => Selection::Task { task_id, member_id: Some(target.to_string()) },
+                Some(task_id) => Selection::Task {
+                    task_id,
+                    member_id: Some(target.to_string()),
+                },
                 // A coordinator alert carries its task id: land on the task
                 // itself, which is the coordinator.
-                None if self.task_store.get(target).is_some() => {
-                    Selection::Task { task_id: target.to_string(), member_id: None }
-                }
+                None if self.task_store.get(target).is_some() => Selection::Task {
+                    task_id: target.to_string(),
+                    member_id: None,
+                },
                 None => Selection::Worktree(target.to_string()),
             }
         };
@@ -333,12 +431,28 @@ impl HarnessWorkspace {
     /// Make an agent tab active in the selected worktree's pane: the one
     /// running `kind` when there is one, else the first agent tab. A worktree
     /// with no agent tab is left on whatever it shows.
-    fn focus_agent_tab(&mut self, kind: Option<&str>, tab_id: Option<u64>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(key) = self.resolve().map(|r| r.key) else { return };
-        let Some(pane) = self.panes.get_mut(&key) else { return };
+    fn focus_agent_tab(
+        &mut self,
+        kind: Option<&str>,
+        tab_id: Option<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(key) = self.resolve().map(|r| r.key) else {
+            return;
+        };
+        let Some(pane) = self.panes.get_mut(&key) else {
+            return;
+        };
         let pick = tab_id
             .and_then(|id| pane.tabs.iter().find(|t| t.id == id && t.agent.is_some()))
-            .or_else(|| kind.and_then(|k| pane.tabs.iter().find(|t| t.agent.as_ref().is_some_and(|a| a.as_str() == k))))
+            .or_else(|| {
+                kind.and_then(|k| {
+                    pane.tabs
+                        .iter()
+                        .find(|t| t.agent.as_ref().is_some_and(|a| a.as_str() == k))
+                })
+            })
             .or_else(|| pane.tabs.iter().find(|t| t.agent.is_some()))
             .map(|t| t.id);
         if let Some(id) = pick {
@@ -357,16 +471,34 @@ impl HarnessWorkspace {
     /// checkout is now named "main" in its project and navigates via a
     /// `main:<repo>` id, which the View handler maps to `Selection::Main`.
     pub(crate) fn alert_target(&self, path: &Path) -> (String, String, String) {
-        if let Some(e) = self.manager.registry.entries().iter().find(|e| e.path == path) {
+        if let Some(e) = self
+            .manager
+            .registry
+            .entries()
+            .iter()
+            .find(|e| e.path == path)
+        {
             return (e.name.clone(), e.repo.clone(), e.id.clone());
         }
         if let Some(r) = self.data.repos.iter().find(|r| r.repo_root == path) {
-            return ("main".to_string(), r.name.clone(), format!("{MAIN_NAV_PREFIX}{}", r.name));
+            return (
+                "main".to_string(),
+                r.name.clone(),
+                format!("{MAIN_NAV_PREFIX}{}", r.name),
+            );
         }
         if let Some(task) = self.coordinator_task_for_path(path) {
-            return (format!("{} · coordinator", task.name), String::new(), task.id.clone());
+            return (
+                format!("{} · coordinator", task.name),
+                String::new(),
+                task.id.clone(),
+            );
         }
-        (crate::notifier::label_for("", path), String::new(), String::new())
+        (
+            crate::notifier::label_for("", path),
+            String::new(),
+            String::new(),
+        )
     }
 
     /// The active task whose coordinator runs in `path`, if any.
@@ -428,10 +560,12 @@ fn dead_agents(candidates: Vec<(AgentTarget, String)>, has_tmux: bool) -> Vec<Ag
     } else {
         Vec::new()
     };
+    // `None` is a failed listing, not "no panes". A candidate with no status
+    // pid is left alone in that case, the same as when `ps` itself failed.
     let panes = if has_tmux && !procs.is_empty() {
-        crate::tmux::list_session_panes()
+        crate::tmux::list_session_panes().ok()
     } else {
-        Vec::new()
+        Some(Vec::new())
     };
     let mut dead = Vec::new();
     for (target, key) in candidates {
@@ -442,16 +576,18 @@ fn dead_agents(candidates: Vec<(AgentTarget, String)>, has_tmux: bool) -> Vec<Ag
             }
             continue;
         }
-        if procs.is_empty() {
+        if procs.is_empty() || panes.is_none() {
             continue;
         }
+        let panes = panes.as_deref().unwrap_or(&[]);
         let prefix = crate::tmux::session_prefix(&key);
         let session_name = target.tab_id.map(|id| crate::tmux::session_name(&key, id));
         let pane_pids: Vec<u32> = panes
             .iter()
             .filter(|(session, _)| match &session_name {
                 Some(name) => session == name,
-                None => session.strip_prefix(&prefix)
+                None => session
+                    .strip_prefix(&prefix)
                     .is_some_and(|suffix| suffix.parse::<u64>().is_ok()),
             })
             .map(|(_, pid)| *pid)
@@ -486,14 +622,17 @@ pub(crate) fn alert_nav_id(target: &str, kind: &AgentKind, tab_id: Option<u64>) 
         return String::new();
     }
     match tab_id {
-        Some(id) => format!("{target}{ALERT_AGENT_SEP}{}{ALERT_AGENT_SEP}{id}", kind.as_str()),
+        Some(id) => format!(
+            "{target}{ALERT_AGENT_SEP}{}{ALERT_AGENT_SEP}{id}",
+            kind.as_str()
+        ),
         None => format!("{target}{ALERT_AGENT_SEP}{}", kind.as_str()),
     }
 }
 
 #[cfg(test)]
 mod alert_nav_tests {
-    use super::{alert_nav_id, ALERT_AGENT_SEP};
+    use super::{ALERT_AGENT_SEP, alert_nav_id};
     use agent_runtime::AgentKind;
 
     #[test]
@@ -514,7 +653,13 @@ mod alert_nav_tests {
 
     #[test]
     fn sibling_codex_tabs_have_distinct_navigation_ids() {
-        assert_eq!(alert_nav_id("main:app", &AgentKind::Codex, Some(7)), "main:app|codex|7");
-        assert_eq!(alert_nav_id("main:app", &AgentKind::Codex, Some(8)), "main:app|codex|8");
+        assert_eq!(
+            alert_nav_id("main:app", &AgentKind::Codex, Some(7)),
+            "main:app|codex|7"
+        );
+        assert_eq!(
+            alert_nav_id("main:app", &AgentKind::Codex, Some(8)),
+            "main:app|codex|8"
+        );
     }
 }

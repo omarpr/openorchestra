@@ -41,7 +41,10 @@ pub(crate) struct AgentTarget {
 
 impl AgentTarget {
     pub fn new(root: &Path, tab_id: Option<u64>) -> Self {
-        Self { root: root.to_path_buf(), tab_id }
+        Self {
+            root: root.to_path_buf(),
+            tab_id,
+        }
     }
 }
 
@@ -168,23 +171,32 @@ impl Conductor {
         // A reattached hook can start writing tab records mid-turn after an
         // app update. Move its legacy status across when the transcript matches.
         let legacy = AgentTarget::new(&target.root, None);
-        let legacy_state = if target.tab_id.is_some() && session_file.is_some()
-            && self.agents.get(&legacy).is_some_and(|tracked| tracked.kind == kind && tracked.session_file == session_file)
+        let legacy_state = if target.tab_id.is_some()
+            && session_file.is_some()
+            && self
+                .agents
+                .get(&legacy)
+                .is_some_and(|tracked| tracked.kind == kind && tracked.session_file == session_file)
         {
             self.remove(&legacy)
         } else {
             None
         };
-        let previous = self.state(target).or(legacy_state.as_ref().map(|tracked| tracked.state));
-        let t = self.agents.entry(target.clone()).or_insert_with(|| Tracked {
-            kind: kind.clone(),
-            label: label.clone(),
-            state,
-            reason,
-            since: legacy_state.and_then(|tracked| tracked.since),
-            session_file: None,
-            tool: None,
-        });
+        let previous = self
+            .state(target)
+            .or(legacy_state.as_ref().map(|tracked| tracked.state));
+        let t = self
+            .agents
+            .entry(target.clone())
+            .or_insert_with(|| Tracked {
+                kind: kind.clone(),
+                label: label.clone(),
+                state,
+                reason,
+                since: legacy_state.and_then(|tracked| tracked.since),
+                session_file: None,
+                tool: None,
+            });
         t.kind = kind;
         t.label = label;
         t.reason = reason;
@@ -223,18 +235,41 @@ impl Conductor {
         self.agents.get(target).map(|tracked| tracked.state)
     }
 
-    pub fn selection_target(&self, target: AgentTarget, kind: &AgentKind) -> AgentTarget {
-        if !self.agents.contains_key(&target) {
-            let legacy = AgentTarget::new(&target.root, None);
-            if self.agents.get(&legacy).is_some_and(|tracked| &tracked.kind == kind) {
-                return legacy;
-            }
+    pub fn selection_target(
+        &self,
+        target: AgentTarget,
+        kind: &AgentKind,
+        sole_kind_owner: bool,
+    ) -> AgentTarget {
+        if self.agents.contains_key(&target) || !sole_kind_owner {
+            return target;
+        }
+        let legacy = AgentTarget::new(&target.root, None);
+        if self
+            .agents
+            .get(&legacy)
+            .is_some_and(|tracked| &tracked.kind == kind)
+        {
+            return legacy;
         }
         target
     }
 
+    /// The tab id of a waiting agent under `root`, when that wait is tagged
+    /// with a tab. A legacy untagged wait returns `None` so navigation stays
+    /// kind-based.
+    pub fn waiting_tab(&self, root: &Path) -> Option<u64> {
+        self.agents
+            .iter()
+            .filter(|(target, tracked)| target.root == root && tracked.state == AgentState::Waiting)
+            .filter_map(|(target, _)| target.tab_id)
+            .min()
+    }
+
     pub fn root_state(&self, root: &Path) -> AgentState {
-        self.agents.iter().filter(|(target, _)| target.root == root)
+        self.agents
+            .iter()
+            .filter(|(target, _)| target.root == root)
             .map(|(_, tracked)| tracked.state)
             .max_by_key(|state| match state {
                 AgentState::Unknown => 0,
@@ -264,14 +299,27 @@ impl Conductor {
     }
 
     pub fn forget_root(&mut self, root: &Path) {
-        let targets: Vec<_> = self.agents.keys().filter(|target| target.root == root).cloned().collect();
+        let targets: Vec<_> = self
+            .agents
+            .keys()
+            .filter(|target| target.root == root)
+            .cloned()
+            .collect();
         for target in targets {
             self.stopped(&target);
         }
     }
 
     /// Show `text` for `root`'s agent for a while. A finish also takes a bow.
-    pub fn announce(&mut self, target: &AgentTarget, label: String, text: String, nav: String, bow: bool, now: Instant) {
+    pub fn announce(
+        &mut self,
+        target: &AgentTarget,
+        label: String,
+        text: String,
+        nav: String,
+        bow: bool,
+        now: Instant,
+    ) {
         self.announcements.retain(|a| &a.target != target);
         self.announcements.insert(
             0,
@@ -292,7 +340,11 @@ impl Conductor {
     /// drop its "finished" line, and its "needs you" until it next waits.
     pub fn dismiss(&mut self, target: &AgentTarget) {
         self.announcements.retain(|a| &a.target != target);
-        if self.agents.get(target).is_some_and(|t| t.state == AgentState::Waiting) {
+        if self
+            .agents
+            .get(target)
+            .is_some_and(|t| t.state == AgentState::Waiting)
+        {
             self.seen.insert(target.clone());
         }
     }
@@ -339,7 +391,11 @@ impl Conductor {
                 _ => "Waiting on you".to_string(),
             },
             _ => {
-                let fallback = if t.kind == AgentKind::ClaudeCode { "Thinking" } else { "Working" };
+                let fallback = if t.kind == AgentKind::ClaudeCode {
+                    "Thinking"
+                } else {
+                    "Working"
+                };
                 let doing = self.activity.get(path).map_or(fallback, String::as_str);
                 match (doing, &elapsed) {
                     ("Thinking" | "Working", Some(e)) => format!("{doing} for {e}…"),
@@ -352,7 +408,12 @@ impl Conductor {
 
     /// Advance timers and work out what to draw. `selected` is the worktree
     /// the user is looking at; `nav_for` maps an agent's root to its alert id.
-    pub fn tick(&mut self, now: Instant, selected: Option<&AgentTarget>, nav_for: impl Fn(&AgentTarget, &AgentKind) -> String) -> View {
+    pub fn tick(
+        &mut self,
+        now: Instant,
+        selected: Option<&AgentTarget>,
+        nav_for: impl Fn(&AgentTarget, &AgentKind) -> String,
+    ) -> View {
         // Blinking: a short close every 2–5.5 s, now and then a double.
         if self.blink_until.is_some_and(|u| now >= u) {
             self.blink_until = None;
@@ -388,7 +449,10 @@ impl Conductor {
         let shown: Vec<AgentTarget> = active.iter().take(room).cloned().collect();
 
         // Keep the visible agents' activity fresh.
-        if self.activity_read.is_none_or(|t| now.duration_since(t) >= ACTIVITY_EVERY) {
+        if self
+            .activity_read
+            .is_none_or(|t| now.duration_since(t) >= ACTIVITY_EVERY)
+        {
             self.activity_read = Some(now);
             for path in &shown {
                 let t = &self.agents[path];
@@ -412,9 +476,14 @@ impl Conductor {
         // the beat — the music doesn't stop because one player needs you —
         // and raises his free hand to cue you if someone's waiting. The
         // baton only stops, held up, when the waiting is all that's left.
-        let running = self.agents.values().filter(|t| t.state == AgentState::Running).count();
+        let running = self
+            .agents
+            .values()
+            .filter(|t| t.state == AgentState::Running)
+            .count();
         let any_waiting = self.agents.iter().any(|(p, t)| self.waiting(p, t));
-        let beat = (now.duration_since(self.clock).as_millis() / BEAT_FRAME.as_millis()) as usize % CONDUCT_FRAMES;
+        let beat = (now.duration_since(self.clock).as_millis() / BEAT_FRAME.as_millis()) as usize
+            % CONDUCT_FRAMES;
         let pose = match (bowing, running > 0, any_waiting) {
             (Some(f), _, _) => Pose::Bow(f),
             (None, true, true) => Pose::ConductCue(beat),
@@ -459,7 +528,11 @@ impl Conductor {
     pub fn tick_interval(&self) -> Duration {
         let moving = self.bow_started.is_some()
             || self.agents.values().any(|t| t.state == AgentState::Running);
-        if moving { BEAT_FRAME } else { Duration::from_millis(100) }
+        if moving {
+            BEAT_FRAME
+        } else {
+            Duration::from_millis(100)
+        }
     }
 }
 
@@ -506,6 +579,59 @@ mod tests {
     }
 
     #[test]
+    fn a_waiting_tab_is_named_even_when_an_earlier_tab_is_running() {
+        let now = Instant::now();
+        let root = Path::new("/worktree");
+        let mut conductor = Conductor::default();
+        let observe = |conductor: &mut Conductor, id, state| {
+            conductor.observe(
+                &AgentTarget::new(root, Some(id)),
+                AgentKind::Codex,
+                state,
+                WaitReason::None,
+                None,
+                None,
+                "(app)".into(),
+                now,
+            )
+        };
+        observe(&mut conductor, 7, AgentState::Running);
+        observe(&mut conductor, 8, AgentState::Waiting);
+        assert_eq!(conductor.waiting_tab(root), Some(8));
+        assert_eq!(conductor.root_state(root), AgentState::Waiting);
+    }
+
+    #[test]
+    fn legacy_selection_stays_on_the_tab_when_it_is_not_the_only_owner() {
+        let now = Instant::now();
+        let root = Path::new("/worktree");
+        let mut conductor = Conductor::default();
+        conductor.observe(
+            &AgentTarget::new(root, None),
+            AgentKind::ClaudeCode,
+            AgentState::Waiting,
+            WaitReason::PermissionPrompt,
+            None,
+            None,
+            "(w)".into(),
+            now,
+        );
+        let tab = AgentTarget::new(root, Some(8));
+        assert_eq!(
+            conductor
+                .selection_target(tab.clone(), &AgentKind::ClaudeCode, false)
+                .tab_id,
+            Some(8)
+        );
+        assert_eq!(
+            conductor
+                .selection_target(tab, &AgentKind::ClaudeCode, true)
+                .tab_id,
+            None
+        );
+    }
+
+    #[test]
     fn sibling_tabs_count_and_finish_independently() {
         let now = Instant::now();
         let root = Path::new("/worktree");
@@ -513,16 +639,39 @@ mod tests {
         let second = AgentTarget::new(root, Some(2));
         let mut conductor = Conductor::default();
         let observe = |conductor: &mut Conductor, target, state, reason| {
-            conductor.observe(target, AgentKind::Codex, state, reason, None, None, "(app)".into(), now)
+            conductor.observe(
+                target,
+                AgentKind::Codex,
+                state,
+                reason,
+                None,
+                None,
+                "(app)".into(),
+                now,
+            )
         };
         for tab in [&first, &second] {
             observe(&mut conductor, tab, AgentState::Running, WaitReason::None);
         }
         let view = conductor.tick(now, Some(&second), |tab, _| tab.tab_id.unwrap().to_string());
         assert_eq!(view.running, 2);
-        assert_eq!(view.lines.iter().map(|line| line.nav.as_str()).collect::<Vec<_>>(), ["2", "1"]);
+        assert_eq!(
+            view.lines
+                .iter()
+                .map(|line| line.nav.as_str())
+                .collect::<Vec<_>>(),
+            ["2", "1"]
+        );
 
-        assert_eq!(observe(&mut conductor, &first, AgentState::Idle, WaitReason::TurnComplete), Some(AgentState::Running));
+        assert_eq!(
+            observe(
+                &mut conductor,
+                &first,
+                AgentState::Idle,
+                WaitReason::TurnComplete
+            ),
+            Some(AgentState::Running)
+        );
         assert_eq!(conductor.root_state(root), AgentState::Running);
         assert_eq!(conductor.tick(now, None, |_, _| String::new()).running, 1);
         conductor.stopped(&second);
@@ -544,7 +693,16 @@ mod tests {
         let t0 = Instant::now();
         let mut c = conductor_with("/w", AgentState::Running, t0);
         let again = |c: &mut Conductor, s, at| {
-            c.observe(&target("/w"), AgentKind::Codex, s, WaitReason::None, None, None, "(app)".into(), at)
+            c.observe(
+                &target("/w"),
+                AgentKind::Codex,
+                s,
+                WaitReason::None,
+                None,
+                None,
+                "(app)".into(),
+                at,
+            )
         };
         again(&mut c, AgentState::Running, t0 + Duration::from_secs(30));
         let v = c.tick(t0 + Duration::from_secs(40), None, |_, _| String::new());
@@ -578,10 +736,34 @@ mod tests {
     fn up_to_three_agents_stack_selected_first_then_more() {
         let t0 = Instant::now();
         let mut c = Conductor::default();
-        for (root, label) in [("/a", "(a)"), ("/b", "(b)"), ("/c", "(c)"), ("/d", "(d)"), ("/e", "(e)")] {
-            c.observe(&target(root), AgentKind::Codex, AgentState::Running, WaitReason::None, None, None, label.into(), t0);
+        for (root, label) in [
+            ("/a", "(a)"),
+            ("/b", "(b)"),
+            ("/c", "(c)"),
+            ("/d", "(d)"),
+            ("/e", "(e)"),
+        ] {
+            c.observe(
+                &target(root),
+                AgentKind::Codex,
+                AgentState::Running,
+                WaitReason::None,
+                None,
+                None,
+                label.into(),
+                t0,
+            );
         }
-        c.observe(&target("/d"), AgentKind::Codex, AgentState::Waiting, WaitReason::PermissionPrompt, None, None, "(d)".into(), t0);
+        c.observe(
+            &target("/d"),
+            AgentKind::Codex,
+            AgentState::Waiting,
+            WaitReason::PermissionPrompt,
+            None,
+            None,
+            "(d)".into(),
+            t0,
+        );
         let v = c.tick(t0, Some(&target("/c")), |p, _| p.root.display().to_string());
         let labels: Vec<&str> = v.lines.iter().map(|l| l.label.as_str()).collect();
         // Selected, then waiting on you, then running by path.
@@ -598,15 +780,33 @@ mod tests {
         let v = c.tick(t0, None, |_, _| String::new());
         assert!(v.frame < CONDUCT_FRAMES * 2, "conducts while anyone plays");
 
-        c.observe(&target("/b"), AgentKind::Codex, AgentState::Waiting, WaitReason::None, None, None, "(b)".into(), t0);
+        c.observe(
+            &target("/b"),
+            AgentKind::Codex,
+            AgentState::Waiting,
+            WaitReason::None,
+            None,
+            None,
+            "(b)".into(),
+            t0,
+        );
         let v = c.tick(t0, None, |_, _| String::new());
-        let cueing = |f| (0..CONDUCT_FRAMES).any(|b| [true, false].iter().any(|&e| scene::frame_index(Pose::ConductCue(b), e) == f));
+        let cueing = |f| {
+            (0..CONDUCT_FRAMES).any(|b| {
+                [true, false]
+                    .iter()
+                    .any(|&e| scene::frame_index(Pose::ConductCue(b), e) == f)
+            })
+        };
         assert!(cueing(v.frame), "still beating, free hand raised");
 
         // Only the waiting one left: baton up and still.
         c.stopped(&target("/a"));
         let v = c.tick(t0, None, |_, _| String::new());
-        assert!(v.frame == scene::frame_index(Pose::Cue, true) || v.frame == scene::frame_index(Pose::Cue, false));
+        assert!(
+            v.frame == scene::frame_index(Pose::Cue, true)
+                || v.frame == scene::frame_index(Pose::Cue, false)
+        );
         assert_eq!(v.lines.len(), 1, "a stopped agent leaves the bubble");
     }
 
@@ -614,20 +814,58 @@ mod tests {
     fn an_announcement_takes_its_agents_line() {
         let t0 = Instant::now();
         let mut c = conductor_with("/a", AgentState::Running, t0);
-        c.observe(&target("/b"), AgentKind::Codex, AgentState::Idle, WaitReason::TurnComplete, None, None, "(b)".into(), t0);
-        c.announce(&target("/b"), "(b)".into(), "Codex finished — your turn".into(), String::new(), true, t0);
+        c.observe(
+            &target("/b"),
+            AgentKind::Codex,
+            AgentState::Idle,
+            WaitReason::TurnComplete,
+            None,
+            None,
+            "(b)".into(),
+            t0,
+        );
+        c.announce(
+            &target("/b"),
+            "(b)".into(),
+            "Codex finished — your turn".into(),
+            String::new(),
+            true,
+            t0,
+        );
         let v = c.tick(t0, None, |_, _| String::new());
-        let texts: Vec<(&str, bool)> = v.lines.iter().map(|l| (l.label.as_str(), l.announcement)).collect();
+        let texts: Vec<(&str, bool)> = v
+            .lines
+            .iter()
+            .map(|l| (l.label.as_str(), l.announcement))
+            .collect();
         assert_eq!(texts, [("(b)", true), ("(app)", false)]);
         // Starting work again retires the stale "finished".
-        c.observe(&target("/b"), AgentKind::Codex, AgentState::Running, WaitReason::None, None, None, "(b)".into(), t0);
+        c.observe(
+            &target("/b"),
+            AgentKind::Codex,
+            AgentState::Running,
+            WaitReason::None,
+            None,
+            None,
+            "(b)".into(),
+            t0,
+        );
         let v = c.tick(t0, None, |_, _| String::new());
         assert!(v.lines.iter().all(|l| !l.announcement));
         assert_eq!(v.lines.len(), 2);
     }
 
     fn wait_on(c: &mut Conductor, root: &str, state: AgentState, at: Instant) {
-        c.observe(&target(root), AgentKind::ClaudeCode, state, WaitReason::PermissionPrompt, None, None, "(w)".into(), at);
+        c.observe(
+            &target(root),
+            AgentKind::ClaudeCode,
+            state,
+            WaitReason::PermissionPrompt,
+            None,
+            None,
+            "(w)".into(),
+            at,
+        );
     }
 
     #[test]
@@ -641,7 +879,10 @@ mod tests {
         // You go and look: the line goes, and so does his cue.
         let v = c.tick(t0, Some(&target("/w")), |_, _| String::new());
         assert!(v.lines.is_empty());
-        assert!(v.frame == scene::frame_index(Pose::Rest, true) || v.frame == scene::frame_index(Pose::Rest, false));
+        assert!(
+            v.frame == scene::frame_index(Pose::Rest, true)
+                || v.frame == scene::frame_index(Pose::Rest, false)
+        );
 
         // The same wait refreshing stays dismissed, even after you leave.
         wait_on(&mut c, "/w", AgentState::Waiting, t0);
@@ -674,7 +915,14 @@ mod tests {
     fn going_to_a_finished_agent_retires_its_announcement() {
         let t0 = Instant::now();
         let mut c = conductor_with("/w", AgentState::Idle, t0);
-        c.announce(&target("/w"), "(app)".into(), "Codex finished — your turn".into(), String::new(), true, t0);
+        c.announce(
+            &target("/w"),
+            "(app)".into(),
+            "Codex finished — your turn".into(),
+            String::new(),
+            true,
+            t0,
+        );
         let v = c.tick(t0, Some(&target("/other")), |_, _| String::new());
         assert_eq!(v.lines.len(), 1);
         let v = c.tick(t0, Some(&target("/w")), |_, _| String::new());
@@ -685,12 +933,25 @@ mod tests {
     fn only_waits_and_announcements_need_you() {
         let t0 = Instant::now();
         let mut c = conductor_with("/run", AgentState::Running, t0);
-        assert!(!c.tick(t0, None, |_, _| String::new()).needs_you(), "progress alone is not urgent");
+        assert!(
+            !c.tick(t0, None, |_, _| String::new()).needs_you(),
+            "progress alone is not urgent"
+        );
         wait_on(&mut c, "/w", AgentState::Waiting, t0);
         assert!(c.tick(t0, None, |_, _| String::new()).needs_you());
         c.dismiss(&target("/w"));
-        assert!(!c.tick(t0, None, |_, _| String::new()).needs_you(), "a seen wait no longer is");
-        c.announce(&target("/run"), "(app)".into(), "finished".into(), String::new(), true, t0);
+        assert!(
+            !c.tick(t0, None, |_, _| String::new()).needs_you(),
+            "a seen wait no longer is"
+        );
+        c.announce(
+            &target("/run"),
+            "(app)".into(),
+            "finished".into(),
+            String::new(),
+            true,
+            t0,
+        );
         assert!(c.tick(t0, None, |_, _| String::new()).needs_you());
     }
 
@@ -698,12 +959,23 @@ mod tests {
     fn a_finish_bows_then_rests() {
         let t0 = Instant::now();
         let mut c = conductor_with("/w", AgentState::Idle, t0);
-        c.announce(&target("/w"), "(app)".into(), "Codex finished — your turn".into(), String::new(), true, t0);
+        c.announce(
+            &target("/w"),
+            "(app)".into(),
+            "Codex finished — your turn".into(),
+            String::new(),
+            true,
+            t0,
+        );
         let v = c.tick(t0, None, |_, _| String::new());
         assert_eq!(v.frame, scene::frame_index(Pose::Bow(0), false));
         assert_eq!(v.lines[0].clone().text, "Codex finished — your turn");
-        let v = c.tick(t0 + BOW_FRAME * (BOW_FRAMES as u32 + 1), None, |_, _| String::new());
-        assert!(matches!(v.frame, f if f == scene::frame_index(Pose::Rest, true) || f == scene::frame_index(Pose::Rest, false)));
+        let v = c.tick(t0 + BOW_FRAME * (BOW_FRAMES as u32 + 1), None, |_, _| {
+            String::new()
+        });
+        assert!(
+            matches!(v.frame, f if f == scene::frame_index(Pose::Rest, true) || f == scene::frame_index(Pose::Rest, false))
+        );
         let v = c.tick(t0 + ANNOUNCE_FOR, None, |_, _| String::new());
         assert!(v.lines.is_empty());
     }
@@ -714,7 +986,9 @@ mod tests {
         let mut c = conductor_with("/w", AgentState::Idle, t0);
         let mut closed = 0;
         for i in 0..200 {
-            let v = c.tick(t0 + Duration::from_millis(i * 50), None, |_, _| String::new());
+            let v = c.tick(t0 + Duration::from_millis(i * 50), None, |_, _| {
+                String::new()
+            });
             if v.frame == scene::frame_index(Pose::Rest, false) {
                 closed += 1;
             }

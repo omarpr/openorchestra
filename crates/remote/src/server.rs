@@ -287,7 +287,9 @@ impl Shared {
             cert_wake: Notify::new(),
             cert_check,
             test_send_delay_ms: AtomicU64::new(0),
-            screenshot_slots: Arc::new(tokio::sync::Semaphore::new(crate::api::MAX_CONCURRENT_SCREENSHOTS)),
+            screenshot_slots: Arc::new(tokio::sync::Semaphore::new(
+                crate::api::MAX_CONCURRENT_SCREENSHOTS,
+            )),
             screenshot_read_timeout: crate::api::SCREENSHOT_READ_TIMEOUT,
             ws_ping_ms: AtomicU64::new(WS_PING.as_millis() as u64),
             ws_idle_ms: AtomicU64::new(WS_IDLE.as_millis() as u64),
@@ -435,7 +437,10 @@ impl Shared {
     }
 
     fn refresh_agents(&self) {
-        let _guard = self.transcript_sync.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self
+            .transcript_sync
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if *self.shutdown.borrow() {
             return;
         }
@@ -1129,11 +1134,7 @@ async fn agents_loop(s: Arc<Shared>) {
             agent.transcript.is_some()
                 && (!agent.has_conversation || agent.agent_kind.as_deref() == Some("opencode"))
         };
-        let watch_exports = s
-            .agents
-            .borrow()
-            .iter()
-            .any(observes_export);
+        let watch_exports = s.agents.borrow().iter().any(observes_export);
         tokio::select! {
             _ = stopped(&mut stop) => return,
             r = snap.changed(), if snap_open => {
@@ -1336,7 +1337,14 @@ mod tests {
             tmux: Tmux::default(),
             hosts_override: None,
         };
-        let shared = Shared::new(&cfg, snap_rx, 0, &ca, "host".into(), Duration::from_secs(60));
+        let shared = Shared::new(
+            &cfg,
+            snap_rx,
+            0,
+            &ca,
+            "host".into(),
+            Duration::from_secs(60),
+        );
         shared.refresh_agents();
         let flag = opencode_transcripts(dir.path()).join("harness_k_1.jsonl.on");
         assert!(flag.is_file());

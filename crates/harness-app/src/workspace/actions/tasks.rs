@@ -44,14 +44,21 @@ impl HarnessWorkspace {
     /// Open the new-task dialog with only `repo` included and as home — the
     /// PROJECTS row's `+`. A one-member task is how a plain worktree is made:
     /// same branch, agent and setup-hook path as any task.
-    pub(crate) fn open_new_task_for_repo(&mut self, repo: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_new_task_for_repo(
+        &mut self,
+        repo: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.data.repos.iter().any(|r| r.name == repo) {
             return;
         }
         self.open_new_task(window, cx);
         if let Some(dialog) = self.new_task.as_mut() {
             dialog.worktree_for = Some(repo.to_string());
-            dialog.name.update(cx, |e, cx| e.set_placeholder_text("worktree name…", window, cx));
+            dialog.name.update(cx, |e, cx| {
+                e.set_placeholder_text("worktree name…", window, cx)
+            });
             dialog.brief.update(cx, |e, cx| {
                 e.set_placeholder_text("What should the agent work on?", window, cx)
             });
@@ -86,11 +93,7 @@ impl HarnessWorkspace {
         });
         let brief = cx.new(|cx| {
             let mut e = Editor::auto_height(3, 8, window, cx);
-            e.set_placeholder_text(
-                "What should the agents work on?",
-                window,
-                cx,
-            );
+            e.set_placeholder_text("What should the agents work on?", window, cx);
             e
         });
         let auto = "feat/task".to_string();
@@ -120,17 +123,21 @@ impl HarnessWorkspace {
     }
 
     pub(crate) fn submit_new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(dialog) = self.new_task.as_ref() else { return };
+        let Some(dialog) = self.new_task.as_ref() else {
+            return;
+        };
         let name = dialog.name.read(cx).text(cx);
         let name = name.trim().to_string();
         let worktree_for = dialog.worktree_for.clone();
         if name.is_empty() {
-            self.set_note(if worktree_for.is_some() {
-                "enter a worktree name"
-            } else {
-                "enter an effort name"
-            }
-            .to_string());
+            self.set_note(
+                if worktree_for.is_some() {
+                    "enter a worktree name"
+                } else {
+                    "enter an effort name"
+                }
+                .to_string(),
+            );
             cx.notify();
             return;
         }
@@ -139,7 +146,11 @@ impl HarnessWorkspace {
         let branch_raw = dialog.branch.read(cx).text(cx);
         let branch = {
             let t = branch_raw.trim();
-            if t.is_empty() { None } else { Some(t.to_string()) }
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
         };
         self.new_task = None;
         match worktree_for {
@@ -153,7 +164,11 @@ impl HarnessWorkspace {
                     std::mem::replace(&mut self.new_target_repo, repo),
                 );
                 self.create_named(&name, &brief, branch.as_deref(), window, cx);
-                (self.new_task_repos, self.new_task_home, self.new_target_repo) = saved;
+                (
+                    self.new_task_repos,
+                    self.new_task_home,
+                    self.new_target_repo,
+                ) = saved;
             }
             None => self.create_named(&name, &brief, branch.as_deref(), window, cx),
         }
@@ -181,9 +196,10 @@ impl HarnessWorkspace {
         }
         member_names.retain(|n| self.data.repos.iter().any(|r| &r.name == n));
         if member_names.is_empty()
-            && let Some(r) = self.data.repos.first() {
-                member_names.push(r.name.clone());
-            }
+            && let Some(r) = self.data.repos.first()
+        {
+            member_names.push(r.name.clone());
+        }
         let mut home = self.new_task_home.clone();
         if !member_names.iter().any(|n| n == &home) {
             home = member_names[0].clone();
@@ -211,8 +227,7 @@ impl HarnessWorkspace {
             .collect();
 
         // Prefer an enabled local agent; never invent OpenCode when it's off.
-        let agent_kind = default_enabled_agent(&self.prefs)
-            .unwrap_or(AgentKind::OpenCode);
+        let agent_kind = default_enabled_agent(&self.prefs).unwrap_or(AgentKind::OpenCode);
 
         let req = CreateTaskRequest {
             name: name.to_string(),
@@ -271,7 +286,9 @@ impl HarnessWorkspace {
     /// tmux, falls back to a silent runner and surfaces the result in the note.
     pub(crate) fn run_visible_setup_hooks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(r) = self.resolve() else { return };
-        let Some(task_id) = r.task_id.clone() else { return };
+        let Some(task_id) = r.task_id.clone() else {
+            return;
+        };
         let Some(task) = self.task_store.get(&task_id).cloned() else {
             return;
         };
@@ -324,11 +341,11 @@ impl HarnessWorkspace {
         // Opening that shell makes it the active tab; remembered so an agent
         // that was in front can be put back.
         let active_before = self.panes.get(&pane_key).map(|p| p.active);
-        if self
-            .panes
-            .get(&pane_key)
-            .is_none_or(|p| !p.tabs.iter().any(|t| t.agent.is_none() && matches!(t.content, TabContent::Terminal(_))))
-        {
+        if self.panes.get(&pane_key).is_none_or(|p| {
+            !p.tabs
+                .iter()
+                .any(|t| t.agent.is_none() && matches!(t.content, TabContent::Terminal(_)))
+        }) {
             self.open_tab(TabKind::Shell, window, cx);
         }
         let Some(pane) = self.panes.get_mut(&pane_key) else {
@@ -345,13 +362,17 @@ impl HarnessWorkspace {
         // Keep the agent in front when the pane has one (a coordinator opens
         // on its agent): setup output is a tab away, and the note says so.
         // Only an agent-less pane switches to the setup shell.
-        let agent_before = active_before
-            .filter(|a| pane.tabs.iter().any(|t| t.id == *a && t.agent.is_some()));
+        let agent_before =
+            active_before.filter(|a| pane.tabs.iter().any(|t| t.id == *a && t.agent.is_some()));
         let front = match agent_before {
             Some(agent) => agent,
-            None if pane.tabs.iter().any(|t| t.agent.is_some()) => {
-                pane.tabs.iter().filter(|t| t.agent.is_some()).map(|t| t.id).min().unwrap_or(tab)
-            }
+            None if pane.tabs.iter().any(|t| t.agent.is_some()) => pane
+                .tabs
+                .iter()
+                .filter(|t| t.agent.is_some())
+                .map(|t| t.id)
+                .min()
+                .unwrap_or(tab),
             None => tab,
         };
         pane.active = front;
@@ -380,10 +401,12 @@ impl HarnessWorkspace {
                     task_id: Some(task_id.clone()),
                     home_worktree: task.home_path().map(|p| p.to_path_buf()),
                 };
-                if let Ok(hooks) = HooksConfig::load_trusted(&entry.repo_root, &self.data_dir, &m.repo)
-                    && let Err(e) = hooks.run_setup(self.manager.git().runner(), &env) {
-                        errors.push(format!("setup {}: {e}", m.repo));
-                    }
+                if let Ok(hooks) =
+                    HooksConfig::load_trusted(&entry.repo_root, &self.data_dir, &m.repo)
+                    && let Err(e) = hooks.run_setup(self.manager.git().runner(), &env)
+                {
+                    errors.push(format!("setup {}: {e}", m.repo));
+                }
             }
             self.set_note(if errors.is_empty() {
                 "setup finished".into()

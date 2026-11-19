@@ -96,7 +96,10 @@ pub fn materialize_harness_status_shim(state_dir: &Path) -> io::Result<PathBuf> 
 
 /// Displayable invocation for Manual install: `node "<shim>"`.
 pub fn harness_status_shim_command(state_dir: &Path) -> String {
-    format!("node {:?}", harness_status_shim_path(state_dir).display().to_string())
+    format!(
+        "node {:?}",
+        harness_status_shim_path(state_dir).display().to_string()
+    )
 }
 
 /// Adapter for [`AgentKind::Other`] with a configured [`SignalProfile`].
@@ -167,13 +170,15 @@ impl ConfigurableRuntime {
         if let (Some(hooks), Some(ours)) = (hooks.as_object_mut(), ours["hooks"].as_object()) {
             let shim_marker = shim.display().to_string();
             for (event, entries) in ours {
-                let list = hooks
-                    .entry(event.clone())
-                    .or_insert_with(|| json!([]));
+                let list = hooks.entry(event.clone()).or_insert_with(|| json!([]));
                 let Some(list) = list.as_array_mut() else {
                     continue;
                 };
-                list.retain(|e| !serde_json::to_string(e).unwrap_or_default().contains(&shim_marker));
+                list.retain(|e| {
+                    !serde_json::to_string(e)
+                        .unwrap_or_default()
+                        .contains(&shim_marker)
+                });
                 if let Some(add) = entries.as_array() {
                     list.extend(add.iter().cloned());
                 }
@@ -222,22 +227,43 @@ impl ConfigurableRuntime {
         let home = std::env::var_os("HARNESS_CURSOR_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cursor")))
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Cursor config directory is unavailable"))?;
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "Cursor config directory is unavailable",
+                )
+            })?;
         let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
-        let marker = format!("if [ \"$HARNESS_AGENT\" = {} ]; then node ", quote(self.kind.as_str()));
+        let marker = format!(
+            "if [ \"$HARNESS_AGENT\" = {} ]; then node ",
+            quote(self.kind.as_str())
+        );
         let command = format!("{marker}{}; fi", quote(&shim.to_string_lossy()));
         crate::update_agent_hooks(&home, |root| {
             let root = root.as_object_mut().expect("validated hooks object");
             root.entry("version").or_insert(json!(1));
-            let hooks = root.entry("hooks").or_insert_with(|| json!({}))
+            let hooks = root
+                .entry("hooks")
+                .or_insert_with(|| json!({}))
                 .as_object_mut()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Cursor hooks must be an object"))?;
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "Cursor hooks must be an object")
+                })?;
             for event in ["beforeSubmitPrompt", "stop"] {
-                let handlers = hooks.entry(event).or_insert_with(|| json!([]))
+                let handlers = hooks
+                    .entry(event)
+                    .or_insert_with(|| json!([]))
                     .as_array_mut()
-                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("Cursor {event} hooks must be an array")))?;
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Cursor {event} hooks must be an array"),
+                        )
+                    })?;
                 if let Some(handler) = handlers.iter_mut().find(|handler| {
-                    handler["command"].as_str().is_some_and(|text| text.starts_with(&marker))
+                    handler["command"]
+                        .as_str()
+                        .is_some_and(|text| text.starts_with(&marker))
                 }) {
                     handler["command"] = json!(command);
                 } else {

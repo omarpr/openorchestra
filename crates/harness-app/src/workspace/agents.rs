@@ -14,6 +14,7 @@ pub(crate) fn agent_display(kind: &AgentKind) -> String {
         AgentKind::Codex => "Codex".to_string(),
         AgentKind::Kimi => "Kimi".to_string(),
         AgentKind::OpenCode => "OpenCode".to_string(),
+        AgentKind::Grok => "Grok".to_string(),
         AgentKind::Other(s) => s.clone(),
     }
 }
@@ -27,6 +28,7 @@ pub(crate) fn agent_mark(kind: &AgentKind) -> (&'static str, Rgba) {
         AgentKind::Codex => ("⬡", rgb(0x10a37f)),
         AgentKind::Kimi => ("K", rgb(0x4f9cf9)),
         AgentKind::OpenCode => ("⟡", rgb(0x3fb950)),
+        AgentKind::Grok => ("G", rgb(0xe6e6e6)),
         AgentKind::Other(_) => ("◇", rgb(0x9aa3af)),
     }
 }
@@ -41,6 +43,7 @@ pub(crate) fn agent_icon(kind: &AgentKind, size: f32) -> AnyElement {
         AgentKind::Codex => Some("codex"),
         AgentKind::Kimi => Some("kimi"),
         AgentKind::OpenCode => Some("opencode"),
+        AgentKind::Grok => Some("grok"),
         AgentKind::Other(slug) if matches!(slug.as_str(), "cursor" | "cursor-agent") => {
             Some("cursor")
         }
@@ -84,12 +87,7 @@ pub(crate) fn agent_catalog(prefs: &Prefs) -> Vec<AgentKind> {
 pub(crate) fn enabled_agents(prefs: &Prefs) -> Vec<AgentKind> {
     agent_catalog(prefs)
         .into_iter()
-        .filter(|k| {
-            !prefs
-                .agents
-                .get(k.as_str())
-                .is_some_and(|p| p.disabled)
-        })
+        .filter(|k| !prefs.agents.get(k.as_str()).is_some_and(|p| p.disabled))
         .collect()
 }
 
@@ -219,9 +217,10 @@ mod agent_prefs_tests {
     fn the_catalog_is_the_built_ins_then_the_custom_agents() {
         let prefs = with_custom("cursor-agent", "cursor-agent");
         let catalog = agent_catalog(&prefs);
+        let built_ins = AgentKind::known();
         assert_eq!(
-            &catalog[..5],
-            &AgentKind::known()[..],
+            &catalog[..built_ins.len()],
+            &built_ins[..],
             "built-ins come first, in order"
         );
         assert_eq!(
@@ -318,11 +317,11 @@ mod agent_prefs_tests {
 
     #[test]
     fn default_task_agent_prefers_last_used_when_enabled() {
-        let mut prefs = Prefs { last_task_agent: Some("claude-code".into()), ..Default::default() };
-        assert_eq!(
-            default_enabled_agent(&prefs),
-            Some(AgentKind::ClaudeCode)
-        );
+        let mut prefs = Prefs {
+            last_task_agent: Some("claude-code".into()),
+            ..Default::default()
+        };
+        assert_eq!(default_enabled_agent(&prefs), Some(AgentKind::ClaudeCode));
         prefs.agents.insert(
             "claude-code".into(),
             AgentPref {

@@ -48,7 +48,10 @@ pub(crate) fn sync_log_flags(
     remove_unshared: bool,
 ) -> io::Result<()> {
     const FLAG_SUFFIX: &str = ".jsonl.on";
-    let shared: HashSet<_> = shared.iter().map(|session| session_file_stem(session)).collect();
+    let shared: HashSet<_> = shared
+        .iter()
+        .map(|session| session_file_stem(session))
+        .collect();
     fs::create_dir_all(dir)?;
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
     for entry in fs::read_dir(dir)? {

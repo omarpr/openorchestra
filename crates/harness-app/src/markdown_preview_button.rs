@@ -144,9 +144,10 @@ impl Render for MarkdownPreviewButton {
                 )
             })
             .on_click(move |_, window, cx| {
-                let (Some(workspace), Some(editor)) =
-                    (workspace.upgrade(), editor.as_ref().and_then(|e| e.upgrade()))
-                else {
+                let (Some(workspace), Some(editor)) = (
+                    workspace.upgrade(),
+                    editor.as_ref().and_then(|e| e.upgrade()),
+                ) else {
                     return;
                 };
                 // Call zed's preview entry points on this button's editor and
@@ -169,7 +170,9 @@ impl Render for MarkdownPreviewButton {
                             workspace, editor, pane, window, cx,
                         );
                     } else {
-                        MarkdownPreviewView::open_preview_in_pane(workspace, editor, pane, window, cx);
+                        MarkdownPreviewView::open_preview_in_pane(
+                            workspace, editor, pane, window, cx,
+                        );
                     }
                 });
             })

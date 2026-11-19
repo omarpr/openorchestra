@@ -19,7 +19,7 @@
 //! are miserable to type by hand.
 //!
 //! On creation the pane runs **whichever agent the worktree records**
-//! (§4.5) — pi, opencode, claude, codex, kimi — or a plain shell on the
+//! (§4.5) — pi, opencode, claude, codex, kimi, grok — or a plain shell on the
 //! read-only `main` entry (D8), with cwd = the configured root. When the
 //! process exits (e.g. you quit the agent) the pane respawns a plain shell in
 //! the same dir, so the tab stays usable.
@@ -39,8 +39,8 @@ use gpui::{
     KeyDownEvent, Keystroke, MouseDownEvent, Render, ScrollEvent, Styled, Task, WeakEntity, Window,
     div, prelude::*, px,
 };
-use settings::Settings;
 use project::Project;
+use settings::Settings;
 use terminal::{
     Event as TerminalEvent, TerminalBuilder,
     terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape, TerminalSettings},
@@ -89,7 +89,8 @@ pub struct TerminalPane {
 
 impl TerminalPane {
     pub(crate) fn direct_agent_exited(&self) -> bool {
-        !self.tmux_backed && (self.respawn_pending || self.spawned == "$SHELL" || self.error.is_some())
+        !self.tmux_backed
+            && (self.respawn_pending || self.spawned == "$SHELL" || self.error.is_some())
     }
 
     /// `agent` is the resolved command for this worktree's agent, or `None` for
@@ -182,7 +183,8 @@ impl TerminalPane {
                     .map(|c| c.label.clone())
                     .unwrap_or_else(|| "shell".to_string());
                 if agent.is_some() && !sess.attach_only {
-                    sess.env.push(("HARNESS_REMOTE_SESSION".into(), sess.name.clone()));
+                    sess.env
+                        .push(("HARNESS_REMOTE_SESSION".into(), sess.name.clone()));
                 }
                 let args = crate::tmux::client_args(
                     &sess.name,
@@ -209,8 +211,9 @@ impl TerminalPane {
             None => match agent {
                 Some(cmd) => {
                     let spawned = format!("{} ({})", cmd.label, cmd.program.display());
-                    let (program, args) =
-                        worktrees::interactive_login_command(&crate::tmux::agent_command_line(&cmd));
+                    let (program, args) = worktrees::interactive_login_command(
+                        &crate::tmux::agent_command_line(&cmd),
+                    );
                     (
                         Shell::WithArguments {
                             program,
@@ -299,7 +302,9 @@ impl TerminalPane {
     /// leaves it. Polling only runs while copy mode may be on, so an idle pane
     /// costs nothing.
     fn watch_copy_mode(&mut self, cx: &mut Context<Self>) {
-        let Some(session) = self.tmux_session.clone() else { return };
+        let Some(session) = self.tmux_session.clone() else {
+            return;
+        };
         if self.watching_copy_mode {
             return;
         }
@@ -338,7 +343,9 @@ impl TerminalPane {
         if self.cancelling_copy_mode {
             return;
         }
-        let Some(session) = self.tmux_session.clone() else { return };
+        let Some(session) = self.tmux_session.clone() else {
+            return;
+        };
         self.cancelling_copy_mode = true;
         cx.spawn(async move |pane, cx| {
             cx.background_executor()
@@ -369,7 +376,9 @@ impl TerminalPane {
 
     /// Insert paths dropped from Finder into the running agent's prompt.
     fn drop_paths(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.view.clone() else { return };
+        let Some(view) = self.view.clone() else {
+            return;
+        };
         let Some(text) = paths_to_prompt_text(paths.paths()) else {
             return;
         };
@@ -426,9 +435,7 @@ impl Render for TerminalPane {
                     // anything painted behind the terminal is covered.
                     .border_2()
                     .border_color(hx.bg0)
-                    .drag_over::<ExternalPaths>(move |style, _, _, _| {
-                        style.border_color(accent)
-                    })
+                    .drag_over::<ExternalPaths>(move |style, _, _, _| style.border_color(accent))
                     .on_drop(cx.listener(|pane, paths: &ExternalPaths, window, cx| {
                         pane.drop_paths(paths, window, cx);
                     }))
@@ -474,10 +481,11 @@ impl Render for TerminalPane {
                 .bg(hx.bg0)
                 .p_2()
                 .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(hx.tx2)
-                        .child(self.error.clone().unwrap_or_else(|| format!("spawning {} …", self.spawned))),
+                    div().text_size(px(12.0)).text_color(hx.tx2).child(
+                        self.error
+                            .clone()
+                            .unwrap_or_else(|| format!("spawning {} …", self.spawned)),
+                    ),
                 ),
         }
     }
@@ -494,7 +502,9 @@ fn is_typing_key(k: &Keystroke) -> bool {
         return false;
     }
     matches!(k.key.as_str(), "enter" | "backspace" | "tab")
-        || k.key_char.as_deref().is_some_and(|c| !c.is_empty() && c.chars().all(|ch| !ch.is_control()))
+        || k.key_char
+            .as_deref()
+            .is_some_and(|c| !c.is_empty() && c.chars().all(|ch| !ch.is_control()))
 }
 
 /// Format dropped file paths for insertion into the running agent's prompt.
@@ -544,7 +554,16 @@ mod tests {
 
     #[test]
     fn typing_keys_pass_through_copy_mode_navigation_does_not() {
-        for k in ["t", "f", "shift-a", "space", "enter", "backspace", "tab", "1"] {
+        for k in [
+            "t",
+            "f",
+            "shift-a",
+            "space",
+            "enter",
+            "backspace",
+            "tab",
+            "1",
+        ] {
             let mut key = ks(k);
             if key.key_char.is_none() && key.key.chars().count() == 1 {
                 key.key_char = Some(key.key.clone());

@@ -1,7 +1,9 @@
 use super::super::*;
 use super::settings::chip;
 use crate::markdown_preview::markdown_style;
-use crate::review_overview::review_file_reference;
+use crate::review_overview::{
+    ReadingPriority, ReadingStep, ReadingStepFile, review_file_reference,
+};
 use ::ui::prelude::Disableable;
 use ::ui::{CommonAnimationExt, Icon, IconName, IconSize};
 use markdown::MarkdownElement;
@@ -114,6 +116,13 @@ impl HarnessWorkspace {
                     .child(format!("{} reported no selectable models.", cli.label()))
                     .into_any_element(),
             ),
+            None => Some(
+                div()
+                    .text_xs()
+                    .text_color(hx.tx2)
+                    .child("Reload models to list this CLI's models.")
+                    .into_any_element(),
+            ),
             _ => None,
         };
 
@@ -170,7 +179,11 @@ impl HarnessWorkspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let running = matches!(&overview.status, OverviewStatus::Running(_));
-        let can_chat = matches!(&overview.status, OverviewStatus::Ready { saved, .. } if saved.report.generated);
+        let can_chat = matches!(
+            &overview.status,
+            OverviewStatus::Ready { saved, .. }
+                if saved.report.generated && saved.preferences.cli.agent_kind().is_some()
+        );
         let action = if running {
             overview_button("cancel-review-overview", "Cancel", hx)
                 .on_click(cx.listener(|ws, _, _, cx| ws.cancel_review_overview(cx)))
@@ -204,7 +217,10 @@ impl HarnessWorkspace {
                     .text_color(hx.tx2)
                     .hover(|d| d.text_color(hx.tx0))
                     .tooltip(tip("Change the CLI or model in Settings"))
-                    .child(overview.preferences.label())
+                    // The CLI that wrote the report stays on that report, for
+                    // Chat about this. This label is the next run, so it
+                    // follows Settings as soon as the choice changes.
+                    .child(self.prefs.review_overview.label())
                     .on_click(cx.listener(|ws, _, _, cx| {
                         ws.settings_section = SettingsSection::Diff;
                         ws.settings_open = true;
@@ -226,6 +242,8 @@ impl HarnessWorkspace {
                     })
                     .child(action),
             );
+        let reading_steps = &overview.reading_steps;
+        let current_step = overview.last_reading_step;
         let content = match &overview.status {
             OverviewStatus::Running(_) => div()
                 .flex()
@@ -283,6 +301,15 @@ impl HarnessWorkspace {
                                 .map(|note| div().text_color(hx.amber).child(note)),
                         ),
                 )
+                .when(!reading_steps.is_empty(), |column| {
+                    column.child(render_reading_path(
+                        reading_steps,
+                        current_step,
+                        &saved.report.files,
+                        hx,
+                        cx,
+                    ))
+                })
                 .child(render_review_markdown(markdown, saved, hx, cx)),
         };
 
@@ -307,6 +334,173 @@ impl HarnessWorkspace {
             )
             .into_any_element()
     }
+}
+
+fn render_reading_path(
+    steps: &[ReadingStep],
+    current: Option<usize>,
+    files: &[crate::review_overview::ReviewFile],
+    hx: &HarnessTheme,
+    cx: &mut Context<HarnessWorkspace>,
+) -> AnyElement {
+    let mut path = div().flex().flex_col();
+    for (index, step) in steps.iter().enumerate() {
+        if index > 0 {
+            path = path.child(
+                div()
+                    .flex()
+                    .justify_center()
+                    .py_1()
+                    .text_xs()
+                    .text_color(hx.tx2)
+                    .child("↓"),
+            );
+        }
+        path = path.child(render_reading_step(
+            index,
+            step,
+            current == Some(index),
+            files,
+            hx,
+            cx,
+        ));
+    }
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(div().text_xs().text_color(hx.tx2).child("Reading order"))
+        .child(path)
+        .into_any_element()
+}
+
+fn render_reading_step(
+    index: usize,
+    step: &ReadingStep,
+    marked: bool,
+    files: &[crate::review_overview::ReviewFile],
+    hx: &HarnessTheme,
+    cx: &mut Context<HarnessWorkspace>,
+) -> AnyElement {
+    let single = step.files.len() == 1;
+    let number_color = if marked { hx.bg0 } else { hx.tx1 };
+    let number_bg = if marked { hx.accent } else { hx.bg0 };
+    let mut body = div().flex().min_w_0().flex_1().flex_col().gap_1();
+    if !step.look_for.is_empty() {
+        body = body.child(
+            div()
+                .text_sm()
+                .text_color(hx.tx0)
+                .child(step.look_for.clone()),
+        );
+    }
+    if single {
+        body = body.child(reading_file_label(
+            &step.files[0].reference,
+            step.files[0].open.is_some(),
+            hx,
+        ));
+    } else {
+        for (file_index, file) in step.files.iter().enumerate() {
+            body = body.child(reading_file_target(index, file_index, file, files, hx, cx));
+        }
+    }
+
+    let mut card = div()
+        .id(gpui::SharedString::from(format!("reading-step-{index}")))
+        .flex()
+        .w_full()
+        .items_start()
+        .gap_2()
+        .px_3()
+        .py_2()
+        .rounded_md()
+        .border_1()
+        .border_color(if marked { hx.accent } else { hx.border2 })
+        .bg(hx.bg2)
+        .child(
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .size(px(22.))
+                .rounded_md()
+                .text_xs()
+                .bg(number_bg)
+                .text_color(number_color)
+                .child(format!("{}", index + 1)),
+        )
+        .child(body)
+        .when(step.priority.is_some() || marked, |card| {
+            card.child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .flex_col()
+                    .items_end()
+                    .gap_1()
+                    .when_some(step.priority, |badges, priority| {
+                        let (label, color) = match priority {
+                            ReadingPriority::High => ("HIGH", hx.red),
+                            ReadingPriority::Medium => ("MEDIUM", hx.amber),
+                            ReadingPriority::Low => ("LOW", hx.tx1),
+                        };
+                        badges.child(sidebar_chip(hx, color).child(label))
+                    })
+                    .when(marked, |badges| {
+                        badges.child(div().text_xs().text_color(hx.accent).child("Opened"))
+                    }),
+            )
+        });
+    if single && let Some((file_index, line)) = step.files[0].open {
+        let root = files[file_index].root.clone();
+        let relative = files[file_index].relative.clone();
+        card = card
+            .cursor_pointer()
+            .hover(|card| card.bg(hx.surface_hover))
+            .on_click(cx.listener(move |ws, _, window, cx| {
+                ws.open_reading_order_file(index, root.clone(), relative.clone(), line, window, cx);
+            }));
+    }
+    card.into_any_element()
+}
+
+fn reading_file_target(
+    step: usize,
+    file_index: usize,
+    file: &ReadingStepFile,
+    files: &[crate::review_overview::ReviewFile],
+    hx: &HarnessTheme,
+    cx: &mut Context<HarnessWorkspace>,
+) -> AnyElement {
+    let mut row = div()
+        .id(gpui::SharedString::from(format!(
+            "reading-step-{step}-file-{file_index}"
+        )))
+        .min_w_0()
+        .child(reading_file_label(&file.reference, file.open.is_some(), hx));
+    if let Some((index, line)) = file.open {
+        let root = files[index].root.clone();
+        let relative = files[index].relative.clone();
+        row = row
+            .cursor_pointer()
+            .hover(|row| row.bg(hx.surface_hover))
+            .rounded_md()
+            .on_click(cx.listener(move |ws, _, window, cx| {
+                ws.open_reading_order_file(step, root.clone(), relative.clone(), line, window, cx);
+            }));
+    }
+    row.into_any_element()
+}
+
+fn reading_file_label(reference: &str, openable: bool, hx: &HarnessTheme) -> impl IntoElement {
+    div()
+        .min_w_0()
+        .text_xs()
+        .font_family(hx.font_mono)
+        .text_color(if openable { hx.accent } else { hx.tx2 })
+        .child(reference.to_string())
 }
 
 fn render_review_markdown(

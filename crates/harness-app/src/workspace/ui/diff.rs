@@ -4,11 +4,10 @@
 use super::super::*;
 
 mod body;
-mod header;
 mod files;
+mod header;
 
 impl HarnessWorkspace {
-
     /// Where one file's diff has to be fetched from: its worktree, the base the
     /// summary pinned, and the file record naming it to git.
     ///
@@ -73,20 +72,24 @@ impl HarnessWorkspace {
             .gap_1()
             .font_family(hx.font_ui);
         if !in_tool_strip {
-            row = row.px_3().pb_1().child(div().flex_1()).child(div().flex_1());
+            row = row
+                .px_3()
+                .pb_1()
+                .child(div().flex_1())
+                .child(div().flex_1());
         }
-        row.child(
-            div()
-                .text_xs()
-                .text_color(hx.amber)
-                .child(format!("{count} comment{}", if count == 1 { "" } else { "s" })),
+        row.child(div().text_xs().text_color(hx.amber).child(format!(
+            "{count} comment{}",
+            if count == 1 { "" } else { "s" }
+        )))
+        .child(
+            chip("copy-review", "copy".to_string(), hx.tx2)
+                .on_click(cx.listener(|ws, _, _, cx| ws.copy_review(cx))),
         )
-        .child(chip("copy-review", "copy".to_string(), hx.tx2).on_click(
-            cx.listener(|ws, _, _, cx| ws.copy_review(cx)),
-        ))
-        .child(chip("save-review", "save .md".to_string(), hx.tx2).on_click(
-            cx.listener(|ws, _, _, cx| ws.save_review_markdown(cx)),
-        ))
+        .child(
+            chip("save-review", "save .md".to_string(), hx.tx2)
+                .on_click(cx.listener(|ws, _, _, cx| ws.save_review_markdown(cx))),
+        )
         .child(
             chip(
                 "clear-review",
@@ -185,7 +188,12 @@ impl HarnessWorkspace {
             .justify_center()
             .gap_2()
             .px_3()
-            .child(div().text_sm().text_color(hx.tx1).child("No project selected"))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(hx.tx1)
+                    .child("No project selected"),
+            )
             .child(
                 div()
                     .text_xs()
@@ -193,5 +201,4 @@ impl HarnessWorkspace {
                     .child("There is no project selected or created. Create your first one!"),
             )
     }
-
 }

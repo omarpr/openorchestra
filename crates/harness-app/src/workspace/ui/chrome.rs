@@ -13,13 +13,21 @@ const TOP_BAR_H: f32 = 38.0;
 const TRAFFIC_LIGHT_PADDING: f32 = 80.0;
 
 impl HarnessWorkspace {
-
     /// The top bar, which is also the window's title bar (the native one is
     /// transparent — see `main.rs`): it leaves room for the traffic lights,
     /// drags the window, and zooms it on double-click, as a native bar would.
-    pub(crate) fn render_top_bar(&self, hx: &HarnessTheme, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_top_bar(
+        &self,
+        hx: &HarnessTheme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         // Fullscreen hides the traffic lights, so their padding goes too.
-        let traffic_light_room = if window.is_fullscreen() { 12.0 } else { TRAFFIC_LIGHT_PADDING };
+        let traffic_light_room = if window.is_fullscreen() {
+            12.0
+        } else {
+            TRAFFIC_LIGHT_PADDING
+        };
         let r = self.resolve();
         let branch = r.as_ref().map(|r| r.branch.clone()).unwrap_or_default();
         let (project, task) = self.location_names();
@@ -37,7 +45,11 @@ impl HarnessWorkspace {
             .py_0p5()
             .rounded_md()
             .text_xs()
-            .text_color(if self.prefs.sidebar_open { hx.tx1 } else { hx.tx2 })
+            .text_color(if self.prefs.sidebar_open {
+                hx.tx1
+            } else {
+                hx.tx2
+            })
             .cursor_pointer()
             .tooltip(tip("Toggle sidebar (⌘B)"))
             .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
@@ -83,12 +95,18 @@ impl HarnessWorkspace {
             // Zed's title bar does the same: arm on press, move on the first
             // drag motion, disarm on release. Starting the move on press would
             // swallow clicks meant for the toggles.
-            .on_mouse_down(MouseButton::Left, cx.listener(|ws, _: &MouseDownEvent, _, _| {
-                ws.titlebar_should_move = true;
-            }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|ws, _: &MouseUpEvent, _, _| {
-                ws.titlebar_should_move = false;
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|ws, _: &MouseDownEvent, _, _| {
+                    ws.titlebar_should_move = true;
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|ws, _: &MouseUpEvent, _, _| {
+                    ws.titlebar_should_move = false;
+                }),
+            )
             .on_mouse_down_out(cx.listener(|ws, _: &MouseDownEvent, _, _| {
                 ws.titlebar_should_move = false;
             }))
@@ -129,35 +147,50 @@ impl HarnessWorkspace {
                                 .child(name),
                         )
                         .child(div().flex_none().text_xs().text_color(hx.tx2).child("·"))
-                        .child(div().flex_none().text_xs().text_color(hx.accent).child("coordinator"))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_xs()
+                                .text_color(hx.accent)
+                                .child("coordinator"),
+                        )
                     })
                     .when(coordinator_of.is_none(), |d| {
-                        d.child(div().flex_none().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).text_color(hx.tx0).child(project))
+                        d.child(
+                            div()
+                                .flex_none()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(hx.tx0)
+                                .child(project),
+                        )
                     })
                     .when_some(task.filter(|_| coordinator_of.is_none()), |d, task| {
-                        d.child(div().flex_none().text_sm().text_color(hx.tx2).child("›")).child(
-                            div()
-                                .min_w_0()
-                                .whitespace_nowrap()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .text_sm()
-                                .text_color(hx.tx0)
-                                .child(task),
-                        )
+                        d.child(div().flex_none().text_sm().text_color(hx.tx2).child("›"))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .text_sm()
+                                    .text_color(hx.tx0)
+                                    .child(task),
+                            )
                     })
                     .when(coordinator_of.is_none(), |d| {
-                        d.child(div().flex_none().text_xs().text_color(hx.tx2).child("·")).child(
-                            div()
-                                .min_w_0()
-                                .whitespace_nowrap()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .text_xs()
-                                .font_family(hx.font_mono)
-                                .text_color(hx.tx1)
-                                .child(branch),
-                        )
+                        d.child(div().flex_none().text_xs().text_color(hx.tx2).child("·"))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .text_xs()
+                                    .font_family(hx.font_mono)
+                                    .text_color(hx.tx1)
+                                    .child(branch),
+                            )
                     })
                     .children(self.render_a2a_delegation_chip(hx))
                     .children(self.render_remote_chip(hx, cx)),
@@ -169,14 +202,18 @@ impl HarnessWorkspace {
     /// phones can reach it and toggles that. Terminal tabs only.
     fn render_remote_chip(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> Option<AnyElement> {
         use crate::workspace::remote::{
-            chip_click, mark_note, remote_chip, ChipClick, RemoteChip, RemoteServe,
+            ChipClick, RemoteChip, RemoteServe, chip_click, mark_note, remote_chip,
         };
         let key = self.resolve()?.key;
         let tab = self.panes.get(&key)?.active_tab()?;
         let tab_id = tab.id;
         let is_shell = matches!(Self::remote_tab_kind(tab), Some(TabKind::Shell));
         let marked = self.remote_is_marked(&key, tab_id);
-        let state = remote_chip(Self::remote_tab_kind(tab).is_some(), marked, self.remote_live())?;
+        let state = remote_chip(
+            Self::remote_tab_kind(tab).is_some(),
+            marked,
+            self.remote_live(),
+        )?;
         let (fg, bg, border, tooltip) = match state {
             RemoteChip::Off if !self.remote.file.enabled => (
                 hx.tx2,
@@ -270,7 +307,8 @@ impl HarnessWorkspace {
                         }
                         ws.remote_open_settings(cx);
                         ws.set_note(
-                            "Turn on Remote control to reach this tab from your devices".to_string(),
+                            "Turn on Remote control to reach this tab from your devices"
+                                .to_string(),
                         );
                         cx.notify();
                         return;
@@ -281,7 +319,9 @@ impl HarnessWorkspace {
                     if let Some(n) = mark_note(ws.remote.file.enabled, other, now) {
                         ws.set_note(n.to_string());
                     } else if now && is_shell {
-                        ws.set_note("Remote on \u{2014} paired devices can use this shell".to_string());
+                        ws.set_note(
+                            "Remote on \u{2014} paired devices can use this shell".to_string(),
+                        );
                     }
                     cx.notify();
                 }))

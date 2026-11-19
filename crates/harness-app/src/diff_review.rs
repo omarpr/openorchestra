@@ -73,7 +73,13 @@ impl ReviewNotes {
     pub fn markdown_path_in(state_dir: &Path, worktree: &str) -> PathBuf {
         let stem: String = worktree
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '-'
+                }
+            })
             .collect();
         state_dir.join("reviews").join(format!("{stem}.md"))
     }
@@ -252,7 +258,11 @@ mod tests {
     #[test]
     fn an_empty_review_is_empty_not_a_header_with_nothing_under_it() {
         assert!(ReviewNotes::default().as_review("app/nav").is_empty());
-        assert!(ReviewNotes::default().as_markdown("app/nav", "feat/x").is_empty());
+        assert!(
+            ReviewNotes::default()
+                .as_markdown("app/nav", "feat/x")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -311,7 +321,10 @@ mod tests {
         // copy — plain feedback for the agent
         assert!(n.as_review("app/nav").contains("line 12: this leaks"));
         // save .md — a document for a human
-        assert!(n.as_markdown("app/nav", "feat/nav").contains("- **line 12** — this leaks"));
+        assert!(
+            n.as_markdown("app/nav", "feat/nav")
+                .contains("- **line 12** — this leaks")
+        );
         // clear
         n.clear("app/nav");
         n.save(&notes_path);
@@ -324,7 +337,10 @@ mod tests {
         assert!(!n.is_reviewed("app/nav", "src/a.rs"));
         n.set_reviewed("app/nav", "src/a.rs", true);
         assert!(n.is_reviewed("app/nav", "src/a.rs"));
-        assert!(!n.is_reviewed("app/other", "src/a.rs"), "scoped per worktree");
+        assert!(
+            !n.is_reviewed("app/other", "src/a.rs"),
+            "scoped per worktree"
+        );
         n.set_reviewed("app/nav", "src/a.rs", false);
         assert!(!n.is_reviewed("app/nav", "src/a.rs"));
     }
@@ -362,7 +378,10 @@ mod tests {
     #[test]
     fn a_missing_or_corrupt_file_loads_as_empty_rather_than_failing() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(ReviewNotes::load(&dir.path().join("nope.json")).count("x"), 0);
+        assert_eq!(
+            ReviewNotes::load(&dir.path().join("nope.json")).count("x"),
+            0
+        );
         let bad = dir.path().join("bad.json");
         std::fs::write(&bad, "{not json").unwrap();
         assert_eq!(ReviewNotes::load(&bad).count("x"), 0);

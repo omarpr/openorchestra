@@ -1461,7 +1461,10 @@ mod conversation {
         let mut events = h.get("/api/events", Some(&token)).await;
         let first = events.chunk().await.unwrap().unwrap();
         let first_text = String::from_utf8_lossy(&first);
-        assert!(first_text.contains("\"has_conversation\":false"), "{first_text}");
+        assert!(
+            first_text.contains("\"has_conversation\":false"),
+            "{first_text}"
+        );
         std::fs::write(&log, concat!(
             r#"{"id":"m1","kind":"user","text":"list files"}"#, "\n",
             r#"{"id":"t1","kind":"tool","tool":{"id":"t1","name":"bash","summary":"ls","status":"ok"},"result":{"text":"a.txt","input":"ls","is_error":false,"truncated":false}}"#, "\n",

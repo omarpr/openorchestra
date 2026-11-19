@@ -34,11 +34,7 @@ impl HarnessWorkspace {
             .into_any_element()
     }
 
-    fn render_tool_tab_strip(
-        &self,
-        hx: &HarnessTheme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_tool_tab_strip(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.prefs.tool_tab;
         let review_count = self
             .resolve()
@@ -57,7 +53,12 @@ impl HarnessWorkspace {
             .border_b_1()
             .border_color(hx.border);
 
-        for tab in [ToolTab::Files, ToolTab::Git, ToolTab::Review, ToolTab::Ports] {
+        for tab in [
+            ToolTab::Files,
+            ToolTab::Git,
+            ToolTab::Review,
+            ToolTab::Ports,
+        ] {
             let selected = active == tab;
             let label = match tab {
                 ToolTab::Files => "Files".to_string(),
@@ -69,7 +70,10 @@ impl HarnessWorkspace {
             };
             strip = strip.child(
                 div()
-                    .id(gpui::SharedString::from(format!("tool-tab-{}", tab.as_str())))
+                    .id(gpui::SharedString::from(format!(
+                        "tool-tab-{}",
+                        tab.as_str()
+                    )))
                     .flex()
                     .items_center()
                     .h(px(24.0))
@@ -209,48 +213,46 @@ impl HarnessWorkspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match self.prefs.tool_tab {
-            ToolTab::Review if self.prefs.diff_location == DiffLocation::Tab => {
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .h_full()
-                    .items_center()
-                    .justify_center()
-                    .gap_2()
-                    .px_3()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(hx.tx1)
-                            .child("Review is a center tab"),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(hx.tx2)
-                            .child("Open it from ＋, or switch Review location to Tools panel."),
-                    )
-                    .child(
-                        div()
-                            .id("tool-open-review-tab")
-                            .mt_2()
-                            .px_2()
-                            .py_1()
-                            .rounded_md()
-                            .bg(hx.surface)
-                            .text_xs()
-                            .text_color(hx.tx0)
-                            .cursor_pointer()
-                            .hover(|d| d.bg(hx.surface_hover))
-                            .child("Open Review tab")
-                            .on_click(cx.listener(|ws, _, window, cx| {
-                                ws.open_tab(TabKind::Diff, window, cx);
-                            })),
-                    )
-                    .child(self.review_overview_button(hx, cx))
-                    .into_any_element()
-            }
+            ToolTab::Review if self.prefs.diff_location == DiffLocation::Tab => div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .h_full()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .px_3()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(hx.tx1)
+                        .child("Review is a center tab"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(hx.tx2)
+                        .child("Open it from ＋, or switch Review location to Tools panel."),
+                )
+                .child(
+                    div()
+                        .id("tool-open-review-tab")
+                        .mt_2()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(hx.surface)
+                        .text_xs()
+                        .text_color(hx.tx0)
+                        .cursor_pointer()
+                        .hover(|d| d.bg(hx.surface_hover))
+                        .child("Open Review tab")
+                        .on_click(cx.listener(|ws, _, window, cx| {
+                            ws.open_tab(TabKind::Diff, window, cx);
+                        })),
+                )
+                .child(self.review_overview_button(hx, cx))
+                .into_any_element(),
             ToolTab::Review => {
                 // Skip the inner review bar — actions are in the tab strip.
                 let width = self.tools_panel_width(window);

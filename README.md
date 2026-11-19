@@ -15,8 +15,8 @@
 </p>
 
 A native macOS workspace for running coding agents (pi, Claude Code, Codex,
-OpenCode and Kimi) in parallel, each in its own git worktree, next to a real
-embedded zed editor. Agents live in tmux sessions, so they keep running when the
+OpenCode, Kimi and Grok) in parallel, each in its own git worktree, next to a
+real embedded zed editor. Agents live in tmux sessions, so they keep running when the
 app closes. Their changes appear in a diff panel you can review and comment on,
 and a native notification tells you when one needs you. Tasks that span several
 repos get one specialist agent per repo, coordinated over a localhost A2A
@@ -83,8 +83,8 @@ The Review panel lists the changed files against the chosen base
 - macOS 12 or later.
 - **git** and **tmux** are required. The app shows a requirements screen until
   both are found.
-- Recommended: at least one agent CLI (`pi`, `claude`, `codex`, `opencode` or
-  `kimi`). Without one, agent tabs fall back to a plain shell.
+- Recommended: at least one agent CLI (`pi`, `claude`, `codex`, `opencode`,
+  `kimi` or `grok`). Without one, agent tabs fall back to a plain shell.
 - Optional: `gh` (PR and CI badges) and `rust-analyzer` (Rust language
   features).
 

@@ -27,8 +27,7 @@ impl AuditLog {
     }
 
     pub fn append<T: Serialize>(&mut self, event: &T) -> io::Result<()> {
-        serde_json::to_writer(&mut self.file, event)
-            .map_err(io::Error::other)?;
+        serde_json::to_writer(&mut self.file, event).map_err(io::Error::other)?;
         self.file.write_all(b"\n")?;
         self.file.flush()?;
         Ok(())

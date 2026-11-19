@@ -39,25 +39,82 @@ pub struct Sound {
 /// Bundled first — they are ours, and the first is the historical default —
 /// then the system sounds in the order macOS lists them.
 pub const CATALOG: &[Sound] = &[
-    Sound { id: "uh-oh", source: Source::Bundled },
-    Sound { id: "bell", source: Source::Bundled },
-    Sound { id: "quack", source: Source::Bundled },
-    Sound { id: "default", source: Source::SystemDefault },
-    Sound { id: "silent", source: Source::Silent },
-    Sound { id: "Basso", source: Source::System },
-    Sound { id: "Blow", source: Source::System },
-    Sound { id: "Bottle", source: Source::System },
-    Sound { id: "Frog", source: Source::System },
-    Sound { id: "Funk", source: Source::System },
-    Sound { id: "Glass", source: Source::System },
-    Sound { id: "Hero", source: Source::System },
-    Sound { id: "Morse", source: Source::System },
-    Sound { id: "Ping", source: Source::System },
-    Sound { id: "Pop", source: Source::System },
-    Sound { id: "Purr", source: Source::System },
-    Sound { id: "Sosumi", source: Source::System },
-    Sound { id: "Submarine", source: Source::System },
-    Sound { id: "Tink", source: Source::System },
+    Sound {
+        id: "uh-oh",
+        source: Source::Bundled,
+    },
+    Sound {
+        id: "bell",
+        source: Source::Bundled,
+    },
+    Sound {
+        id: "quack",
+        source: Source::Bundled,
+    },
+    Sound {
+        id: "default",
+        source: Source::SystemDefault,
+    },
+    Sound {
+        id: "silent",
+        source: Source::Silent,
+    },
+    Sound {
+        id: "Basso",
+        source: Source::System,
+    },
+    Sound {
+        id: "Blow",
+        source: Source::System,
+    },
+    Sound {
+        id: "Bottle",
+        source: Source::System,
+    },
+    Sound {
+        id: "Frog",
+        source: Source::System,
+    },
+    Sound {
+        id: "Funk",
+        source: Source::System,
+    },
+    Sound {
+        id: "Glass",
+        source: Source::System,
+    },
+    Sound {
+        id: "Hero",
+        source: Source::System,
+    },
+    Sound {
+        id: "Morse",
+        source: Source::System,
+    },
+    Sound {
+        id: "Ping",
+        source: Source::System,
+    },
+    Sound {
+        id: "Pop",
+        source: Source::System,
+    },
+    Sound {
+        id: "Purr",
+        source: Source::System,
+    },
+    Sound {
+        id: "Sosumi",
+        source: Source::System,
+    },
+    Sound {
+        id: "Submarine",
+        source: Source::System,
+    },
+    Sound {
+        id: "Tink",
+        source: Source::System,
+    },
 ];
 
 /// What a fresh install uses: the chirp the app has always made.
@@ -103,10 +160,7 @@ pub fn file_name(sound: Sound) -> Option<String> {
 pub fn path(sound: Sound) -> Option<std::path::PathBuf> {
     match sound.source {
         Source::System => {
-            let p = std::path::PathBuf::from(format!(
-                "/System/Library/Sounds/{}.aiff",
-                sound.id
-            ));
+            let p = std::path::PathBuf::from(format!("/System/Library/Sounds/{}.aiff", sound.id));
             p.exists().then_some(p)
         }
         Source::Bundled => {
@@ -169,7 +223,10 @@ pub fn preview(id: &str) {
                 Err(e) => log::warn!("afplay could not be waited on: {e}"),
             });
         }
-        Err(e) => log::warn!("could not run afplay for {id:?} ({}): {e}", target.display()),
+        Err(e) => log::warn!(
+            "could not run afplay for {id:?} ({}): {e}",
+            target.display()
+        ),
     }
 }
 
@@ -183,7 +240,11 @@ mod tests {
         let count = ids.len();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), count, "a duplicate id would make the picker ambiguous");
+        assert_eq!(
+            ids.len(),
+            count,
+            "a duplicate id would make the picker ambiguous"
+        );
         assert_eq!(resolve(DEFAULT).id, DEFAULT);
     }
 

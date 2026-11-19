@@ -159,8 +159,7 @@ impl HarnessWorkspace {
     /// Deliver an A2A inbox message into the specialist's agent tmux session,
     /// or queue it until an Agent tab is available.
     pub(crate) fn deliver_a2a_inbox(&mut self, delivery: InboxDelivery) {
-        let pane_key =
-            a2a_broker::task_member_pane_key(&delivery.oo_task_id, &delivery.tenant);
+        let pane_key = a2a_broker::task_member_pane_key(&delivery.oo_task_id, &delivery.tenant);
         if self.try_inject_a2a_message(&pane_key, &delivery.message) {
             return;
         }
@@ -217,12 +216,13 @@ impl HarnessWorkspace {
 
         if let Some(pane) = self.panes.get(pane_key) {
             if let Some(tab) = pane.active_tab()
-                && tab.agent.is_some() {
-                    let name = crate::tmux::session_name(pane_key, tab.id);
-                    if is_live(&name) {
-                        return Some(name);
-                    }
+                && tab.agent.is_some()
+            {
+                let name = crate::tmux::session_name(pane_key, tab.id);
+                if is_live(&name) {
+                    return Some(name);
                 }
+            }
             for tab in pane.tabs.iter().rev() {
                 if tab.agent.is_some() {
                     let name = crate::tmux::session_name(pane_key, tab.id);

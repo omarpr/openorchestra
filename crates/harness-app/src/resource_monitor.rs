@@ -97,7 +97,10 @@ pub fn aggregate(
                 continue;
             }
             if let Some(p) = by_pid.get(&pid) {
-                usage.add(Usage { cpu_pct: p.cpu_pct, rss_bytes: p.rss_bytes });
+                usage.add(Usage {
+                    cpu_pct: p.cpu_pct,
+                    rss_bytes: p.rss_bytes,
+                });
             }
             if let Some(kids) = children.get(&pid) {
                 stack.extend(kids.iter().copied());
@@ -115,7 +118,10 @@ pub fn aggregate(
                 usage.add(subtree(*pane_pid, &mut visited));
             }
         }
-        per_worktree.push(WorktreeUsage { label: w.label.clone(), usage });
+        per_worktree.push(WorktreeUsage {
+            label: w.label.clone(),
+            usage,
+        });
     }
 
     let base = subtree(app_pid, &mut visited);
@@ -124,7 +130,11 @@ pub fn aggregate(
     for w in &per_worktree {
         total.add(w.usage);
     }
-    Snapshot { total, base, per_worktree }
+    Snapshot {
+        total,
+        base,
+        per_worktree,
+    }
 }
 
 /// One tick's raw inputs, collected off the UI thread. Turned into a
@@ -152,11 +162,17 @@ pub fn sample_once(sys: &mut System, has_tmux: bool) -> RawSample {
         })
         .collect();
     let session_panes = if has_tmux {
-        crate::tmux::list_session_panes()
+        // A listing failure attributes nothing this tick. It is not evidence
+        // that every session exited; the next sample tries again.
+        crate::tmux::list_session_panes().unwrap_or_default()
     } else {
         Vec::new()
     };
-    RawSample { app_pid: std::process::id(), procs, session_panes }
+    RawSample {
+        app_pid: std::process::id(),
+        procs,
+        session_panes,
+    }
 }
 
 /// A process reduced to what agent-liveness needs: its pid, parent, and a
@@ -196,7 +212,11 @@ pub fn parse_ps(output: &str) -> Vec<ProcInfo> {
             }
             let base = raw.rsplit('/').next().unwrap_or(&raw);
             let comm = base.trim_start_matches('-').to_ascii_lowercase();
-            Some(ProcInfo { pid, parent: (ppid != 0).then_some(ppid), comm })
+            Some(ProcInfo {
+                pid,
+                parent: (ppid != 0).then_some(ppid),
+                comm,
+            })
         })
         .collect()
 }
@@ -219,9 +239,10 @@ pub fn agent_running_in(procs: &[ProcInfo], roots: &[u32]) -> bool {
             continue;
         }
         if let Some(p) = by_pid.get(&pid)
-            && !is_shell(&p.comm) {
-                return true;
-            }
+            && !is_shell(&p.comm)
+        {
+            return true;
+        }
         if let Some(kids) = children.get(&pid) {
             stack.extend(kids.iter().copied());
         }
@@ -282,7 +303,10 @@ pub struct History {
 
 impl History {
     pub fn new(cap: usize) -> Self {
-        History { samples: VecDeque::with_capacity(cap), cap: cap.max(1) }
+        History {
+            samples: VecDeque::with_capacity(cap),
+            cap: cap.max(1),
+        }
     }
 
     pub fn push(&mut self, sample: Usage) {
@@ -302,7 +326,12 @@ mod tests {
     use super::*;
 
     fn proc(pid: u32, parent: Option<u32>, cpu: f32, rss: u64) -> Proc {
-        Proc { pid, parent, cpu_pct: cpu, rss_bytes: rss }
+        Proc {
+            pid,
+            parent,
+            cpu_pct: cpu,
+            rss_bytes: rss,
+        }
     }
 
     fn wt(key: &str, label: &str) -> Attributable {
@@ -316,7 +345,7 @@ mod tests {
     fn subtree_sums_a_multi_level_process_tree() {
         // pane 100 → 101 → 102, all under one worktree's session.
         let procs = [
-            proc(1, None, 1.0, 100),     // app
+            proc(1, None, 1.0, 100), // app
             proc(100, Some(9), 5.0, 200),
             proc(101, Some(100), 3.0, 300),
             proc(102, Some(101), 2.0, 400),
@@ -327,9 +356,27 @@ mod tests {
             &[("harness_wtA_7".to_string(), 100)],
             &[wt("wtA", "A")],
         );
-        assert_eq!(snap.per_worktree[0].usage, Usage { cpu_pct: 10.0, rss_bytes: 900 });
-        assert_eq!(snap.base, Usage { cpu_pct: 1.0, rss_bytes: 100 });
-        assert_eq!(snap.total, Usage { cpu_pct: 11.0, rss_bytes: 1000 });
+        assert_eq!(
+            snap.per_worktree[0].usage,
+            Usage {
+                cpu_pct: 10.0,
+                rss_bytes: 900
+            }
+        );
+        assert_eq!(
+            snap.base,
+            Usage {
+                cpu_pct: 1.0,
+                rss_bytes: 100
+            }
+        );
+        assert_eq!(
+            snap.total,
+            Usage {
+                cpu_pct: 11.0,
+                rss_bytes: 1000
+            }
+        );
     }
 
     #[test]
@@ -353,7 +400,13 @@ mod tests {
             acc
         });
         assert_eq!(snap.total, sum, "the accounting invariant must hold");
-        assert_eq!(snap.total, Usage { cpu_pct: 12.0, rss_bytes: 250 });
+        assert_eq!(
+            snap.total,
+            Usage {
+                cpu_pct: 12.0,
+                rss_bytes: 250
+            }
+        );
     }
 
     #[test]
@@ -370,7 +423,13 @@ mod tests {
             ],
             &[wt("wtA", "A")],
         );
-        assert_eq!(snap.per_worktree[0].usage, Usage { cpu_pct: 8.0, rss_bytes: 800 });
+        assert_eq!(
+            snap.per_worktree[0].usage,
+            Usage {
+                cpu_pct: 8.0,
+                rss_bytes: 800
+            }
+        );
     }
 
     #[test]
@@ -389,7 +448,13 @@ mod tests {
             ],
             &[wt("wtA", "A")],
         );
-        assert_eq!(snap.per_worktree[0].usage, Usage { cpu_pct: 3.0, rss_bytes: 30 });
+        assert_eq!(
+            snap.per_worktree[0].usage,
+            Usage {
+                cpu_pct: 3.0,
+                rss_bytes: 30
+            }
+        );
     }
 
     #[test]
@@ -409,8 +474,16 @@ mod tests {
             ],
             &[wt("wtA", "A")],
         );
-        assert_eq!(snap.per_worktree[0].usage, Usage::default(), "wtA claims nothing");
-        assert_eq!(snap.total, Usage::default(), "unmatched sessions aren't in the total");
+        assert_eq!(
+            snap.per_worktree[0].usage,
+            Usage::default(),
+            "wtA claims nothing"
+        );
+        assert_eq!(
+            snap.total,
+            Usage::default(),
+            "unmatched sessions aren't in the total"
+        );
     }
 
     #[test]
@@ -418,8 +491,8 @@ mod tests {
         // A non-tmux pane is a child of the app AND (hypothetically) listed as a
         // session pane — it must be counted once, in the worktree, not twice.
         let procs = [
-            proc(1, None, 1.0, 100),      // app
-            proc(2, Some(1), 4.0, 400),   // pane spawned directly under the app
+            proc(1, None, 1.0, 100),    // app
+            proc(2, Some(1), 4.0, 400), // pane spawned directly under the app
         ];
         let snap = aggregate(
             &procs,
@@ -427,9 +500,28 @@ mod tests {
             &[("harness_wtA_1".to_string(), 2)],
             &[wt("wtA", "A")],
         );
-        assert_eq!(snap.per_worktree[0].usage, Usage { cpu_pct: 4.0, rss_bytes: 400 });
-        assert_eq!(snap.base, Usage { cpu_pct: 1.0, rss_bytes: 100 }, "app only, pane not re-counted");
-        assert_eq!(snap.total, Usage { cpu_pct: 5.0, rss_bytes: 500 });
+        assert_eq!(
+            snap.per_worktree[0].usage,
+            Usage {
+                cpu_pct: 4.0,
+                rss_bytes: 400
+            }
+        );
+        assert_eq!(
+            snap.base,
+            Usage {
+                cpu_pct: 1.0,
+                rss_bytes: 100
+            },
+            "app only, pane not re-counted"
+        );
+        assert_eq!(
+            snap.total,
+            Usage {
+                cpu_pct: 5.0,
+                rss_bytes: 500
+            }
+        );
     }
 
     #[test]
@@ -437,7 +529,13 @@ mod tests {
         // Pathological, but a bad parent chain must not hang the sampler.
         let procs = [proc(10, Some(11), 1.0, 1), proc(11, Some(10), 1.0, 1)];
         let snap = aggregate(&procs, 10, &[], &[]);
-        assert_eq!(snap.base, Usage { cpu_pct: 2.0, rss_bytes: 2 });
+        assert_eq!(
+            snap.base,
+            Usage {
+                cpu_pct: 2.0,
+                rss_bytes: 2
+            }
+        );
     }
 
     #[test]
@@ -454,7 +552,13 @@ mod tests {
 
     #[test]
     fn descendants_walks_deep_and_survives_cycles() {
-        let edges = [(2, Some(1)), (3, Some(2)), (4, Some(3)), (9, Some(8)), (1, Some(4))];
+        let edges = [
+            (2, Some(1)),
+            (3, Some(2)),
+            (4, Some(3)),
+            (9, Some(8)),
+            (1, Some(4)),
+        ];
         let got = descendants(edges, &[2]);
         assert_eq!(got, HashSet::from([1, 2, 3, 4]));
         assert!(descendants(edges, &[]).is_empty());
@@ -465,7 +569,11 @@ mod tests {
         assert_eq!(fmt_cpu(34.4), "34%");
         assert_eq!(fmt_cpu(0.0), "0%");
         assert_eq!(fmt_cpu(-2.0), "0%", "a negative delta reads as 0");
-        assert_eq!(fmt_cpu(220.0), "220%", "a multi-core subtree may exceed 100");
+        assert_eq!(
+            fmt_cpu(220.0),
+            "220%",
+            "a multi-core subtree may exceed 100"
+        );
     }
 
     #[test]
@@ -490,7 +598,10 @@ mod tests {
             .find(|p| p.pid == me)
             .expect("the sampler must see our own pid");
         assert!(mine.rss_bytes > 0, "a running process holds some memory");
-        assert!(raw.session_panes.is_empty(), "has_tmux=false skips the tmux read");
+        assert!(
+            raw.session_panes.is_empty(),
+            "has_tmux=false skips the tmux read"
+        );
     }
 
     #[test]
@@ -501,11 +612,27 @@ mod tests {
         assert_eq!(
             procs,
             vec![
-                ProcInfo { pid: 97973, parent: Some(82836), comm: "zsh".into() },
-                ProcInfo { pid: 99906, parent: Some(82836), comm: "sh".into() },
-                ProcInfo { pid: 99909, parent: Some(99906), comm: "claude".into() },
+                ProcInfo {
+                    pid: 97973,
+                    parent: Some(82836),
+                    comm: "zsh".into()
+                },
+                ProcInfo {
+                    pid: 99906,
+                    parent: Some(82836),
+                    comm: "sh".into()
+                },
+                ProcInfo {
+                    pid: 99909,
+                    parent: Some(99906),
+                    comm: "claude".into()
+                },
                 // ppid 0 → no parent.
-                ProcInfo { pid: 1, parent: None, comm: "launchd".into() },
+                ProcInfo {
+                    pid: 1,
+                    parent: None,
+                    comm: "launchd".into()
+                },
             ]
         );
     }
@@ -514,14 +641,20 @@ mod tests {
     fn a_pane_of_only_shells_has_no_agent() {
         // sample-project's stale case: the pane fell back to `-zsh`, agent long gone.
         let procs = parse_ps("97973 82836 -zsh\n98039 97973 -zsh\n");
-        assert!(!agent_running_in(&procs, &[97973]), "only shells → no agent");
+        assert!(
+            !agent_running_in(&procs, &[97973]),
+            "only shells → no agent"
+        );
     }
 
     #[test]
     fn a_live_agent_under_the_pane_shell_is_detected() {
         // openOrchestra: pane runs `sh -lc`, with claude as its child.
         let procs = parse_ps("99906 82836 sh\n99909 99906 /opt/test/bin/claude\n");
-        assert!(agent_running_in(&procs, &[99906]), "claude under the pane → alive");
+        assert!(
+            agent_running_in(&procs, &[99906]),
+            "claude under the pane → alive"
+        );
     }
 
     #[test]
@@ -537,17 +670,27 @@ mod tests {
         // No live pane pids at all, or a root that no longer exists.
         let procs = parse_ps("1 0 launchd\n");
         assert!(!agent_running_in(&procs, &[]), "no roots → nothing alive");
-        assert!(!agent_running_in(&procs, &[99999]), "vanished root → nothing alive");
+        assert!(
+            !agent_running_in(&procs, &[99999]),
+            "vanished root → nothing alive"
+        );
     }
 
     #[test]
     fn history_drops_the_oldest_past_its_cap() {
         let mut h = History::new(3);
         for i in 1..=5u64 {
-            h.push(Usage { cpu_pct: i as f32, rss_bytes: i });
+            h.push(Usage {
+                cpu_pct: i as f32,
+                rss_bytes: i,
+            });
         }
         assert_eq!(h.iter().count(), 3);
         let cpus: Vec<f32> = h.iter().map(|u| u.cpu_pct).collect();
-        assert_eq!(cpus, vec![3.0, 4.0, 5.0], "oldest two fell off, order preserved");
+        assert_eq!(
+            cpus,
+            vec![3.0, 4.0, 5.0],
+            "oldest two fell off, order preserved"
+        );
     }
 }

@@ -25,9 +25,7 @@ use std::process::{Command, Stdio};
 
 use serde_json::{json, Value};
 
-use crate::{
-    resolve_on_path, AgentCommand, AgentKind, AgentRuntime, SignalKind, WaitFidelity,
-};
+use crate::{resolve_on_path, AgentCommand, AgentKind, AgentRuntime, SignalKind, WaitFidelity};
 
 const SHIM: &str = include_str!("../shims/codex-hook.mjs");
 const SHIM_FILENAME: &str = "codex-hook.mjs";
@@ -44,8 +42,12 @@ const HOOK_EVENTS: &[&str] = &["UserPromptSubmit", "Stop"];
 /// below and the settings UI (via [`crate::default_command_display`]) both
 /// derive from these two consts.
 pub(crate) const PROGRAM: &str = "codex";
-pub(crate) const DEFAULT_ARGS: &[&str] =
-    &["--sandbox", "workspace-write", "--ask-for-approval", "on-request"];
+pub(crate) const DEFAULT_ARGS: &[&str] = &[
+    "--sandbox",
+    "workspace-write",
+    "--ask-for-approval",
+    "on-request",
+];
 const NO_DAEMON: &str = "--no-daemon";
 
 pub struct CodexRuntime {
@@ -94,7 +96,11 @@ impl CodexRuntime {
     }
 
     fn install_hook(&self, shim: &Path) -> io::Result<()> {
-        install_status_hooks(&self.codex_home(), &shim.display().to_string(), &Self::hook_command(shim))
+        install_status_hooks(
+            &self.codex_home(),
+            &shim.display().to_string(),
+            &Self::hook_command(shim),
+        )
     }
 
     /// Best-effort removal of the pre-hooks `notify` line from `config.toml`,
@@ -197,7 +203,9 @@ fn ensure_hook(root: &mut Value, event: &str, marker: &str, command: &str) {
         };
         let was_empty = handlers.is_empty();
         handlers.retain_mut(|handler| {
-            let belongs_to_us = handler["command"].as_str().is_some_and(|cmd| cmd.contains(marker));
+            let belongs_to_us = handler["command"]
+                .as_str()
+                .is_some_and(|cmd| cmd.contains(marker));
             if !belongs_to_us {
                 return true;
             }

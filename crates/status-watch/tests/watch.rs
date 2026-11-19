@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
-use status_watch::{AgentState, StatusEvent, StatusWatcher, status_path};
+use status_watch::{status_path, AgentState, StatusEvent, StatusWatcher};
 
 const RECV: Duration = Duration::from_secs(10);
 /// Window in which we assert that *no* event arrives.
@@ -24,7 +24,7 @@ fn write_atomic(root: &Path, content: &str) {
 
 fn write_atomic_file(file: &Path, content: &str) {
     let dir = file.parent().unwrap();
-    fs::create_dir_all(&dir).unwrap();
+    fs::create_dir_all(dir).unwrap();
     let tmp = dir.join(".status-test.tmp");
     fs::write(&tmp, content).unwrap();
     fs::rename(&tmp, file).unwrap();
@@ -46,6 +46,44 @@ fn missing_file_reports_unknown_on_watch() {
     assert_eq!(event.worktree_root, dir.path());
     assert_eq!(event.status.timestamp, None);
     assert_eq!(event.status.session_file, None);
+}
+
+#[test]
+fn a_tagged_mirror_retires_an_earlier_untagged_running_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_atomic(root, r#"{"state":"running","agent":"codex"}"#);
+
+    let (mut watcher, rx) = StatusWatcher::new().unwrap();
+    watcher.watch(root).unwrap();
+    let event = expect_state(&rx, AgentState::Running);
+    assert_eq!(event.tab_id, None);
+
+    let running = r#"{"state":"running","agent":"codex","tabId":7}"#;
+    write_atomic_file(&status_path(root, Some(7)), running);
+    write_atomic(root, running);
+    let mut retired = Vec::new();
+    while retired.len() < 2 {
+        retired.push(
+            rx.recv_timeout(RECV)
+                .expect("expected the retirement and the tab status"),
+        );
+    }
+    retired.sort_by_key(|event| event.tab_id);
+    assert_eq!(retired[0].tab_id, None);
+    assert_eq!(retired[0].status.state, AgentState::Unknown);
+    assert_eq!(retired[1].tab_id, Some(7));
+    assert_eq!(retired[1].status.state, AgentState::Running);
+
+    let idle = r#"{"state":"idle","agent":"codex","tabId":7}"#;
+    write_atomic_file(&status_path(root, Some(7)), idle);
+    write_atomic(root, idle);
+    let event = expect_state(&rx, AgentState::Idle);
+    assert_eq!(event.tab_id, Some(7));
+    assert!(
+        rx.recv_timeout(QUIET).is_err(),
+        "the retired legacy status must stay unknown"
+    );
 }
 
 #[test]
@@ -211,10 +249,7 @@ fn unwatch_stops_delivery() {
 
     watcher.unwatch(dir.path()).unwrap();
     write_atomic(dir.path(), &status_json("running"));
-    assert!(
-        rx.recv_timeout(QUIET).is_err(),
-        "no events after unwatch"
-    );
+    assert!(rx.recv_timeout(QUIET).is_err(), "no events after unwatch");
     assert!(watcher.watched().is_empty());
 }
 

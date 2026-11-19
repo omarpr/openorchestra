@@ -202,7 +202,12 @@ pub(crate) fn max_diff_width(viewport_w: f32, sidebar_w: f32, sidebar_open: bool
 /// for two columns. Before this, a dock between the two thresholds kept the
 /// file list and so vetoed Split forever — picking Split in the tools panel
 /// visibly did nothing on any laptop-sized window.
-pub(crate) fn use_two_pane(location: DiffLocation, dock_width: f32, view: DiffView, list_width: f32) -> bool {
+pub(crate) fn use_two_pane(
+    location: DiffLocation,
+    dock_width: f32,
+    view: DiffView,
+    list_width: f32,
+) -> bool {
     match location {
         DiffLocation::Tab => true,
         DiffLocation::Dock => {
@@ -398,10 +403,11 @@ pub(crate) const INLINE_BODY_MAX_H: f32 = 420.0;
 #[cfg(test)]
 mod diff_render_tests {
     use super::{
-        load_prefs, max_diff_width, move_task_on_disk, readable_diff_lines, reorder_base, reorder_panel_origin,
-        reordered, same_members, save_prefs_to, shifted, split_rows,
-        split_dock_width, target_line_for_row, use_split, use_two_pane, DiffLineKind, DiffLocation, DiffView,
-        Prefs, SplitRow, ToolTab, DIFF_TWO_PANE_MIN, MAX_PANEL_W, MIN_CENTER_W, SPLIT_MIN_W,
+        DIFF_TWO_PANE_MIN, DiffLineKind, DiffLocation, DiffView, MAX_PANEL_W, MIN_CENTER_W, Prefs,
+        SPLIT_MIN_W, SplitRow, ToolTab, load_prefs, max_diff_width, move_task_on_disk,
+        readable_diff_lines, reorder_base, reorder_panel_origin, reordered, same_members,
+        save_prefs_to, shifted, split_dock_width, split_rows, target_line_for_row, use_split,
+        use_two_pane,
     };
 
     /// Verbatim shape of the noise a new file produces — the case that
@@ -575,14 +581,21 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
         let split = split_rows(&rows);
 
         // The file header and hunk rule belong to neither side.
-        assert_eq!(split[0], SplitRow::Full(0), "file header spans both columns");
+        assert_eq!(
+            split[0],
+            SplitRow::Full(0),
+            "file header spans both columns"
+        );
         assert_eq!(split[1], SplitRow::Full(1), "hunk rule spans both columns");
 
         // Context sits opposite itself.
         let ctx_a = split[2];
         assert_eq!(
             ctx_a,
-            SplitRow::Pair { left: Some(2), right: Some(2) },
+            SplitRow::Pair {
+                left: Some(2),
+                right: Some(2)
+            },
             "a context line is the same row on both sides"
         );
 
@@ -600,7 +613,13 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
         // A pure insertion has nothing to sit opposite.
         let inserted = *split.last().unwrap();
         assert!(
-            matches!(inserted, SplitRow::Pair { left: None, right: Some(_) }),
+            matches!(
+                inserted,
+                SplitRow::Pair {
+                    left: None,
+                    right: Some(_)
+                }
+            ),
             "a pure insertion leaves the old column empty, got {inserted:?}"
         );
     }
@@ -619,7 +638,9 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
         assert_eq!(pairs.len(), 4, "the longer side sets the line count");
         // Both sides present for the first two, old side empty after that.
         for (i, p) in pairs.iter().enumerate() {
-            let SplitRow::Pair { left, right } = *p else { unreachable!() };
+            let SplitRow::Pair { left, right } = *p else {
+                unreachable!()
+            };
             assert!(right.is_some(), "every new line is shown");
             assert_eq!(
                 left.is_some(),
@@ -660,16 +681,25 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
         let rows = paired_fixture();
         let split = split_rows(&rows);
         let modified = split[3];
-        let SplitRow::Pair { right, .. } = modified else { panic!() };
+        let SplitRow::Pair { right, .. } = modified else {
+            panic!()
+        };
         assert_eq!(
             modified.anchor(),
             right,
             "comments and edit intent address the file as it stands now"
         );
         // A deletion with no counterpart falls back to the old side.
-        let deletion = SplitRow::Pair { left: Some(7), right: None };
+        let deletion = SplitRow::Pair {
+            left: Some(7),
+            right: None,
+        };
         assert_eq!(deletion.anchor(), Some(7));
-        assert_eq!(SplitRow::Full(0).anchor(), None, "structure is not clickable");
+        assert_eq!(
+            SplitRow::Full(0).anchor(),
+            None,
+            "structure is not clickable"
+        );
     }
 
     #[test]
@@ -689,7 +719,10 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
         let dir = std::env::temp_dir().join(format!("harness-prefs-view-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("prefs.json");
-        let prefs = Prefs { diff_view: DiffView::Split, ..Prefs::default() };
+        let prefs = Prefs {
+            diff_view: DiffView::Split,
+            ..Prefs::default()
+        };
         save_prefs_to(&path, &prefs);
         assert_eq!(load_prefs(&path).diff_view, DiffView::Split);
     }
@@ -714,7 +747,10 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
         // The point of issue #8: on a large display the dock must be
         // draggable far past the old 800 px cap.
         let wide = max_diff_width(3840.0, 280.0, true);
-        assert!(wide > 800.0, "a 4K window must allow a dock wider than 800px");
+        assert!(
+            wide > 800.0,
+            "a 4K window must allow a dock wider than 800px"
+        );
         assert_eq!(wide, 3840.0 - 280.0 - MIN_CENTER_W);
 
         // ...but never so wide that the center pane disappears.
@@ -743,8 +779,14 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
     fn dragging_a_project_onto_another_puts_it_at_that_position() {
         let p = |s: &str| std::path::PathBuf::from(s);
         let roots = [p("/a"), p("/b"), p("/c")];
-        assert_eq!(reordered(&roots, p("/a"), p("/c")), vec![p("/b"), p("/c"), p("/a")]);
-        assert_eq!(reordered(&roots, p("/c"), p("/a")), vec![p("/c"), p("/a"), p("/b")]);
+        assert_eq!(
+            reordered(&roots, p("/a"), p("/c")),
+            vec![p("/b"), p("/c"), p("/a")]
+        );
+        assert_eq!(
+            reordered(&roots, p("/c"), p("/a")),
+            vec![p("/c"), p("/a"), p("/b")]
+        );
         assert_eq!(reordered(&roots, p("/x"), p("/a")), roots.to_vec());
     }
 
@@ -765,8 +807,14 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
         let current = [p("/a"), p("/b"), p("/c")];
         let disk = vec![p("/a"), p("/x"), p("/b"), p("/c")];
         let base = reorder_base(disk, &current);
-        assert_eq!(reordered(&base, p("/a"), p("/c")), vec![p("/x"), p("/b"), p("/c"), p("/a")]);
-        assert_eq!(shifted(&base, &p("/c"), true), vec![p("/a"), p("/x"), p("/c"), p("/b")]);
+        assert_eq!(
+            reordered(&base, p("/a"), p("/c")),
+            vec![p("/x"), p("/b"), p("/c"), p("/a")]
+        );
+        assert_eq!(
+            shifted(&base, &p("/c"), true),
+            vec![p("/a"), p("/x"), p("/c"), p("/b")]
+        );
         // A missing or unreadable repos.json never empties the list.
         assert_eq!(reorder_base(Vec::new(), &current), current.to_vec());
         assert!(same_members(&[1, 2, 3], &[3, 1, 2]));
@@ -777,13 +825,16 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
     #[test]
     fn a_task_reorder_keeps_tasks_the_other_build_added() {
         let task = |id: &str| {
-            format!(r#"{{"id":"{id}","name":"{id}","slug":"{id}","home_repo":"app","members":[],"created_at":"2026-11-16T00:00:00Z"}}"#)
+            format!(
+                r#"{{"id":"{id}","name":"{id}","slug":"{id}","home_repo":"app","members":[],"created_at":"2026-11-16T00:00:00Z"}}"#
+            )
         };
         let file = |ids: &[&str]| {
             let tasks: Vec<String> = ids.iter().map(|i| task(i)).collect();
             format!(r#"{{"tasks":[{}]}}"#, tasks.join(","))
         };
-        let ids = |s: &worktrees::TaskStore| s.tasks().iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        let ids =
+            |s: &worktrees::TaskStore| s.tasks().iter().map(|t| t.id.clone()).collect::<Vec<_>>();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tasks.json");
 
@@ -791,9 +842,14 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
         std::fs::write(&path, file(&["a", "b"])).unwrap();
         let current = worktrees::TaskStore::load(&path).unwrap();
         std::fs::write(&path, file(&["a", "b", "x"])).unwrap();
-        let moved = move_task_on_disk(&current, "a", "b").unwrap().expect("order changed");
+        let moved = move_task_on_disk(&current, "a", "b")
+            .unwrap()
+            .expect("order changed");
         assert_eq!(ids(&moved), ["b", "a", "x"]);
-        assert_eq!(ids(&worktrees::TaskStore::load(&path).unwrap()), ["b", "a", "x"]);
+        assert_eq!(
+            ids(&worktrees::TaskStore::load(&path).unwrap()),
+            ["b", "a", "x"]
+        );
 
         // Unknown or same ids change nothing on disk.
         assert!(move_task_on_disk(&moved, "a", "a").unwrap().is_none());
@@ -801,7 +857,9 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
 
         // A missing file falls back to this build's list.
         std::fs::remove_file(&path).unwrap();
-        let moved = move_task_on_disk(&current, "b", "a").unwrap().expect("order changed");
+        let moved = move_task_on_disk(&current, "b", "a")
+            .unwrap()
+            .expect("order changed");
         assert_eq!(ids(&moved), ["b", "a"]);
 
         // An unreadable file is reported and left alone.
@@ -819,19 +877,28 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
         // Near the bottom: lifted so title + 3 rows + Done fit above the edge.
         assert_eq!(at((100.0, 760.0), 3), (100.0, 800.0 - (96.0 + 80.0) - 8.0));
         // A long list counts only its capped height.
-        assert_eq!(at((100.0, 760.0), 50), (100.0, 800.0 - (420.0 + 80.0) - 8.0));
+        assert_eq!(
+            at((100.0, 760.0), 50),
+            (100.0, 800.0 - (420.0 + 80.0) - 8.0)
+        );
         // Off the left or right edge: pulled in by the margin.
         assert_eq!(at((-150.0, 120.0), 3).0, 8.0);
         assert_eq!(at((1100.0, 120.0), 3).0, 1200.0 - 240.0 - 8.0);
         // A window smaller than the panel: top-left margin, never negative.
-        assert_eq!(reorder_panel_origin((100.0, 100.0), (200.0, 150.0), 50, 90.0, 16.0), (8.0, 8.0));
+        assert_eq!(
+            reorder_panel_origin((100.0, 100.0), (200.0, 150.0), 50, 90.0, 16.0),
+            (8.0, 8.0)
+        );
         // A larger UI font makes rows and chrome taller; a smaller one never
         // counts them shorter than at 16 px.
         assert_eq!(
             reorder_panel_origin((100.0, 760.0), win, 3, 420.0, 24.0).1,
             800.0 - (144.0 + 120.0) - 8.0
         );
-        assert_eq!(reorder_panel_origin((100.0, 760.0), win, 3, 420.0, 12.0), at((100.0, 760.0), 3));
+        assert_eq!(
+            reorder_panel_origin((100.0, 760.0), win, 3, 420.0, 12.0),
+            at((100.0, 760.0), 3)
+        );
     }
 
     #[test]
@@ -851,8 +918,18 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
         let u = DiffView::Unified;
         assert!(use_two_pane(DiffLocation::Tab, 0.0, u, 200.0));
         assert!(!use_two_pane(DiffLocation::Dock, 340.0, u, 200.0));
-        assert!(!use_two_pane(DiffLocation::Dock, DIFF_TWO_PANE_MIN - 1.0, u, 200.0));
-        assert!(use_two_pane(DiffLocation::Dock, DIFF_TWO_PANE_MIN, u, 200.0));
+        assert!(!use_two_pane(
+            DiffLocation::Dock,
+            DIFF_TWO_PANE_MIN - 1.0,
+            u,
+            200.0
+        ));
+        assert!(use_two_pane(
+            DiffLocation::Dock,
+            DIFF_TWO_PANE_MIN,
+            u,
+            200.0
+        ));
         assert!(use_two_pane(DiffLocation::Dock, 800.0, u, 200.0));
     }
 
@@ -874,17 +951,26 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
     fn picking_split_in_a_narrow_dock_widens_it_just_enough() {
         assert_eq!(split_dock_width(380.0, 816.0), Some(SPLIT_MIN_W));
         assert_eq!(split_dock_width(SPLIT_MIN_W, 816.0), None, "already splits");
-        assert_eq!(split_dock_width(380.0, 400.0), None, "window too small to help");
+        assert_eq!(
+            split_dock_width(380.0, 400.0),
+            None,
+            "window too small to help"
+        );
     }
 
     #[test]
     fn an_added_or_context_row_targets_its_own_line() {
-        let rows = readable_diff_lines(
-            "diff --git a/x.rs b/x.rs\n@@ -1,2 +1,3 @@\n ctx\n+added\n ctx2\n",
-        );
-        let added = rows.iter().position(|r| r.kind == DiffLineKind::Added).unwrap();
+        let rows =
+            readable_diff_lines("diff --git a/x.rs b/x.rs\n@@ -1,2 +1,3 @@\n ctx\n+added\n ctx2\n");
+        let added = rows
+            .iter()
+            .position(|r| r.kind == DiffLineKind::Added)
+            .unwrap();
         assert_eq!(target_line_for_row(&rows, added), rows[added].number);
-        let ctx = rows.iter().position(|r| r.kind == DiffLineKind::Context).unwrap();
+        let ctx = rows
+            .iter()
+            .position(|r| r.kind == DiffLineKind::Context)
+            .unwrap();
         assert_eq!(target_line_for_row(&rows, ctx), rows[ctx].number);
     }
 
@@ -896,7 +982,10 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
         let rows = readable_diff_lines(
             "diff --git a/x.rs b/x.rs\n@@ -1,3 +1,2 @@\n keep\n-gone\n after\n",
         );
-        let removed = rows.iter().position(|r| r.kind == DiffLineKind::Removed).unwrap();
+        let removed = rows
+            .iter()
+            .position(|r| r.kind == DiffLineKind::Removed)
+            .unwrap();
         let after = rows
             .iter()
             .enumerate()
@@ -913,7 +1002,10 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
         let rows = readable_diff_lines(
             "diff --git a/x.rs b/x.rs\n@@ -1,3 +1,1 @@\n keep\n-gone\n-also gone\n",
         );
-        let removed = rows.iter().position(|r| r.kind == DiffLineKind::Removed).unwrap();
+        let removed = rows
+            .iter()
+            .position(|r| r.kind == DiffLineKind::Removed)
+            .unwrap();
         assert_eq!(target_line_for_row(&rows, removed), None);
     }
 
@@ -932,7 +1024,10 @@ diff --git a/b.rs b/b.rs\nindex 3..4 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@
             "diff --git a/x.rs b/x.rs\n@@ -1,2 +1,1 @@\n keep\n-gone\n\
 diff --git a/y.rs b/y.rs\n@@ -1,1 +1,2 @@\n other\n+new\n",
         );
-        let removed = rows.iter().position(|r| r.kind == DiffLineKind::Removed).unwrap();
+        let removed = rows
+            .iter()
+            .position(|r| r.kind == DiffLineKind::Removed)
+            .unwrap();
         assert_eq!(target_line_for_row(&rows, removed), None);
     }
 
@@ -973,7 +1068,11 @@ diff --git a/y.rs b/y.rs\n@@ -1,1 +1,2 @@\n other\n+new\n",
             ..Prefs::default()
         };
         save_prefs_to(&path, &prefs);
-        assert!(std::fs::read_to_string(&path).unwrap().contains(r#""tool_tab": "ports""#));
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains(r#""tool_tab": "ports""#)
+        );
         assert_eq!(load_prefs(&path).tool_tab, ToolTab::Ports);
     }
 
@@ -992,9 +1091,17 @@ diff --git a/y.rs b/y.rs\n@@ -1,1 +1,2 @@\n other\n+new\n",
     #[test]
     fn the_diff_list_width_is_clamped_like_every_other_panel() {
         // A hand-edited or truncated file must not render the list unusable.
-        let squashed = Prefs { diff_list_width: -10.0, ..Prefs::default() }.sanitized();
+        let squashed = Prefs {
+            diff_list_width: -10.0,
+            ..Prefs::default()
+        }
+        .sanitized();
         assert!(squashed.diff_list_width >= 160.0);
-        let huge = Prefs { diff_list_width: 9999.0, ..Prefs::default() }.sanitized();
+        let huge = Prefs {
+            diff_list_width: 9999.0,
+            ..Prefs::default()
+        }
+        .sanitized();
         assert!(huge.diff_list_width <= 560.0);
     }
 
@@ -1002,7 +1109,10 @@ diff --git a/y.rs b/y.rs\n@@ -1,1 +1,2 @@\n other\n+new\n",
     fn the_diff_location_survives_a_save_load_cycle() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("prefs.json");
-        let prefs = Prefs { diff_location: DiffLocation::Tab, ..Prefs::default() };
+        let prefs = Prefs {
+            diff_location: DiffLocation::Tab,
+            ..Prefs::default()
+        };
         save_prefs_to(&path, &prefs);
         assert_eq!(load_prefs(&path).diff_location, DiffLocation::Tab);
     }

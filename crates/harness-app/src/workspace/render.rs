@@ -1,8 +1,8 @@
 //! The root `Render` impl that lays out the window, plus small shared
 //! widgets (agent pill, CI summary, tool chips).
 
-use super::*;
 use super::ui::sidebar::SidebarSection;
+use super::*;
 
 impl Focusable for HarnessWorkspace {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
@@ -59,180 +59,208 @@ impl Render for HarnessWorkspace {
         // outside the editor) used to open the service workspace's finder
         // invisibly — and that hidden finder then held focus, so ⌘P, ⌘C, ⌘V
         // and typing all looked dead until a click back into the text.
-        let base = match self.active_ide_workspace().or_else(|| self.editor_workspace()) {
+        let base = match self
+            .active_ide_workspace()
+            .or_else(|| self.editor_workspace())
+        {
             Some(ws) => ws.update(cx, |w, cx| w.actions(div(), window, cx)),
             None => div(),
         };
-        let mut root = base
-            .relative()
-            .key_context("Harness")
-            .flex()
-            .flex_col()
-            .size_full()
-            .bg(hx.bg0)
-            .font_family(hx.font_ui)
-            .text_color(hx.tx0)
-            .child(self.render_top_bar(&hx, window, cx))
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    // `h_full` alongside `flex_1`, the way zed's own containers
-                    // pair them. flex_1 alone leaves the height *indefinite* in
-                    // taffy's eyes: the div gets stretched to the right size,
-                    // but percentage heights below it fall back to content
-                    // size. zed's dock caches its panel as a childless leaf
-                    // node, whose content height is zero — so the file tree
-                    // laid out into a 239×0 box while every state probe read
-                    // healthy. min_h_0 still allows shrinking.
-                    .h_full()
-                    .min_h_0()
-                    // Collapsing hides the splitter too — a resize handle for
-                    // a panel that isn't there is just a dead strip of chrome.
-                    .when(self.prefs.sidebar_open, |d| {
-                        d.child(self.render_sidebar(&hx, cx)).child(self.splitter(
-                            &hx,
-                            Drag::Sidebar,
-                            cx,
-                        ))
-                    })
-                    .when(!(self.prefs.diff_open && self.tools_maximized), |d| {
-                        d.child(self.render_center(&hx, window, cx))
-                    })
-                    .when(self.prefs.diff_open, |d| {
-                        d.when(!self.tools_maximized, |d| {
-                            d.child(self.splitter(&hx, Drag::DiffPanel, cx))
+        let mut root =
+            base.relative()
+                .track_focus(&self.focus_handle)
+                .key_context("Harness")
+                .flex()
+                .flex_col()
+                .size_full()
+                .bg(hx.bg0)
+                .font_family(hx.font_ui)
+                .text_color(hx.tx0)
+                .child(self.render_top_bar(&hx, window, cx))
+                .child(
+                    div()
+                        .flex()
+                        .flex_1()
+                        // `h_full` alongside `flex_1`, the way zed's own containers
+                        // pair them. flex_1 alone leaves the height *indefinite* in
+                        // taffy's eyes: the div gets stretched to the right size,
+                        // but percentage heights below it fall back to content
+                        // size. zed's dock caches its panel as a childless leaf
+                        // node, whose content height is zero — so the file tree
+                        // laid out into a 239×0 box while every state probe read
+                        // healthy. min_h_0 still allows shrinking.
+                        .h_full()
+                        .min_h_0()
+                        // Collapsing hides the splitter too — a resize handle for
+                        // a panel that isn't there is just a dead strip of chrome.
+                        .when(self.prefs.sidebar_open, |d| {
+                            d.child(self.render_sidebar(&hx, cx)).child(self.splitter(
+                                &hx,
+                                Drag::Sidebar,
+                                cx,
+                            ))
                         })
-                        .child(self.render_tool_panel(&hx, window, cx))
+                        .when(!(self.prefs.diff_open && self.tools_maximized), |d| {
+                            d.child(self.render_center(&hx, window, cx))
+                        })
+                        .when(self.prefs.diff_open, |d| {
+                            d.when(!self.tools_maximized, |d| {
+                                d.child(self.splitter(&hx, Drag::DiffPanel, cx))
+                            })
+                            .child(self.render_tool_panel(&hx, window, cx))
+                        }),
+                )
+                .children(self.render_zed_modal(cx))
+                .children(self.render_conductor(&hx, window, cx))
+                .children(self.render_toast(&hx, cx))
+                // The settings overlay is the LAST child on purpose: gpui paints
+                // siblings in order, so an overlay added before the content row
+                // renders underneath it — "settings don't open" while the state
+                // toggles perfectly. Absolute positioning takes it out of flow;
+                // being last takes it to the top.
+                // Stacking order depends on whether the requirements screen is
+                // *blocking*, and getting this wrong is what made Settings look
+                // broken: an informational preflight rendered last covered a
+                // Settings the user had deliberately opened, backdrop and all, so
+                // ⌘, appeared to do nothing.
+                //
+                // A blocking screen must win over everything — there is nothing
+                // else worth interacting with. A dismissible one must not swallow
+                // a deliberate action; it waits underneath and is still there when
+                // Settings closes, because it has not been acknowledged yet.
+                .when(
+                    self.preflight_open && !crate::preflight::blocked(&self.preflight),
+                    |d| d.child(self.render_preflight(&hx, cx)),
+                )
+                .when(self.settings_open, |d| {
+                    d.child(self.render_settings(&hx, window, cx))
+                })
+                .when(
+                    self.preflight_open && crate::preflight::blocked(&self.preflight),
+                    |d| d.child(self.render_preflight(&hx, cx)),
+                )
+                // Drag tracking lives on the root so the pointer can leave the
+                // 6px handle mid-drag without the resize stopping.
+                .on_action(
+                    cx.listener(|ws, _: &crate::CopyDiffSelection, _, cx| {
+                        ws.copy_diff_selection(cx)
                     }),
-            )
-            .children(self.render_zed_modal(cx))
-            .children(self.render_conductor(&hx, window, cx))
-            .children(self.render_toast(&hx, cx))
-            // The settings overlay is the LAST child on purpose: gpui paints
-            // siblings in order, so an overlay added before the content row
-            // renders underneath it — "settings don't open" while the state
-            // toggles perfectly. Absolute positioning takes it out of flow;
-            // being last takes it to the top.
-            // Stacking order depends on whether the requirements screen is
-            // *blocking*, and getting this wrong is what made Settings look
-            // broken: an informational preflight rendered last covered a
-            // Settings the user had deliberately opened, backdrop and all, so
-            // ⌘, appeared to do nothing.
-            //
-            // A blocking screen must win over everything — there is nothing
-            // else worth interacting with. A dismissible one must not swallow
-            // a deliberate action; it waits underneath and is still there when
-            // Settings closes, because it has not been acknowledged yet.
-            .when(self.preflight_open && !crate::preflight::blocked(&self.preflight), |d| {
-                d.child(self.render_preflight(&hx, cx))
-            })
-            .when(self.settings_open, |d| d.child(self.render_settings(&hx, window, cx)))
-            .when(self.preflight_open && crate::preflight::blocked(&self.preflight), |d| {
-                d.child(self.render_preflight(&hx, cx))
-            })
-            // Drag tracking lives on the root so the pointer can leave the
-            // 6px handle mid-drag without the resize stopping.
-            .on_action(
-                cx.listener(|ws, _: &crate::CopyDiffSelection, _, cx| ws.copy_diff_selection(cx)),
-            )
-            .on_action(cx.listener(Self::focus_files_tool))
-            .on_action(cx.listener(Self::focus_project_search))
-            .on_action(cx.listener(Self::focus_git_tool))
-            .on_action(cx.listener(Self::focus_review_tool))
-            .on_action(cx.listener(|ws, _: &crate::NewTerminal, window, cx| {
-                ws.open_tab(TabKind::Shell, window, cx)
-            }))
-            .on_action(cx.listener(|ws, _: &crate::NewEditor, window, cx| {
-                ws.open_tab(TabKind::Editor, window, cx)
-            }))
-            .on_action(cx.listener(|ws, _: &crate::CloseTab, window, cx| {
-                log::debug!("CloseTab (root ⌘W)");
-                let Some(r) = ws.resolve() else { return };
-                let Some(active) = ws.panes.get(&r.key).map(|p| p.active) else {
-                    return;
-                };
-                ws.request_close_tab(active, window, cx);
-            }))
-            .on_action(cx.listener(|_, _: &crate::About, window, cx| {
-                cx.stop_propagation();
-                crate::update_check::show_about(window, cx);
-            }))
-            .on_action(cx.listener(|_, _: &crate::CheckForUpdates, window, cx| {
-                cx.stop_propagation();
-                crate::update_check::check_for_updates(window, cx);
-            }))
-            .on_action(cx.listener(|ws, _: &crate::FirstTimeChecks, _, cx| {
-                cx.stop_propagation();
-                ws.open_first_time_checks(cx);
-            }))
-            .on_action(cx.listener(|ws, _: &crate::OpenSettings, window, cx| {
-                cx.stop_propagation();
-                ws.toggle_settings(window, cx);
-            }))
-            .on_action(cx.listener(|ws, _: &crate::ActivateTab1, w, cx| ws.activate_tab_at(Some(0), w, cx)))
-            .on_action(cx.listener(|ws, _: &crate::ActivateTab2, w, cx| ws.activate_tab_at(Some(1), w, cx)))
-            .on_action(cx.listener(|ws, _: &crate::ActivateTab3, w, cx| ws.activate_tab_at(Some(2), w, cx)))
-            .on_action(cx.listener(|ws, _: &crate::ActivateTab4, w, cx| ws.activate_tab_at(Some(3), w, cx)))
-            .on_action(cx.listener(|ws, _: &crate::ActivateTab5, w, cx| ws.activate_tab_at(Some(4), w, cx)))
-            .on_action(cx.listener(|ws, _: &crate::ActivateTab6, w, cx| ws.activate_tab_at(Some(5), w, cx)))
-            .on_action(cx.listener(|ws, _: &crate::ActivateTab7, w, cx| ws.activate_tab_at(Some(6), w, cx)))
-            .on_action(cx.listener(|ws, _: &crate::ActivateTab8, w, cx| ws.activate_tab_at(Some(7), w, cx)))
-            .on_action(cx.listener(|ws, _: &crate::ActivateLastTab, w, cx| ws.activate_tab_at(None, w, cx)))
-            .on_action(cx.listener(|ws, _: &crate::NextTab, w, cx| {
-                cx.stop_propagation();
-                ws.cycle_tab(true, w, cx);
-            }))
-            .on_action(cx.listener(|ws, _: &crate::PreviousTab, w, cx| {
-                cx.stop_propagation();
-                ws.cycle_tab(false, w, cx);
-            }))
-            .on_action(cx.listener(|ws, _: &crate::NextWorktree, w, cx| {
-                cx.stop_propagation();
-                ws.cycle_worktree(true, w, cx);
-            }))
-            .on_action(cx.listener(|ws, _: &crate::PreviousWorktree, w, cx| {
-                cx.stop_propagation();
-                ws.cycle_worktree(false, w, cx);
-            }))
-            .on_action(cx.listener(|ws, _: &crate::NextWaitingAgent, w, cx| {
-                cx.stop_propagation();
-                ws.next_waiting_agent(w, cx);
-            }))
-            .on_action(cx.listener(|ws, _: &crate::NewTask, w, cx| {
-                cx.stop_propagation();
-                ws.open_new_task(w, cx);
-            }))
-            .on_action(cx.listener(|ws, _: &crate::ToggleSidebar, _, cx| {
-                cx.stop_propagation();
-                ws.toggle_sidebar(cx);
-            }))
-            .on_action(cx.listener(|ws, _: &crate::ToggleTools, w, cx| {
-                cx.stop_propagation();
-                ws.toggle_diff(w, cx);
-            }))
-            .on_action(cx.listener(|ws, _: &crate::NewChat, window, cx| {
-                ws.open_tab(TabKind::Chat, window, cx)
-            }))
-            // ⌘Q / menu quit routes through the keep-or-close-terminals prompt
-            // instead of quitting outright. stop_propagation so the app-level
-            // fallback `Quit` handler doesn't also fire and quit behind the
-            // prompt's back.
-            .on_action(cx.listener(|ws, _: &crate::Quit, _window, cx| {
-                cx.stop_propagation();
-                ws.request_quit(cx);
-            }))
-            .on_mouse_move(
-                cx.listener(|ws, ev: &MouseMoveEvent, window, cx| ws.drag_move(ev, window, cx)),
-            )
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|ws, _: &MouseUpEvent, window, cx| {
-                    ws.diff_selecting = false;
-                    ws.conductor_drag_end(window, cx);
-                    ws.end_drag(cx);
-                }),
-            );
+                )
+                .on_action(cx.listener(Self::focus_files_tool))
+                .on_action(cx.listener(Self::focus_project_search))
+                .on_action(cx.listener(Self::focus_git_tool))
+                .on_action(cx.listener(Self::focus_review_tool))
+                .on_action(cx.listener(|ws, _: &crate::NewTerminal, window, cx| {
+                    ws.open_tab(TabKind::Shell, window, cx)
+                }))
+                .on_action(cx.listener(|ws, _: &crate::NewEditor, window, cx| {
+                    ws.open_tab(TabKind::Editor, window, cx)
+                }))
+                .on_action(cx.listener(|ws, _: &crate::CloseTab, window, cx| {
+                    log::debug!("CloseTab (root ⌘W)");
+                    let Some(r) = ws.resolve() else { return };
+                    let Some(active) = ws.panes.get(&r.key).map(|p| p.active) else {
+                        return;
+                    };
+                    ws.request_close_tab(active, window, cx);
+                }))
+                .on_action(cx.listener(|_, _: &crate::About, window, cx| {
+                    cx.stop_propagation();
+                    crate::update_check::show_about(window, cx);
+                }))
+                .on_action(cx.listener(|_, _: &crate::CheckForUpdates, window, cx| {
+                    cx.stop_propagation();
+                    crate::update_check::check_for_updates(window, cx);
+                }))
+                .on_action(cx.listener(|ws, _: &crate::FirstTimeChecks, _, cx| {
+                    cx.stop_propagation();
+                    ws.open_first_time_checks(cx);
+                }))
+                .on_action(cx.listener(|ws, _: &crate::OpenSettings, window, cx| {
+                    cx.stop_propagation();
+                    ws.toggle_settings(window, cx);
+                }))
+                .on_action(cx.listener(|ws, _: &crate::ActivateTab1, w, cx| {
+                    ws.activate_tab_at(Some(0), w, cx)
+                }))
+                .on_action(cx.listener(|ws, _: &crate::ActivateTab2, w, cx| {
+                    ws.activate_tab_at(Some(1), w, cx)
+                }))
+                .on_action(cx.listener(|ws, _: &crate::ActivateTab3, w, cx| {
+                    ws.activate_tab_at(Some(2), w, cx)
+                }))
+                .on_action(cx.listener(|ws, _: &crate::ActivateTab4, w, cx| {
+                    ws.activate_tab_at(Some(3), w, cx)
+                }))
+                .on_action(cx.listener(|ws, _: &crate::ActivateTab5, w, cx| {
+                    ws.activate_tab_at(Some(4), w, cx)
+                }))
+                .on_action(cx.listener(|ws, _: &crate::ActivateTab6, w, cx| {
+                    ws.activate_tab_at(Some(5), w, cx)
+                }))
+                .on_action(cx.listener(|ws, _: &crate::ActivateTab7, w, cx| {
+                    ws.activate_tab_at(Some(6), w, cx)
+                }))
+                .on_action(cx.listener(|ws, _: &crate::ActivateTab8, w, cx| {
+                    ws.activate_tab_at(Some(7), w, cx)
+                }))
+                .on_action(cx.listener(|ws, _: &crate::ActivateLastTab, w, cx| {
+                    ws.activate_tab_at(None, w, cx)
+                }))
+                .on_action(cx.listener(|ws, _: &crate::NextTab, w, cx| {
+                    cx.stop_propagation();
+                    ws.cycle_tab(true, w, cx);
+                }))
+                .on_action(cx.listener(|ws, _: &crate::PreviousTab, w, cx| {
+                    cx.stop_propagation();
+                    ws.cycle_tab(false, w, cx);
+                }))
+                .on_action(cx.listener(|ws, _: &crate::NextWorktree, w, cx| {
+                    cx.stop_propagation();
+                    ws.cycle_worktree(true, w, cx);
+                }))
+                .on_action(cx.listener(|ws, _: &crate::PreviousWorktree, w, cx| {
+                    cx.stop_propagation();
+                    ws.cycle_worktree(false, w, cx);
+                }))
+                .on_action(cx.listener(|ws, _: &crate::NextWaitingAgent, w, cx| {
+                    cx.stop_propagation();
+                    ws.next_waiting_agent(w, cx);
+                }))
+                .on_action(cx.listener(|ws, _: &crate::NewTask, w, cx| {
+                    cx.stop_propagation();
+                    ws.open_new_task(w, cx);
+                }))
+                .on_action(cx.listener(|ws, _: &crate::ToggleSidebar, _, cx| {
+                    cx.stop_propagation();
+                    ws.toggle_sidebar(cx);
+                }))
+                .on_action(cx.listener(|ws, _: &crate::ToggleTools, w, cx| {
+                    cx.stop_propagation();
+                    ws.toggle_diff(w, cx);
+                }))
+                .on_action(cx.listener(|ws, _: &crate::NewChat, window, cx| {
+                    ws.open_tab(TabKind::Chat, window, cx)
+                }))
+                // ⌘Q / menu quit routes through the keep-or-close-terminals prompt
+                // instead of quitting outright. stop_propagation so the app-level
+                // fallback `Quit` handler doesn't also fire and quit behind the
+                // prompt's back.
+                .on_action(cx.listener(|ws, _: &crate::Quit, _window, cx| {
+                    cx.stop_propagation();
+                    ws.request_quit(cx);
+                }))
+                .on_mouse_move(
+                    cx.listener(|ws, ev: &MouseMoveEvent, window, cx| ws.drag_move(ev, window, cx)),
+                )
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|ws, _: &MouseUpEvent, window, cx| {
+                        ws.diff_selecting = false;
+                        ws.conductor_drag_end(window, cx);
+                        ws.end_drag(cx);
+                    }),
+                );
 
         if let Some(m) = &self.menu {
             let menu = m.clone();
@@ -456,7 +484,6 @@ impl Render for HarnessWorkspace {
     }
 }
 
-
 /// Repaint cadence for the sidebar indicators: ~15 fps is smooth for a 10px
 /// spinner and a fraction of what a per-frame gpui animation would cost — the
 /// whole chrome re-renders on every repaint, for as long as an agent works.
@@ -549,7 +576,14 @@ pub(crate) fn spin_arc(color: gpui::Rgba, track: gpui::Rgba, size: f32, t: f32) 
         .flex_none()
         .relative()
         .size(px(size))
-        .child(div().absolute().size_full().rounded_full().border_1().border_color(track))
+        .child(
+            div()
+                .absolute()
+                .size_full()
+                .rounded_full()
+                .border_1()
+                .border_color(track),
+        )
         .child(
             gpui::svg()
                 .absolute()
@@ -619,7 +653,13 @@ pub(crate) fn stopped_pill(hx: &HarnessTheme) -> gpui::Div {
         .bg(tint(hx.tx2, 0.14))
         .text_xs()
         .text_color(hx.tx2)
-        .child(div().size(px(7.0)).rounded_full().border_1().border_color(hx.tx2))
+        .child(
+            div()
+                .size(px(7.0))
+                .rounded_full()
+                .border_1()
+                .border_color(hx.tx2),
+        )
         .child("STOPPED")
 }
 
@@ -634,29 +674,45 @@ pub(crate) const ICON_WORKTREE: &str = "icons/git_branch.svg";
 /// glow while it waits on you. Colour only where it says something — at rest
 /// every row is the same quiet grey, so the one that needs you stands out.
 /// The glow breathes on the same clock and period as the WAITING pill's dot.
-pub(crate) fn state_tile(hx: &HarnessTheme, icon: &'static str, state: AgentState, t: f32) -> gpui::Div {
+pub(crate) fn state_tile(
+    hx: &HarnessTheme,
+    icon: &'static str,
+    state: AgentState,
+    t: f32,
+) -> gpui::Div {
     let (fg, tile) = match state {
-        AgentState::Running => (hx.accent, div().bg(tint(hx.accent, 0.22)).border_color(tint(hx.accent, 0.5))),
+        AgentState::Running => (
+            hx.accent,
+            div()
+                .bg(tint(hx.accent, 0.22))
+                .border_color(tint(hx.accent, 0.5)),
+        ),
         AgentState::Waiting => {
             let phase = (t / PULSE_PERIOD).fract() * std::f32::consts::TAU;
             let level = 0.35 + 0.65 * (0.5 - 0.5 * phase.cos());
             (
                 hx.amber,
-                div().bg(tint(hx.amber, 0.2)).border_color(tint(hx.amber, 0.6)).shadow(vec![gpui::BoxShadow {
-                    color: tint(hx.amber, 0.45 * level).into(),
-                    offset: gpui::point(px(0.0), px(0.0)),
-                    blur_radius: px(10.0),
-                    spread_radius: px(0.0),
-                    inset: false,
-                }]),
+                div()
+                    .bg(tint(hx.amber, 0.2))
+                    .border_color(tint(hx.amber, 0.6))
+                    .shadow(vec![gpui::BoxShadow {
+                        color: tint(hx.amber, 0.45 * level).into(),
+                        offset: gpui::point(px(0.0), px(0.0)),
+                        blur_radius: px(10.0),
+                        spread_radius: px(0.0),
+                        inset: false,
+                    }]),
             )
         }
         // Fill and outline come from the text colour, not a surface step: in
         // themes whose `surface2` is close to the sidebar's own colour, the
         // resting tile vanished and left a lone glyph.
-        AgentState::Idle | AgentState::Unknown => {
-            (hx.tx1, div().bg(tint(hx.tx2, 0.12)).border_color(tint(hx.tx2, 0.35)))
-        }
+        AgentState::Idle | AgentState::Unknown => (
+            hx.tx1,
+            div()
+                .bg(tint(hx.tx2, 0.12))
+                .border_color(tint(hx.tx2, 0.35)),
+        ),
     };
     tile.size(px(24.0))
         .flex_none()
@@ -665,7 +721,13 @@ pub(crate) fn state_tile(hx: &HarnessTheme, icon: &'static str, state: AgentStat
         .justify_center()
         .rounded_md()
         .border_1()
-        .child(gpui::svg().size(px(14.0)).flex_none().path(icon).text_color(fg))
+        .child(
+            gpui::svg()
+                .size(px(14.0))
+                .flex_none()
+                .path(icon)
+                .text_color(fg),
+        )
 }
 
 /// The fill a selected sidebar row gets. An accent wash rather than the
@@ -685,7 +747,12 @@ pub(crate) fn row_hover_bg(hx: &HarnessTheme, selected: bool) -> Rgba {
 }
 
 /// A compact chip for the row's Git counts. Zero counts take no space.
-pub(crate) fn git_counts(hx: &HarnessTheme, ahead: usize, behind: usize, dirty: usize) -> Option<gpui::Div> {
+pub(crate) fn git_counts(
+    hx: &HarnessTheme,
+    ahead: usize,
+    behind: usize,
+    dirty: usize,
+) -> Option<gpui::Div> {
     let mut row = sidebar_chip(hx, hx.tx1).gap_1();
     for (count, icon, color, label) in [
         (ahead, "icons/arrow_up.svg", hx.green, "Commits ahead"),
@@ -738,16 +805,24 @@ pub(crate) fn ci_summary(checks: &[forge::CheckRun]) -> Option<CheckStatus> {
     }
 }
 
-
 /// How long a status toast stays up.
 pub(crate) const NOTE_TTL: Duration = Duration::from_secs(6);
 
 /// Whether a status message reports something going wrong.
 fn is_failure(note: &str) -> bool {
     let n = note.to_ascii_lowercase();
-    ["fail", "error", "could not", "couldn't", "cannot", "can't", "not trusted", "skipped"]
-        .iter()
-        .any(|w| n.contains(w))
+    [
+        "fail",
+        "error",
+        "could not",
+        "couldn't",
+        "cannot",
+        "can't",
+        "not trusted",
+        "skipped",
+    ]
+    .iter()
+    .any(|w| n.contains(w))
 }
 
 impl HarnessWorkspace {
@@ -793,7 +868,11 @@ impl HarnessWorkspace {
                         .rounded_md()
                         .bg(hx.surface2)
                         .border_1()
-                        .border_color(if failed { tint(hx.red, 0.6) } else { hx.border2 })
+                        .border_color(if failed {
+                            tint(hx.red, 0.6)
+                        } else {
+                            hx.border2
+                        })
                         .shadow_lg()
                         .text_sm()
                         .text_color(if failed { hx.red } else { hx.tx0 })
@@ -817,9 +896,18 @@ mod tests {
 
     #[test]
     fn ci_remains_running_after_some_checks_pass() {
-        let build = forge::CheckRun { name: "build".into(), status: CheckStatus::Pass };
-        let mut test = forge::CheckRun { name: "test".into(), status: CheckStatus::Running };
-        assert_eq!(ci_summary(&[build.clone(), test.clone()]), Some(CheckStatus::Running));
+        let build = forge::CheckRun {
+            name: "build".into(),
+            status: CheckStatus::Pass,
+        };
+        let mut test = forge::CheckRun {
+            name: "test".into(),
+            status: CheckStatus::Running,
+        };
+        assert_eq!(
+            ci_summary(&[build.clone(), test.clone()]),
+            Some(CheckStatus::Running)
+        );
         test.status = CheckStatus::Pass;
         assert_eq!(ci_summary(&[build, test]), Some(CheckStatus::Pass));
     }

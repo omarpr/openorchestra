@@ -56,8 +56,7 @@ impl BrokerCredentials {
         fs::create_dir_all(a2a_dir)?;
         restrict_dir(a2a_dir)?;
         let path = Self::path(a2a_dir);
-        let body = serde_json::to_vec_pretty(self)
-            .map_err(io::Error::other)?;
+        let body = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
         let tmp = a2a_dir.join(format!(".{FILE_NAME}.tmp"));
         let _ = fs::remove_file(&tmp);
         {
@@ -73,12 +72,19 @@ impl BrokerCredentials {
 #[cfg(unix)]
 fn private_file(path: &Path) -> io::Result<fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
-    fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
 }
 
 #[cfg(not(unix))]
 fn private_file(path: &Path) -> io::Result<fs::File> {
-    fs::OpenOptions::new().write(true).create_new(true).open(path)
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
 }
 
 #[cfg(unix)]

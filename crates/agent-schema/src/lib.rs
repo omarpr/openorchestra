@@ -113,12 +113,21 @@ pub enum Compatibility {
     /// Trained against an older minor of the same major: every tool the
     /// checkpoint knows still exists and still means the same thing. It just
     /// will not use whatever was added since.
-    CompatibleOlderMinor { checkpoint: Version, current: Version },
+    CompatibleOlderMinor {
+        checkpoint: Version,
+        current: Version,
+    },
     /// Trained against a *newer* minor: it may emit calls to tools this build
     /// does not have. Runnable, but the harness should surface it.
-    CompatibleNewerMinor { checkpoint: Version, current: Version },
+    CompatibleNewerMinor {
+        checkpoint: Version,
+        current: Version,
+    },
     /// Different major — refuse (§4.4).
-    Incompatible { checkpoint: Version, current: Version },
+    Incompatible {
+        checkpoint: Version,
+        current: Version,
+    },
     /// The checkpoint declared nothing parseable. Treated as incompatible: an
     /// undeclared schema is exactly the situation the contract exists to stop.
     Undeclared { declared: String },
@@ -138,17 +147,26 @@ impl std::fmt::Display for Compatibility {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Compatibility::Exact => write!(f, "checkpoint matches the tool schema exactly"),
-            Compatibility::CompatibleOlderMinor { checkpoint, current } => write!(
+            Compatibility::CompatibleOlderMinor {
+                checkpoint,
+                current,
+            } => write!(
                 f,
                 "checkpoint targets schema {checkpoint}, harness ships {current}: compatible, \
                  but the checkpoint will not use tools added since {checkpoint}"
             ),
-            Compatibility::CompatibleNewerMinor { checkpoint, current } => write!(
+            Compatibility::CompatibleNewerMinor {
+                checkpoint,
+                current,
+            } => write!(
                 f,
                 "checkpoint targets schema {checkpoint}, harness ships {current}: compatible, \
                  but the checkpoint may call tools this build does not provide"
             ),
-            Compatibility::Incompatible { checkpoint, current } => write!(
+            Compatibility::Incompatible {
+                checkpoint,
+                current,
+            } => write!(
                 f,
                 "checkpoint targets schema {checkpoint}, harness ships {current}: incompatible \
                  major version — the toolset changed in a breaking way"

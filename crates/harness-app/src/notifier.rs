@@ -78,14 +78,14 @@ mod mac {
     use crossbeam_channel::Sender;
     use objc2::rc::Retained;
     use objc2::runtime::ProtocolObject;
-    use objc2::{define_class, msg_send, AllocAnyThread, DefinedClass};
+    use objc2::{AllocAnyThread, DefinedClass, define_class, msg_send};
     use objc2_foundation::{NSBundle, NSObject, NSObjectProtocol, NSSet, NSString};
     use objc2_user_notifications::{
-        UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,
-        UNNotificationAction, UNNotificationActionOptions, UNNotificationCategory,
-        UNNotificationCategoryOptions, UNNotificationDefaultActionIdentifier,
-        UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
-        UNUserNotificationCenter, UNUserNotificationCenterDelegate,
+        UNAuthorizationOptions, UNMutableNotificationContent, UNNotification, UNNotificationAction,
+        UNNotificationActionOptions, UNNotificationCategory, UNNotificationCategoryOptions,
+        UNNotificationDefaultActionIdentifier, UNNotificationPresentationOptions,
+        UNNotificationRequest, UNNotificationResponse, UNUserNotificationCenter,
+        UNUserNotificationCenterDelegate,
     };
 
     const CATEGORY: &str = "harness-agent-attention";
@@ -264,7 +264,10 @@ mod mac {
         );
         let done = RcBlock::new(|err: *mut objc2_foundation::NSError| {
             if let Some(error) = unsafe { err.as_ref() } {
-                log::warn!("macOS rejected the notification: {}", error.localizedDescription());
+                log::warn!(
+                    "macOS rejected the notification: {}",
+                    error.localizedDescription()
+                );
             }
         });
         center.addNotificationRequest_withCompletionHandler(&request, Some(&done));
@@ -327,7 +330,12 @@ fn escape(s: &str) -> String {
 /// Human-readable label for a worktree, preferring its editable name.
 /// Title and body for an agent alert. The repo is parenthesised only when
 /// known: an empty one rendered as a stray "()" in every banner.
-pub fn alert_text(agent: &str, worktree_name: &str, repo: &str, alert: AgentAlert) -> (String, String) {
+pub fn alert_text(
+    agent: &str,
+    worktree_name: &str,
+    repo: &str,
+    alert: AgentAlert,
+) -> (String, String) {
     let who = if repo.is_empty() {
         worktree_name.to_string()
     } else {
@@ -359,8 +367,13 @@ pub fn label_for(name: &str, path: &Path) -> String {
 mod tests {
     #[test]
     fn an_alert_never_shows_empty_parentheses() {
-        use super::{alert_text, AgentAlert};
-        let (_, body) = alert_text("Claude Code", "main", "sample-repo", AgentAlert::NeedsAttention);
+        use super::{AgentAlert, alert_text};
+        let (_, body) = alert_text(
+            "Claude Code",
+            "main",
+            "sample-repo",
+            AgentAlert::NeedsAttention,
+        );
         assert_eq!(body, "main (sample-repo) is waiting on you");
         let (_, body) = alert_text("Claude Code", "scratch", "", AgentAlert::Finished);
         assert_eq!(body, "scratch is ready for review");

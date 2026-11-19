@@ -286,9 +286,10 @@ pub(crate) fn save_repos(path: &Path, repos: &[PathBuf]) {
         let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(json) = serde_json::to_string_pretty(repos)
-        && let Err(e) = crate::state_files::write_private(path, json.as_bytes()) {
-            log::warn!("could not save {}: {e}", path.display());
-        }
+        && let Err(e) = crate::state_files::write_private(path, json.as_bytes())
+    {
+        log::warn!("could not save {}: {e}", path.display());
+    }
 }
 
 /// Move `root` out of `from` and into `to` (append), returning whether it was
@@ -369,7 +370,10 @@ mod collapsed_prefs_tests {
         use crate::workspace::state::diff_base_ref;
         // `HEAD` is what collapses the merge-base to a working-tree diff — the
         // path the main entry has always taken.
-        assert_eq!(diff_base_ref(DiffBase::Uncommitted, "origin/master"), "HEAD");
+        assert_eq!(
+            diff_base_ref(DiffBase::Uncommitted, "origin/master"),
+            "HEAD"
+        );
         assert_eq!(
             diff_base_ref(DiffBase::DefaultBranch, "origin/master"),
             "origin/master"
@@ -401,7 +405,10 @@ mod collapsed_prefs_tests {
         std::fs::write(&path, r#"{"dark":true}"#).unwrap();
         assert_eq!(load_prefs(&path).diff_base, DiffBase::Uncommitted);
 
-        let prefs = Prefs { diff_base: DiffBase::DefaultBranch, ..Default::default() };
+        let prefs = Prefs {
+            diff_base: DiffBase::DefaultBranch,
+            ..Default::default()
+        };
         save_prefs_to(&path, &prefs);
         assert_eq!(
             load_prefs(&path).diff_base,
@@ -439,13 +446,22 @@ mod collapsed_prefs_tests {
         // This pins the three keys the file format depends on.
         use crate::workspace::ui::sidebar::SidebarSection::*;
         assert_eq!(
-            [Stats.label(), Tasks.label(), Projects.label(), Archived.label()],
+            [
+                Stats.label(),
+                Tasks.label(),
+                Projects.label(),
+                Archived.label()
+            ],
             ["STATS", "TASKS", "PROJECTS", "ARCHIVED"]
         );
         // Only ARCHIVED starts collapsed; for the rest a stored key still means
         // "collapsed", so existing prefs files keep their meaning.
         assert!(Archived.collapsed_by_default());
-        assert!(![Stats, Tasks, Projects].iter().any(|s| s.collapsed_by_default()));
+        assert!(
+            ![Stats, Tasks, Projects]
+                .iter()
+                .any(|s| s.collapsed_by_default())
+        );
     }
 
     #[test]
@@ -453,8 +469,14 @@ mod collapsed_prefs_tests {
         // The Ports tab's two lists use the same collapsible header as the
         // sidebar, so their collapse state persists the same way.
         use crate::workspace::ui::sidebar::SidebarSection::*;
-        assert_eq!([PortsTask.label(), PortsOther.label()], ["THIS TASK", "OTHER ON THIS MAC"]);
-        assert!(PortsOther.collapsed_by_default(), "the rest of the Mac starts folded away");
+        assert_eq!(
+            [PortsTask.label(), PortsOther.label()],
+            ["THIS TASK", "OTHER ON THIS MAC"]
+        );
+        assert!(
+            PortsOther.collapsed_by_default(),
+            "the rest of the Mac starts folded away"
+        );
         assert!(!PortsTask.collapsed_by_default());
     }
 }
