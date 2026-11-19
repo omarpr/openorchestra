@@ -315,48 +315,74 @@ pub fn create_task<R: CommandRunner>(
     }
     let task_id = Task::id_for(&slug);
 
-    let mut members = Vec::new();
     for m in &req.members {
-        let wt_req = CreateRequest {
-            repo: m.repo.clone(),
-            repo_root: m.repo_root.clone(),
-            task_slug: slug.clone(),
-            branch: m.branch.clone(),
-            base_ref: m.base_ref.clone(),
-            created_at: req.created_at.clone(),
-            agent_kind: req.agent_kind.clone(),
-        };
-        let worktree_id = manager.create(wt_req)?;
-        // Attach task_id on the registry entry.
-        if let Some(entry) = manager.registry.get_mut(&worktree_id) {
+        if manager.git().ref_exists(&m.repo_root, &format!("refs/heads/{}", m.branch)) {
+            return Err(TaskError::Worktree(format!("branch {:?} already exists in {}", m.branch, m.repo)));
+        }
+    }
+
+    let mut created = Vec::new();
+    let mut registry_saved = false;
+    let result = (|| -> Result<(), TaskError> {
+        let mut members = Vec::new();
+        for m in &req.members {
+            let worktree_id = manager.register_worktree(CreateRequest {
+                repo: m.repo.clone(),
+                repo_root: m.repo_root.clone(),
+                task_slug: slug.clone(),
+                branch: m.branch.clone(),
+                base_ref: m.base_ref.clone(),
+                created_at: req.created_at.clone(),
+                agent_kind: req.agent_kind.clone(),
+            })?;
+            created.push(worktree_id.clone());
+            let entry = manager.registry.get_mut(&worktree_id)
+                .ok_or_else(|| TaskError::Worktree(format!("missing {worktree_id}")))?;
             entry.task_id = Some(task_id.clone());
             entry.name = req.name.clone();
+            members.push(TaskMember {
+                repo: m.repo.clone(),
+                worktree_id,
+                path: entry.path.clone(),
+                branch: m.branch.clone(),
+            });
         }
-        let entry = manager
-            .registry
-            .get(&worktree_id)
-            .ok_or_else(|| TaskError::Worktree(format!("missing {worktree_id}")))?;
-        members.push(TaskMember {
-            repo: m.repo.clone(),
-            worktree_id: worktree_id.clone(),
-            path: entry.path.clone(),
-            branch: m.branch.clone(),
-        });
-    }
-    manager.registry.save()?;
+        manager.registry.save()?;
+        registry_saved = true;
 
-    let task = Task {
-        id: task_id.clone(),
-        name: req.name,
-        slug,
-        home_repo: req.home_repo,
-        members,
-        agent_kind: req.agent_kind,
-        created_at: req.created_at,
-        archived: false,
-    };
-    store.add(task)?;
-    store.save()?;
+        store.add(Task {
+            id: task_id.clone(),
+            name: req.name,
+            slug,
+            home_repo: req.home_repo,
+            members,
+            agent_kind: req.agent_kind,
+            created_at: req.created_at,
+            archived: false,
+        })?;
+        if let Err(error) = store.save() {
+            store.remove(&task_id);
+            return Err(error.into());
+        }
+        Ok(())
+    })();
+
+    if let Err(error) = result {
+        let mut failures = Vec::new();
+        for id in created.iter().rev() {
+            if let Err(cleanup) = manager.remove_registered_worktree(id) {
+                failures.push(format!("{id}: {cleanup}"));
+            }
+        }
+        if registry_saved || !failures.is_empty() {
+            failures.extend(manager.registry.save().err().map(|error| format!("saving registry: {error}")));
+        }
+        return if failures.is_empty() {
+            Err(error)
+        } else {
+            Err(TaskError::Worktree(format!("{error}; rollback failed: {}", failures.join("; "))))
+        };
+    }
     Ok(task_id)
 }
 

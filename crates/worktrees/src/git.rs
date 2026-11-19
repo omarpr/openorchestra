@@ -294,8 +294,7 @@ impl<R: CommandRunner> GitWorktrees<R> {
     ///
     /// Uses `.git/info/exclude` rather than the repo's tracked `.gitignore`:
     /// the harness must not edit a file the user commits. Entries are wrapped
-    /// in a marked block so a later call can replace them cleanly, and the
-    /// whole thing is idempotent.
+    /// in a marked block shared by all the adapters in this repo.
     ///
     /// **The path is the git *common* dir, not the worktree's git dir.**
     /// Verified against real git: writing to a linked worktree's own
@@ -320,9 +319,21 @@ impl<R: CommandRunner> GitWorktrees<R> {
 
         let info = common.join("info");
         let exclude = info.join("exclude");
-        let existing = std::fs::read_to_string(&exclude).unwrap_or_default();
+        let io_error = |err: std::io::Error| GitError::Io(err.to_string());
+        std::fs::create_dir_all(&info).map_err(io_error)?;
+        // The exclude file itself is replaced on each write. Lock a stable
+        // sibling across both threads and app instances.
+        let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true)
+            .open(info.join(".exclude.harness.lock")).map_err(io_error)?;
+        lock.lock().map_err(io_error)?;
+        let existing = match std::fs::read_to_string(&exclude) {
+            Ok(contents) => contents,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(err) => return Err(io_error(err)),
+        };
 
         let mut kept: Vec<&str> = Vec::new();
+        let mut managed = Vec::new();
         let mut inside = false;
         for line in existing.lines() {
             if line == BLOCK_START {
@@ -333,7 +344,9 @@ impl<R: CommandRunner> GitWorktrees<R> {
                 inside = false;
                 continue;
             }
-            if !inside {
+            if inside {
+                managed.push(line);
+            } else {
                 kept.push(line);
             }
         }
@@ -344,14 +357,19 @@ impl<R: CommandRunner> GitWorktrees<R> {
         }
         out.push_str(BLOCK_START);
         out.push('\n');
-        for pattern in patterns {
-            out.push_str(pattern);
-            out.push('\n');
+        let mut seen = std::collections::HashSet::new();
+        for pattern in managed.into_iter().chain(patterns.iter().copied()) {
+            if seen.insert(pattern) {
+                out.push_str(pattern);
+                out.push('\n');
+            }
         }
         out.push_str(BLOCK_END);
         out.push('\n');
 
-        std::fs::create_dir_all(&info).map_err(|e| GitError::Io(e.to_string()))?;
+        if out == existing {
+            return Ok(());
+        }
         // Atomic, like every other write in this codebase: git may be reading
         // this file concurrently, and a truncated exclude file would start
         // showing spurious changes.

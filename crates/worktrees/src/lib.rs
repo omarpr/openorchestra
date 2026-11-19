@@ -135,11 +135,22 @@ impl<R: CommandRunner> Manager<R> {
 
     /// Create a worktree: `git worktree add` then register + persist.
     pub fn create(&mut self, req: CreateRequest) -> Result<String, WorktreeError> {
+        let id = self.register_worktree(req)?;
+        self.registry.save()?;
+        Ok(id)
+    }
+
+    /// Register a new checkout in memory so task creation can persist all its
+    /// members together.
+    fn register_worktree(&mut self, req: CreateRequest) -> Result<String, WorktreeError> {
+        let id = WorktreeEntry::id_for(&req.repo, &req.task_slug);
+        if self.registry.get(&id).is_some() {
+            return Err(RegistryError::Duplicate(id).into());
+        }
         let path = self.worktree_path(&req.repo, &req.task_slug);
         self.git
             .add_worktree(&req.repo_root, &path, &req.branch, req.base_ref.as_deref())?;
 
-        let id = WorktreeEntry::id_for(&req.repo, &req.task_slug);
         let entry = WorktreeEntry {
             id: id.clone(),
             repo: req.repo,
@@ -157,7 +168,6 @@ impl<R: CommandRunner> Manager<R> {
             task_id: None,
         };
         self.registry.add(entry)?;
-        self.registry.save()?;
         Ok(id)
     }
 
@@ -183,6 +193,12 @@ impl<R: CommandRunner> Manager<R> {
     /// Delete: destroy the worktree dir, its branch, and the registry entry —
     /// for abandoned experiments, behind a confirm in the UI (§6.1 D6).
     pub fn delete(&mut self, id: &str) -> Result<(), WorktreeError> {
+        self.remove_registered_worktree(id)?;
+        self.registry.save()?;
+        Ok(())
+    }
+
+    fn remove_registered_worktree(&mut self, id: &str) -> Result<(), WorktreeError> {
         let entry = self
             .registry
             .get(id)
@@ -191,7 +207,6 @@ impl<R: CommandRunner> Manager<R> {
         self.git.remove_worktree(&entry.repo_root, &entry.path)?;
         self.git.delete_branch(&entry.repo_root, &entry.branch)?;
         self.registry.remove(id);
-        self.registry.save()?;
         Ok(())
     }
 

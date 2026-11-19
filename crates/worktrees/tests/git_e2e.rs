@@ -159,6 +159,55 @@ fn task_with_multiple_projects_uses_the_home_projects_branch_in_its_slug() {
 }
 
 #[test]
+fn task_creation_rolls_back_after_a_later_member_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let a = root.join("a");
+    let b = root.join("b");
+    init_repo(&a);
+    init_repo(&b);
+    let registry_path = root.join("registry.json");
+    let mut manager = Manager::new(
+        Registry::new_at(&registry_path),
+        GitWorktrees::new(SystemRunner),
+        root.join("worktrees"),
+    );
+    let mut tasks = TaskStore::new_at(root.join("tasks.json"));
+    let mut request = CreateTaskRequest {
+        name: "Settings".into(),
+        slug: "settings".into(),
+        home_repo: "a".into(),
+        members: [("a", &a, "main"), ("b", &b, "missing-base")]
+            .into_iter()
+            .map(|(repo, path, base)| CreateTaskMember {
+                repo: repo.into(),
+                repo_root: path.clone(),
+                branch: "feat/settings".into(),
+                base_ref: Some(base.into()),
+            })
+            .collect(),
+        created_at: String::new(),
+        agent_kind: Default::default(),
+    };
+
+    git(&b, &["branch", "feat/settings"]);
+    assert!(create_task(&mut manager, &mut tasks, request.clone())
+        .unwrap_err().to_string().contains("already exists"));
+    assert!(!root.join("worktrees/a").exists());
+    git(&b, &["branch", "-D", "feat/settings"]);
+
+    assert!(create_task(&mut manager, &mut tasks, request.clone()).is_err());
+    assert!(manager.registry.entries().is_empty());
+    assert!(Registry::load(registry_path).unwrap().entries().is_empty());
+    assert!(tasks.tasks().is_empty());
+    assert!(!manager.git().ref_exists(&a, "refs/heads/feat/settings"));
+    assert_eq!(manager.git().list_worktrees(&a).unwrap().len(), 1);
+
+    request.members[1].base_ref = Some("main".into());
+    assert!(create_task(&mut manager, &mut tasks, request).is_ok());
+}
+
+#[test]
 fn full_lifecycle_create_status_diff_archive_delete() {
     let tmp = tempfile::tempdir().unwrap();
     let repo_root = tmp.path().join("app");
@@ -349,6 +398,31 @@ fn exclude_locally_targets_the_common_dir_not_the_worktree_git_dir() {
     let common = repo_root.join(".git/info/exclude");
     assert!(common.exists(), "must write the common dir's exclude file");
     assert!(fs::read_to_string(&common).unwrap().contains(".harness/"));
+}
+
+#[test]
+fn concurrent_adapter_excludes_merge_in_the_common_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("app");
+    init_repo(&repo);
+    let git = GitWorktrees::new(SystemRunner);
+    let worktree = tmp.path().join("linked");
+    git.add_worktree(&repo, &worktree, "feat/linked", None).unwrap();
+    let start = std::sync::Barrier::new(2);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            start.wait();
+            git.exclude_locally(&repo, &[".harness/", ".codex/"]).unwrap();
+        });
+        scope.spawn(|| {
+            start.wait();
+            git.exclude_locally(&worktree, &[".harness/", ".claude/settings.local.json"]).unwrap();
+        });
+    });
+    let exclude = fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
+    assert_eq!(exclude.matches(".harness/").count(), 1);
+    assert!(exclude.contains(".codex/"));
+    assert!(exclude.contains(".claude/settings.local.json"));
 }
 
 /// A clone with a bare origin — enough to exercise push against real git
