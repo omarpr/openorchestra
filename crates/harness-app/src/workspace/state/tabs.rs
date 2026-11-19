@@ -355,19 +355,10 @@ impl HarnessWorkspace {
         }
         let Some(pane) = self.panes.get_mut(&key) else { return };
         let Some(ix) = pane.tabs.iter().position(|t| t.id == id) else { return };
-        pane.tabs.remove(ix);
         // The pane keeps its agent on record even when its last agent tab is
         // closed on purpose: a task needs every agent, so a closed one shows
         // STOPPED with a Restart like one lost to a computer restart.
-        if pane.active == id {
-            // Prefer the tab to the left, which is where the eye already is.
-            pane.active = pane
-                .tabs
-                .get(ix.saturating_sub(1))
-                .or_else(|| pane.tabs.last())
-                .map(|t| t.id)
-                .unwrap_or(0);
-        }
+        pane.remove_tab_at(ix);
         // A worktree with no tabs is a dead end; give it a shell back.
         if pane.tabs.is_empty() {
             self.open_tab(TabKind::Shell, window, cx); // saves panes itself
@@ -414,8 +405,8 @@ impl HarnessWorkspace {
                             hosted.update(cx, |ws, cx| {
                                 ws.activate_item(item.as_ref(), true, true, window, cx);
                             });
-                        }
-                        if hosted.read(cx).active_item(cx).is_some() {
+                            item.item_focus_handle(cx)
+                        } else if hosted.read(cx).active_item(cx).is_some() {
                             hosted.read(cx).focus_handle(cx)
                         } else {
                             self.editor_host_focus.clone()
@@ -658,6 +649,39 @@ fn pane_to_evict<'a>(
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn closing_a_tab_selects_the_next_tab_then_the_previous() {
+        for (ids, active, closing, expected) in [
+            (&[1, 3, 2][..], 1, 0, 3),
+            (&[1, 3, 2][..], 3, 1, 2),
+            (&[1, 3, 2][..], 2, 2, 3),
+            (&[1, 3, 2][..], 1, 1, 1),
+            (&[1][..], 1, 0, 0),
+        ] {
+            let mut pane = PaneSet {
+                tabs: ids
+                    .iter()
+                    .map(|&id| Tab {
+                        id,
+                        title: String::new(),
+                        content: TabContent::Diff,
+                        agent: None,
+                    })
+                    .collect(),
+                active,
+                last_used: 0,
+            };
+
+            pane.remove_tab_at(closing);
+
+            assert_eq!(
+                pane.active, expected,
+                "closing tab {} in {ids:?}",
+                ids[closing]
+            );
+        }
+    }
 
     #[test]
     fn bulk_agent_launches_can_exceed_the_pane_cap_until_startup_finishes() {

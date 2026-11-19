@@ -481,6 +481,16 @@ impl PaneSet {
     fn active_tab(&self) -> Option<&Tab> {
         self.tabs.iter().find(|t| t.id == self.active)
     }
+
+    fn remove_tab_at(&mut self, index: usize) {
+        if self.tabs.remove(index).id == self.active {
+            self.active = self
+                .tabs
+                .get(index)
+                .or_else(|| self.tabs.last())
+                .map_or(0, |tab| tab.id);
+        }
+    }
 }
 
 /// How many worktree pane sets stay live at once.

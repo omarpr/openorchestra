@@ -505,28 +505,17 @@ impl HarnessWorkspace {
         let Some(r) = self.resolve() else { return };
         let key = r.key.clone();
         let Some(pane) = self.panes.get_mut(&key) else { return };
-        let was_active = pane.tabs.iter().any(|t| {
-            t.id == pane.active
-                && matches!(&t.content, TabContent::File { item_id: id, .. } if *id == item_id)
+        let closed_index = pane.tabs.iter().position(|t| {
+            matches!(&t.content, TabContent::File { item_id: id, .. } if *id == item_id)
         });
         // Any closed file tab's slot, not just a flagged preview's: zed's
         // `close_current_preview_item` clears the preview id *before* removing
         // the item, so our flag sync has already marked the tab non-preview by
         // the time this runs. The timestamp below limits reuse to a preview
         // that arrives in the same replacement.
-        self.preview_slot = pane
-            .tabs
-            .iter()
-            .position(|t| {
-                matches!(&t.content, TabContent::File { item_id: id, .. } if *id == item_id)
-            })
-            .map(|ix| (key.clone(), ix, std::time::Instant::now()));
-        pane.tabs.retain(|t| {
-            !matches!(&t.content, TabContent::File { item_id: id, .. } if *id == item_id)
-        });
-        if was_active {
-            pane.active = pane.tabs.last().map(|t| t.id).unwrap_or(0);
-        }
+        self.preview_slot = closed_index.map(|ix| (key, ix, std::time::Instant::now()));
+        let Some(ix) = closed_index else { return };
+        pane.remove_tab_at(ix);
         if pane.tabs.is_empty() {
             self.open_tab(TabKind::Shell, window, cx);
         } else {
@@ -542,10 +531,29 @@ impl HarnessWorkspace {
         cx: &mut Context<Self>,
     ) {
         self.sync_file_preview_flags(cx);
-        let Some(item) = hosted.read(cx).active_item(cx) else { return };
-        let item_id = item.item_id();
         let Some(r) = self.resolve() else { return };
+        if self.service_workspaces.get(&r.key) != Some(hosted) {
+            return;
+        }
         let Some(pane) = self.panes.get_mut(&r.key) else { return };
+        let service = hosted.read(cx);
+        // Zed can activate its own fallback before emitting ItemRemoved. Let
+        // the removal handler choose the neighbor from the visible tab order.
+        if let Some(TabContent::File { item_id, .. }) = pane.active_tab().map(|tab| &tab.content)
+            && !service.panes().iter().any(|pane| {
+                pane.read(cx).items().any(|item| item.item_id() == *item_id)
+            })
+        {
+            return;
+        }
+        let Some(item) = service.active_item(cx) else { return };
+        // A close can also emit a follow-up activation after focus moved to
+        // the selected neighbor. Only mirror a hosted item that holds focus.
+        let focus = item.item_focus_handle(cx);
+        if !focus.is_focused(window) && !focus.contains_focused(window, cx) {
+            return;
+        }
+        let item_id = item.item_id();
         if let Some(tab) = pane.tabs.iter().find(|t| {
             matches!(&t.content, TabContent::File { item_id: id, .. } if *id == item_id)
         })
@@ -585,22 +593,11 @@ impl HarnessWorkspace {
         }
         self.prefs.diff_location = location;
         if location == DiffLocation::Dock {
-            let keys: Vec<String> = self.panes.keys().cloned().collect();
-            for key in keys {
-                let Some(pane) = self.panes.get_mut(&key) else { continue };
-                let closing: Vec<u64> = pane
-                    .tabs
-                    .iter()
-                    .filter(|t| matches!(t.content, TabContent::Diff))
-                    .map(|t| t.id)
-                    .collect();
-                if closing.is_empty() {
-                    continue;
-                }
-                pane.tabs.retain(|t| !closing.contains(&t.id));
-                if closing.contains(&pane.active) {
-                    // Prefer the tab to the left, the way close_tab does.
-                    pane.active = pane.tabs.last().map(|t| t.id).unwrap_or(0);
+            for pane in self.panes.values_mut() {
+                for ix in (0..pane.tabs.len()).rev() {
+                    if matches!(pane.tabs[ix].content, TabContent::Diff) {
+                        pane.remove_tab_at(ix);
+                    }
                 }
             }
             // A worktree left with no tabs is a dead end; give it a shell back,
