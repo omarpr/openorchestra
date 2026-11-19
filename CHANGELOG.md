@@ -70,6 +70,8 @@ Unreleased is empty.
 
 ### Security
 
+- Update the desktop app's Wasmtime and heapless dependencies to patch
+  advisories reported by RustSec.
 - Review Overview configures each CLI to restrict tool access during its
   one-shot snapshot review.
 

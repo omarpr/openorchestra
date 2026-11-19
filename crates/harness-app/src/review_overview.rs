@@ -423,8 +423,7 @@ fn is_json_fence(line: &str) -> bool {
     let Some(rest) = line.trim().strip_prefix("```") else {
         return false;
     };
-    rest.trim_start()
-        .split_whitespace()
+    rest.split_whitespace()
         .next()
         .is_some_and(|word| word.eq_ignore_ascii_case("json"))
 }
