@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::Arc;
 
 use agent_runtime::AgentKind;
 use serde::{Deserialize, Serialize};
@@ -73,6 +74,7 @@ pub enum TabRecordKind {
     Editor,
     Chat,
     Diff,
+    ReviewOverview(Option<Arc<crate::review_overview::StoredReviewOverview>>),
 }
 
 pub fn load(path: &Path) -> PanesState {
@@ -161,6 +163,38 @@ mod tests {
                 agent: None,
             },
         );
+        save(&path, &mut state);
+        assert_eq!(load(&path), state);
+    }
+
+    #[test]
+    fn review_overview_restores_its_active_tab_and_last_completed_report() {
+        use crate::review_overview::{ReviewCli, ReviewPreferences, ReviewReport, StoredReviewOverview};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("panes.json");
+        let mut state = PanesState { next_tab_id: 3, ..Default::default() };
+        let saved = StoredReviewOverview {
+            preferences: ReviewPreferences {
+                cli: ReviewCli::Codex,
+                models: BTreeMap::from([(ReviewCli::Codex, "test-model".to_string())]),
+            },
+            report: ReviewReport {
+                markdown: "## Riskiest change\n\nA test report.".into(),
+                scope: vec!["project · branch · vs main".into()],
+                limitations: Vec::new(),
+                files: Vec::new(),
+                generated: true,
+            },
+        };
+        state.worktrees.insert("main:project".into(), WorktreePanes {
+            active: Some(2),
+            tabs: vec![
+                TabRecord { id: 1, kind: TabRecordKind::Shell, title: "shell".into() },
+                TabRecord { id: 2, kind: TabRecordKind::ReviewOverview(Some(Arc::new(saved))), title: "Review Overview".into() },
+            ],
+            agent: None,
+        });
         save(&path, &mut state);
         assert_eq!(load(&path), state);
     }

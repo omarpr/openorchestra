@@ -1,27 +1,9 @@
-//! Native OS notifications when an agent needs input (architecture §4.6, A5).
+//! Native OS notifications for agent attention and turn completion.
 //!
-//! Fed from the [`Bus`](agent_runtime::Bus) that every adapter publishes on, so
-//! this is agent-neutral: it does not know or care whether the signal arrived
-//! as a status file, an SSE event, or a hook shim.
-//!
-//! Three rules, each of which exists because breaking it makes the feature
-//! worse than not having it:
-//!
-//! 1. **Only exact signals may claim "input needed"** (R11). Enforced upstream
-//!    by `AgentSignal::should_notify`, so a best-effort adapter reporting
-//!    turn-complete can never be dressed up as a request for input.
-//! 2. **Suppress when the user is already looking at that worktree.** Telling
-//!    someone about the prompt they are staring at is pure noise.
-//! 3. **Only on a transition into Waiting**, never on a repeat, so a flapping
-//!    adapter cannot spam the user.
-//!
-//! macOS delivery goes through `osascript`. That is deliberate: the
-//! `UNUserNotificationCenter` route §4.6 names requires the process to be a
-//! properly registered bundle, which is true for `openOrchestra.app` but *not*
-//! for `cargo run` during development — so the native path would silently do
-//! nothing exactly when a developer is trying to test it. `osascript` works in
-//! both, with no new dependency. Linux uses `notify-send` for the same reason
-//! (`notify-rust` remains the tidier long-term option).
+//! The workspace decides which transitions warrant a notification and whether
+//! the originating tab is already visible. Bundled macOS builds deliver via
+//! `UNUserNotificationCenter`. Bare macOS builds use `osascript`, and Linux
+//! uses `notify-send`.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -281,8 +263,8 @@ mod mac {
             None,
         );
         let done = RcBlock::new(|err: *mut objc2_foundation::NSError| {
-            if !err.is_null() {
-                log::warn!("notification post failed");
+            if let Some(error) = unsafe { err.as_ref() } {
+                log::warn!("macOS rejected the notification: {}", error.localizedDescription());
             }
         });
         center.addNotificationRequest_withCompletionHandler(&request, Some(&done));

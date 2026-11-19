@@ -88,6 +88,7 @@ pub fn harness_status_shim_path(state_dir: &Path) -> PathBuf {
 
 /// Write (or refresh) the universal status shim under `state_dir/shims/`.
 pub fn materialize_harness_status_shim(state_dir: &Path) -> io::Result<PathBuf> {
+    crate::install_remote_tab_helper(state_dir)?;
     let path = harness_status_shim_path(state_dir);
     crate::install_shim(&path, SHIM)?;
     Ok(path)

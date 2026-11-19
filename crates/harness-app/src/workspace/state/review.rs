@@ -2,8 +2,140 @@
 //! comments, and the markdown preview toggle.
 
 use super::*;
+use crate::review_overview::{ReviewRepo, ReviewRequest};
+
+impl OverviewTab {
+    pub(super) fn set_report(
+        &mut self,
+        saved: Arc<StoredReviewOverview>,
+        cx: &mut Context<HarnessWorkspace>,
+    ) {
+        self.preferences = saved.preferences.clone();
+        let text = saved.report.markdown.clone();
+        let markdown = cx.new(|cx| markdown::Markdown::new(text.into(), None, None, cx));
+        self.last_report = Some(Arc::clone(&saved));
+        self.status = OverviewStatus::Ready { markdown, saved };
+    }
+}
 
 impl HarnessWorkspace {
+    pub(crate) fn ensure_review_model_catalog(&mut self, cx: &mut Context<Self>) {
+        let cli = self.prefs.review_overview.cli;
+        if !self.review_model_catalogs.contains_key(&cli) {
+            self.load_review_model_catalog(cli, cx);
+        }
+    }
+
+    pub(crate) fn load_review_model_catalog(&mut self, cli: ReviewCli, cx: &mut Context<Self>) {
+        if matches!(self.review_model_catalogs.get(&cli), Some(ModelCatalog::Loading)) {
+            return;
+        }
+        let cwd = self.resolve().map(|r| r.path).unwrap_or_else(|| self.data_dir.clone());
+        self.review_model_catalogs.insert(cli, ModelCatalog::Loading);
+        cx.spawn(async move |view, cx| {
+            let result = cx.background_spawn(async move {
+                crate::review_overview::models::discover(cli, &cwd)
+            }).await;
+            let _ = view.update(cx, |ws, cx| {
+                ws.review_model_catalogs.insert(cli, match result {
+                    Ok(models) => ModelCatalog::Ready(models),
+                    Err(error) => ModelCatalog::Failed(error),
+                });
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
+    }
+
+    pub(crate) fn run_review_overview(&mut self, cx: &mut Context<Self>) {
+        let Some(r) = self.resolve() else { return };
+        let repos = if let Some(task) = r.task_id.as_deref().and_then(|id| self.task_store.get(id)) {
+            task.members.iter().map(|member| ReviewRepo {
+                name: member.repo.clone(),
+                path: member.path.clone(),
+                compare_ref: self.data.repos.iter()
+                    .find(|repo| repo.name == member.repo)
+                    .map(|repo| repo.compare_ref.clone())
+                    .unwrap_or_else(|| "HEAD".into()),
+            }).collect()
+        } else {
+            let project = self.data.repos.iter().find(|repo| {
+                repo.repo_root == r.path || repo.worktrees.iter().any(|entry| entry.path == r.path)
+            });
+            vec![ReviewRepo {
+                name: project.map(|repo| repo.name.clone()).unwrap_or_else(|| r.branch.clone()),
+                path: r.path.clone(),
+                compare_ref: r.compare_ref,
+            }]
+        };
+        let request = ReviewRequest {
+            cwd: r.path,
+            repos,
+            preferences: self.prefs.review_overview.clone(),
+        };
+        let Some(pane) = self.panes.get_mut(&r.key) else { return };
+        let id = pane.active;
+        let Some(overview) = review_overview_tab(pane, id) else { return };
+        if matches!(overview.status, OverviewStatus::Running(_)) {
+            return;
+        }
+
+        let run = ReviewRun::new();
+        let worker = run.worker_flag();
+        overview.preferences = request.preferences.clone();
+        overview.status = OverviewStatus::Running(run);
+        cx.notify();
+        cx.spawn(async move |view, cx| {
+            let cancelled = Arc::clone(&worker);
+            let result = cx.background_spawn(async move { request.run(cancelled) }).await;
+            let _ = view.update(cx, |ws, cx| {
+                let Some(pane) = ws.panes.get_mut(&r.key) else { return };
+                let Some(overview) = review_overview_tab(pane, id) else { return };
+                if !matches!(&overview.status, OverviewStatus::Running(run) if run.owns(&worker)) {
+                    return;
+                }
+                match result {
+                    Ok(report) => {
+                        let saved = Arc::new(StoredReviewOverview {
+                            preferences: overview.preferences.clone(),
+                            report,
+                        });
+                        overview.set_report(saved, cx);
+                        ws.save_panes();
+                    }
+                    Err(error) => overview.status = OverviewStatus::Failed(error),
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    pub(crate) fn cancel_review_overview(&mut self, cx: &mut Context<Self>) {
+        let Some(r) = self.resolve() else { return };
+        let Some(pane) = self.panes.get_mut(&r.key) else { return };
+        let Some(overview) = review_overview_tab(pane, pane.active) else { return };
+        if matches!(overview.status, OverviewStatus::Running(_)) {
+            overview.status = OverviewStatus::Cancelled;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn chat_about_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(r) = self.resolve() else { return };
+        let Some(tab) = self.panes.get(&r.key).and_then(PaneSet::active_tab) else { return };
+        let TabContent::ReviewOverview(overview) = &tab.content else { return };
+        let OverviewStatus::Ready { saved, .. } =
+            &overview.status else { return };
+        let report = &saved.report;
+        if !report.generated {
+            return;
+        }
+        let followup = ReviewFollowup::new(
+            &saved.preferences, &report.markdown, &report.scope, &report.limitations,
+        );
+        self.open_review_chat(followup, window, cx);
+    }
+
     /// Recompute the merge-base diff **off the UI thread** (M4).
     ///
     /// `compute_diff` shells out to `git diff`, which on a large repo takes
@@ -350,5 +482,13 @@ impl HarnessWorkspace {
             });
         })
         .detach();
+    }
+}
+
+fn review_overview_tab(pane: &mut PaneSet, id: u64) -> Option<&mut OverviewTab> {
+    let tab = pane.tabs.iter_mut().find(|tab| tab.id == id)?;
+    match &mut tab.content {
+        TabContent::ReviewOverview(overview) => Some(overview),
+        _ => None,
     }
 }

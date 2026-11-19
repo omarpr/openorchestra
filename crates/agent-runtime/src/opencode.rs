@@ -187,6 +187,7 @@ fn pump(
                     };
                     let signal = AgentSignal {
                         worktree_root: worktree_root.to_path_buf(),
+                        tab_id: None,
                         kind: AgentKind::OpenCode,
                         state,
                         reason,

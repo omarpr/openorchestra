@@ -101,13 +101,13 @@ impl HarnessWorkspace {
             cx.notify();
             return false;
         }
-        let selected = self.resolve().map(|r| r.path);
+        let selected = self.selected_agent().map(|(target, kind)| self.conductor.selection_target(target, kind));
         // `tick` needs the workspace (to name alert targets) while mutating
         // the conductor, so lend it out for the call.
         let mut conductor = std::mem::take(&mut self.conductor);
-        let view = conductor.tick(std::time::Instant::now(), selected.as_deref(), |root, kind| {
-            let (_, _, id) = self.alert_target(root);
-            super::super::state::alert_nav_id(&id, kind)
+        let view = conductor.tick(std::time::Instant::now(), selected.as_ref(), |target, kind| {
+            let (_, _, id) = self.alert_target(&target.root);
+            super::super::state::alert_nav_id(&id, kind, target.tab_id)
         });
         self.conductor = conductor;
         if self.conductor_view.as_ref() != Some(&view) {
@@ -151,9 +151,7 @@ impl HarnessWorkspace {
             self.navigate_to_alert(&nav, window, cx);
             // Clicking his line is checking on that agent, even when you were
             // already there (so the next tick sees no arrival to dismiss on).
-            if let Some(r) = self.resolve() {
-                self.conductor.dismiss(&r.path);
-            }
+            self.dismiss_selected_agent();
         }
         cx.notify();
     }
@@ -232,8 +230,8 @@ impl HarnessWorkspace {
         // "finished" opens the full bubble, and so does hovering him.
         let collapsed = !view.needs_you() && !self.conductor_hovered && !dragging;
         let on_left = right + FIGURE / 2.0 < vw / 2.0;
-        let badge = (collapsed && !view.lines.is_empty()).then(|| {
-            let n = view.lines.len() + view.more;
+        let badge = (collapsed && view.running > 0).then(|| {
+            let n = view.running;
             let b = div()
                 .id("conductor-badge")
                 .occlude()

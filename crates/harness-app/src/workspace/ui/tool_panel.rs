@@ -248,6 +248,7 @@ impl HarnessWorkspace {
                                 ws.open_tab(TabKind::Diff, window, cx);
                             })),
                     )
+                    .child(self.review_overview_button(hx, cx))
                     .into_any_element()
             }
             ToolTab::Review => {

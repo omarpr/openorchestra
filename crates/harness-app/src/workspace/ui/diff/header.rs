@@ -297,7 +297,8 @@ impl HarnessWorkspace {
                     // *wrapping*, and a long branch wrapped to three lines inside
                     // this `h(px(34.0))` row overflowed it above and below —
                     // painting over the row beneath.
-                    .child(div().flex_1().min_w_0().text_xs().font_family(hx.font_ui).text_color(hx.tx1).truncate().child(r.branch.clone())),
+                    .child(div().flex_1().min_w_0().text_xs().font_family(hx.font_ui).text_color(hx.tx1).truncate().child(r.branch.clone()))
+                    .child(self.review_overview_button(hx, cx)),
             )
             .child(
                 div()

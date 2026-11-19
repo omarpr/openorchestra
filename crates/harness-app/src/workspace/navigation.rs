@@ -139,9 +139,9 @@ impl HarnessWorkspace {
             // A coordinator has no registry entry: it runs the task's agent.
             .or_else(|| self.coordinator_task_for_path(&path).map(|t| t.agent_kind.clone()))
             .unwrap_or_default();
-        let nav = super::state::alert_nav_id(&id, &kind);
+        let nav = super::state::alert_nav_id(&id, &kind, None);
         self.navigate_to_alert(&nav, window, cx);
-        self.conductor.dismiss(&path);
+        self.dismiss_selected_agent();
     }
 
     pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {

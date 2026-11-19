@@ -6,6 +6,25 @@ use super::*;
 impl HarnessWorkspace {
     /// Open a new tab in the active worktree's set and focus it.
     pub(crate) fn open_tab(&mut self, kind: TabKind, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_tab_with_review(kind, None, window, cx);
+    }
+
+    pub(crate) fn open_review_chat(
+        &mut self,
+        review: ReviewFollowup,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_tab_with_review(TabKind::Agent(review.cli.agent_kind()), Some(review), window, cx);
+    }
+
+    fn open_tab_with_review(
+        &mut self,
+        kind: TabKind,
+        review: Option<ReviewFollowup>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(r) = self.resolve() else { return };
         // `main` is a read-only checkout with no agent (D8).
         // D8 revised (July 22, 2026): agents may run on main too — it is the
@@ -16,6 +35,18 @@ impl HarnessWorkspace {
             self.set_note("agent chat needs a worktree".to_string());
             cx.notify();
             return;
+        }
+
+        if kind == TabKind::ReviewOverview {
+            self.tools_maximized = false;
+            if let Some(pane) = self.panes.get_mut(&r.key)
+                && let Some(tab) = pane.tabs.iter().find(|t| matches!(t.content, TabContent::ReviewOverview(_)))
+            {
+                pane.active = tab.id;
+                self.focus_active_pane(window, cx);
+                cx.notify();
+                return;
+            }
         }
 
         let tab_id = self.next_tab_id();
@@ -43,7 +74,7 @@ impl HarnessWorkspace {
                 )
             }
             TabKind::Agent(ref agent) => {
-                let prep = self.prepare_agent_launch(agent, &r);
+                let prep = self.prepare_agent_launch(agent, &r, tab_id);
                 let session = self.has_tmux.then(|| crate::terminal_pane::TerminalSession {
                     name: crate::tmux::session_name(&r.key, tab_id),
                     attach_only: false,
@@ -65,6 +96,10 @@ impl HarnessWorkspace {
             // Nothing to construct: the surface reads state the view already
             // holds, so the tab is a marker saying where to draw it.
             TabKind::Diff => (TabContent::Diff, "⑂ diff".to_string()),
+            TabKind::ReviewOverview => (
+                TabContent::ReviewOverview(OverviewTab::default()),
+                "Review Overview".to_string(),
+            ),
             TabKind::Editor => {
                 // One per worktree: a second ⌘E switches to the existing tab.
                 if let Some(pane) = self.panes.get_mut(&r.key)
@@ -100,23 +135,17 @@ impl HarnessWorkspace {
         // and the else case silently dropped the tab — including a fully
         // constructed zed Workspace, whose own diagnostics all read healthy
         // because the entity *was* healthy right up until it was released.
-        // Every state probe passed while the screen showed nothing; a tab
-        // that cannot be attached must never be discarded without a trace.
-        self.pane_clock = self.pane_clock.wrapping_add(1);
-        let pane = self.panes.entry(r.key.clone()).or_insert_with(|| PaneSet {
-            tabs: Vec::new(),
-            active: 0,
-            last_used: 0,
-        });
-        pane.last_used = self.pane_clock;
-        pane.tabs.push(Tab { id: tab_id, title, content, agent: agent_of_kind });
-        pane.active = tab_id;
+        // Every state probe passed while the screen showed nothing.
+        self.attach_tab(&r.key, Tab { id: tab_id, title, content, agent: agent_of_kind });
         if let TabKind::Agent(a) = &kind {
             // The transcript on record is an earlier session's, not this tab's.
             self.remote.forget_session(&r.path, a.as_str());
         }
         self.focus_active_pane(window, cx);
         self.save_panes();
+        if kind == TabKind::ReviewOverview {
+            self.run_review_overview(cx);
+        }
         if let Some((prep, session)) = pending_agent_launch {
             self.pending_agent_launches.insert(tab_id);
             let key = r.key.clone();
@@ -124,7 +153,7 @@ impl HarnessWorkspace {
             cx.spawn_in(window, async move |view, cx| {
                 let command = cx
                     .background_executor()
-                    .spawn(async move { prep.resolve() })
+                    .spawn(async move { prep.resolve(review) })
                     .await;
                 let launch = view
                     .update_in(cx, |ws, window, cx| {
@@ -212,11 +241,6 @@ impl HarnessWorkspace {
         self.exit_hooks_edit(window, cx);
         self.edit_prompt = None;
         let Some(r) = self.resolve() else { return };
-        let Some(hosted) = self.ensure_service_workspace(window, cx) else {
-            self.set_note("could not open an editor".to_string());
-            cx.notify();
-            return;
-        };
         // A task's diff keys files `repo/path`: open it in its member's
         // worktree. Anything else is relative to the editor root, never
         // `r.path`: for a coordinator that is the task folder, which holds
@@ -230,7 +254,23 @@ impl HarnessWorkspace {
             Some(f) => (f.worktree.clone(), f.file.path.clone()),
             None => (r.editor_path.clone(), file),
         };
-        crate::workspace_host::open_file_at(&hosted, &root, &rel, line, false, window, cx);
+        self.open_workspace_file(&root, &rel, line, window, cx);
+    }
+
+    pub(crate) fn open_workspace_file(
+        &mut self,
+        root: &Path,
+        relative: &str,
+        line: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(hosted) = self.ensure_service_workspace(window, cx) else {
+            self.set_note("could not open an editor".to_string());
+            cx.notify();
+            return;
+        };
+        crate::workspace_host::open_file_at(&hosted, root, relative, line, false, window, cx);
         cx.notify();
     }
 
@@ -346,12 +386,11 @@ impl HarnessWorkspace {
             self.remote.forget_session(&r.path, a.as_str());
         }
         if was_agent {
-            // Unknown (renders as IDLE) rather than Idle: we killed the process,
-            // we didn't observe a clean finish. A file event can't unstick this
-            // because the dead agent will never touch status.json again.
-            self.conductor.stopped(&r.path);
-            self.agent_since.insert(r.path.clone(), (std::time::SystemTime::now(), None));
-            self.agent_status.insert(r.path.clone(), AgentState::Unknown);
+            self.stop_agent(&crate::conductor::AgentTarget::new(&r.path, Some(id)));
+            let _ = std::fs::remove_file(agent_runtime::status_path(&r.path, Some(id)));
+            if !self.panes[&key].tabs.iter().any(|tab| tab.id != id && tab.agent.is_some()) {
+                self.stop_agent(&crate::conductor::AgentTarget::new(&r.path, None));
+            }
         }
         let Some(pane) = self.panes.get_mut(&key) else { return };
         let Some(ix) = pane.tabs.iter().position(|t| t.id == id) else { return };
@@ -417,6 +456,7 @@ impl HarnessWorkspace {
                 }
                 TabContent::Chat(c) => c.read(cx).focus_handle(cx),
                 TabContent::Diff => self.diff_surface_focus.clone(),
+                TabContent::ReviewOverview(_) => self.focus_handle.clone(),
                 TabContent::Editor(ws) => {
                     if ws.read(cx).active_item(cx).is_some() {
                         ws.read(cx).focus_handle(cx)
@@ -480,17 +520,15 @@ impl HarnessWorkspace {
                 let tabs: Vec<TabRecord> = pane
                     .tabs
                     .iter()
-                    .filter(|t| !matches!(t.content, TabContent::File { .. }))
-                    .map(|t| TabRecord {
+                    .filter_map(|t| Some(TabRecord {
                         id: t.id,
-                        kind: t.kind_tag(),
+                        kind: t.kind_tag()?,
                         title: t.title.clone(),
-                    })
+                    }))
                     .collect();
-                let active = pane
-                    .tabs
+                let active = tabs
                     .iter()
-                    .find(|t| t.id == pane.active && !matches!(t.content, TabContent::File { .. }))
+                    .find(|t| t.id == pane.active)
                     .map(|t| t.id)
                     .or_else(|| tabs.first().map(|t| t.id));
                 // A live agent tab names the pane's agent; with none (it came
@@ -557,6 +595,21 @@ impl HarnessWorkspace {
                 K::Editor => self.open_tab(TabKind::Editor, window, cx),
                 K::Chat => self.open_tab(TabKind::Chat, window, cx),
                 K::Diff => self.open_tab(TabKind::Diff, window, cx),
+                K::ReviewOverview(saved) => {
+                    let mut overview = OverviewTab {
+                        preferences: self.prefs.review_overview.clone(),
+                        ..Default::default()
+                    };
+                    if let Some(saved) = saved {
+                        overview.set_report(saved, cx);
+                    }
+                    self.attach_tab(key, Tab {
+                        id,
+                        title,
+                        content: TabContent::ReviewOverview(overview),
+                        agent: None,
+                    });
+                }
                 K::Shell => self.restore_terminal_tab(key, id, None, &title, &live, window, cx),
                 K::Agent(a) => self.restore_terminal_tab(key, id, Some(a), &title, &live, window, cx),
             }
@@ -619,6 +672,10 @@ impl HarnessWorkspace {
             crate::terminal_pane::TerminalPane::new(r.path.clone(), None, session, window, cx)
         }));
 
+        self.attach_tab(key, Tab { id, title: title.to_string(), content, agent: mark });
+    }
+
+    fn attach_tab(&mut self, key: &str, tab: Tab) {
         self.pane_clock = self.pane_clock.wrapping_add(1);
         let pane = self.panes.entry(key.to_string()).or_insert_with(|| PaneSet {
             tabs: Vec::new(),
@@ -626,8 +683,8 @@ impl HarnessWorkspace {
             last_used: 0,
         });
         pane.last_used = self.pane_clock;
-        pane.tabs.push(Tab { id, title: title.to_string(), content, agent: mark });
-        pane.active = id;
+        pane.active = tab.id;
+        pane.tabs.push(tab);
     }
 }
 

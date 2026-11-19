@@ -33,6 +33,8 @@ use worktrees::{
 };
 
 use crate::data::{UnifiedDiff, WorkspaceData, compute_diff};
+use crate::review_overview::models::ModelCatalog;
+use crate::review_overview::{ReviewCli, ReviewFollowup, ReviewPreferences, ReviewRun, StoredReviewOverview};
 use crate::terminal_pane::TerminalPane;
 use crate::theme::{HarnessTheme, theme, tint};
 
@@ -132,6 +134,27 @@ enum TabContent {
     /// resolved per worktree. Giving the tab its own entity would create a
     /// second copy that could disagree with the dock's.
     Diff,
+    ReviewOverview(OverviewTab),
+}
+
+#[derive(Default)]
+struct OverviewTab {
+    preferences: ReviewPreferences,
+    status: OverviewStatus,
+    last_report: Option<Arc<StoredReviewOverview>>,
+}
+
+#[derive(Default)]
+enum OverviewStatus {
+    #[default]
+    Waiting,
+    Cancelled,
+    Running(ReviewRun),
+    Ready {
+        markdown: Entity<markdown::Markdown>,
+        saved: Arc<StoredReviewOverview>,
+    },
+    Failed(String),
 }
 
 /// What to open, before the entity exists.
@@ -145,6 +168,7 @@ pub(crate) enum TabKind {
     Chat,
     /// The diff review surface as a center tab (`DiffLocation::Tab`).
     Diff,
+    ReviewOverview,
     /// The full editor (IDE) tab — one per worktree.
     Editor,
 }
@@ -280,13 +304,11 @@ impl Tab {
     /// Classify this tab for persistence (`panes_state`). `TabContent` holds
     /// live entities that can't be matched by kind ergonomically at the call
     /// site, so `save_panes` goes through this instead.
-    fn kind_tag(&self) -> crate::panes_state::TabRecordKind {
+    fn kind_tag(&self) -> Option<crate::panes_state::TabRecordKind> {
         use crate::panes_state::TabRecordKind as K;
-        match &self.content {
-            // File tabs are session-ephemeral (reopened from the tree); do not
-            // persist them. kind_tag is only used from save_panes which skips
-            // File — this arm is unreachable there.
-            TabContent::File { .. } => K::Shell,
+        Some(match &self.content {
+            TabContent::File { .. } => return None,
+            TabContent::ReviewOverview(overview) => K::ReviewOverview(overview.last_report.clone()),
             TabContent::Chat(_) => K::Chat,
             TabContent::Diff => K::Diff,
             TabContent::Editor(_) => K::Editor,
@@ -294,7 +316,7 @@ impl Tab {
                 Some(a) => K::Agent(a.clone()),
                 None => K::Shell,
             },
-        }
+        })
     }
 }
 
@@ -595,6 +617,7 @@ pub struct HarnessWorkspace {
     /// Which Settings pane is showing. Not persisted: reopening Settings should
     /// land where the page starts, not where you happened to leave it.
     settings_section: SettingsSection,
+    review_model_catalogs: std::collections::BTreeMap<ReviewCli, ModelCatalog>,
     /// The requirements screen is open. Not dismissible while a Required tool
     /// is missing — see `preflight::blocked`.
     preflight_open: bool,
@@ -699,14 +722,8 @@ pub struct HarnessWorkspace {
     note_at: Option<std::time::Instant>,
     forge_status: HashMap<PathBuf, HashMap<String, BranchStatus>>,
     agent_status: HashMap<PathBuf, AgentState>,
-    /// When each worktree's status last changed, and the tool its latest
-    /// signal reported — the phone's "waiting since" and tool chip.
-    agent_since: HashMap<PathBuf, (std::time::SystemTime, Option<String>)>,
     /// oo-remote: marks cache, phone server lifecycle, keep-awake.
     remote: remote::RemoteRuntime,
-    /// Fidelity of the adapter behind each worktree's status, so the UI can be
-    /// honest about how much the pill actually knows (R11).
-    agent_fidelity: HashMap<PathBuf, WaitFidelity>,
     _poller: Option<Poller>,
     /// One watcher for every StatusFile-signalled worktree (pi, Claude Code).
     status_source: Option<StatusFileSource>,

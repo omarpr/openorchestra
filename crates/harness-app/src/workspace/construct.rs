@@ -174,6 +174,7 @@ impl HarnessWorkspace {
             clearing_review: false,
             settings_open: false,
             settings_section: SettingsSection::Appearance,
+            review_model_catalogs: Default::default(),
             // Probed once at startup; the screen opens below if this machine is
             // missing something that blocks, or if it has never been shown.
             preflight_open: false,
@@ -225,9 +226,7 @@ impl HarnessWorkspace {
             note_at: None,
             forge_status: HashMap::new(),
             agent_status: HashMap::new(),
-            agent_since: HashMap::new(),
             remote: super::remote::RemoteRuntime::new(&data_dir),
-            agent_fidelity: HashMap::new(),
             _poller: Some(poller),
             status_source,
             diff_watch,
@@ -438,11 +437,13 @@ impl HarnessWorkspace {
         .detach();
 
         if let Some(status_rx) = status_rx {
-            cx.spawn(async move |view, cx| {
+            cx.spawn_in(window, async move |view, cx| {
                 loop {
                     match status_rx.try_recv() {
                         Ok(ev) => {
-                            if view.update(cx, |ws, cx| ws.apply_agent(ev, cx)).is_err() {
+                            if view.update_in(cx, |ws, window, cx| {
+                                ws.apply_agent(ev, window.is_window_active(), cx);
+                            }).is_err() {
                                 break;
                             }
                         }

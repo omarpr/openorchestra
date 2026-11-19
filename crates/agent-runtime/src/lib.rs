@@ -48,7 +48,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-pub use status_watch::{AgentState, ToolCall};
+pub use status_watch::{AgentState, ToolCall, status_path};
 pub use worktrees::AgentKind;
 
 /// Why an agent is waiting, when it tells us (§4.5).
@@ -96,6 +96,8 @@ pub enum SignalKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentSignal {
     pub worktree_root: PathBuf,
+    /// The terminal that produced the update, when the launch is tracked.
+    pub tab_id: Option<u64>,
     pub kind: AgentKind,
     pub state: AgentState,
     pub reason: WaitReason,

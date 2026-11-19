@@ -81,7 +81,7 @@ impl MarkdownPreview {
 
 /// Map the harness tokens onto zed's markdown styling, so a preview looks like
 /// part of the app rather than a foreign document.
-fn markdown_style(hx: &HarnessTheme, cx: &App) -> MarkdownStyle {
+pub(crate) fn markdown_style(hx: &HarnessTheme, cx: &App) -> MarkdownStyle {
     let mut style = MarkdownStyle {
         base_text_style: gpui::TextStyle {
             color: hx.tx1.into(),

@@ -399,6 +399,7 @@ fn codex_is_best_effort_and_may_not_claim_input_is_needed() {
 
     let waiting = agent_runtime::AgentSignal {
         worktree_root: Path::new("/wt").into(),
+        tab_id: None,
         kind: AgentKind::Codex,
         state: AgentState::Waiting,
         reason: WaitReason::PermissionPrompt,
@@ -725,6 +726,7 @@ fn runtime_for_with_signal_selects_configurable_for_other() {
 fn other_with_exact_fidelity_notifies_on_waiting() {
     let signal = AgentSignal {
         worktree_root: PathBuf::from("/wt"),
+        tab_id: None,
         kind: AgentKind::Other("cursor-agent".into()),
         state: AgentState::Waiting,
         reason: WaitReason::PermissionPrompt,

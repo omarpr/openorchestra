@@ -28,6 +28,7 @@ mod harness_zed_theme;
 mod login_env;
 mod markdown_preview;
 mod markdown_preview_button;
+mod review_overview;
 mod notifier;
 mod panes_state;
 mod ports;

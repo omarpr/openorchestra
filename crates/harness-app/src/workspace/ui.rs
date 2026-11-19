@@ -11,6 +11,7 @@ mod dialogs;
 mod new_task;
 mod preflight;
 mod project_search;
+mod review_overview;
 mod settings;
 /// `pub(crate)` for `qr_cells` / `parse_port`, which `remote.rs` and the
 /// port field's commit use.

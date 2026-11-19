@@ -276,8 +276,7 @@ impl HarnessWorkspace {
     }
 
     /// Fidelity for notifications: prefs signal profile for custom agents,
-    /// else the kind's built-in declaration. Used when the per-worktree cache
-    /// is cold (app restart before any agent tab was opened).
+    /// else the kind's built-in declaration.
     pub(crate) fn fidelity_for_kind(&self, kind: &AgentKind) -> WaitFidelity {
         if let Some(signal) = self
             .prefs
@@ -294,8 +293,7 @@ impl HarnessWorkspace {
     /// only) and return the filesystem-dependent command preparation to run
     /// on a background worker.
     ///
-    /// Separate from tab creation because it also wires up the status signal
-    /// and the local git excludes, which are per-worktree, not per-tab.
+    /// Wires the tab's status signal and prepares the worktree's git excludes.
     ///
     /// A user command override replaces the launch command but NOT the
     /// adapter wiring: hooks, excludes, and the status watch still belong to
@@ -305,6 +303,7 @@ impl HarnessWorkspace {
         &mut self,
         kind: &AgentKind,
         r: &Resolved,
+        tab_id: u64,
     ) -> AgentLaunchPrep {
         let agent_pref = self.prefs.agents.get(kind.as_str());
         let signal = agent_pref.and_then(|p| p.signal.clone());
@@ -322,7 +321,6 @@ impl HarnessWorkspace {
         if is_coordinator && let Some(source) = &mut self.status_source {
             let _ = source.watch(&r.path, kind.clone());
         }
-        self.agent_fidelity.insert(r.path.clone(), runtime.fidelity());
         // Adapters that stream their own signals (OpenCode's SSE) publish
         // straight onto the shared bus; file-based ones are served by
         // StatusFileSource.
@@ -338,6 +336,7 @@ impl HarnessWorkspace {
                 .ok();
         }
         AgentLaunchPrep {
+            tab_id,
             kind: kind.clone(),
             path: r.path.clone(),
             runtime,
@@ -354,6 +353,7 @@ impl HarnessWorkspace {
 
 /// Captured UI-thread inputs for preparing an agent command on a worker thread.
 pub(crate) struct AgentLaunchPrep {
+    tab_id: u64,
     kind: AgentKind,
     path: PathBuf,
     runtime: Box<dyn agent_runtime::AgentRuntime>,
@@ -366,7 +366,7 @@ pub(crate) struct AgentLaunchPrep {
 impl AgentLaunchPrep {
     /// Run filesystem-dependent setup (`on_spawn`, local git excludes, task
     /// context, `$PATH` lookup, and `prepare_launch`) off the UI thread.
-    pub(crate) fn resolve(self) -> Option<agent_runtime::AgentCommand> {
+    pub(crate) fn resolve(self, review: Option<ReviewFollowup>) -> Option<agent_runtime::AgentCommand> {
         if let Err(e) = self.runtime.on_spawn(&self.path) {
             log::warn!("{} setup failed for {}: {e}", self.kind, self.path.display());
         }
@@ -387,10 +387,17 @@ impl AgentLaunchPrep {
         // Resolve the adapter command first so a prefs override can keep the
         // managed env (HARNESS_MANAGED / HARNESS_AGENT) that hooks need.
         let mut runtime_cmd = self.runtime.command(&self.path);
+        let tab_env = [
+            ("HARNESS_AGENT_TAB_ID".to_string(), self.tab_id.to_string()),
+            ("HARNESS_AGENT_WORKTREE".to_string(), self.path.to_string_lossy().into_owned()),
+        ];
+        if let Some(cmd) = runtime_cmd.as_mut() {
+            cmd.env.extend(tab_env.clone());
+        }
         let runtime_env = runtime_cmd
             .as_ref()
             .map(|c| c.env.clone())
-            .unwrap_or_default();
+            .unwrap_or_else(|| Vec::from(tab_env));
 
         let context_path = self.task.as_ref().and_then(|task| {
             worktrees::ensure_task_agent_context(task, &self.tasks_root)
@@ -398,7 +405,10 @@ impl AgentLaunchPrep {
                 .flatten()
         });
 
-        if let Some(cmd) = self.override_cmd {
+        // Review follow-ups use the same installed CLI and model as the
+        // report. Free-form interactive overrides may select another model
+        // or consume the initial prompt themselves.
+        if let Some(cmd) = self.override_cmd.filter(|_| review.is_none()) {
             // Login + interactive: an override is a line the user typed, so it
             // has to resolve the way it would in their terminal — including
             // aliases and shell functions, which only exist once `.zshrc` runs.
@@ -432,13 +442,19 @@ impl AgentLaunchPrep {
         // folder, where the CLI can scope that to the folder (see
         // `continue_args`). User overrides above are free-form lines and start
         // fresh.
-        if self.continue_next_agent
+        if review.is_none() && self.continue_next_agent
             && let Some(cmd) = runtime_cmd.as_mut()
             && let Some(args) = agent_runtime::continue_args(&self.kind, &cmd.args)
         {
             cmd.args = args;
         }
-        runtime_cmd.map(|cmd| self.runtime.prepare_launch(cmd))
+        runtime_cmd.map(|cmd| {
+            let mut cmd = self.runtime.prepare_launch(cmd);
+            if let Some(review) = review {
+                review.apply(&mut cmd);
+            }
+            cmd
+        })
     }
 }
 

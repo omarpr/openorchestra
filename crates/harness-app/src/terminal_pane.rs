@@ -88,6 +88,10 @@ pub struct TerminalPane {
 }
 
 impl TerminalPane {
+    pub(crate) fn direct_agent_exited(&self) -> bool {
+        !self.tmux_backed && (self.respawn_pending || self.spawned == "$SHELL" || self.error.is_some())
+    }
+
     /// `agent` is the resolved command for this worktree's agent, or `None` for
     /// a plain shell (the `main` entry, or an agent that is not installed).
     pub fn new(

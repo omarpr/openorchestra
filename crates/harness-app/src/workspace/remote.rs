@@ -303,7 +303,7 @@ pub(crate) fn remote_menu_item(
     match kind {
         TabKind::Shell => Some((label, Some("Gives paired devices this shell"))),
         TabKind::Agent(_) => Some((label, None)),
-        TabKind::Chat | TabKind::Diff | TabKind::Editor => None,
+        TabKind::Chat | TabKind::Diff | TabKind::Editor | TabKind::ReviewOverview => None,
     }
 }
 

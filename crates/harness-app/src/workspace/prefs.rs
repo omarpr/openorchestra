@@ -136,6 +136,7 @@ pub(crate) struct Prefs {
     /// the new default, exactly like a fresh install.
     #[serde(default)]
     pub(crate) diff_base: DiffBase,
+    pub(crate) review_overview: crate::review_overview::ReviewPreferences,
     pub(crate) sidebar_width: f32,
     /// Width of the right-hand tools panel (Files / Git / Review).
     /// Kept as `diff_width` in prefs.json so existing installs don't reset.
@@ -197,6 +198,7 @@ impl Default for Prefs {
             collapsed: Default::default(),
             collapsed_sections: Default::default(),
             diff_base: DiffBase::default(),
+            review_overview: Default::default(),
             sidebar_width: 280.0,
             diff_width: 380.0,
             diff_location: DiffLocation::Dock,

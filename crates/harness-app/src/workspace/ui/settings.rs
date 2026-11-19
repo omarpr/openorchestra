@@ -101,7 +101,12 @@ impl HarnessWorkspace {
     /// Rendered from `shortcuts::entries()` — the same table `main.rs` binds
     /// from — so this screen structurally cannot claim a shortcut that is not
     /// actually bound.
-    pub(crate) fn render_settings(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_settings(
+        &self,
+        hx: &HarnessTheme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let mut card = div()
             .id("settings-card")
             .flex()
@@ -532,6 +537,10 @@ impl HarnessWorkspace {
             );
         }
 
+        body = body
+            .child(section_title("Review Overview"))
+            .child(self.render_review_overview_settings(hx, window, cx));
+
         if !self.has_tmux {
             body = body.child(
                 div()
@@ -961,6 +970,9 @@ impl HarnessWorkspace {
                     .on_click(cx.listener(move |ws, _, _, cx| {
                         cx.stop_propagation();
                         ws.settings_section = s;
+                        if s == S::Diff {
+                            ws.ensure_review_model_catalog(cx);
+                        }
                         if s != S::Remote {
                             ws.remote_close_setup();
                         }

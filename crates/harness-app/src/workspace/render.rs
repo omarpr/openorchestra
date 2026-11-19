@@ -127,7 +127,7 @@ impl Render for HarnessWorkspace {
             .when(self.preflight_open && !crate::preflight::blocked(&self.preflight), |d| {
                 d.child(self.render_preflight(&hx, cx))
             })
-            .when(self.settings_open, |d| d.child(self.render_settings(&hx, cx)))
+            .when(self.settings_open, |d| d.child(self.render_settings(&hx, window, cx)))
             .when(self.preflight_open && crate::preflight::blocked(&self.preflight), |d| {
                 d.child(self.render_preflight(&hx, cx))
             })

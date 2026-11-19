@@ -346,8 +346,8 @@ impl HarnessWorkspace {
             // kept; a re-created same-slug task must not inherit its pill.
             if let Some(slug) = self.task_store.get(tid).map(|t| t.slug.clone()) {
                 let dir = clear_coordinator_status(&self.data_dir.join("tasks"), &slug);
+                self.conductor.forget_root(&dir);
                 self.agent_status.remove(&dir);
-                self.agent_since.remove(&dir);
             }
             let legacy = format!("task:{tid}");
             self.teardown_sessions(&legacy);

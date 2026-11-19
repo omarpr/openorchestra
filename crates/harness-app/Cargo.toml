@@ -183,7 +183,7 @@ env_logger = "0.11"
 # Spike 3c: build a zed ThemeFamilyContent from HarnessTheme tokens via a JSON
 # value (every content field is Option/#[serde(default)], so a partial object
 # deserializes cleanly). serde_json is already deep in the zed cone.
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 # kill(pid, 0) liveness probe — unsticks an agent pill left on waiting/running
 # by a process that died without writing "idle".
@@ -201,6 +201,7 @@ image = { version = "0.25", default-features = false }
 # Settings → Remote draws the "Add a device" QR from its modules (as divs), so
 # none of its image/svg renderers are needed.
 qrcode = { version = "0.14.1", default-features = false }
+tempfile = "3"
 
 # Zed's workspace [patch.crates-io] entries do NOT propagate to out-of-tree
 # consumers, so we replicate the ones inside our dependency cone (from zed's
@@ -209,7 +210,6 @@ qrcode = { version = "0.14.1", default-features = false }
 # compiles on Windows, so it is untested here — replicated for lock fidelity.
 [dev-dependencies]
 futures = "0.3"
-tempfile = "3"
 
 [patch.crates-io]
 # Mirrors zed's own [patch.crates-io] at the pinned rev (v1.28.1). Entries for

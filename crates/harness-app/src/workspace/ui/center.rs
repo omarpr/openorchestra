@@ -99,6 +99,7 @@ impl HarnessWorkspace {
                 }
                 TabContent::Chat(c) => c.clone().into_any_element(),
                 TabContent::Diff => self.render_diff_surface(hx, None, true, cx),
+                TabContent::ReviewOverview(overview) => self.render_review_overview(overview, hx, cx),
             },
             None => div().into_any_element(),
         };
@@ -338,6 +339,10 @@ impl HarnessWorkspace {
         let ghost_theme = hx.clone();
         let hover_bg = hx.surface_hover;
         let group = gpui::SharedString::from(format!("tab-{}", tab.id));
+        let overview = match &tab.content {
+            TabContent::ReviewOverview(overview) => Some(overview),
+            _ => None,
+        };
         div()
             .id(("tab", tab.id as usize))
             .group(group.clone())
@@ -371,6 +376,18 @@ impl HarnessWorkspace {
             )
             .when_some(tab.agent.clone(), |d, kind| {
                 d.child(div().mr_1().size(px(14.0)).child(agent_icon(&kind, 13.0)))
+            })
+            .when_some(overview, |d, overview| {
+                if matches!(overview.status, OverviewStatus::Running(_)) {
+                    d.child(super::review_overview::review_spinner(::ui::IconSize::Small))
+                } else {
+                    d.child(
+                        svg()
+                            .path(::ui::IconName::ListTodo.path())
+                            .size(px(14.0))
+                            .text_color(if active { hx.accent } else { hx.tx2 }),
+                    )
+                }
             })
             // A file tab is a view into zed (the service workspace), so it
             // wears the Editor tab's `{ }` mark: same glyph, same spacing as

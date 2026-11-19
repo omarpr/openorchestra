@@ -17,6 +17,7 @@ const QUIET: Duration = Duration::from_millis(400);
 fn signal(root: &str, state: AgentState) -> AgentSignal {
     AgentSignal {
         worktree_root: PathBuf::from(root),
+        tab_id: None,
         kind: AgentKind::Pi,
         state,
         reason: WaitReason::None,
