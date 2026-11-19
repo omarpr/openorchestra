@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
-use crate::{CheckRun, Forge, ForgeError, PrInfo};
+use crate::{CheckRun, CheckStatus, Forge, ForgeError, PrInfo, PrState};
 
 /// Identifies one polled branch.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -40,7 +40,11 @@ pub struct ForgeUpdate {
 pub struct PollerConfig {
     /// Base interval between successful polls of the same branch.
     pub interval: Duration,
-    /// Uniform random jitter added to every scheduled poll, `0..jitter`.
+    /// Poll an open or draft PR sooner to catch new runs and reruns.
+    pub open_pr_interval: Duration,
+    /// Poll active checks sooner to catch completion.
+    pub running_interval: Duration,
+    /// Upper bound on the uniform random jitter added to each poll.
     pub jitter: Duration,
     /// First backoff step after a failure; doubles per consecutive failure.
     pub initial_backoff: Duration,
@@ -52,6 +56,8 @@ impl Default for PollerConfig {
     fn default() -> Self {
         PollerConfig {
             interval: Duration::from_secs(45),
+            open_pr_interval: Duration::from_secs(20),
+            running_interval: Duration::from_secs(5),
             jitter: Duration::from_secs(10),
             initial_backoff: Duration::from_secs(15),
             max_backoff: Duration::from_secs(300),
@@ -193,17 +199,17 @@ fn poll_loop(
             }
 
             let result = poll_branch(forge.as_ref(), &key);
-            let delay = match &result {
-                Ok(_) => {
+            let (delay, jitter) = match &result {
+                Ok(status) => {
                     state.consecutive_failures = 0;
-                    config.interval
+                    success_schedule(&config, status)
                 }
                 Err(_) => {
                     state.consecutive_failures = state.consecutive_failures.saturating_add(1);
-                    backoff(&config, state.consecutive_failures)
+                    (backoff(&config, state.consecutive_failures), config.jitter)
                 }
             };
-            state.next_due = Instant::now() + delay + rng.jitter(config.jitter);
+            state.next_due = Instant::now() + delay + rng.jitter(jitter);
 
             // Deliver on change only; an ongoing failure streak is delivered
             // once (the first error), successes only when the data differs.
@@ -228,6 +234,18 @@ fn poll_branch(forge: &dyn Forge, key: &BranchKey) -> Result<BranchStatus, Forge
         Vec::new()
     };
     Ok(BranchStatus { pr, checks })
+}
+
+fn success_schedule(config: &PollerConfig, status: &BranchStatus) -> (Duration, Duration) {
+    let interval = if status.checks.iter().any(|check| check.status == CheckStatus::Running) {
+        config.running_interval
+    } else if status.pr.as_ref().is_some_and(|pr| matches!(pr.state, PrState::Open | PrState::Draft)) {
+        config.open_pr_interval
+    } else {
+        return (config.interval, config.jitter);
+    };
+    let interval = interval.min(config.interval);
+    (interval, config.jitter.min(interval / 5))
 }
 
 fn backoff(config: &PollerConfig, failures: u32) -> Duration {
@@ -275,16 +293,38 @@ mod tests {
     #[test]
     fn backoff_doubles_and_caps() {
         let config = PollerConfig {
-            interval: Duration::from_secs(45),
             jitter: Duration::ZERO,
             initial_backoff: Duration::from_secs(10),
             max_backoff: Duration::from_secs(60),
+            ..PollerConfig::default()
         };
         assert_eq!(backoff(&config, 1), Duration::from_secs(10));
         assert_eq!(backoff(&config, 2), Duration::from_secs(20));
         assert_eq!(backoff(&config, 3), Duration::from_secs(40));
         assert_eq!(backoff(&config, 4), Duration::from_secs(60));
         assert_eq!(backoff(&config, 30), Duration::from_secs(60)); // no overflow
+    }
+
+    #[test]
+    fn checks_in_progress_poll_faster_until_they_finish() {
+        let config = PollerConfig::default();
+        let mut status = BranchStatus {
+            pr: Some(PrInfo {
+                number: 1,
+                state: PrState::Open,
+                title: String::new(),
+                url: None,
+            }),
+            checks: vec![
+                CheckRun { name: "build".into(), status: CheckStatus::Pass },
+                CheckRun { name: "test".into(), status: CheckStatus::Running },
+            ],
+        };
+        assert_eq!(success_schedule(&config, &status), (Duration::from_secs(5), Duration::from_secs(1)));
+        status.checks[1].status = CheckStatus::Pass;
+        assert_eq!(success_schedule(&config, &status), (Duration::from_secs(20), Duration::from_secs(4)));
+        status.pr.as_mut().unwrap().state = PrState::Merged;
+        assert_eq!(success_schedule(&config, &status), (config.interval, config.jitter));
     }
 
     #[test]

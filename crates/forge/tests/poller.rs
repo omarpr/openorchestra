@@ -15,6 +15,8 @@ const QUIET: Duration = Duration::from_millis(300);
 fn fast_config() -> PollerConfig {
     PollerConfig {
         interval: Duration::from_millis(20),
+        open_pr_interval: Duration::from_millis(20),
+        running_interval: Duration::from_millis(20),
         jitter: Duration::from_millis(5),
         initial_backoff: Duration::from_millis(20),
         max_backoff: Duration::from_millis(80),
@@ -111,7 +113,11 @@ fn refreshing_a_repository_delivers_its_checks_before_the_next_poll() {
     let forge = Arc::new(ScriptedForge::new(vec![Ok(Some(pr(7)))]));
     let branch = key("feat/a");
     let other = BranchKey { repo_dir: PathBuf::from("/repos/other"), ..branch.clone() };
-    let config = PollerConfig { interval: Duration::from_secs(60), ..fast_config() };
+    let config = PollerConfig {
+        interval: Duration::from_secs(60),
+        open_pr_interval: Duration::from_secs(60),
+        ..fast_config()
+    };
     let (poller, rx) = Poller::spawn(forge, vec![branch.clone(), other], config);
     let initial = rx.recv_timeout(RECV).unwrap();
     assert_eq!(initial.key, branch);
