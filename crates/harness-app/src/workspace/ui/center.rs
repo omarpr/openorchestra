@@ -347,16 +347,20 @@ impl HarnessWorkspace {
     /// saved panes and paired phones read it.
     fn tab_face(&self, hx: &HarnessTheme, tab: &Tab, active: bool) -> (AnyElement, String) {
         match (&tab.content, &tab.agent) {
-            (TabContent::Terminal(_), Some(kind)) => (agent_icon(kind, 15.0), agent_display(kind)),
+            (TabContent::Terminal(_), Some(kind)) => (agent_icon(kind, 15.0), tab_label(tab)),
             // Includes an agent tab restored after its session died: it
             // comes back as a plain shell, and is named for what it is now.
-            (TabContent::Terminal(_), None) => (terminal_mark(hx), "Terminal".to_string()),
-            (TabContent::Editor(_), _) => (zed_mark(hx), "Editor".to_string()),
-            (TabContent::Diff, _) => (tab_glyph(hx, "⑂"), "Diff".to_string()),
-            (TabContent::Chat(_), _) => (tab_glyph(hx, "π"), "pi chat".to_string()),
+            (TabContent::Terminal(_), None) => {
+                (kind_icon(hx, LookKind::Shell, 14.0), tab_label(tab))
+            }
+            (TabContent::Editor(_), _) => (kind_icon(hx, LookKind::Editor, 14.0), tab_label(tab)),
+            (TabContent::Diff, _) => (kind_icon(hx, LookKind::Diff, 14.0), tab_label(tab)),
+            (TabContent::Chat(_), _) => (tab_glyph(hx, "π"), tab_label(tab)),
             // A file tab is a view into zed, so it wears the Editor's mark,
             // with the file's own name.
-            (TabContent::File { .. }, _) => (zed_mark(hx), tab.title.clone()),
+            (TabContent::File { .. }, _) => {
+                (kind_icon(hx, LookKind::Editor, 14.0), tab_label(tab))
+            }
             (TabContent::ReviewOverview(overview), _) => {
                 let icon = if matches!(overview.status, OverviewStatus::Running(_)) {
                     super::review_overview::review_spinner(::ui::IconSize::Small)
@@ -368,7 +372,7 @@ impl HarnessWorkspace {
                         .text_color(if active { hx.accent } else { hx.tx2 })
                         .into_any_element()
                 };
-                (icon, tab.title.clone())
+                (icon, tab_label(tab))
             }
         }
     }
@@ -806,7 +810,7 @@ impl HarnessWorkspace {
             .child(self.tab_menu_row(
                 hx,
                 "tabmenu-Terminal".to_string(),
-                terminal_mark(hx),
+                kind_icon(hx, LookKind::Shell, 14.0),
                 "Terminal".to_string(),
                 "⌘T",
                 TabKind::Shell,
@@ -815,7 +819,7 @@ impl HarnessWorkspace {
             .child(self.tab_menu_row(
                 hx,
                 "tabmenu-Editor".to_string(),
-                zed_mark(hx),
+                kind_icon(hx, LookKind::Editor, 14.0),
                 "Editor".to_string(),
                 "⌘E",
                 TabKind::Editor,
@@ -968,33 +972,3 @@ fn tab_glyph(hx: &HarnessTheme, glyph: &str) -> AnyElement {
         .child(glyph.to_string())
         .into_any_element()
 }
-
-/// Zed's mark, for the Editor and the file tabs it hosts: the editor *is*
-/// Zed, embedded. Bundled with zed's own icons, so nothing extra to ship.
-/// In Zed's blue, the way each agent wears its own brand colour.
-fn zed_mark(_hx: &HarnessTheme) -> AnyElement {
-    svg()
-        .path(::ui::IconName::AiZed.path())
-        .size(px(14.0))
-        .text_color(rgb(EDITOR_MARK))
-        .into_any_element()
-}
-
-/// The Terminal's `❯_` prompt, in its own colour like the agent and Editor
-/// marks. Cyan: clear of Codex and OpenCode's greens and of the diff's
-/// added-line green, so a shell never reads as an agent or a change.
-fn terminal_mark(hx: &HarnessTheme) -> AnyElement {
-    div()
-        .text_xs()
-        .not_italic()
-        .font_family(hx.font_mono)
-        .font_weight(gpui::FontWeight::BOLD)
-        .text_color(rgb(TERMINAL_MARK))
-        .child("❯_")
-        .into_any_element()
-}
-
-/// Fixed brand-style colours, like `agent_mark`'s: the same in light and
-/// dark themes, so an item is recognisable by colour alone.
-const EDITOR_MARK: u32 = 0x3d8bfd;
-const TERMINAL_MARK: u32 = 0x3ec7d6;

@@ -901,6 +901,8 @@ mod coordinator;
 pub(crate) mod lifecycle;
 pub(crate) mod remote;
 mod state;
+mod tab_look;
+pub(crate) use tab_look::*;
 mod ui;
 
 /// One matching line in the Files → Search panel.

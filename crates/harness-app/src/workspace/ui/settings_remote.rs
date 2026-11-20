@@ -309,7 +309,7 @@ impl HarnessWorkspace {
                                         .text_ellipsis()
                                         .whitespace_nowrap()
                                         .text_color(hx.tx0)
-                                        .child(display_title(&row.title, row.kind.is_none())),
+                                        .child(display_title(row.kind.as_deref())),
                                 )
                                 .child(
                                     div()
@@ -692,19 +692,11 @@ impl HarnessWorkspace {
     }
 }
 
-/// A tab's title for a list that already shows its icon: a shell's "❯_ "
-/// prefix would repeat it.
-pub(crate) fn display_title(title: &str, shell: bool) -> String {
-    if shell {
-        let t = title
-            .trim_start_matches('\u{276F}')
-            .trim_start_matches('_')
-            .trim_start();
-        if !t.is_empty() {
-            return t.to_string();
-        }
-    }
-    title.to_string()
+/// A tab's name for a list that already shows its icon: the same name its
+/// tab wears ("Shell", "Claude"), not the stored title ("❯_ shell",
+/// "claude"). `kind` is the agent kind's stored string; `None` is a shell.
+pub(crate) fn display_title(kind: Option<&str>) -> String {
+    terminal_label(kind.map(AgentKind::from).as_ref())
 }
 
 /// A plain bordered button (the Settings "Reset …" style).
@@ -937,11 +929,11 @@ mod tests {
     }
 
     #[test]
-    fn shell_titles_drop_the_glyph_the_icon_already_shows() {
-        assert_eq!(display_title("\u{276F}_ shell", true), "shell");
-        assert_eq!(display_title("\u{276F}_ npm run dev", true), "npm run dev");
-        assert_eq!(display_title("\u{276F}_ ", true), "\u{276F}_ ");
-        assert_eq!(display_title("claude", false), "claude");
+    fn phone_rows_use_the_same_names_as_tabs() {
+        assert_eq!(display_title(None), "Shell");
+        assert_eq!(display_title(Some("claude-code")), "Claude");
+        assert_eq!(display_title(Some("opencode")), "OpenCode");
+        assert_eq!(display_title(Some("cursor-agent")), "cursor-agent");
     }
 
     #[test]

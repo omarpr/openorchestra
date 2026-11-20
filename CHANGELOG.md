@@ -39,10 +39,11 @@ Unreleased is empty.
   it's the out-of-the-box default.
 - The **+** menu lists agents under their own **Agents** heading, and every
   item's label now lines up.
-- Tabs use the **+** menu's names and spacing: "Claude Code" rather than
-  "claude", "Terminal" rather than "❯_ shell". An agent tab's running spinner
-  sits after its icon. Editor and file tabs show Zed's logo in Zed blue, and
-  Terminal's `❯_` is cyan, in the menu and on tabs.
+- Tabs show a colored icon for every kind and title-case names (Shell,
+  Editor, Diff, Claude, Codex, …) instead of the stored lowercase titles, and
+  the phone UI uses the same names. An agent tab's running spinner sits after
+  its icon. Editor and file tabs show Zed's logo in Zed blue, Shell's `❯_` is
+  cyan and Diff's `⑂` is pink.
 
 ### Fixed
 
