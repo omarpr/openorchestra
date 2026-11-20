@@ -1232,14 +1232,17 @@ impl HarnessWorkspace {
                 };
 
             // The default-agent star, in a fixed slot so every row's lines up.
-            // Filled = the effective default (inert); outlined = click to make
-            // this agent the default; a disabled agent can't be, so no star.
+            // Filled = the effective default; outlined = click to make this
+            // agent the default; a disabled agent can't be, so no star. A
+            // filled star is inert once saved; one that is the default only
+            // as the last-used or first agent saves it (`star_saves`).
             // Filled and outlined share one id, so the keyboard stays on the
             // star when activating it turns outlined into filled.
             let star = match agent_star(&self.prefs, &kind) {
                 AgentStar::Hidden => div().flex_none().w(px(20.0)).into_any_element(),
                 state => {
                     let filled = state == AgentStar::Filled;
+                    let saves = star_saves(&self.prefs, &kind).is_some();
                     let star_key = key.clone();
                     let accent = hx.accent;
                     let hover_bg = hx.surface_hover;
@@ -1248,7 +1251,9 @@ impl HarnessWorkspace {
                     focus
                         .scroll_choice(
                             format!("agent-star-{key}"),
-                            if filled {
+                            if filled && saves {
+                                format!("Keep {display_name} as the default for new tasks")
+                            } else if filled {
                                 format!("{display_name} is the default for new tasks")
                             } else {
                                 format!("Make {display_name} the default for new tasks")
@@ -1266,18 +1271,17 @@ impl HarnessWorkspace {
                         .text_color(if filled { accent } else { hx.tx2 })
                         .tooltip(tip("Default for new tasks"))
                         .child(if filled { "★" } else { "☆" })
-                        .when(!filled, |d| {
+                        .when(saves, |d| {
                             d.cursor_pointer()
                                 .hover(move |d| d.bg(hover_bg).text_color(accent))
                         })
                         .on_click(cx.listener(move |ws, _, _, cx| {
                             cx.stop_propagation();
-                            // The filled star is already the default: nothing
-                            // to change (and nothing to save).
-                            if agent_star(&ws.prefs, &AgentKind::from(star_key.as_str()))
-                                == AgentStar::Outlined
+                            // The saved default's star: nothing to change.
+                            if let Some(key) =
+                                star_saves(&ws.prefs, &AgentKind::from(star_key.as_str()))
                             {
-                                ws.prefs.default_agent = Some(star_key.clone());
+                                ws.prefs.default_agent = Some(key);
                                 save_prefs_to(&ws.prefs_path, &ws.prefs);
                                 cx.notify();
                             }

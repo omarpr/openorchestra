@@ -165,6 +165,17 @@ pub(crate) fn agent_star(prefs: &Prefs, kind: &AgentKind) -> AgentStar {
     }
 }
 
+/// What clicking `kind`'s star saves as the default agent: its key, unless
+/// it is already the saved default (nothing to change) or has no star. A
+/// filled star that is the default only by fallback (last used, or first
+/// in the list) saves too, so it stays the default when another agent is
+/// used next.
+pub(crate) fn star_saves(prefs: &Prefs, kind: &AgentKind) -> Option<String> {
+    (agent_star(prefs, kind) != AgentStar::Hidden
+        && prefs.default_agent.as_deref() != Some(kind.as_str()))
+    .then(|| kind.as_str().to_string())
+}
+
 /// Whether `slug` is a usable key for a new custom agent: non-empty, only
 /// `[A-Za-z0-9_-]`, and not already taken by a built-in kind or an existing
 /// entry (custom or a built-in override).
@@ -209,7 +220,7 @@ pub(crate) struct AgentPref {
 mod agent_prefs_tests {
     use super::{
         AgentKind, AgentPref, AgentStar, Prefs, agent_catalog, agent_display,
-        agent_order_after_move, agent_star, default_enabled_agent, enabled_agents,
+        agent_order_after_move, agent_star, default_enabled_agent, enabled_agents, star_saves,
         valid_agent_slug,
     };
 
@@ -573,5 +584,33 @@ mod agent_prefs_tests {
         let plain = Prefs::default();
         assert_eq!(agent_star(&plain, &AgentKind::ClaudeCode), AgentStar::Filled);
         assert_eq!(agent_star(&plain, &AgentKind::Kimi), AgentStar::Outlined);
+    }
+
+    #[test]
+    fn a_filled_star_by_fallback_can_be_saved_as_the_default() {
+        // Codex is the default only as the last used: its filled star saves it.
+        let prefs = Prefs {
+            last_task_agent: Some("codex".into()),
+            ..Default::default()
+        };
+        assert_eq!(agent_star(&prefs, &AgentKind::Codex), AgentStar::Filled);
+        assert_eq!(star_saves(&prefs, &AgentKind::Codex).as_deref(), Some("codex"));
+        assert_eq!(star_saves(&prefs, &AgentKind::Kimi).as_deref(), Some("kimi"));
+        // Already the saved default: nothing to save.
+        let saved = Prefs {
+            default_agent: Some("codex".into()),
+            ..Default::default()
+        };
+        assert_eq!(star_saves(&saved, &AgentKind::Codex), None);
+        // A disabled agent has no star.
+        let mut off = Prefs::default();
+        off.agents.insert(
+            "pi".into(),
+            AgentPref {
+                disabled: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(star_saves(&off, &AgentKind::Pi), None);
     }
 }
