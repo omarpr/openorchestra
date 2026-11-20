@@ -391,16 +391,24 @@ impl BrowserHistory {
     }
 
     /// Write every changed project now (quit, or the pending write firing).
+    /// One that can't be written (a full disk) stays changed, so the next
+    /// write, started by the next change or quit, tries it again; nothing
+    /// retries on a timer, so a disk that stays full costs no spinning.
     pub(crate) fn flush(&mut self) {
         self.save = None;
-        for project in std::mem::take(&mut self.dirty) {
-            let Some(history) = self.projects.get(&project) else {
-                continue;
+        let (dir, projects) = (&self.dir, &self.projects);
+        self.dirty.retain(|project| {
+            let Some(history) = projects.get(project) else {
+                return false;
             };
-            if let Err(e) = save(&self.dir, &project, history) {
-                log::warn!("browser history: could not write {project}'s: {e}");
+            match save(dir, project, history) {
+                Ok(()) => false,
+                Err(e) => {
+                    log::warn!("browser history: could not write {project}'s: {e}");
+                    true
+                }
             }
-        }
+        });
     }
 
     /// Forget every project's history, in memory and on disk, including a
@@ -726,6 +734,26 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn a_write_that_fails_is_tried_again_by_the_next_flush() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A file where the folder should be: every write fails.
+        let dir = tmp.path().join("browser-history");
+        std::fs::write(&dir, b"").unwrap();
+        let mut history = BrowserHistory::new(dir.clone());
+        let mut h = History::default();
+        h.record("http://localhost:8765/", 5);
+        history.projects.insert("/repo/a".into(), h);
+        history.dirty.insert("/repo/a".into());
+        history.flush();
+        assert!(history.dirty.contains("/repo/a"), "kept for a retry");
+        // The disk recovers; quit's flush writes it with no new change.
+        std::fs::remove_file(&dir).unwrap();
+        history.flush();
+        assert!(history.dirty.is_empty());
+        assert_eq!(load(&dir, "/repo/a").entries.len(), 1);
     }
 
     #[test]
