@@ -2,6 +2,7 @@
 //! and its single-project "New worktree" mode, opened from a PROJECTS row.
 
 use super::super::*;
+use super::{modal_button, modal_control, toggled};
 
 impl HarnessWorkspace {
     /// Push `feat/{slug}` into the branch field placeholder when the name changes.
@@ -31,6 +32,7 @@ impl HarnessWorkspace {
     pub(crate) fn render_new_task_dialog(
         &self,
         hx: &HarnessTheme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some(dialog) = self.new_task.as_ref() else {
@@ -40,9 +42,12 @@ impl HarnessWorkspace {
         // Worktree mode: opened from a PROJECTS row, for that project only.
         let worktree_for = dialog.worktree_for.clone();
         let is_worktree = worktree_for.is_some();
-        let name_editor = dialog.name.clone();
-        let brief_editor = dialog.brief.clone();
-        let branch_editor = dialog.branch.clone();
+        let title = if is_worktree {
+            "New worktree"
+        } else {
+            "New task"
+        };
+        let name_error = dialog.name_required.then_some("Enter a name.");
 
         let field_label = |label: &str| {
             div()
@@ -52,10 +57,9 @@ impl HarnessWorkspace {
                 .child(label.to_string())
         };
 
+        let card = dialog.focus.card(div().id("new-task-card"), title);
         let card =
-            div()
-                .id("new-task-card")
-                .w(px(480.0))
+            card.w(px(480.0).min(window.viewport_size().width - px(24.0)))
                 .max_h(px(640.0))
                 .flex()
                 .flex_col()
@@ -66,7 +70,6 @@ impl HarnessWorkspace {
                 .border_1()
                 .border_color(hx.border2)
                 .shadow_lg()
-                .key_context("HarnessInput")
                 .on_action(cx.listener(Self::confirm_edit))
                 .on_action(cx.listener(Self::cancel_edit))
                 .on_mouse_down(
@@ -84,11 +87,7 @@ impl HarnessWorkspace {
                                 .text_lg()
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(hx.tx0)
-                                .child(if is_worktree {
-                                    "New worktree"
-                                } else {
-                                    "New task"
-                                }),
+                                .child(title),
                         )
                         .child(
                             div()
@@ -97,8 +96,7 @@ impl HarnessWorkspace {
                                 .gap_1()
                                 .child(self.render_new_task_info(hx, is_worktree))
                                 .child(
-                                    div()
-                                        .id("new-task-close")
+                                    modal_button("new-task-close", "Close", hx)
                                         .px_2()
                                         .rounded_md()
                                         .text_sm()
@@ -118,7 +116,18 @@ impl HarnessWorkspace {
                         .flex_col()
                         .gap_1()
                         .child(field_label("Name"))
-                        .child(self.render_input(hx, name_editor, cx)),
+                        .child(task_input("Name", &dialog.name, false, name_error, hx, cx))
+                        .when_some(name_error, |d, error| {
+                            d.child(
+                                div()
+                                    .id("new-task-name-error")
+                                    .role(gpui::Role::Alert)
+                                    .aria_label(error)
+                                    .text_xs()
+                                    .text_color(hx.red)
+                                    .child(error),
+                            )
+                        }),
                 )
                 .child(
                     div()
@@ -130,7 +139,7 @@ impl HarnessWorkspace {
                         } else {
                             "Brief"
                         }))
-                        .child(self.render_multiline_input(hx, brief_editor, cx))
+                        .child(task_input("Brief", &dialog.brief, true, None, hx, cx))
                         .child(div().text_size(px(10.0)).text_color(hx.tx2).child(
                             if is_worktree {
                                 "Given to the agent as its starting prompt."
@@ -145,7 +154,7 @@ impl HarnessWorkspace {
                         .flex_col()
                         .gap_1()
                         .child(field_label("Branch"))
-                        .child(self.render_input(hx, branch_editor, cx))
+                        .child(task_input("Branch", &dialog.branch, false, None, hx, cx))
                         .child(
                             div()
                                 .text_size(px(10.0))
@@ -190,8 +199,7 @@ impl HarnessWorkspace {
                         .gap_2()
                         .mt_1()
                         .child(
-                            div()
-                                .id("new-task-cancel")
+                            modal_button("new-task-cancel", "Cancel", hx)
                                 .flex_1()
                                 .flex()
                                 .items_center()
@@ -211,31 +219,41 @@ impl HarnessWorkspace {
                                 ),
                         )
                         .child(
-                            div()
-                                .id("new-task-create")
-                                .flex_1()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .h(px(34.0))
-                                .rounded_md()
-                                .border_1()
-                                .border_color(hx.accent)
-                                .bg(tint(hx.accent, 0.16))
-                                .text_sm()
-                                .text_color(hx.accent)
-                                .cursor_pointer()
-                                .hover(|d| d.border_color(hx.accent).text_color(hx.accent))
-                                .child(if is_worktree {
+                            modal_button(
+                                "new-task-create",
+                                if is_worktree {
                                     "Create worktree"
                                 } else {
                                     "Create"
-                                })
-                                .on_click(cx.listener(|ws, _, window, cx| {
+                                },
+                                hx,
+                            )
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .h(px(34.0))
+                            .rounded_md()
+                            .border_1()
+                            .border_color(hx.accent)
+                            .bg(tint(hx.accent, 0.16))
+                            .text_sm()
+                            .text_color(hx.accent)
+                            .cursor_pointer()
+                            .hover(|d| d.border_color(hx.accent).text_color(hx.accent))
+                            .child(if is_worktree {
+                                "Create worktree"
+                            } else {
+                                "Create"
+                            })
+                            .on_click(cx.listener(
+                                |ws, _, window, cx| {
                                     ws.submit_new_task(window, cx);
-                                })),
+                                },
+                            )),
                         ),
-                );
+                )
+                .child(dialog.focus.end());
 
         div()
             .id("new-task-backdrop")
@@ -314,21 +332,26 @@ impl HarnessWorkspace {
                 .hover(|d| d.bg(hx.surface_hover));
 
             row = row.child(
-                div()
-                    .id(("new-task-check", i))
-                    .flex_none()
-                    .size(px(16.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(12.0))
-                    .text_color(if included { hx.tx0 } else { hx.tx2 })
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |ws, _, _, cx| {
-                        cx.stop_propagation();
-                        ws.toggle_new_task_repo(&name_for_check, cx);
-                    }))
-                    .child(check),
+                modal_control(
+                    ("new-task-check", i),
+                    label.clone(),
+                    gpui::Role::CheckBox,
+                    hx,
+                )
+                .aria_toggled(toggled(included))
+                .flex_none()
+                .size(px(16.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(12.0))
+                .text_color(if included { hx.tx0 } else { hx.tx2 })
+                .cursor_pointer()
+                .on_click(cx.listener(move |ws, _, _, cx| {
+                    cx.stop_propagation();
+                    ws.toggle_new_task_repo(&name_for_check, cx);
+                }))
+                .child(check),
             );
 
             row = row.child(
@@ -353,26 +376,31 @@ impl HarnessWorkspace {
             if included && !multi {
                 let radio = if is_home { "●" } else { "○" };
                 row = row.child(
-                    div()
-                        .id(("new-task-home", i))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap_0p5()
-                        .cursor_pointer()
-                        .text_size(px(10.0))
-                        .text_color(if is_home { hx.accent } else { hx.tx2 })
-                        .on_click(cx.listener(move |ws, _, _, cx| {
-                            cx.stop_propagation();
-                            ws.set_new_task_home(&name_for_home, cx);
-                        }))
-                        .child(radio)
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(if is_home { hx.accent } else { hx.tx2 })
-                                .child("Home"),
-                        ),
+                    modal_control(
+                        ("new-task-home", i),
+                        format!("{} as home project", name),
+                        gpui::Role::RadioButton,
+                        hx,
+                    )
+                    .aria_toggled(toggled(is_home))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_0p5()
+                    .cursor_pointer()
+                    .text_size(px(10.0))
+                    .text_color(if is_home { hx.accent } else { hx.tx2 })
+                    .on_click(cx.listener(move |ws, _, _, cx| {
+                        cx.stop_propagation();
+                        ws.set_new_task_home(&name_for_home, cx);
+                    }))
+                    .child(radio)
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(if is_home { hx.accent } else { hx.tx2 })
+                            .child("Home"),
+                    ),
                 );
             }
 
@@ -380,30 +408,43 @@ impl HarnessWorkspace {
         }
         col
     }
+}
 
-    /// Taller editor chrome for the brief field (Enter inserts a newline).
-    fn render_multiline_input(
-        &self,
-        hx: &HarnessTheme,
-        editor: Entity<Editor>,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .key_context("HarnessInput")
-            .on_action(cx.listener(Self::cancel_edit))
-            .flex()
-            .flex_col()
-            .w_full()
-            .min_h(px(72.0))
-            .max_h(px(160.0))
-            .px_1p5()
-            .py_1()
-            .rounded_md()
-            .bg(hx.bg0)
-            .border_1()
-            .border_color(hx.accent)
-            .text_sm()
-            .text_color(hx.tx0)
-            .child(editor)
-    }
+fn task_input(
+    label: &'static str,
+    editor: &Entity<Editor>,
+    multiline: bool,
+    error: Option<&'static str>,
+    hx: &HarnessTheme,
+    cx: &App,
+) -> gpui::Stateful<gpui::Div> {
+    let focus = editor.focus_handle(cx).tab_stop(true);
+    let border = if error.is_some() { hx.red } else { hx.border2 };
+    div()
+        .id(label)
+        .role(if multiline {
+            gpui::Role::MultilineTextInput
+        } else {
+            gpui::Role::TextInput
+        })
+        .aria_label(label)
+        .aria_value(editor.read(cx).text(cx))
+        .when_some(error, |d, error| d.aria_description(error))
+        .track_focus(&focus)
+        .key_context("HarnessInput")
+        .flex()
+        .w_full()
+        .when(multiline, |d| {
+            d.flex_col().min_h(px(72.0)).max_h(px(160.0)).py_1()
+        })
+        .when(!multiline, |d| d.items_center().h(px(22.0)))
+        .px_1p5()
+        .rounded_md()
+        .bg(hx.bg0)
+        .border_1()
+        .border_color(border)
+        .focus(|d| d.border_color(if error.is_some() { hx.red } else { hx.accent }))
+        .text_sm()
+        .text_color(hx.tx0)
+        .child(editor.clone())
 }

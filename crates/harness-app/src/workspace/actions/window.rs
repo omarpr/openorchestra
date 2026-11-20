@@ -185,17 +185,31 @@ impl HarnessWorkspace {
     }
 
     pub(crate) fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_open {
+            self.close_settings(window, cx);
+        } else {
+            self.open_settings(self.settings_section, window, cx);
+        }
+    }
+
+    pub(crate) fn open_settings(
+        &mut self,
+        section: SettingsSection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Refuse while a required tool is missing: Settings sits behind
         // the blocking screen, so opening it would only mean a menu
         // item that visibly does nothing.
         if crate::preflight::blocked(&self.preflight) {
             return;
         }
-        self.settings_open = !self.settings_open;
-        if !self.settings_open {
-            self.remote_close_setup();
-            self.focus_active_pane(window, cx);
-        } else if self.settings_section == SettingsSection::Diff {
+        self.settings_open = true;
+        self.settings_section = section;
+        self.settings_focus.reset_scroll();
+        let focus = self.settings_focus.control_focus(section.focus_id(), cx);
+        window.focus(&focus, cx);
+        if section == SettingsSection::Diff {
             self.ensure_review_model_catalog(cx);
         }
         cx.notify();
@@ -203,9 +217,24 @@ impl HarnessWorkspace {
 
     pub(crate) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_open = false;
+        self.leave_settings_control();
         self.remote_close_setup();
-        self.focus_active_pane(window, cx);
+        if let Some(dialog) = &self.new_task {
+            window.focus(&dialog.name.focus_handle(cx), cx);
+        } else {
+            self.focus_active_pane(window, cx);
+        }
         cx.notify();
+    }
+
+    pub(crate) fn leave_settings_control(&mut self) {
+        self.rebinding = None;
+        if matches!(
+            self.edit_kind(),
+            Some(EditKind::AgentCmd(_) | EditKind::NewAgent | EditKind::RemotePort)
+        ) {
+            self.edit = None;
+        }
     }
 
     /// Resolve the quit prompt. `keep` leaves the tmux sessions running

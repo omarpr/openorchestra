@@ -67,6 +67,8 @@ actions!(
         CopyDiffSelection,
         /// Open the settings screen (⌘,).
         OpenSettings,
+        FocusNextModalControl,
+        FocusPreviousModalControl,
         /// Open the tool-requirements screen on demand.
         FirstTimeChecks,
         /// Show the version and project link (app menu).
@@ -407,7 +409,17 @@ pub fn apply_zed_settings(
 pub fn install_keymap(overrides: &std::collections::BTreeMap<String, String>, cx: &mut gpui::App) {
     let bindings = shortcuts::bindings_with(overrides, cx);
     cx.bind_keys(bindings);
-    cx.bind_keys([KeyBinding::new("ctrl-q", Quit, None)]);
+    cx.bind_keys([
+        KeyBinding::new("ctrl-q", Quit, None),
+        KeyBinding::new("escape", menu::Cancel, Some("HarnessModal")),
+    ]);
+    // Match at the editor node too, so form navigation wins over editor indentation.
+    for context in ["HarnessModal", "HarnessModal > Editor"] {
+        cx.bind_keys([
+            KeyBinding::new("tab", FocusNextModalControl, Some(context)),
+            KeyBinding::new("shift-tab", FocusPreviousModalControl, Some(context)),
+        ]);
+    }
 }
 
 fn run_with_harness_workspace(

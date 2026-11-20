@@ -182,6 +182,7 @@ impl HarnessWorkspace {
             comment_draft: None,
             clearing_review: false,
             settings_open: false,
+            settings_focus: ui::ModalFocus::new(cx),
             settings_section: SettingsSection::Appearance,
             review_model_catalogs: Default::default(),
             // Probed once at startup; the screen opens below if this machine is
@@ -199,7 +200,6 @@ impl HarnessWorkspace {
             indicator_ticking: false,
             titlebar_should_move: false,
             rebinding: None,
-            rebind_focus: cx.focus_handle(),
             md_preview: None,
             diff_gen: 0,
             diff_pending: false,

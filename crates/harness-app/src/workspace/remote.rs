@@ -916,17 +916,6 @@ impl HarnessWorkspace {
         cx.notify();
     }
 
-    /// Open Settings on the Remote section (unless the blocking preflight
-    /// screen is up, which Settings would sit behind).
-    pub(crate) fn remote_open_settings(&mut self, cx: &mut Context<Self>) {
-        if crate::preflight::blocked(&self.preflight) {
-            return;
-        }
-        self.settings_open = true;
-        self.settings_section = crate::workspace::SettingsSection::Remote;
-        cx.notify();
-    }
-
     pub(crate) fn remote_toggle_mark(&mut self, key: &str, tab_id: u64, cx: &mut Context<Self>) {
         // Decide on the file's current contents, not the cache.
         let marked = self.remote.store.load().mark_for(key, tab_id).is_some();

@@ -81,13 +81,19 @@ impl HarnessWorkspace {
         }
         let name = cx.new(|cx| {
             let mut e = Editor::single_line(window, cx);
-            e.set_placeholder_text("effort name…", window, cx);
+            e.set_placeholder_text("Task name…", window, cx);
             e
         });
         // Re-render when the name changes so the branch placeholder
         // (feat/{slug}) stays in sync.
-        let _name_sub = cx.subscribe(&name, |_ws, _editor, event, cx| {
+        let name_sub = cx.subscribe(&name, |ws, editor, event, cx| {
             if matches!(event, editor::EditorEvent::BufferEdited) {
+                if let Some(dialog) = ws.new_task.as_mut()
+                    && dialog.name == editor
+                    && !editor.read(cx).text(cx).trim().is_empty()
+                {
+                    dialog.name_required = false;
+                }
                 cx.notify();
             }
         });
@@ -102,13 +108,22 @@ impl HarnessWorkspace {
             e.set_placeholder_text(auto.as_str(), window, cx);
             e
         });
+        let [brief_sub, branch_sub] = [&brief, &branch].map(|field| {
+            cx.subscribe(field, |_, _, event, cx| {
+                if matches!(event, editor::EditorEvent::BufferEdited) {
+                    cx.notify();
+                }
+            })
+        });
         window.focus(&name.focus_handle(cx), cx);
         self.new_task = Some(NewTaskDialog {
+            focus: ui::ModalFocus::new(cx),
             name,
+            name_required: false,
             brief,
             branch,
             auto_branch_shown: auto,
-            _name_sub,
+            _field_subs: [name_sub, brief_sub, branch_sub],
             worktree_for: None,
         });
         self.edit = None;
@@ -123,21 +138,15 @@ impl HarnessWorkspace {
     }
 
     pub(crate) fn submit_new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(dialog) = self.new_task.as_ref() else {
+        let Some(dialog) = self.new_task.as_mut() else {
             return;
         };
         let name = dialog.name.read(cx).text(cx);
         let name = name.trim().to_string();
         let worktree_for = dialog.worktree_for.clone();
         if name.is_empty() {
-            self.set_note(
-                if worktree_for.is_some() {
-                    "enter a worktree name"
-                } else {
-                    "enter an effort name"
-                }
-                .to_string(),
-            );
+            dialog.name_required = true;
+            window.focus(&dialog.name.focus_handle(cx), cx);
             cx.notify();
             return;
         }

@@ -475,6 +475,10 @@ impl HarnessWorkspace {
     }
 
     pub(crate) fn focus_active_pane(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_open {
+            self.settings_focus.restore(window, cx);
+            return;
+        }
         let Some(r) = self.resolve() else {
             window.focus(&self.focus_handle, cx);
             return;

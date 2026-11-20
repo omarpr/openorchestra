@@ -21,27 +21,6 @@ impl Render for HarnessWorkspace {
         let scale = self.prefs.font_size.unwrap_or(13.0) / 13.0;
         window.set_rem_size(px(16.0 * scale));
 
-        // Keep the agent-command field focused while the Settings overlay edits
-        // it. That field floats over the hosted zed editor, which holds window
-        // focus when Settings is opened from the menu (⌘,) — so `begin_edit`
-        // lands the caret but the editor behind keeps the keystrokes and the
-        // field looks dead. The sidebar's rename uses this same input and never
-        // sees this, because interacting with the sidebar already moved focus
-        // off the editor. Re-assert only for this exact case, and only once
-        // focus has actually escaped, so it converges instead of thrashing.
-        if self.settings_open
-            && matches!(
-                self.edit_kind(),
-                Some(EditKind::AgentCmd(_) | EditKind::RemotePort)
-            )
-            && let Some(editor) = self.edit_editor()
-        {
-            let handle = editor.focus_handle(cx);
-            if !handle.is_focused(window) {
-                window.focus(&handle, cx);
-            }
-        }
-
         let hx = theme(cx).clone();
         self.ensure_conductor(&hx, cx);
         self.ensure_indicator_ticker(cx);
@@ -461,7 +440,7 @@ impl Render for HarnessWorkspace {
 
         if self.new_task.is_some() {
             self.sync_new_task_branch_placeholder(window, cx);
-            root = root.child(self.render_new_task_dialog(&hx, cx));
+            root = root.child(self.render_new_task_dialog(&hx, window, cx));
         }
 
         if self.start_specialists.is_some() {

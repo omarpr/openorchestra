@@ -27,6 +27,7 @@ impl HarnessWorkspace {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let r = &self.remote;
+        let focus = &self.settings_focus;
         let enabled = r.file.enabled;
         let serving = r.serve == RemoteServe::Serving;
         let mut col = div().flex().flex_col();
@@ -35,8 +36,14 @@ impl HarnessWorkspace {
         let mut onoff = div().flex().gap_1p5().pb_1();
         for (label, on) in [("On", true), ("Off", false)] {
             onoff = onoff.child(
-                div()
-                    .id(gpui::SharedString::from(format!("remote-enabled-{label}")))
+                focus
+                    .scroll_choice(
+                        format!("remote-enabled-{label}"),
+                        format!("Remote control: {label}"),
+                        enabled == on,
+                        hx,
+                        cx,
+                    )
                     .child(chip(label.to_string(), enabled == on, hx))
                     .on_click(cx.listener(move |ws, _, _, cx| {
                         cx.stop_propagation();
@@ -171,8 +178,8 @@ impl HarnessWorkspace {
             port_row = port_row.child(div().w(px(90.0)).child(self.render_input(hx, editor, cx)));
         } else {
             port_row = port_row.child(
-                div()
-                    .id("remote-port")
+                focus
+                    .scroll_button("remote-port", "Edit HTTPS port", hx, cx)
                     .w(px(90.0))
                     .px_2()
                     .py_0p5()
@@ -457,8 +464,14 @@ impl HarnessWorkspace {
         let mut awake_row = div().flex().gap_1p5().pb_1();
         for (label, on) in [("On", true), ("Off", false)] {
             awake_row = awake_row.child(
-                div()
-                    .id(gpui::SharedString::from(format!("remote-awake-{label}")))
+                focus
+                    .scroll_choice(
+                        format!("remote-awake-{label}"),
+                        format!("Keep this Mac awake: {label}"),
+                        awake == on,
+                        hx,
+                        cx,
+                    )
                     .child(chip(label.to_string(), awake == on, hx))
                     .on_click(cx.listener(move |ws, _, _, cx| {
                         cx.stop_propagation();

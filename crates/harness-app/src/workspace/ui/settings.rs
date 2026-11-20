@@ -2,6 +2,7 @@
 //! `impl HarnessWorkspace` methods for this feature area.
 
 use super::super::*;
+use super::{modal_button, modal_control, toggled};
 
 /// A Settings section heading. Shared by every pane (and `settings_remote`).
 pub(super) fn section_title(label: &str, hx: &HarnessTheme) -> gpui::Div {
@@ -106,15 +107,20 @@ impl HarnessWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut card = div()
-            .id("settings-card")
+        let viewport = window.viewport_size();
+        let focus = &self.settings_focus;
+        let mut card = focus
+            .card(div().id("settings-card"), "Settings")
+            .when(self.rebinding.is_some(), |d| {
+                d.key_context("SettingsRebinding")
+            })
+            .on_action(cx.listener(|ws, _: &menu::Cancel, window, cx| {
+                ws.close_settings(window, cx);
+            }))
             .flex()
             .flex_col()
-            // Widened with the rail, not for its own sake: the rail takes 140px
-            // out of what used to be 520px of content, and the font chips and
-            // agent command rows were laid out against the old width.
-            .w(px(660.0))
-            .max_h(px(600.0))
+            .w(px(660.0).min(viewport.width - px(24.0)))
+            .h(px(600.0).min(viewport.height - px(24.0)))
             .rounded_lg()
             .bg(hx.bg1)
             .border_1()
@@ -139,8 +145,7 @@ impl HarnessWorkspace {
                             .child("Settings"),
                     )
                     .child(
-                        div()
-                            .id("settings-close")
+                        modal_button("settings-close", "Close Settings", hx)
                             .px_2()
                             .rounded_md()
                             .text_sm()
@@ -161,11 +166,17 @@ impl HarnessWorkspace {
         // past the card (long addresses, network keys) instead of letting
         // those rows truncate.
         let mut body = div()
-            .id("settings-body")
+            .id(gpui::SharedString::from(format!(
+                "settings-body-{}",
+                sec.label()
+            )))
+            .role(gpui::Role::TabPanel)
+            .aria_label(sec.label())
             .flex_1()
             .min_w_0()
             .min_h_0()
             .overflow_y_scroll()
+            .track_scroll(&focus.scroll)
             .px_4()
             .py_2();
 
@@ -179,8 +190,8 @@ impl HarnessWorkspace {
             for (label, dark) in [("Dark", true), ("Light", false)] {
                 let selected = self.prefs.dark == dark;
                 modes = modes.child(
-                    div()
-                        .id(gpui::SharedString::from(format!("mode-{label}")))
+                    focus
+                        .scroll_choice(format!("mode-{label}"), label, selected, hx, cx)
                         .child(chip(label.to_string(), selected, hx))
                         .on_click(cx.listener(move |ws, _, _, cx| {
                             cx.stop_propagation();
@@ -223,8 +234,8 @@ impl HarnessWorkspace {
                 };
                 let value2 = value.clone();
                 themes = themes.child(
-                    div()
-                        .id(gpui::SharedString::from(format!("theme-{label}")))
+                    focus
+                        .scroll_choice(format!("theme-{label}"), label.clone(), selected, hx, cx)
                         .child(chip(label.clone(), selected, hx))
                         .on_click(cx.listener(move |ws, _, _, cx| {
                             cx.stop_propagation();
@@ -286,8 +297,14 @@ impl HarnessWorkspace {
                 let selected = name == current;
                 let pick = name.clone();
                 row = row.child(
-                    div()
-                        .id(gpui::SharedString::from(format!("font-{title}-{name}")))
+                    focus
+                        .scroll_choice(
+                            format!("font-{title}-{name}"),
+                            name.clone(),
+                            selected,
+                            hx,
+                            cx,
+                        )
                         .child(chip(name, selected, hx))
                         .on_click(cx.listener(move |ws, _, _, cx| {
                             cx.stop_propagation();
@@ -336,8 +353,8 @@ impl HarnessWorkspace {
                         .gap_1p5()
                         .pb_1()
                         .child(
-                            div()
-                                .id("fs-minus")
+                            focus
+                                .scroll_button("fs-minus", "Decrease font size", hx, cx)
                                 .tooltip(tip("Smaller"))
                                 .child(size_chip("−"))
                                 .on_click(cx.listener(step(-1.0))),
@@ -352,8 +369,8 @@ impl HarnessWorkspace {
                                 .child(format!("{size:.0} px")),
                         )
                         .child(
-                            div()
-                                .id("fs-plus")
+                            focus
+                                .scroll_button("fs-plus", "Increase font size", hx, cx)
                                 .tooltip(tip("Larger"))
                                 .child(size_chip("+"))
                                 .on_click(cx.listener(step(1.0))),
@@ -375,8 +392,8 @@ impl HarnessWorkspace {
                     crate::sounds::Source::Silent => "no sound at all",
                 };
                 list = list.child(
-                    div()
-                        .id(gpui::SharedString::from(format!("sound-{id}")))
+                    focus
+                        .scroll_choice(format!("sound-{id}"), id, selected, hx, cx)
                         .flex()
                         .items_center()
                         .gap_2()
@@ -411,8 +428,13 @@ impl HarnessWorkspace {
                         // someone is checking whether preview works at all.
                         .when(sound.source != crate::sounds::Source::Silent, |row| {
                             row.child(
-                                div()
-                                    .id(gpui::SharedString::from(format!("play-{id}")))
+                                focus
+                                    .scroll_button(
+                                        format!("play-{id}"),
+                                        format!("Preview {id}"),
+                                        hx,
+                                        cx,
+                                    )
                                     .flex_none()
                                     .px_1p5()
                                     .rounded_md()
@@ -452,8 +474,7 @@ impl HarnessWorkspace {
                     .gap_2()
                     .pb_1()
                     .child(
-                        div()
-                            .id("conductor-toggle")
+                        focus.scroll_control("conductor-toggle", "Always-on conductor", gpui::Role::Switch, hx, cx).aria_toggled(toggled(always))
                             .child(chip(
                                 if always { "on".into() } else { "off".into() },
                                 always,
@@ -496,8 +517,15 @@ impl HarnessWorkspace {
                         .gap_2()
                         .pb_1()
                         .child(
-                            div()
-                                .id("show-ignored-toggle")
+                            focus
+                                .scroll_control(
+                                    "show-ignored-toggle",
+                                    "Show gitignored files",
+                                    gpui::Role::Switch,
+                                    hx,
+                                    cx,
+                                )
+                                .aria_toggled(toggled(enabled))
                                 .child(chip(
                                     if enabled { "on".into() } else { "off".into() },
                                     enabled,
@@ -531,8 +559,8 @@ impl HarnessWorkspace {
                 ] {
                     let selected = location == value;
                     row = row.child(
-                        div()
-                            .id(gpui::SharedString::from(format!("diff-loc-{label}")))
+                        focus
+                            .scroll_choice(format!("diff-loc-{label}"), label, selected, hx, cx)
                             .child(chip(label.to_string(), selected, hx))
                             .on_click(cx.listener(move |ws, _, window, cx| {
                                 cx.stop_propagation();
@@ -554,11 +582,14 @@ impl HarnessWorkspace {
                 for value in [DiffView::Unified, DiffView::Split] {
                     let selected = view == value;
                     view_row = view_row.child(
-                        div()
-                            .id(gpui::SharedString::from(format!(
-                                "diff-view-set-{}",
-                                value.label()
-                            )))
+                        focus
+                            .scroll_choice(
+                                format!("diff-view-set-{}", value.label()),
+                                value.label(),
+                                selected,
+                                hx,
+                                cx,
+                            )
                             .child(chip(value.label().to_string(), selected, hx))
                             .on_click(cx.listener(move |ws, _, _, cx| {
                                 cx.stop_propagation();
@@ -589,6 +620,7 @@ impl HarnessWorkspace {
 
         if sec == S::Agents {
             // ---- Agents: enable/disable + launch-command override -------------
+            let default_agent = default_enabled_agent(&self.prefs);
             let mut agents = div().flex().flex_col().gap_1().pb_1();
             for kind in agent_catalog(&self.prefs) {
                 let key = kind.as_str().to_string();
@@ -599,6 +631,8 @@ impl HarnessWorkspace {
                 let default_cmd = agent_runtime::default_command_display(&kind);
                 let editing = matches!(self.edit_kind(), Some(EditKind::AgentCmd(k)) if *k == key);
 
+                let display_name = agent_display(&kind);
+                let is_default = default_agent.as_ref() == Some(&kind);
                 let toggle_key = key.clone();
                 let edit_key_ = key.clone();
                 // Prefill what the user SEES — the override if set, else the
@@ -624,17 +658,32 @@ impl HarnessWorkspace {
                     .child(
                         div()
                             .flex_none()
-                            .w(px(110.0))
-                            .text_sm()
-                            .text_color(if pref.disabled { hx.tx2 } else { hx.tx0 })
-                            .child(kind.to_string()),
+                            .w(px(124.0))
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .items_start()
+                            .gap_0p5()
+                            .child(
+                                div().max_w_full().truncate().text_sm()
+                                    .text_color(if pref.disabled { hx.tx2 } else { hx.tx0 })
+                                    .child(display_name.clone()),
+                            )
+                            .when(is_default, |d| {
+                                d.child(
+                                    div().id(format!("agent-default-{key}"))
+                                        .px_1().rounded_sm().bg(tint(hx.accent, 0.14))
+                                        .text_xs().text_color(hx.accent)
+                                        .tooltip(tip("New tasks start with the last agent you used, or the first enabled agent in this list."))
+                                        .child("Default"),
+                                )
+                            }),
                     )
                     .child(
                         // Fixed width + centered so "on"/"off" occupy the same
                         // box — otherwise the wider "off" pill shoves the command
                         // field right and the column stops aligning.
-                        div()
-                            .id(gpui::SharedString::from(format!("agent-en-{key}")))
+                        focus.scroll_control(format!("agent-en-{key}"), format!("Enable {display_name}"), gpui::Role::Switch, hx, cx).aria_toggled(toggled(!pref.disabled))
                             .flex_none()
                             .w(px(38.0))
                             .py_0p5()
@@ -669,8 +718,13 @@ impl HarnessWorkspace {
                     row = row.child(div().flex_1().child(self.render_input(hx, editor, cx)));
                 } else {
                     row = row.child(
-                        div()
-                            .id(gpui::SharedString::from(format!("agent-cmd-{key}")))
+                        focus
+                            .scroll_button(
+                                format!("agent-cmd-{key}"),
+                                format!("Edit {display_name} launch command"),
+                                hx,
+                                cx,
+                            )
                             .flex_1()
                             // Without min_w_0 a flex child keeps its content width
                             // (min-width: auto), so a long default like codex's
@@ -710,8 +764,13 @@ impl HarnessWorkspace {
                 if is_custom {
                     let remove_key = key.clone();
                     row = row.child(
-                        div()
-                            .id(gpui::SharedString::from(format!("agent-rm-{key}")))
+                        focus
+                            .scroll_button(
+                                format!("agent-rm-{key}"),
+                                format!("Remove {display_name}"),
+                                hx,
+                                cx,
+                            )
                             .flex_none()
                             .w(px(20.0))
                             .py_0p5()
@@ -759,8 +818,8 @@ impl HarnessWorkspace {
                 );
             } else {
                 agents = agents.child(
-                    div()
-                        .id("agent-add")
+                    focus
+                        .scroll_button("agent-add", "Add agent", hx, cx)
                         .mt_1()
                         .px_2()
                         .py_1()
@@ -802,8 +861,12 @@ impl HarnessWorkspace {
                 .agents
                 .values()
                 .any(|a| !a.custom && (a.disabled || a.command.is_some()));
-            let mut reset = div()
-                .id("agents-reset")
+            let reset = if agents_dirty {
+                focus.scroll_button("agents-reset", "Reset agents to defaults", hx, cx)
+            } else {
+                div().id("agents-reset")
+            };
+            let mut reset = reset
                 .mt_1()
                 .px_3()
                 .py_1()
@@ -843,8 +906,14 @@ impl HarnessWorkspace {
                     ("Close", Some(true)),
                 ] {
                     row = row.child(
-                        div()
-                            .id(gpui::SharedString::from(format!("quit-terminals-{label}")))
+                        focus
+                            .scroll_choice(
+                                format!("quit-terminals-{label}"),
+                                label,
+                                current == value,
+                                hx,
+                                cx,
+                            )
                             .child(chip(label.to_string(), current == value, hx))
                             .on_click(cx.listener(move |ws, _, _, cx| {
                                 cx.stop_propagation();
@@ -901,13 +970,16 @@ impl HarnessWorkspace {
                     let arming = self.rebinding.as_deref() == Some(id.as_str());
                     let overridden = self.prefs.shortcuts.contains_key(&id);
                     let arm_id = id.clone();
+                    let button_id = format!("sc-{id}");
+                    let button_focus = focus.control_focus(button_id.clone().into(), cx);
                     let chip_label = if arming {
                         "press keys…".to_string()
                     } else {
                         crate::shortcuts::display_keys(&e.keys)
                     };
-                    let mut chipd = div()
-                        .id(gpui::SharedString::from(format!("sc-{id}")))
+                    let mut chipd = focus
+                        .scroll_button(button_id, e.what, hx, cx)
+                        .aria_description(chip_label.clone())
                         .flex_none()
                         .w(px(120.0))
                         .px_2()
@@ -936,15 +1008,13 @@ impl HarnessWorkspace {
                         .on_click(cx.listener(move |ws, _, window, cx| {
                             cx.stop_propagation();
                             ws.rebinding = Some(arm_id.clone());
-                            window.focus(&ws.rebind_focus, cx);
+                            window.focus(&button_focus, cx);
                             cx.notify();
                         }));
                     if arming {
                         // The armed chip owns the keyboard until a chord lands
                         // or escape cancels.
-                        chipd = chipd
-                            .track_focus(&self.rebind_focus)
-                            .on_key_down(cx.listener(Self::rebind_key));
+                        chipd = chipd.on_key_down(cx.listener(Self::rebind_key));
                     }
                     section = section.child(
                         div()
@@ -962,8 +1032,8 @@ impl HarnessWorkspace {
             // undoes nothing is clutter.
             if !self.prefs.shortcuts.is_empty() {
                 body = body.child(
-                    div()
-                        .id("sc-reset")
+                    focus
+                        .scroll_button("sc-reset", "Reset shortcuts to defaults", hx, cx)
                         .mt_2()
                         .mb_3()
                         .px_3()
@@ -988,22 +1058,27 @@ impl HarnessWorkspace {
             }
         }
         let mut rail = div()
+            .id("settings-nav")
+            .role(gpui::Role::TabList)
+            .aria_label("Settings sections")
             .flex()
             .flex_col()
             .flex_none()
             .w(px(140.0))
+            .min_h_0()
+            .overflow_y_scroll()
             .gap_0p5()
             .p_2()
             .border_r_1()
             .border_color(hx.border);
         for s in S::ALL {
             let selected = s == sec;
+            let nav_focus = focus.control_focus(s.focus_id(), cx);
             rail = rail.child(
-                div()
-                    .id(gpui::SharedString::from(format!(
-                        "settings-nav-{}",
-                        s.label()
-                    )))
+                modal_control(s.focus_id(), s.label(), gpui::Role::Tab, hx)
+                    .track_focus(&nav_focus)
+                    .aria_selected(selected)
+                    .flex_none()
                     .px_2()
                     .py_1()
                     .rounded_md()
@@ -1015,6 +1090,10 @@ impl HarnessWorkspace {
                     .child(s.label())
                     .on_click(cx.listener(move |ws, _, _, cx| {
                         cx.stop_propagation();
+                        if ws.settings_section != s {
+                            ws.leave_settings_control();
+                            ws.settings_focus.reset_scroll();
+                        }
                         ws.settings_section = s;
                         if s == S::Diff {
                             ws.ensure_review_model_catalog(cx);
@@ -1026,25 +1105,26 @@ impl HarnessWorkspace {
                     })),
             );
         }
-        card = card.child(
-            div()
-                .flex()
-                .flex_1()
-                .h_full()
-                .min_h_0()
-                .when(crate::probe_paint(), |d| {
-                    d.child(
-                        gpui::canvas(
-                            |b, _, _| log::info!("paint: settings content row = {b:?}"),
-                            |_, _, _, _| {},
+        card = card
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .when(crate::probe_paint(), |d| {
+                        d.child(
+                            gpui::canvas(
+                                |b, _, _| log::info!("paint: settings content row = {b:?}"),
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .size_full(),
                         )
-                        .absolute()
-                        .size_full(),
-                    )
-                })
-                .child(rail)
-                .child(body),
-        );
+                    })
+                    .child(rail)
+                    .child(body),
+            )
+            .child(self.settings_focus.end());
 
         // Full-window backdrop. Swallows mouse-down (the ＋-menu lesson: a
         // backdrop that closes on mouse-down eats the click before any child
@@ -1128,6 +1208,7 @@ impl HarnessWorkspace {
         let show_shim = signal_on && effective_install == HookInstall::None;
         let shim_cmd = agent_runtime::harness_status_shim_command(&self.state_dir);
 
+        let focus = &self.settings_focus;
         let fid_key = key.to_string();
         let inst_key = key.to_string();
 
@@ -1138,8 +1219,13 @@ impl HarnessWorkspace {
             .pl(px(28.0))
             .pb_1()
             .child(
-                div()
-                    .id(gpui::SharedString::from(format!("agent-sig-{key}")))
+                focus
+                    .scroll_button(
+                        format!("agent-sig-{key}"),
+                        format!("{key} {fidelity_label}"),
+                        hx,
+                        cx,
+                    )
                     .flex_none()
                     .px_2()
                     .py_0p5()
@@ -1173,8 +1259,13 @@ impl HarnessWorkspace {
                     })),
             )
             .child(
-                div()
-                    .id(gpui::SharedString::from(format!("agent-inst-{key}")))
+                focus
+                    .scroll_button(
+                        format!("agent-inst-{key}"),
+                        format!("{key} {install_label}"),
+                        hx,
+                        cx,
+                    )
                     .flex_none()
                     .px_2()
                     .py_0p5()

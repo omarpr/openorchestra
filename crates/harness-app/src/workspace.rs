@@ -82,6 +82,10 @@ impl SettingsSection {
             SettingsSection::Shortcuts => "Shortcuts",
         }
     }
+
+    fn focus_id(self) -> gpui::ElementId {
+        format!("settings-nav-{}", self.label()).into()
+    }
 }
 
 /// One line of the rendered diff body.
@@ -383,16 +387,17 @@ struct ActiveEdit {
 
 /// Centered "New task" dialog: name, brief, optional branch, project members.
 struct NewTaskDialog {
+    focus: ui::ModalFocus,
     name: Entity<Editor>,
+    name_required: bool,
     /// Multi-line initial prompt injected into agent context on launch.
     brief: Entity<Editor>,
     branch: Entity<Editor>,
     /// Last auto-branch string pushed into the branch field's placeholder, so
     /// we only call `set_placeholder_text` when the name's slug changes.
     auto_branch_shown: String,
-    /// Keeps the dialog view refreshing while the name is typed so the
-    /// branch placeholder can track `feat/{slug}`.
-    _name_sub: gpui::Subscription,
+    /// Refreshes the form's accessible values and auto-branch placeholder.
+    _field_subs: [gpui::Subscription; 3],
     /// `Some(repo)` when opened from a PROJECTS row's `+`: the dialog is a
     /// "New worktree" form for that one project — no member picker, no Home,
     /// worktree wording. Under the hood it is still a one-member task, so the
@@ -632,6 +637,7 @@ pub struct HarnessWorkspace {
     clearing_review: bool,
     /// The settings screen (⌘, or the gear). Transient, never persisted.
     settings_open: bool,
+    settings_focus: ui::ModalFocus,
     /// Which Settings pane is showing. Not persisted: reopening Settings should
     /// land where the page starts, not where you happened to leave it.
     settings_section: SettingsSection,
@@ -664,8 +670,6 @@ pub struct HarnessWorkspace {
     titlebar_should_move: bool,
     /// A shortcut row waiting for its new chord (`shortcuts::key_id`).
     rebinding: Option<String>,
-    /// Focus target while capturing a chord.
-    rebind_focus: FocusHandle,
     /// Rendered-markdown preview of the selected `.md` file, when the user has
     /// switched to it. Rebuilt on selection, since it snapshots file contents.
     md_preview: Option<(String, Entity<crate::markdown_preview::MarkdownPreview>)>,

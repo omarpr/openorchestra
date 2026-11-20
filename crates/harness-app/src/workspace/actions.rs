@@ -529,6 +529,7 @@ impl HarnessWorkspace {
                 }
                 entry.command = if cmd.is_empty() { None } else { Some(cmd) };
                 save_prefs_to(&self.prefs_path, &self.prefs);
+                self.settings_focus.focus(window, cx);
                 cx.notify();
             }
             EditKind::NewAgent => {
@@ -554,6 +555,7 @@ impl HarnessWorkspace {
                         format!("'{slug}' is not a valid new agent name")
                     });
                 }
+                self.settings_focus.focus(window, cx);
                 cx.notify();
             }
             EditKind::RemotePort => {
@@ -561,6 +563,7 @@ impl HarnessWorkspace {
                     Ok(port) => self.remote_set_port(port, cx),
                     Err(e) => self.remote.ui.port_error = Some(e),
                 }
+                self.settings_focus.focus(window, cx);
                 cx.notify();
             }
         }

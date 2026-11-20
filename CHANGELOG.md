@@ -12,6 +12,20 @@ Unreleased is empty.
 
 ## Unreleased
 
+### Fixed
+
+- Tab and Shift-Tab cycle through controls in Settings, New Task, and New
+  Worktree with a visible focus indicator. Settings scrolls the focused
+  control into view. macOS accessibility exposes Settings navigation, agent
+  switches, and the task form.
+- New Task and New Worktree show a missing-name error beside Name, focus
+  the field, and clear the error as soon as you enter a name.
+- Settings keeps its navigation and close button in place when changing panes.
+  Agent names match the tab menu and the default marker leaves room for the
+  full name.
+- The tools panel labels Git's count as changed files. Review shows the comment
+  count with its comment actions and in the tab tooltip.
+
 ## 1.3.0 - 2026-11-19
 
 ### Added

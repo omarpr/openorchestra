@@ -62,9 +62,9 @@ impl HarnessWorkspace {
             let selected = active == tab;
             let label = match tab {
                 ToolTab::Files => "Files".to_string(),
-                ToolTab::Git if dirty > 0 => format!("Git · {dirty}"),
+                ToolTab::Git if dirty == 1 => "Git · 1 file".to_string(),
+                ToolTab::Git if dirty > 1 => format!("Git · {dirty} files"),
                 ToolTab::Git => "Git".to_string(),
-                ToolTab::Review if review_count > 0 => format!("Review · {review_count}"),
                 ToolTab::Review => "Review".to_string(),
                 ToolTab::Ports => crate::ports::tab_label(ports, self.ports_visible()),
             };
@@ -86,6 +86,14 @@ impl HarnessWorkspace {
                     .when(!selected, |d| {
                         d.text_color(hx.tx2)
                             .hover(|h| h.bg(hx.surface).text_color(hx.tx1))
+                    })
+                    .when(tab == ToolTab::Review && review_count > 0, |d| {
+                        let noun = if review_count == 1 {
+                            "comment"
+                        } else {
+                            "comments"
+                        };
+                        d.tooltip(tip(format!("{review_count} review {noun}")))
                     })
                     .child(label)
                     .on_click(cx.listener(move |ws, _, window, cx| {
