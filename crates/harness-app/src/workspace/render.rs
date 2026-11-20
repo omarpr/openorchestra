@@ -490,6 +490,8 @@ impl HarnessWorkspace {
         let animating = |ws: &Self| {
             ws.agent_status.values().any(|s| matches!(s, AgentState::Running | AgentState::Waiting))
                 || !ws.ending.is_empty()
+                // A Review Overview tab spins while its review generates.
+                || ws.panes.values().any(|pane| pane.tabs.iter().any(overview_running))
                 || (ws.prefs.sidebar_open
                     && !ws.section_collapsed(SidebarSection::Projects)
                     && ws.data.repos.iter().any(|repo| {

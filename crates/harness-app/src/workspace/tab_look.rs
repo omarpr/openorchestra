@@ -126,9 +126,38 @@ pub(crate) fn tab_label(tab: &Tab) -> String {
     }
 }
 
+/// Whether a tab wears the running spinner: its agent is working, or it is a
+/// Review Overview whose review is generating.
+pub(crate) fn tab_running(agent_running: bool, overview_running: bool) -> bool {
+    agent_running || overview_running
+}
+
+/// A Review Overview tab whose review is generating.
+pub(crate) fn overview_running(tab: &Tab) -> bool {
+    matches!(&tab.content, TabContent::ReviewOverview(o) if matches!(o.status, OverviewStatus::Running(_)))
+}
+
+/// The running spinner a tab shows after its icon, shared by agent tabs and
+/// the Review Overview so the two cannot drift.
+pub(crate) fn tab_running_spinner(hx: &HarnessTheme, tab_id: u64, t: f32) -> impl IntoElement {
+    div()
+        .id(("tab-running", tab_id as usize))
+        .flex_none()
+        .tooltip(tip("Running"))
+        .child(spin_arc(hx.accent, tint(hx.accent, 0.3), 10.0, t))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn running_spinner_shows_for_agent_or_overview() {
+        assert!(!tab_running(false, false));
+        assert!(tab_running(true, false));
+        assert!(tab_running(false, true));
+        assert!(tab_running(true, true));
+    }
 
     #[test]
     fn agent_tabs_use_short_title_case_names() {

@@ -361,17 +361,12 @@ impl HarnessWorkspace {
             (TabContent::File { .. }, _) => {
                 (kind_icon(hx, LookKind::Editor, 14.0), tab_label(tab))
             }
-            (TabContent::ReviewOverview(overview), _) => {
-                let icon = if matches!(overview.status, OverviewStatus::Running(_)) {
-                    super::review_overview::review_spinner(::ui::IconSize::Small)
-                        .into_any_element()
-                } else {
-                    svg()
-                        .path(::ui::IconName::ListTodo.path())
-                        .size(px(14.0))
-                        .text_color(if active { hx.accent } else { hx.tx2 })
-                        .into_any_element()
-                };
+            (TabContent::ReviewOverview(_), _) => {
+                let icon = svg()
+                    .path(::ui::IconName::ListTodo.path())
+                    .size(px(14.0))
+                    .text_color(if active { hx.accent } else { hx.tx2 })
+                    .into_any_element();
                 (icon, tab_label(tab))
             }
         }
@@ -397,6 +392,7 @@ impl HarnessWorkspace {
             }
             _ => false,
         };
+        let running = tab_running(running, overview_running(tab));
         let spin_t = self.anim_secs();
         let key = resolved.map(|r| r.key).unwrap_or_default();
         let remote_on = self.remote_is_marked(&key, tab.id);
@@ -450,13 +446,7 @@ impl HarnessWorkspace {
             // After the icon: the mark says which agent, the spinner that it
             // is working.
             .when(running, |d| {
-                d.child(
-                    div()
-                        .id(("tab-running", tab.id as usize))
-                        .flex_none()
-                        .tooltip(tip("Running"))
-                        .child(spin_arc(hx.accent, tint(hx.accent, 0.3), 10.0, spin_t)),
-                )
+                d.child(tab_running_spinner(hx, tab.id, spin_t))
             })
             .when(remote_menu, |d| {
                 d.on_mouse_down(

@@ -27,6 +27,8 @@ Unreleased is empty.
 
 ### Changed
 
+- Review Overview tabs show their icon first and the same running spinner as
+  agent tabs.
 - Settings are tidier. The long explainer above Agents is gone; its useful
   parts are now tooltips on the command field and the Codex row. A built-in
   agent with an edited command has a ↺ button that restores the default.
