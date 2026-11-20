@@ -485,11 +485,12 @@ impl HarnessWorkspace {
         cx: &mut Context<Self>,
     ) -> Option<u64> {
         let key = self.resolve()?.key;
-        self.open_browser_tab_in(&key, url, window, cx)
+        self.open_browser_tab_in(&key, url, BrowserOpen::ReuseSameUrl, window, cx)
     }
 
-    /// [`Self::open_browser_tab`] in pane `key`: a page's new window opens
-    /// beside it, in the pane that owns that page.
+    /// [`Self::open_browser_tab`] in pane `key`, reusing a tab already on
+    /// `url` only as `how` says: a page's new window opens beside it, in
+    /// the pane that owns that page, always as a tab of its own.
     ///
     /// Only into a live pane: a pane created here would hold just this tab,
     /// and the next save would replace that worktree's saved tabs with it.
@@ -497,6 +498,7 @@ impl HarnessWorkspace {
         &mut self,
         key: &str,
         url: Option<String>,
+        how: BrowserOpen,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<u64> {
@@ -508,7 +510,7 @@ impl HarnessWorkspace {
             .iter()
             .filter_map(|t| t.record(cx))
             .collect();
-        let existing = url.as_deref().and_then(|url| find_browser_tab(&records, url));
+        let existing = reusable_browser_tab(&records, url.as_deref(), how);
         let id = match existing {
             Some(id) => {
                 if let Some(pane) = self.panes.get_mut(key) {
@@ -571,7 +573,16 @@ impl HarnessWorkspace {
                     cx.notify();
                 }
                 BrowserEvent::NewWindow(url) => {
-                    ws.open_browser_tab_in(&key, Some(url.clone()), window, cx);
+                    // WebKit has already declined to open its own window;
+                    // the page asked for a new one, so it gets a new tab
+                    // even when one (its own, say) is on that URL.
+                    ws.open_browser_tab_in(
+                        &key,
+                        Some(url.clone()),
+                        BrowserOpen::AlwaysNew,
+                        window,
+                        cx,
+                    );
                 }
             }
         })
@@ -1122,6 +1133,30 @@ const BROWSER_SAVE_DELAY: Duration = Duration::from_secs(1);
 /// The browser tab among `tabs` showing `url`, compared as parsed URLs (so
 /// `http://localhost:3000` matches `http://localhost:3000/`). A blank tab, or
 /// an unparsable `url`, never matches.
+/// Whether opening a URL in a browser tab may land on a tab already there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BrowserOpen {
+    /// An open from the app (a routed link, Ports' Open): focus the tab
+    /// already on that URL, if any.
+    ReuseSameUrl,
+    /// A page's new-window request (`target=_blank`, `window.open`): always
+    /// a tab of its own.
+    AlwaysNew,
+}
+
+/// The tab an open of `url` lands on instead of a new one, if any: never
+/// for a blank tab (`None`) or [`BrowserOpen::AlwaysNew`].
+pub(crate) fn reusable_browser_tab(
+    tabs: &[crate::panes_state::TabRecord],
+    url: Option<&str>,
+    how: BrowserOpen,
+) -> Option<u64> {
+    match how {
+        BrowserOpen::ReuseSameUrl => find_browser_tab(tabs, url?),
+        BrowserOpen::AlwaysNew => None,
+    }
+}
+
 pub(crate) fn find_browser_tab(tabs: &[crate::panes_state::TabRecord], url: &str) -> Option<u64> {
     use crate::panes_state::TabRecordKind as K;
     let comparable = |u: &str| url::Url::parse(u.trim()).ok().map(String::from);
@@ -1282,6 +1317,12 @@ mod tests {
         assert_eq!(find_browser_tab(&tabs, "https://localhost:3000/"), None);
         // A blank tab is never "the same page".
         assert_eq!(find_browser_tab(&tabs, ""), None);
+        // App opens reuse the tab; a page's new window never does, even on
+        // its own URL; a blank tab is always new.
+        let url = Some("http://localhost:3000/");
+        assert_eq!(reusable_browser_tab(&tabs, url, BrowserOpen::ReuseSameUrl), Some(3));
+        assert_eq!(reusable_browser_tab(&tabs, url, BrowserOpen::AlwaysNew), None);
+        assert_eq!(reusable_browser_tab(&tabs, None, BrowserOpen::ReuseSameUrl), None);
     }
 
     #[test]
