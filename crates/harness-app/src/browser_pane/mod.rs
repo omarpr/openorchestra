@@ -573,11 +573,12 @@ fn address_text<'a>(
     (!(focused && edited)).then(|| failed.or(page).unwrap_or_default())
 }
 
-/// Whether the bar's `text` is the user's own: neither the page's URL nor
-/// the failed address, whichever the pane last put there.
-fn address_edited(text: &str, page: Option<&str>, failed: Option<&str>) -> bool {
-    let text = text.trim();
-    text != page.unwrap_or_default() && failed.is_none_or(|f| text != f)
+/// Whether the bar's `text` is the user's own: not what the pane last
+/// put there (`written`). Not the page's current URL: that may already
+/// have moved on (a redirect, `pushState`) while the bar still shows the
+/// one written before, untouched, which must then follow the page.
+fn address_edited(text: &str, written: &str) -> bool {
+    text.trim() != written.trim()
 }
 
 /// A load that failed, shown in place of the page.
@@ -797,6 +798,9 @@ pub(crate) struct BrowserPane {
     /// Where the open inspector is in settling to the user's placement
     /// ([`settle_inspector`]).
     inspector_watch: InspectorWatch,
+    /// The text the pane last put in the address bar, which tells what
+    /// the user typed from what we wrote ([`address_edited`]).
+    address_written: String,
     /// Opens and refreshes the suggestions as the user types.
     _address_edits: gpui::Subscription,
     /// Redraws when the history changes: a blank tab's Recent list fills in
@@ -904,6 +908,7 @@ impl BrowserPane {
             }
         });
         Self {
+            address_written: url.clone().unwrap_or_default(),
             attempted: url.clone(),
             url,
             title: title.filter(|t| !t.trim().is_empty()),
@@ -997,7 +1002,7 @@ impl BrowserPane {
     fn update_suggestions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.address.read(cx).text(cx);
         let typing = self.address.focus_handle(cx).is_focused(window)
-            && address_edited(&text, self.url.as_deref(), self.failed_url());
+            && address_edited(&text, &self.address_written);
         let items: Vec<history::HistoryEntry> = match (&self.project, typing) {
             (Some(project), true) => self
                 .history
@@ -1041,8 +1046,7 @@ impl BrowserPane {
     /// it, the list closes and the page takes the keyboard once shown.
     fn load_here(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
         self.suggestions = None;
-        self.address
-            .update(cx, |e, cx| e.set_text(url.as_str(), window, cx));
+        self.write_address(&url, window, cx);
         self.navigate(url, cx);
         window.focus(&self.focus_handle, cx);
         self.focus_page.set(true);
@@ -1295,15 +1299,25 @@ impl BrowserPane {
     fn set_address(&mut self, focused: bool, window: &mut Window, cx: &mut Context<Self>) {
         let failed = self.failed_url();
         let current = self.address.read(cx).text(cx);
-        let edited = address_edited(&current, self.url.as_deref(), failed);
+        let edited = address_edited(&current, &self.address_written);
         let Some(text) = address_text(self.url.as_deref(), failed, focused, edited) else {
             return;
         };
+        let text = text.to_string();
         if current != text {
-            let text = text.to_string();
-            self.address
-                .update(cx, |e, cx| e.set_text(text.as_str(), window, cx));
+            self.write_address(&text, window, cx);
+        } else {
+            // Already there (typed to match, say): ours from now on, so the
+            // bar follows the page again.
+            self.address_written = text;
         }
+    }
+
+    /// Put `text` in the address bar as ours, not the user's: remembered
+    /// first, so the edit it makes doesn't open the suggestions.
+    fn write_address(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.address_written = text.to_string();
+        self.address.update(cx, |e, cx| e.set_text(text, window, cx));
     }
 
     /// The address whose load failure shows in place of the page.
@@ -2518,19 +2532,24 @@ mod tests {
     }
 
     #[test]
-    fn the_address_bar_is_edited_when_it_names_neither_the_page_nor_the_failure() {
-        let page = Some("http://localhost:3000/");
-        let failed = Some("http://localhost:9/");
-        assert!(!address_edited("http://localhost:3000/", page, None));
-        assert!(!address_edited(" http://localhost:3000/ ", page, None));
-        assert!(!address_edited("http://localhost:9/", page, failed));
-        // The page's URL still in the bar when the error arrives: not
-        // typed, so it gives way to the failed address.
-        assert!(!address_edited("http://localhost:3000/", page, failed));
-        assert!(address_edited("localhost:3", page, failed));
-        assert!(address_edited("http://localhost:9/", page, None));
-        assert!(!address_edited("", None, None));
-        assert!(address_edited("loc", None, None));
+    fn the_address_bar_is_edited_when_it_differs_from_what_the_pane_wrote() {
+        let a = "http://localhost:3000/a";
+        assert!(!address_edited(a, a));
+        assert!(!address_edited(" http://localhost:3000/a ", a));
+        assert!(address_edited("localhost:3", a));
+        assert!(!address_edited("", ""));
+        assert!(address_edited("loc", ""));
+        // Focused on /a, untouched, while the page moves to /b: the bar
+        // still holds what the pane wrote, so it isn't the user's, and
+        // follows the page even with the focus there.
+        let edited = address_edited(a, a);
+        assert_eq!(
+            address_text(Some("http://localhost:3000/b"), None, true, edited),
+            Some("http://localhost:3000/b")
+        );
+        // Typed over: left alone until the user leaves the bar.
+        let edited = address_edited("localhost:9", a);
+        assert_eq!(address_text(Some("http://localhost:3000/b"), None, true, edited), None);
     }
 
     #[test]
