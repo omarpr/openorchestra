@@ -97,6 +97,22 @@ pub fn open_external_now(url: &str) {
     }
 }
 
+/// The routed-link drain's way out when its workspace is gone: close
+/// `routed`, so the platform sends any later link straight to the system
+/// (its fallback for a failed send), then hand every link already queued
+/// to `open`. The platform accepted those, so dropping the receiver alone
+/// would lose them.
+pub async fn open_rest_externally(
+    routed: &mut futures::channel::mpsc::UnboundedReceiver<String>,
+    open: impl Fn(&str),
+) {
+    use futures::StreamExt as _;
+    routed.close();
+    while let Some(url) = routed.next().await {
+        open(&url);
+    }
+}
+
 /// What the system is given for `url`: its normalized absolute form, unless
 /// it is a local file (opening `file:///…/x.app` launches it), a script, or
 /// a page's own plumbing (`about:`, `data:`, `blob:`): the browser tab loads
@@ -234,6 +250,20 @@ mod tests {
         ] {
             assert!(launch_target(u).is_none(), "{u}");
         }
+    }
+
+    #[test]
+    fn a_gone_drain_opens_every_queued_link_and_refuses_new_ones() {
+        let (tx, mut rx) = futures::channel::mpsc::unbounded();
+        tx.unbounded_send("http://localhost:1/".to_string()).unwrap();
+        tx.unbounded_send("http://localhost:2/".to_string()).unwrap();
+        let opened = std::cell::RefCell::new(Vec::new());
+        futures::executor::block_on(open_rest_externally(&mut rx, |u| {
+            opened.borrow_mut().push(u.to_string())
+        }));
+        assert_eq!(*opened.borrow(), ["http://localhost:1/", "http://localhost:2/"]);
+        // A later link fails to send, so the platform opens it itself.
+        assert!(tx.unbounded_send("http://localhost:3/".to_string()).is_err());
     }
 
     #[test]

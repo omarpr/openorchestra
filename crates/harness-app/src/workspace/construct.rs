@@ -405,11 +405,18 @@ impl HarnessWorkspace {
                     match opened {
                         Ok(true) => {}
                         Ok(false) => crate::link_routing::open_external_now(&url),
-                        // The workspace is gone: this link goes out, and
-                        // dropping the receiver sends later ones straight to
-                        // the default browser.
+                        // The workspace is gone: this link goes out, and so
+                        // does every one already queued behind it. Closing
+                        // first sends later ones straight to the default
+                        // browser (the platform's fallback for a failed
+                        // send), then the buffer drains and the loop ends.
                         Err(_) => {
                             crate::link_routing::open_external_now(&url);
+                            crate::link_routing::open_rest_externally(
+                                &mut routed,
+                                crate::link_routing::open_external_now,
+                            )
+                            .await;
                             break;
                         }
                     }
