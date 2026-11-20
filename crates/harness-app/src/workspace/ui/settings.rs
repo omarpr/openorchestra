@@ -839,7 +839,7 @@ impl HarnessWorkspace {
                     } else {
                         crate::shortcuts::display_keys(&e.keys)
                     };
-                    let mut chipd = focus
+                    let chipd = focus
                         .scroll_button(button_id, e.what, hx, cx)
                         .aria_description(chip_label.clone())
                         .flex_none()
@@ -873,11 +873,10 @@ impl HarnessWorkspace {
                             window.focus(&button_focus, cx);
                             cx.notify();
                         }));
-                    if arming {
-                        // The armed chip owns the keyboard until a chord lands
-                        // or escape cancels.
-                        chipd = chipd.on_key_down(cx.listener(Self::rebind_key));
-                    }
+                    // While armed, the chip owns the keyboard until a chord
+                    // lands or escape cancels: the workspace's keystroke
+                    // interceptor takes the keys before the keymap can run
+                    // them (`capture_rebind_keystroke`).
                     section = section.child(
                         div()
                             .flex()

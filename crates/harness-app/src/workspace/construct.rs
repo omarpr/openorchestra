@@ -340,6 +340,17 @@ impl HarnessWorkspace {
         // or the app hidden (memory; the page reloads when shown). gpui
         // draws no frames for a hidden window, so `render`'s reconcile can't
         // see this; the visibility observer can.
+        // An armed shortcut row records the next chord, ⌘W included. gpui
+        // runs keymap actions before any key-down listener, so the capture
+        // has to happen in an interceptor, which runs first.
+        let rebind_ws = cx.weak_entity();
+        cx.intercept_keystrokes(move |event, window, cx| {
+            let _ = rebind_ws.update(cx, |ws, cx| {
+                ws.capture_rebind_keystroke(&event.keystroke, window, cx)
+            });
+        })
+        .detach();
+
         cx.observe_window_visibility(window, |ws, visibility, window, cx| {
             ws.window_visibility_changed(visibility, window, cx);
         })

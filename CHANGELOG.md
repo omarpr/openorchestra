@@ -76,6 +76,9 @@ Unreleased is empty.
 - Status messages are shown in red only when something failed. A success
   message that happens to name something like "Error Phone" stays in the
   normal color.
+- When you change a keyboard shortcut in **Settings › Shortcuts**, pressing a
+  key combination that already does something, like ⌘W, now records it
+  instead of running it.
 
 ## 1.3.0 - 2026-11-19
 
