@@ -173,6 +173,12 @@ pub(crate) struct Prefs {
     /// Open local/dev links in an in-app browser tab instead of the system browser.
     #[serde(default = "default_true")]
     pub(crate) links_in_browser_tab: bool,
+    /// Where browser tabs open their Web Inspector: docked at the bottom,
+    /// left or right of the page, or in its own window; the user's last
+    /// move from the inspector's toolbar. Absent in older prefs → bottom;
+    /// older builds ignore it.
+    #[serde(default, deserialize_with = "crate::browser_pane::InspectorPlacement::deserialize_lenient")]
+    pub(crate) inspector_placement: crate::browser_pane::InspectorPlacement,
 }
 
 pub(crate) fn default_true() -> bool {
@@ -219,6 +225,7 @@ impl Default for Prefs {
             diff_open: true,
             close_terminals_on_exit: None,
             links_in_browser_tab: true,
+            inspector_placement: Default::default(),
         }
     }
 }
@@ -494,6 +501,41 @@ mod collapsed_prefs_tests {
 #[cfg(test)]
 mod links_pref_tests {
     use super::Prefs;
+    use crate::browser_pane::InspectorPlacement;
+
+    #[test]
+    fn the_inspector_placement_is_remembered_and_old_files_get_bottom() {
+        assert_eq!(Prefs::default().inspector_placement, InspectorPlacement::Bottom);
+        // A prefs.json written before the setting existed.
+        let mut old = serde_json::to_value(Prefs::default()).unwrap();
+        old.as_object_mut().unwrap().remove("inspector_placement");
+        let p: Prefs = serde_json::from_value(old).unwrap();
+        assert_eq!(p.inspector_placement, InspectorPlacement::Bottom);
+        // Each placement round-trips under its lowercase name.
+        for (placement, name) in [
+            (InspectorPlacement::Bottom, "bottom"),
+            (InspectorPlacement::Left, "left"),
+            (InspectorPlacement::Right, "right"),
+            (InspectorPlacement::Window, "window"),
+        ] {
+            let prefs = Prefs {
+                inspector_placement: placement,
+                ..Prefs::default()
+            };
+            let json = serde_json::to_value(&prefs).unwrap();
+            assert_eq!(json["inspector_placement"], name);
+            let back: Prefs = serde_json::from_value(json).unwrap();
+            assert_eq!(back.inspector_placement, placement);
+        }
+        // One this build doesn't know (a newer build's) is bottom, and the
+        // rest of the file still loads.
+        let mut newer = serde_json::to_value(Prefs::default()).unwrap();
+        newer["inspector_placement"] = serde_json::json!("floating");
+        newer["sidebar_width"] = serde_json::json!(300.0);
+        let p: Prefs = serde_json::from_value(newer).unwrap();
+        assert_eq!(p.inspector_placement, InspectorPlacement::Bottom);
+        assert_eq!(p.sidebar_width, 300.0);
+    }
 
     #[test]
     fn prefs_default_routes_links_and_old_files_get_the_default() {

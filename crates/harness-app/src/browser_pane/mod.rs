@@ -48,6 +48,14 @@
 //! button change it too. The inspector lives and dies with the native view:
 //! hiding or closing the tab closes it and resets the button, and the tab
 //! shown again does not reopen it.
+//!
+//! It opens docked inside the tab, at the bottom by default. Its own
+//! toolbar docks it left, right or bottom, or pops it out into a window;
+//! the pane remembers the last of those the user picked
+//! ([`InspectorPlacement`], `prefs.json`, through [`BrowserEvent::InspectorPlaced`])
+//! and moves each newly opened inspector there once ([`settle_inspector`]):
+//! where it opened, and the result of the pane's own move, are never taken
+//! for the user's choice.
 
 mod history;
 mod webview;
@@ -73,7 +81,9 @@ use crate::workspace::{LookKind, browser_label, kind_icon, tip};
 pub(crate) use webview::{
     Hole, set_app_shortcuts, set_punch_through, window_is_minimized_or_hidden,
 };
-use webview::{NativeEvents, NativeWebView, inspector_available, settle_inspector};
+use webview::{
+    DockSide, InspectorMove, InspectorPlace, NativeEvents, NativeWebView, inspector_available,
+};
 
 /// What the address bar makes of what was typed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -284,6 +294,145 @@ fn devtools_button(available: bool, has_page_view: bool, inspector_open: bool) -
 /// change it without telling the pane.
 const INSPECTOR_POLL: Duration = Duration::from_millis(500);
 
+/// Where the user keeps a page's Web Inspector: docked in the tab on one
+/// side, or in its own window. Remembered in `prefs.json`
+/// (`inspector_placement`) and mirrored here ([`set_inspector_placement`]),
+/// so each tab reopens it there.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum InspectorPlacement {
+    #[default]
+    Bottom,
+    Left,
+    Right,
+    Window,
+}
+
+impl InspectorPlacement {
+    fn index(self) -> u8 {
+        match self {
+            InspectorPlacement::Bottom => 0,
+            InspectorPlacement::Left => 1,
+            InspectorPlacement::Right => 2,
+            InspectorPlacement::Window => 3,
+        }
+    }
+
+    fn from_index(i: u8) -> Self {
+        match i {
+            1 => InspectorPlacement::Left,
+            2 => InspectorPlacement::Right,
+            3 => InspectorPlacement::Window,
+            _ => InspectorPlacement::Bottom,
+        }
+    }
+
+    /// Reads `prefs.json`'s value leniently: a placement this build doesn't
+    /// know (a newer build's) is the default, rather than failing the whole
+    /// prefs file.
+    pub(crate) fn deserialize_lenient<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::Deserialize as _;
+        Ok(serde_json::Value::deserialize(d)
+            .ok()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default())
+    }
+}
+
+static INSPECTOR_PLACEMENT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Mirror of the `inspector_placement` pref, readable by every pane without
+/// threading the workspace through. Set when prefs load and whenever a
+/// pane sees the user move an inspector.
+pub(crate) fn set_inspector_placement(placement: InspectorPlacement) {
+    INSPECTOR_PLACEMENT.store(placement.index(), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn inspector_placement() -> InspectorPlacement {
+    InspectorPlacement::from_index(INSPECTOR_PLACEMENT.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// The placement an inspector at `place` is in, if it can be told.
+fn placement_of(place: InspectorPlace) -> Option<InspectorPlacement> {
+    match place {
+        InspectorPlace::Docked(Some(DockSide::Bottom)) => Some(InspectorPlacement::Bottom),
+        InspectorPlace::Docked(Some(DockSide::Left)) => Some(InspectorPlacement::Left),
+        InspectorPlace::Docked(Some(DockSide::Right)) => Some(InspectorPlacement::Right),
+        InspectorPlace::OwnWindow => Some(InspectorPlacement::Window),
+        InspectorPlace::Unsupported
+        | InspectorPlace::NotPlaced
+        | InspectorPlace::Docked(None)
+        | InspectorPlace::DockedElsewhere => None,
+    }
+}
+
+/// Logs, once per process, that WebKit docked an inspector outside the
+/// page's container (the pane then moves it to its own window).
+fn log_docked_elsewhere() {
+    static LOGGED: std::sync::Once = std::sync::Once::new();
+    LOGGED.call_once(|| {
+        log::warn!("browser: WebKit docked the inspector outside the tab; moving it to its own window");
+    });
+}
+
+/// How the pane moves an inspector to `to`.
+fn move_for(to: InspectorPlacement) -> InspectorMove {
+    match to {
+        InspectorPlacement::Bottom => InspectorMove::AttachBottom,
+        InspectorPlacement::Left => InspectorMove::Dock(DockSide::Left),
+        InspectorPlacement::Right => InspectorMove::Dock(DockSide::Right),
+        InspectorPlacement::Window => InspectorMove::Detach,
+    }
+}
+
+/// Where the pane is with an open inspector ([`settle_inspector`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InspectorWatch {
+    /// No inspector open.
+    Closed,
+    /// It just opened; waiting to see where WebKit put it.
+    Opening,
+    /// The pane moved it to the user's placement; the next placement seen
+    /// is the result, not the user's doing.
+    Moved,
+    /// Settled at this placement (`None`: unknown). A different one seen
+    /// from now on is the user's doing, from the inspector's own toolbar.
+    Watching(Option<InspectorPlacement>),
+}
+
+/// What the pane does on a poll that sees the open inspector at `place`,
+/// with the user's placement `want`: the move to make (at most once per
+/// open), the next state, and a placement to remember (only one the user
+/// chose: never where it opened, nor the result of our own move).
+fn settle_inspector(
+    watch: InspectorWatch,
+    want: InspectorPlacement,
+    place: InspectorPlace,
+) -> (Option<InspectorMove>, InspectorWatch, Option<InspectorPlacement>) {
+    use InspectorWatch::*;
+    let seen = placement_of(place);
+    match (watch, place, seen) {
+        (Closed, _, _) => (None, Closed, None),
+        // WebKit can't say where it is: leave it alone for good.
+        (_, InspectorPlace::Unsupported, _) => (None, Watching(None), None),
+        // Docked somewhere other than beside the page (never expected):
+        // its own window, once.
+        (Opening, InspectorPlace::DockedElsewhere, _) => (Some(InspectorMove::Detach), Moved, None),
+        (Moved, InspectorPlace::DockedElsewhere, _) => (None, Watching(None), None),
+        // Not in a window yet, or mid-move: ask again next time.
+        (Opening | Moved, _, None) => (None, watch, None),
+        (Opening, _, Some(p)) if p == want => (None, Watching(Some(p)), None),
+        // Elsewhere: moved once. WebKit may refuse (a page too small to
+        // dock beside); whatever comes of it is where it stays.
+        (Opening, _, Some(_)) => (Some(move_for(want)), Moved, None),
+        (Moved, _, Some(p)) => (None, Watching(Some(p)), None),
+        // No baseline yet (it was never readable): this is one, not a move.
+        (Watching(None), _, Some(p)) => (None, Watching(Some(p)), None),
+        (Watching(Some(last)), _, Some(p)) if last != p => (None, Watching(Some(p)), Some(p)),
+        (Watching(_), _, _) => (None, watch, None),
+    }
+}
+
 /// The tab's name for a page: its title, else its host, else "Browser".
 pub(crate) fn page_label(url: Option<&str>, title: Option<&str>) -> String {
     let host = url
@@ -303,6 +452,9 @@ pub(crate) enum BrowserEvent {
     TitleChanged,
     /// The page asked for a new window (`target=_blank`, `window.open`).
     NewWindow(String),
+    /// The user moved the page's Web Inspector (its toolbar's dock
+    /// buttons): remember it in `prefs.json`.
+    InspectorPlaced(InspectorPlacement),
 }
 
 impl BrowserEvent {
@@ -510,9 +662,9 @@ pub(crate) struct BrowserPane {
     /// The page's Web Inspector is open, as last polled
     /// (`poll_inspector`). Reset when the view is dropped, which closes it.
     inspector_open: bool,
-    /// The inspector just opened and may still be docked by WebKit; the
-    /// next poll moves it to its own window ([`settle_inspector`]).
-    inspector_settling: bool,
+    /// Where the open inspector is in settling to the user's placement
+    /// ([`settle_inspector`]).
+    inspector_watch: InspectorWatch,
     /// Opens and refreshes the suggestions as the user types.
     _address_edits: gpui::Subscription,
 }
@@ -635,7 +787,7 @@ impl BrowserPane {
             fresh_load: false,
             running: Vec::new(),
             inspector_open: false,
-            inspector_settling: false,
+            inspector_watch: InspectorWatch::Closed,
             _address_edits: address_edits,
         }
     }
@@ -808,7 +960,7 @@ impl BrowserPane {
             // shown again, the page reloads with it closed.
             self.native = None;
             self.inspector_open = false;
-            self.inspector_settling = false;
+            self.inspector_watch = InspectorWatch::Closed;
             self.loading = false;
             self.suggestions = None;
             // A focus request the page never got to take (e.g. Enter that
@@ -876,7 +1028,10 @@ impl BrowserPane {
                     cx.spawn_in(window, async move |this, cx| {
                         loop {
                             cx.background_executor().timer(INSPECTOR_POLL).await;
-                            if this.update(cx, |pane, cx| pane.poll_inspector(cx)).is_err() {
+                            if this
+                                .update_in(cx, |pane, window, cx| pane.poll_inspector(window, cx))
+                                .is_err()
+                            {
                                 break;
                             }
                         }
@@ -886,7 +1041,7 @@ impl BrowserPane {
                 self.reshow = (!std::mem::take(&mut self.fresh_load)).then(|| url.clone());
                 self.attempted = Some(url);
                 self.inspector_open = false;
-                self.inspector_settling = false;
+                self.inspector_watch = InspectorWatch::Closed;
                 self.native = Some(Native {
                     view,
                     _events: events,
@@ -1079,34 +1234,71 @@ impl BrowserPane {
 
     /// The Developer tools button: show the page's Web Inspector, or close
     /// it if open. The state is read back from WebKit right away; showing
-    /// may land a moment later, which the next poll picks up.
-    fn toggle_devtools(&mut self, cx: &mut Context<Self>) {
+    /// may land a moment later, which the next poll picks up. Opening puts
+    /// gpui's focus on the page's side of the tab, so a docked inspector's
+    /// ⌘-chords reach it (the key monitor's routing in `webview.rs`); closing
+    /// one that had the keyboard hands it to the page.
+    fn toggle_devtools(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(native) = &self.native {
-            native.view.toggle_inspector();
+            let opening = !self.inspector_open;
+            if native.view.toggle_inspector() {
+                self.focus_page.set(true);
+            }
+            if opening {
+                window.focus(&self.focus_handle, cx);
+            }
         }
-        self.poll_inspector(cx);
+        self.poll_inspector(window, cx);
     }
 
-    /// Catch up with the page's inspector: the button, Inspect Element and
-    /// the inspector's own close button all open or close it. One that just
-    /// opened is moved to its own window if WebKit docked it
-    /// ([`settle_inspector`]). Notifies only on a change.
-    fn poll_inspector(&mut self, cx: &mut Context<Self>) {
+    /// Catch up with the page's inspector: the button, Inspect Element, the
+    /// inspector's own close button and its dock buttons all change it.
+    /// One that just opened is moved once to the user's placement, and a
+    /// move the user makes afterwards is remembered ([`settle_inspector`]).
+    /// Notifies only on a change.
+    ///
+    /// A docked inspector that took the keyboard without a click (WebKit
+    /// makes it first responder when it docks: Inspect Element, our own
+    /// move) while gpui's focus is off the page's side of this tab pulls
+    /// gpui's focus here, as a click in it would: its ⌘-chords then reach
+    /// it, and leaving the tab takes its keyboard back.
+    fn poll_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(native) = &self.native else {
             return;
         };
         let open = native.view.inspector_visible();
-        if open != self.inspector_open {
+        let changed = open != self.inspector_open;
+        if changed {
             self.inspector_open = open;
-            self.inspector_settling = open;
+            self.inspector_watch = if open { InspectorWatch::Opening } else { InspectorWatch::Closed };
             cx.notify();
         }
-        if self.inspector_settling {
-            let (detach, pending) = settle_inspector(true, native.view.inspector_place());
-            if detach {
-                native.view.detach_inspector();
+        if open {
+            let place = native.view.inspector_place();
+            if place == InspectorPlace::DockedElsewhere {
+                log_docked_elsewhere();
             }
-            self.inspector_settling = pending;
+            let (to, next, chosen) = settle_inspector(self.inspector_watch, inspector_placement(), place);
+            if let Some(to) = to {
+                native.view.move_inspector(to);
+            }
+            self.inspector_watch = next;
+            if let Some(chosen) = chosen {
+                set_inspector_placement(chosen);
+                cx.emit(BrowserEvent::InspectorPlaced(chosen));
+            }
+        }
+        if open || changed {
+            // Popped out or closed while it had the keyboard: AppKit leaves
+            // it with the window; gpui's view gets it back.
+            native.view.recover_focus();
+        }
+        if open && native.view.inspector_has_focus() {
+            let in_pane = self.focus_handle.contains_focused(window, cx);
+            let in_address = self.address.focus_handle(cx).contains_focused(window, cx);
+            if !gpui_focus_on_page(in_pane, in_address) {
+                window.focus(&self.focus_handle, cx);
+            }
         }
     }
 
@@ -1210,7 +1402,7 @@ impl BrowserPane {
                             state == DevToolsButton::On,
                         )
                         .when(enabled, |d| {
-                            d.on_click(cx.listener(|pane, _, _, cx| pane.toggle_devtools(cx)))
+                            d.on_click(cx.listener(|pane, _, window, cx| pane.toggle_devtools(window, cx)))
                         }),
                     )
                 }
@@ -1957,6 +2149,103 @@ mod tests {
         assert_eq!(page_label(Some("http://localhost:3000/x"), None), "Browser · localhost");
         assert_eq!(page_label(Some("http://localhost:3000/x"), Some("Vite")), "Browser · Vite");
         assert_eq!(page_label(Some("not a url"), None), "Browser");
+    }
+
+    #[test]
+    fn an_inspectors_placement_is_read_from_where_it_is() {
+        use InspectorPlace::*;
+        assert_eq!(placement_of(Docked(Some(DockSide::Bottom))), Some(InspectorPlacement::Bottom));
+        assert_eq!(placement_of(Docked(Some(DockSide::Left))), Some(InspectorPlacement::Left));
+        assert_eq!(placement_of(Docked(Some(DockSide::Right))), Some(InspectorPlacement::Right));
+        assert_eq!(placement_of(OwnWindow), Some(InspectorPlacement::Window));
+        for place in [Unsupported, NotPlaced, Docked(None), DockedElsewhere] {
+            assert_eq!(placement_of(place), None, "{place:?}");
+        }
+    }
+
+    #[test]
+    fn the_placement_mirror_round_trips() {
+        let before = inspector_placement();
+        for p in [
+            InspectorPlacement::Left,
+            InspectorPlacement::Right,
+            InspectorPlacement::Window,
+            InspectorPlacement::Bottom,
+        ] {
+            set_inspector_placement(p);
+            assert_eq!(inspector_placement(), p);
+        }
+        set_inspector_placement(before);
+    }
+
+    #[test]
+    fn an_opened_inspector_goes_to_the_users_placement_once_and_later_moves_are_remembered() {
+        use InspectorPlacement as P;
+        use InspectorWatch::*;
+        let bottom = InspectorPlace::Docked(Some(DockSide::Bottom));
+        let left = InspectorPlace::Docked(Some(DockSide::Left));
+        let right = InspectorPlace::Docked(Some(DockSide::Right));
+        let window = InspectorPlace::OwnWindow;
+        let mid = InspectorPlace::Docked(None);
+
+        // Closed: nothing, whatever WebKit says.
+        for place in [bottom, window, InspectorPlace::NotPlaced] {
+            assert_eq!(settle_inspector(Closed, P::Bottom, place), (None, Closed, None));
+        }
+        // Opening, not placed yet or mid-move: ask again next time.
+        assert_eq!(settle_inspector(Opening, P::Bottom, InspectorPlace::NotPlaced), (None, Opening, None));
+        assert_eq!(settle_inspector(Opening, P::Bottom, mid), (None, Opening, None));
+        // Opened where the user wants it: settled, nothing remembered.
+        assert_eq!(settle_inspector(Opening, P::Bottom, bottom), (None, Watching(Some(P::Bottom)), None));
+        assert_eq!(settle_inspector(Opening, P::Window, window), (None, Watching(Some(P::Window)), None));
+        // Opened elsewhere: moved, once, to the user's placement.
+        assert_eq!(
+            settle_inspector(Opening, P::Bottom, window),
+            (Some(InspectorMove::AttachBottom), Moved, None)
+        );
+        assert_eq!(settle_inspector(Opening, P::Window, bottom), (Some(InspectorMove::Detach), Moved, None));
+        assert_eq!(
+            settle_inspector(Opening, P::Left, window),
+            (Some(InspectorMove::Dock(DockSide::Left)), Moved, None)
+        );
+        assert_eq!(
+            settle_inspector(Opening, P::Right, left),
+            (Some(InspectorMove::Dock(DockSide::Right)), Moved, None)
+        );
+        // After our move: wherever it ended up is the baseline, never
+        // remembered and never moved again (WebKit refuses to dock beside
+        // a small page; no loop).
+        assert_eq!(settle_inspector(Moved, P::Bottom, window), (None, Watching(Some(P::Window)), None));
+        assert_eq!(settle_inspector(Moved, P::Left, left), (None, Watching(Some(P::Left)), None));
+        assert_eq!(settle_inspector(Moved, P::Left, mid), (None, Moved, None));
+        // Settled: a different placement is the user's, from the
+        // inspector's toolbar; it is remembered. The same one is not.
+        assert_eq!(settle_inspector(Watching(Some(P::Bottom)), P::Bottom, bottom), (None, Watching(Some(P::Bottom)), None));
+        assert_eq!(
+            settle_inspector(Watching(Some(P::Bottom)), P::Bottom, right),
+            (None, Watching(Some(P::Right)), Some(P::Right))
+        );
+        assert_eq!(
+            settle_inspector(Watching(Some(P::Right)), P::Bottom, window),
+            (None, Watching(Some(P::Window)), Some(P::Window))
+        );
+        // Mid-move while watching: wait for where it lands.
+        assert_eq!(settle_inspector(Watching(Some(P::Bottom)), P::Bottom, mid), (None, Watching(Some(P::Bottom)), None));
+        // Docked outside the tab (never expected): its own window, once.
+        let elsewhere = InspectorPlace::DockedElsewhere;
+        assert_eq!(settle_inspector(Opening, P::Bottom, elsewhere), (Some(InspectorMove::Detach), Moved, None));
+        assert_eq!(settle_inspector(Moved, P::Bottom, elsewhere), (None, Watching(None), None));
+        assert_eq!(settle_inspector(Watching(None), P::Bottom, elsewhere), (None, Watching(None), None));
+        // A late result of that move, first readable now: the baseline,
+        // not the user's choice.
+        assert_eq!(settle_inspector(Watching(None), P::Bottom, window), (None, Watching(Some(P::Window)), None));
+        // WebKit can't say where it is: left alone for good.
+        for watch in [Opening, Moved, Watching(Some(P::Left))] {
+            assert_eq!(
+                settle_inspector(watch, P::Bottom, InspectorPlace::Unsupported),
+                (None, Watching(None), None)
+            );
+        }
     }
 
     #[test]

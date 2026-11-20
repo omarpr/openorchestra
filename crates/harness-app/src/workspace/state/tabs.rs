@@ -593,6 +593,12 @@ impl HarnessWorkspace {
                     }
                     cx.notify();
                 }
+                BrowserEvent::InspectorPlaced(placement) => {
+                    // The pane already updated the shared mirror; only the
+                    // file is left.
+                    ws.prefs.inspector_placement = *placement;
+                    ws.save_prefs(cx);
+                }
                 BrowserEvent::NewWindow(url) => {
                     // WebKit has already declined to open its own window;
                     // the page asked for a new one, so it gets a new tab

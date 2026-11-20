@@ -23,7 +23,9 @@ Unreleased is empty.
   General › Clear browsing history** forgets them. The conductor stays
   visible over a browser page and can be dragged there. Browser tabs have
   Developer tools (Web Inspector) from the address bar and from right-click
-  → Inspect Element.
+  → Inspect Element. Developer tools open docked in the tab (bottom by
+  default; dock left/right or in a window from the inspector's toolbar,
+  remembered).
 - Links to local addresses (localhost, your network, Tailscale) and ports
   opened from the current project or task open in a browser tab. Other links
   still use your default browser. Change it in **Settings › General**.

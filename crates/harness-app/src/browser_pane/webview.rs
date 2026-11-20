@@ -162,12 +162,15 @@
 //!   preferences before the view is made, as WebKit-based apps commonly do.
 //!   KVC raises `NSUndefinedKeyException` for an unknown key, and an ObjC
 //!   exception must not unwind through Rust, so the key is validated
-//!   instead of caught: it is set only if the preferences answer
-//!   `_setDeveloperExtrasEnabled:` or `setDeveloperExtrasEnabled:` (KVC's
-//!   setter search; [`developer_extras_settable`]).
+//!   instead of caught: it is set only if KVC's setter search
+//!   (`setDeveloperExtrasEnabled:`, then `_setDeveloperExtrasEnabled:`)
+//!   finds a method and that method takes one BOOL (three arguments, the
+//!   third encoded `B` or `c`; `v20@0:8B16` here)
+//!   ([`developer_extras_settable`]).
 //! - **The address bar's Developer tools button**: `-[WKWebView _inspector]`
 //!   returns the page's `_WKInspector`, whose `show`, `close`, `isVisible`
-//!   (and, optionally, `isConnected`, `inspectorWebView`, `detach`) were
+//!   (and, optionally, `isConnected`, `inspectorWebView`, `attach`,
+//!   `detach`) were
 //!   found by introspecting the runtime on macOS 27.3, not guessed.
 //!   [`inspector_available`] checks once, on the classes, that each needed
 //!   method exists with the shape we send it (no arguments; returns
@@ -184,15 +187,86 @@
 //!
 //! The inspector is the page's: dropping the view (the tab hidden or
 //! closed, see `mod.rs`) closes it first, and the page shown again starts
-//! with it closed (it doesn't reopen on its own). WebKit may dock a new
-//! inspector beside the page (its preference "starts attached"); the pane
-//! moves one it docked into its own window once, as it opens
-//! ([`settle_inspector`]), and leaves alone one the user docks later from
-//! the inspector's toolbar. Docked, it is native and above gpui like the
-//! page, next to it in the page's container. The key monitor acts
-//! only on events inside a page of ours ([`registered_page`]); the
-//! inspector is a `WKWebView` but not registered, so its keys and clicks
-//! go on untouched, in its own window or docked.
+//! with it closed (it doesn't reopen on its own).
+//!
+//! **Docked inside the tab** (Task 13). WebKit docks the inspector beside
+//! its *attachment view*, which defaults to the page's `WKWebView` itself
+//! (`-[WKWebView _inspectorAttachmentView]` falls back to the view; we
+//! never call `_setInspectorAttachmentView:`). It adds the inspector's web
+//! view to the attachment view's superview and splits that superview's
+//! bounds between the two. So the page sits in a **dock view** of ours, a
+//! plain NSView filling the container: the inspector docks in there,
+//! inside `PageContainer`, so hiding the container for an overlay, the
+//! conductor's mask and the container's hole hit test all cover it too.
+//! Pointing the attachment at the container instead would put the
+//! inspector in gpui's view (outside the mask) and have WebKit reframe the
+//! container that `set_frame` places. The dock view is **unflipped**
+//! because WebKit's split assumes it: bottom docking puts the inspector at
+//! y = 0 and the page above it, which in the flipped container would draw
+//! the inspector at the top.
+//!
+//! **Who sizes what.** `set_frame` sizes the container from gpui and the
+//! dock view to fill it. The page fills the dock view only while nothing
+//! sits beside it there ([`page_sizer`]; read every frame from the dock
+//! view's subviews, public API). With the inspector docked, WebKit owns
+//! both frames. A container resize then autoresizes the dock view, the
+//! page (width and height sizable) and the inspector (WebKit's own masks:
+//! bottom = width-sizable + flexible top margin, right = height-sizable +
+//! flexible left margin, left = height-sizable + flexible right margin),
+//! which keeps the split; WebKit also watches the page's frame
+//! (`NSViewFrameDidChangeNotification`) and re-applies its size limits on
+//! the next turn of the main queue, keeping the inspector's height or
+//! width. No proportional re-split of ours is needed.
+//!
+//! **Placement.** `mod.rs` moves a newly opened inspector once to the
+//! user's placement (bottom by default; [`InspectorMove`]):
+//! `-[_WKInspector attach]` docks at the bottom, `detach` pops it out, and
+//! left/right go through the inspector's own page:
+//! `InspectorFrontendHost.requestSetDockSide('left'|'right')`, which its
+//! toolbar's dock buttons call, run with public `evaluateJavaScript:` and
+//! guarded in the script itself. Where it is is read from AppKit
+//! ([`InspectorPlace`]): `inspectorWebView` (received as any object and
+//! checked to be a `WKWebView` before any view message), its window, its
+//! superview (our dock view or not) and its frame against the page's
+//! ([`dock_side`]). A later move from its toolbar is remembered.
+//!
+//! **Assumptions** (from WebKit's source, `main` as of 2026-11, and a
+//! runtime probe on macOS 27.3; not observed on screen), each with what
+//! happens if it is wrong:
+//! - The attachment view defaults to the page and the inspector is added
+//!   to its superview, split by frames in an unflipped superview. If not,
+//!   [`InspectorPlace::DockedElsewhere`] (in our window, not beside the
+//!   page) moves it to its own window once and logs it; a split read the
+//!   other way round shows as an unknown side (never remembered).
+//! - WebKit follows the container's size through autoresizing and its
+//!   frame observer. If not, the page and inspector keep their sizes
+//!   until WebKit's next layout (a window resize ends in one through its
+//!   `contentLayoutRect` observer); the fix would be re-splitting here.
+//! - `attach` docks at the bottom (its C++ default) and does nothing when
+//!   the page is under 500 pt wide or 334 pt tall; the inspector then
+//!   stays in its window, and the pane doesn't try again.
+//! - `requestSetDockSide` exists on the inspector page's
+//!   `InspectorFrontendHost` (the installed Web Inspector's Main.js calls
+//!   it so). If not, the script does nothing and the inspector stays where
+//!   WebKit opened it (WebKit also remembers its last side itself).
+//! - Removing the view holding the keyboard (the inspector closing or
+//!   popping out) leaves the window itself first responder; the pane then
+//!   hands it to gpui's view (`recover_focus`), and the toggle and `Drop`
+//!   hand it over before closing.
+//!
+//! **Keys and clicks.** The key monitor acts on events inside a page of
+//! ours, and on an inspector docked in one of our containers
+//! ([`monitor_target`]); an inspector in its own window is left alone.
+//! Docked, the inspector shares the gpui window, whose view sees ⌘-chords
+//! before the first responder, so the monitor forwards its non-app
+//! ⌘-chords to it as it does a page's (⌘C/⌘V/⌘A act in the inspector,
+//! app shortcuts like ⌘W still reach the app). A click in it moves gpui's
+//! focus to the tab, so leaving the tab takes the keyboard back, but it is
+//! never a page gesture (no stamp: it can't let a page open an app or a
+//! download). WebKit also makes it first responder when it docks, with no
+//! click (Inspect Element, the pane's own move); the pane's poll then
+//! moves gpui's focus to the tab the same way. Plain typing goes straight
+//! to it as first responder.
 
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
@@ -242,42 +316,145 @@ pub(crate) fn route_key(
     }
 }
 
-/// Which view of `chain` is one of our live pages, if any: `chain` is a view
-/// and its superviews, nearest first (by address), `pages` the registered
-/// pages' web views. The key monitor acts only on an event whose
-/// first responder (a key) or hit view (a click) is inside one of our
-/// pages. A Web Inspector is a `WKWebView` too, in its own window or docked
-/// beside the page in the same container, but it is not registered, so its
-/// keys and clicks go on untouched: never to a page, never routed to gpui.
-pub(crate) fn registered_page(chain: &[usize], pages: &[usize]) -> Option<usize> {
-    chain.iter().position(|view| pages.contains(view))
+/// What the key monitor acts for, found in a view's chain: a view and its
+/// superviews, nearest first (by address).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MonitorTarget {
+    /// One of our registered pages, at this index of the chain.
+    Page(usize),
+    /// A Web Inspector docked inside one of our page containers: the
+    /// index of its web view (the outermost `WKWebView` below the
+    /// container) in the chain.
+    Inspector(usize),
+}
+
+/// Which of our views the key monitor acts for, given `chain` (a view and
+/// its superviews, nearest first, by address), which of them are
+/// `WKWebView`s (`web_views`, parallel to `chain`), the registered pages'
+/// web views (`pages`) and their containers (`containers`).
+/// - Inside one of our pages: that page (its keys, clicks and gestures).
+/// - Inside one of our containers but no page: an inspector WebKit docked
+///   beside the page. Its ⌘-chords are forwarded to it as a page's are
+///   (gpui's view would otherwise take ⌘C/⌘V first), and a click in it
+///   moves gpui's focus to the tab, but it never counts as a page gesture.
+/// - Anything else (an inspector in its own window, gpui's own views):
+///   nothing; it goes on untouched.
+pub(crate) fn monitor_target(
+    chain: &[usize],
+    web_views: &[bool],
+    pages: &[usize],
+    containers: &[usize],
+) -> Option<MonitorTarget> {
+    if let Some(at) = chain.iter().position(|view| pages.contains(view)) {
+        return Some(MonitorTarget::Page(at));
+    }
+    let container = chain.iter().position(|view| containers.contains(view))?;
+    (0..container)
+        .rev()
+        .find(|&i| web_views.get(i).copied().unwrap_or(false))
+        .map(MonitorTarget::Inspector)
+}
+
+/// A side WebKit can dock its inspector on, beside the page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DockSide {
+    Bottom,
+    Left,
+    Right,
+}
+
+/// A view's frame in its superview: x, y, width, height.
+pub(crate) type ViewFrame = (f64, f64, f64, f64);
+
+/// Which side of the page a docked inspector is on, from both frames in
+/// their shared (unflipped, bottom-left origin) superview: wholly left of
+/// the page, wholly right of it, or wholly under it. `None` while they
+/// overlap (WebKit mid-move), or for anything else.
+pub(crate) fn dock_side(inspector: ViewFrame, page: ViewFrame) -> Option<DockSide> {
+    const SLACK: f64 = 0.5;
+    let (ix, iy, iw, ih) = inspector;
+    let (px, py, pw, _) = page;
+    if iw <= 0.0 || ih <= 0.0 {
+        None
+    } else if ix + iw <= px + SLACK {
+        Some(DockSide::Left)
+    } else if ix >= px + pw - SLACK {
+        Some(DockSide::Right)
+    } else if iy + ih <= py + SLACK {
+        Some(DockSide::Bottom)
+    } else {
+        None
+    }
 }
 
 /// Where a page's Web Inspector is, as far as AppKit can tell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InspectorPlace {
-    /// WebKit can't say (`inspectorWebView` is missing).
+    /// WebKit can't say (`inspectorWebView` is missing, or isn't a web
+    /// view).
     Unsupported,
     /// Its view isn't in a window yet.
     NotPlaced,
-    /// Docked in the page's own window, beside the page.
-    Docked,
+    /// Docked beside the page, inside the page's container; `None` while
+    /// the side can't be read ([`dock_side`]).
+    Docked(Option<DockSide>),
+    /// In the page's window but not beside the page: WebKit docked it
+    /// somewhere other than our container. Never expected (the page is
+    /// WebKit's attachment view); moved to its own window.
+    DockedElsewhere,
     /// In a window of its own.
     OwnWindow,
 }
 
-/// What to do with an inspector that just opened (`pending`) and is at
-/// `place`: whether to detach it into its own window, and whether to ask
-/// again next time. WebKit docks a new inspector inside the page's area by
-/// default; its own window is preferred, so one WebKit docked is detached,
-/// once. Nothing pending is never touched, so a user who docks it from the
-/// inspector's own toolbar keeps it docked until it closes.
-pub(crate) fn settle_inspector(pending: bool, place: InspectorPlace) -> (bool, bool) {
-    match (pending, place) {
-        (true, InspectorPlace::Docked) => (true, false),
-        (true, InspectorPlace::NotPlaced) => (false, true),
-        _ => (false, false),
+/// [`InspectorPlace`] from what AppKit says of the inspector's web view:
+/// whether its window is the page's (`None`: no window), whether it is a
+/// sibling of the page (same superview), and the side [`dock_side`] reads.
+pub(crate) fn place_of(
+    same_window: Option<bool>,
+    beside_page: bool,
+    side: Option<DockSide>,
+) -> InspectorPlace {
+    match same_window {
+        None => InspectorPlace::NotPlaced,
+        Some(false) => InspectorPlace::OwnWindow,
+        Some(true) if beside_page => InspectorPlace::Docked(side),
+        Some(true) => InspectorPlace::DockedElsewhere,
     }
+}
+
+/// Who sets the page's frame inside its container.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PageSizer {
+    /// We do: the page fills the container (no inspector docked).
+    Us,
+    /// WebKit does: it splits the container between the page and a docked
+    /// inspector, and follows the container's size on its own (autoresizing
+    /// masks, then its frame-change observer re-applies its limits), so
+    /// setting the page's frame would fight it.
+    WebKit,
+}
+
+/// [`PageSizer`] from whether anything sits beside the page in its dock
+/// view (only WebKit's docked inspector ever does).
+pub(crate) fn page_sizer(something_beside_page: bool) -> PageSizer {
+    if something_beside_page {
+        PageSizer::WebKit
+    } else {
+        PageSizer::Us
+    }
+}
+
+/// How the pane moves an inspector that just opened elsewhere than the
+/// user's placement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InspectorMove {
+    /// `-[_WKInspector attach]`: docked at the bottom.
+    AttachBottom,
+    /// Docked on the left or right, through the inspector's own dock
+    /// request (its toolbar's buttons do the same).
+    Dock(DockSide),
+    /// `-[_WKInspector detach]`: its own window.
+    Detach,
 }
 
 /// The catalog's name (`t`, `]`, `down`) for the key of a ⌘-chord. `chars`
@@ -759,10 +936,11 @@ mod mac {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     use super::{
-        APP_CHORDS, DOWNLOAD_UNSUPPORTED, Hole, InspectorPlace, KeyRoute, NavDecision, NavOrigin,
-        NativeEvents, PageMask, decide_download, decide_navigation, decide_new_window, event_chords, flip_y,
-        holes_in_page, in_any_hole, is_benign_failure, is_download, mask_changed, page_mask,
-        registered_page, response_origin, route_key, safari_app_name, user_clicked, user_started,
+        APP_CHORDS, DOWNLOAD_UNSUPPORTED, DockSide, Hole, InspectorMove, InspectorPlace, KeyRoute,
+        MonitorTarget, NavDecision, NavOrigin, NativeEvents, PageMask, PageSizer, decide_download,
+        decide_navigation, decide_new_window, dock_side, event_chords, flip_y, holes_in_page, in_any_hole,
+        is_benign_failure, is_download, mask_changed, monitor_target, page_mask, page_sizer, place_of,
+        response_origin, route_key, safari_app_name, user_clicked, user_started,
     };
     use crate::shortcuts::{Chord, PageEdit, is_app_shortcut, page_edit};
 
@@ -793,12 +971,28 @@ mod mac {
     /// (see the module docs). KVC finds it through `_setDeveloperExtrasEnabled:`.
     const DEVELOPER_EXTRAS_KEY: &str = "developerExtrasEnabled";
 
-    /// Whether KVC can set [`DEVELOPER_EXTRAS_KEY`] without raising: KVC's
-    /// setter search (`set<Key>:`, then `_set<Key>:`) finds a method. The
-    /// ivar fallback is never relied on, so an unknown key can't reach
+    /// Whether KVC can set [`DEVELOPER_EXTRAS_KEY`] on `class`'s instances
+    /// without raising, to a BOOL: KVC's setter search (`set<Key>:`, then
+    /// `_set<Key>:`) finds a method, and the one it finds takes one BOOL
+    /// ([`takes_one_bool`]), which KVC unboxes our NSNumber for. The ivar
+    /// fallback is never relied on, so an unknown key can't reach
     /// `setValue:forUndefinedKey:` (which raises `NSUndefinedKeyException`).
-    fn developer_extras_settable(responds: impl Fn(Sel) -> bool) -> bool {
-        responds(sel!(_setDeveloperExtrasEnabled:)) || responds(sel!(setDeveloperExtrasEnabled:))
+    fn developer_extras_settable(class: &AnyClass) -> bool {
+        [sel!(setDeveloperExtrasEnabled:), sel!(_setDeveloperExtrasEnabled:)]
+            .into_iter()
+            .find(|&sel| class.instance_method(sel).is_some())
+            .is_some_and(|sel| takes_one_bool(class, sel))
+    }
+
+    /// Whether `class`'s instances have `sel` returning nothing and taking
+    /// exactly one BOOL (self, _cmd, the BOOL: three arguments, the third
+    /// encoded `B` on arm64 or `c` on x86_64), e.g. `v20@0:8B16`.
+    fn takes_one_bool(class: &AnyClass, sel: Sel) -> bool {
+        class.instance_method(sel).is_some_and(|m| {
+            m.arguments_count() == 3
+                && m.return_type().to_bytes() == b"v"
+                && m.argument_type(2).is_some_and(|t| matches!(t.to_bytes(), b"B" | b"c"))
+        })
     }
 
     /// Turns on WebKit's developer extras (the context menu's Inspect
@@ -806,12 +1000,12 @@ mod mac {
     /// about to be made with `prefs`. Validated first; skipped (and logged
     /// once) if this WebKit lacks it.
     fn enable_developer_extras(prefs: &WKPreferences) {
-        if !developer_extras_settable(|s| prefs.respondsToSelector(s)) {
+        if !developer_extras_settable(prefs.class()) {
             log_devtools_missing("WKPreferences developerExtrasEnabled");
             return;
         }
-        // SAFETY: the key resolves to a BOOL setter (checked above), and KVC
-        // unboxes the NSNumber for it.
+        // SAFETY: KVC's setter for the key takes one BOOL (checked above),
+        // and KVC unboxes the NSNumber for it.
         unsafe {
             prefs.setValue_forKey(
                 Some(&NSNumber::new_bool(true)),
@@ -823,7 +1017,7 @@ mod mac {
     /// The first private piece of the inspector API this WebKit lacks, if
     /// any. Asked of the classes, so no web view is needed.
     fn devtools_missing() -> Option<&'static str> {
-        if !developer_extras_settable(|s| WKPreferences::class().responds_to(s)) {
+        if !developer_extras_settable(WKPreferences::class()) {
             return Some("WKPreferences developerExtrasEnabled");
         }
         if !WKWebView::class().responds_to(sel!(_inspector)) {
@@ -1301,16 +1495,14 @@ mod mac {
         if !command {
             return false;
         }
-        let Some(page) = event.window(mtm).as_deref().and_then(focused_page) else {
+        // A page of ours, or an inspector docked beside one: either takes
+        // the chord the same way (gpui's view would otherwise get ⌘C/⌘V
+        // before it).
+        let Some(held) = event.window(mtm).as_deref().and_then(focused_view) else {
             return false;
         };
-        let pane_focused = PAGES.with(|pages| {
-            let addr = Retained::as_ptr(&page) as usize;
-            pages
-                .borrow()
-                .iter()
-                .any(|p| p.view == addr && p.pane_focused.get())
-        });
+        let pane_focused = held.entry().is_some_and(|e| e.pane_focused.get());
+        let page = held.web_view();
         let for_app = APP_CHORDS.with(|app| {
             let app = app.borrow();
             event_chords_of(event).iter().any(|c| is_app_shortcut(c, &app))
@@ -1379,23 +1571,76 @@ mod mac {
         }
     }
 
-    /// The page of ours holding `window`'s keyboard focus (itself or a view
-    /// inside it), if any. A Web Inspector holding it is no page of ours
-    /// ([`registered_page`]).
-    fn focused_page(window: &NSWindow) -> Option<Retained<WKWebView>> {
-        our_page(window.firstResponder()?.downcast::<NSView>().ok()?)
+    /// A view of ours the key monitor acts for ([`monitor_target`]).
+    enum Held {
+        /// One of our pages.
+        Page(Retained<WKWebView>),
+        /// An inspector docked beside a page, in that page's container
+        /// (by address).
+        Inspector { view: Retained<WKWebView>, container: usize },
     }
 
-    /// The page of ours that is `view` or holds it ([`registered_page`]).
-    fn our_page(view: Retained<NSView>) -> Option<Retained<WKWebView>> {
+    impl Held {
+        /// The web view that takes a forwarded chord.
+        fn web_view(&self) -> &WKWebView {
+            match self {
+                Held::Page(view) | Held::Inspector { view, .. } => view,
+            }
+        }
+
+        /// The page entry this belongs to: the page's own, or that of the
+        /// page whose container holds the inspector.
+        fn entry(&self) -> Option<PageHit> {
+            match self {
+                Held::Page(page) => page_entry(page),
+                Held::Inspector { container, .. } => PAGES.with(|pages| {
+                    pages
+                        .borrow()
+                        .iter()
+                        .find(|p| Retained::as_ptr(&p.container) as usize == *container)
+                        .map(PageHit::of)
+                }),
+            }
+        }
+    }
+
+    /// The view of ours holding `window`'s keyboard focus (itself or a view
+    /// inside it), if any: a page, or an inspector docked beside one.
+    fn focused_view(window: &NSWindow) -> Option<Held> {
+        held_by(window.firstResponder()?.downcast::<NSView>().ok()?)
+    }
+
+    /// The page of ours holding `window`'s keyboard focus, if any. An
+    /// inspector holding it is not the page (no gesture is stamped for it).
+    fn focused_page(window: &NSWindow) -> Option<Retained<WKWebView>> {
+        match focused_view(window)? {
+            Held::Page(page) => Some(page),
+            Held::Inspector { .. } => None,
+        }
+    }
+
+    /// The view of ours that is `view` or holds it ([`monitor_target`]).
+    fn held_by(view: Retained<NSView>) -> Option<Held> {
         let mut chain = vec![view];
         while let Some(up) = chain.last().and_then(|v| unsafe { v.superview() }) {
             chain.push(up);
         }
         let addrs: Vec<usize> = chain.iter().map(|v| Retained::as_ptr(v) as usize).collect();
-        let pages: Vec<usize> = PAGES.with(|p| p.borrow().iter().map(|e| e.view).collect());
-        let at = registered_page(&addrs, &pages)?;
-        chain.swap_remove(at).downcast::<WKWebView>().ok()
+        let web_views: Vec<bool> = chain.iter().map(|v| v.isKindOfClass(WKWebView::class())).collect();
+        let (pages, containers): (Vec<usize>, Vec<usize>) = PAGES.with(|p| {
+            p.borrow()
+                .iter()
+                .map(|e| (e.view, Retained::as_ptr(&e.container) as usize))
+                .unzip()
+        });
+        match monitor_target(&addrs, &web_views, &pages, &containers)? {
+            MonitorTarget::Page(at) => chain.swap_remove(at).downcast::<WKWebView>().ok().map(Held::Page),
+            MonitorTarget::Inspector(at) => {
+                let container = addrs.iter().copied().find(|a| containers.contains(a))?;
+                let view = chain.swap_remove(at).downcast::<WKWebView>().ok()?;
+                Some(Held::Inspector { view, container })
+            }
+        }
     }
 
     /// What the monitor needs of the page a mouse event lands on, if it
@@ -1406,38 +1651,60 @@ mod mac {
         events: Weak<NativeEvents>,
     }
 
-    fn page_hit(event: &NSEvent) -> Option<PageHit> {
+    impl PageHit {
+        fn of(p: &PageEntry) -> Self {
+            PageHit {
+                pane_focused: p.pane_focused.clone(),
+                gesture: p.gesture.clone(),
+                events: p.events.clone(),
+            }
+        }
+    }
+
+    /// The view of ours a mouse event lands on, if any ([`held_by`]),
+    /// through the containers' own hit test (so never inside a hole).
+    fn mouse_hit(event: &NSEvent) -> Option<Held> {
         let mtm = MainThreadMarker::new()?;
-        let page = event
+        event
             .window(mtm)
             .and_then(|w| w.contentView())
             .and_then(|content| content.hitTest(event.locationInWindow()))
-            .and_then(our_page)?;
-        page_entry(&page)
+            .and_then(held_by)
+    }
+
+    /// The page of ours a mouse event lands on. An inspector docked beside
+    /// it is not the page: a click there is never a page gesture.
+    fn page_hit(event: &NSEvent) -> Option<PageHit> {
+        match mouse_hit(event)? {
+            Held::Page(page) => page_entry(&page),
+            Held::Inspector { .. } => None,
+        }
     }
 
     fn page_entry(page: &WKWebView) -> Option<PageHit> {
         let addr = page as *const WKWebView as usize;
-        PAGES.with(|pages| {
-            pages.borrow().iter().find(|p| p.view == addr).map(|p| PageHit {
-                pane_focused: p.pane_focused.clone(),
-                gesture: p.gesture.clone(),
-                events: p.events.clone(),
-            })
-        })
+        PAGES.with(|pages| pages.borrow().iter().find(|p| p.view == addr).map(PageHit::of))
     }
 
     /// A left mouse-down: when it lands on one of our pages, that page's tab
     /// takes gpui's focus (the click itself goes on to the page), and the
-    /// page's last gesture is now.
+    /// page's last gesture is now. One in an inspector docked beside a page
+    /// moves gpui's focus to that tab too, so its ⌘-chords reach it and
+    /// leaving the tab takes its keyboard back, but stamps no gesture.
     fn note_page_click(event: &NSEvent) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
-        let Some(entry) = page_hit(event) else {
+        let Some(held) = mouse_hit(event) else {
             return;
         };
-        entry.gesture.set(Some(Instant::now()));
+        let is_page = matches!(held, Held::Page(_));
+        let Some(entry) = held.entry() else {
+            return;
+        };
+        if is_page {
+            entry.gesture.set(Some(Instant::now()));
+        }
         // Now, not when gpui's focus lands: a ⌘V right after the click must
         // already go to the page.
         entry.pane_focused.set(true);
@@ -1686,6 +1953,10 @@ mod mac {
         /// The view holding `view`, the one added to gpui's view: it is
         /// what is framed, shown and hidden, and it carries the mask.
         container: Retained<PageContainer>,
+        /// `view`'s superview, filling `container`: a plain, unflipped
+        /// NSView, where WebKit docks the inspector beside the page (see
+        /// the module docs).
+        dock: Retained<NSView>,
         /// Owned here: the web view only holds its delegates weakly.
         delegate: Retained<Delegate>,
         _events: Rc<NativeEvents>,
@@ -1741,13 +2012,18 @@ mod mac {
             if view.respondsToSelector(sel!(setInspectable:)) {
                 unsafe { view.setInspectable(true) };
             }
-            // The page fills its container, which is what moves.
-            view.setAutoresizingMask(
-                NSAutoresizingMaskOptions::ViewWidthSizable
-                    | NSAutoresizingMaskOptions::ViewHeightSizable,
-            );
+            // The page fills its dock view, which fills the container,
+            // which is what moves. With an inspector docked, WebKit splits
+            // the dock view between them and these masks (and WebKit's own
+            // on the inspector) carry the split through a resize.
+            let fill = NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable;
+            view.setAutoresizingMask(fill);
+            let dock = NSView::initWithFrame(NSView::alloc(mtm), NSRect::ZERO);
+            dock.setAutoresizingMask(fill);
+            dock.addSubview(&view);
             let container = PageContainer::new(mtm);
-            container.addSubview(&view);
+            container.addSubview(&dock);
             container.setHidden(true);
             // Keep the top edge pinned while the window resizes, until the
             // next frame's set_frame lands; otherwise an unflipped parent
@@ -1789,7 +2065,7 @@ mod mac {
                     container: container.clone(),
                 })
             });
-            let this = Self { view, container, delegate, _events: events, pane_focused, navigation };
+            let this = Self { view, container, dock, delegate, _events: events, pane_focused, navigation };
             if !url.is_empty() {
                 this.load(url);
             }
@@ -1815,7 +2091,16 @@ mod mac {
             let size = NSSize::new(w as f64, h as f64);
             self.container
                 .setFrame(NSRect::new(NSPoint::new(x as f64, y as f64), size));
-            self.view.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), size));
+            // Only the container is sized from gpui. The dock view fills
+            // it; the page fills the dock view unless WebKit has docked the
+            // inspector beside it, when WebKit lays both out ([`page_sizer`]).
+            let fill = NSRect::new(NSPoint::new(0.0, 0.0), size);
+            if self.dock.frame() != fill {
+                self.dock.setFrame(fill);
+            }
+            if page_sizer(self.something_beside_page()) == PageSizer::Us && self.view.frame() != fill {
+                self.view.setFrame(fill);
+            }
             let page = (f32::from(bounds.origin.x), f32::from(bounds.origin.y), w, h);
             self.container.ivars().page.set(Some(page));
             self.container.refresh_mask();
@@ -1846,8 +2131,19 @@ mod mac {
             self.pane_focused.set(focused);
         }
 
-        /// If the page (or anything in it) has the keyboard, give it to
-        /// gpui's view, or gpui gets no keys until the user clicks.
+        /// Whether anything sits beside the page in its dock view: only
+        /// WebKit's docked inspector ever does. Public API only, so it is
+        /// cheap enough for every frame.
+        fn something_beside_page(&self) -> bool {
+            self.dock
+                .subviews()
+                .iter()
+                .any(|v| !ptr::eq(Retained::as_ptr(&v), Retained::as_ptr(&self.view).cast::<NSView>()))
+        }
+
+        /// If the page or a docked inspector (anything in the container)
+        /// has the keyboard, give it to gpui's view, or gpui gets no keys
+        /// until the user clicks.
         pub(crate) fn release_focus(&self) -> bool {
             let Some(window) = self.view.window() else {
                 return false;
@@ -1855,7 +2151,7 @@ mod mac {
             let page_has_focus = window
                 .firstResponder()
                 .and_then(|r| r.downcast::<NSView>().ok())
-                .is_some_and(|v| v.isDescendantOf(&self.view));
+                .is_some_and(|v| v.isDescendantOf(&self.container));
             if page_has_focus {
                 // gpui's view, not the container.
                 let parent = unsafe { self.container.superview() };
@@ -1951,56 +2247,136 @@ mod mac {
         }
 
         /// The Developer tools button: closes the page's Web Inspector if it
-        /// is open, else shows it (WebKit gives it its own window unless it
-        /// docks it; the pane then detaches it: [`settle_inspector`]). A
-        /// no-op where the API is missing (the button is hidden then).
-        pub(crate) fn toggle_inspector(&self) {
+        /// is open, else shows it. WebKit opens it docked or in its own
+        /// window from its own memory; the pane then moves it to the
+        /// user's placement once (`settle_inspector` in `mod.rs`). Closing
+        /// one that has the keyboard hands the keyboard to gpui's view
+        /// first; returns whether it had it. A no-op where the API is
+        /// missing (the button is hidden then).
+        pub(crate) fn toggle_inspector(&self) -> bool {
             let Some(inspector) = self.inspector() else {
-                return;
+                return false;
             };
             if self.inspector_visible() {
+                let had_focus = self.inspector_has_focus() && self.release_focus();
                 if responds(&inspector, sel!(close), Returns::Nothing) {
                     // SAFETY: answered; `close` takes and returns nothing.
                     let _: () = unsafe { msg_send![&*inspector, close] };
                 }
-            } else if responds(&inspector, sel!(show), Returns::Nothing) {
-                // SAFETY: answered; `show` takes and returns nothing.
-                let _: () = unsafe { msg_send![&*inspector, show] };
+                had_focus
+            } else {
+                if responds(&inspector, sel!(show), Returns::Nothing) {
+                    // SAFETY: answered; `show` takes and returns nothing.
+                    let _: () = unsafe { msg_send![&*inspector, show] };
+                }
+                false
+            }
+        }
+
+        /// The inspector's own web view (`-[_WKInspector inspectorWebView]`),
+        /// if WebKit answers it and it is a `WKWebView`. Received as any
+        /// object and checked with `isKindOfClass:` before any NSView
+        /// message is sent to it: anything else is `None`, never a
+        /// mistyped message.
+        fn inspector_web_view(&self) -> Option<Option<Retained<WKWebView>>> {
+            let inspector = self
+                .inspector()
+                .filter(|i| responds(i, sel!(inspectorWebView), Returns::Object))?;
+            // SAFETY: answered; `inspectorWebView` takes no arguments and
+            // returns an object or nil (`@16@0:8`).
+            let view: Option<Retained<AnyObject>> = unsafe { msg_send![&*inspector, inspectorWebView] };
+            match view {
+                None => Some(None),
+                Some(view) => view.downcast::<WKWebView>().ok().map(Some),
             }
         }
 
         /// Where the page's inspector is ([`InspectorPlace`]): docked when
-        /// its own web view (`inspectorWebView`) is in the page's window.
+        /// its web view is in the page's window, beside the page (in its
+        /// dock view), on the side its frame says ([`dock_side`]; the dock
+        /// view is unflipped, as WebKit's split assumes).
         pub(crate) fn inspector_place(&self) -> InspectorPlace {
-            let Some(inspector) = self
-                .inspector()
-                .filter(|i| responds(i, sel!(inspectorWebView), Returns::Object))
-            else {
+            let Some(view) = self.inspector_web_view() else {
                 return InspectorPlace::Unsupported;
             };
-            // SAFETY: answered; `inspectorWebView` returns a WKWebView or
-            // nil (`@16@0:8`).
-            let view: Option<Retained<WKWebView>> =
-                unsafe { msg_send![&*inspector, inspectorWebView] };
-            match view.and_then(|v| v.window()) {
-                None => InspectorPlace::NotPlaced,
-                Some(window) => {
-                    let docked = self.view.window().is_some_and(|w| ptr::eq(&*w, &*window));
-                    if docked {
-                        InspectorPlace::Docked
-                    } else {
-                        InspectorPlace::OwnWindow
+            let Some(view) = view else {
+                return InspectorPlace::NotPlaced;
+            };
+            let same_window = view
+                .window()
+                .map(|w| self.view.window().is_some_and(|ours| ptr::eq(&*ours, &*w)));
+            let beside_page = unsafe { view.superview() }
+                .is_some_and(|s| ptr::eq(Retained::as_ptr(&s), Retained::as_ptr(&self.dock)));
+            let rect = |r: NSRect| (r.origin.x, r.origin.y, r.size.width, r.size.height);
+            let side = dock_side(rect(view.frame()), rect(self.view.frame()));
+            place_of(same_window, beside_page, side)
+        }
+
+        /// Whether the inspector, docked beside the page, holds the
+        /// window's keyboard.
+        pub(crate) fn inspector_has_focus(&self) -> bool {
+            let Some(Some(view)) = self.inspector_web_view() else {
+                return false;
+            };
+            view.window()
+                .and_then(|w| w.firstResponder())
+                .and_then(|r| r.downcast::<NSView>().ok())
+                .is_some_and(|r| r.isDescendantOf(&view) && r.isDescendantOf(&self.container))
+        }
+
+        /// Moves the open inspector ([`InspectorMove`]). Each way is
+        /// checked first and is a no-op where WebKit lacks it. WebKit
+        /// refuses to dock beside a page smaller than 500 × 334 pt, and it
+        /// then stays where it is.
+        pub(crate) fn move_inspector(&self, to: InspectorMove) {
+            let Some(inspector) = self.inspector() else {
+                return;
+            };
+            match to {
+                InspectorMove::AttachBottom => {
+                    if responds(&inspector, sel!(attach), Returns::Nothing) {
+                        // SAFETY: answered; `attach` takes and returns
+                        // nothing (WebKit docks it at the bottom).
+                        let _: () = unsafe { msg_send![&*inspector, attach] };
                     }
+                }
+                InspectorMove::Detach => {
+                    if responds(&inspector, sel!(detach), Returns::Nothing) {
+                        // SAFETY: answered; `detach` takes and returns nothing.
+                        let _: () = unsafe { msg_send![&*inspector, detach] };
+                    }
+                }
+                InspectorMove::Dock(side) => {
+                    // No `_WKInspector` method docks on a side; the
+                    // inspector's own dock buttons call this in its page.
+                    // Public API (evaluateJavaScript) into the inspector's
+                    // page; the script checks the host function exists, so
+                    // a WebKit without it does nothing (no exception
+                    // reaches us either way: errors go to the absent
+                    // completion handler).
+                    let Some(Some(view)) = self.inspector_web_view() else {
+                        return;
+                    };
+                    let script = dock_side_script(side);
+                    unsafe { view.evaluateJavaScript_completionHandler(&NSString::from_str(&script), None) };
                 }
             }
         }
 
-        /// Moves a docked inspector into its own window. Only called when
-        /// [`Self::inspector_place`] says it is docked.
-        pub(crate) fn detach_inspector(&self) {
-            if let Some(inspector) = self.inspector().filter(|i| responds(i, sel!(detach), Returns::Nothing)) {
-                // SAFETY: answered; `detach` takes and returns nothing.
-                let _: () = unsafe { msg_send![&*inspector, detach] };
+        /// After the inspector left the page's window or closed while it
+        /// had the keyboard, AppKit leaves the window itself as first
+        /// responder and gpui gets no keys; give them back to gpui's view.
+        /// Does nothing while a view holds the keyboard.
+        pub(crate) fn recover_focus(&self) {
+            let Some(window) = self.view.window() else {
+                return;
+            };
+            let stranded = window.firstResponder().is_none_or(|r| {
+                ptr::eq(Retained::as_ptr(&r), Retained::as_ptr(&window).cast::<NSResponder>())
+            });
+            if stranded {
+                let parent = unsafe { self.container.superview() };
+                window.makeFirstResponder(parent.as_deref().map(|p| &**p));
             }
         }
 
@@ -2022,6 +2398,24 @@ mod mac {
         }
     }
 
+    /// The script that asks the inspector's own page to dock on `side`, as
+    /// its toolbar's dock buttons do (`InspectorFrontendHost`, found in the
+    /// installed Web Inspector's Main.js), guarded so a page without it
+    /// does nothing.
+    fn dock_side_script(side: DockSide) -> String {
+        let side = match side {
+            DockSide::Bottom => "bottom",
+            DockSide::Left => "left",
+            DockSide::Right => "right",
+        };
+        format!(
+            "(function(){{var h=window.InspectorFrontendHost;\
+             if(h&&typeof h.requestSetDockSide==='function'\
+             &&(typeof h.supportsDockSide!=='function'||h.supportsDockSide('{side}')))\
+             h.requestSetDockSide('{side}');}})();"
+        )
+    }
+
     /// The window is minimized or the app is hidden (⌘H), as opposed to
     /// merely covered by another window or on another Space: gpui reports
     /// all of those as one `WindowVisibility::Hidden`.
@@ -2038,7 +2432,11 @@ mod mac {
 
     impl Drop for NativeWebView {
         fn drop(&mut self) {
-            // The inspector is this page's: it closes first, while the page
+            // The keyboard goes back to gpui's view first (the page or a
+            // docked inspector may hold it): removing the view that holds
+            // it would leave the window itself as first responder.
+            self.release_focus();
+            // The inspector is this page's: it closes next, while the page
             // is still whole. The next view (the tab shown again) starts
             // with it closed.
             self.close_inspector();
@@ -2054,9 +2452,6 @@ mod mac {
                 self.view.setUIDelegate(None);
                 self.view.stopLoading();
             }
-            // The view goes away on every tab switch; the keyboard goes back
-            // to gpui's view first.
-            self.release_focus();
             let addr = Retained::as_ptr(&self.view) as usize;
             PAGES.with(|pages| pages.borrow_mut().retain(|p| p.view != addr));
             self.container.removeFromSuperview();
@@ -2115,6 +2510,43 @@ mod mac {
             let missing = devtools_missing();
             eprintln!("inspector API missing: {missing:?}");
             assert_eq!(inspector_available(), missing.is_none());
+        }
+
+        /// KVC's BOOL setter check for developer extras, on methods whose
+        /// shapes are known: `-[NSView setHidden:]` takes one BOOL;
+        /// `setFrameOrigin:` takes a struct; `isHidden` takes nothing.
+        #[test]
+        fn the_developer_extras_setter_must_take_one_bool() {
+            use objc2::runtime::NSObject;
+            use objc2::sel;
+            use objc2_app_kit::NSView;
+            use objc2_web_kit::WKPreferences;
+
+            use super::{developer_extras_settable, takes_one_bool};
+            assert!(takes_one_bool(NSView::class(), sel!(setHidden:)));
+            assert!(!takes_one_bool(NSView::class(), sel!(setFrameOrigin:)));
+            assert!(!takes_one_bool(NSView::class(), sel!(isHidden)));
+            assert!(!takes_one_bool(NSView::class(), sel!(harnessNoSuchSetter:)));
+            // No such key on NSObject: never set (KVC would raise).
+            assert!(!developer_extras_settable(NSObject::class()));
+            // On this WebKit: whatever it says, it must not panic; the
+            // runtime probe (task 13 report) found `v20@0:8B16`.
+            eprintln!(
+                "developer extras settable: {}",
+                developer_extras_settable(WKPreferences::class())
+            );
+        }
+
+        /// The script that docks the inspector on a side names only that
+        /// side, and checks the host function exists before calling it.
+        #[test]
+        fn the_dock_side_script_is_guarded() {
+            use super::{DockSide, dock_side_script};
+            let left = dock_side_script(DockSide::Left);
+            assert!(left.contains("typeof h.requestSetDockSide==='function'"));
+            assert!(left.contains("h.requestSetDockSide('left')"));
+            assert!(!left.contains("right") && !left.contains("bottom"));
+            assert!(dock_side_script(DockSide::Right).contains("requestSetDockSide('right')"));
         }
     }
 }
@@ -2450,42 +2882,87 @@ mod tests {
     }
 
     #[test]
-    fn the_monitor_acts_only_for_our_own_pages() {
-        // Views by address: a page's inner view, the page, its container,
-        // gpui's view; an inspector's inner view and its web view.
-        let (inner, page, container, gpui) = (10, 11, 12, 13);
+    fn the_monitor_acts_for_our_pages_and_inspectors_docked_beside_them() {
+        use MonitorTarget::{Inspector, Page};
+        // Views by address: a page's inner view, the page, its dock view,
+        // its container, gpui's view; an inspector's inner view, its web
+        // view, and (in its own window) that window's content view.
+        let (inner, page, dock, container, gpui) = (10, 11, 12, 13, 14);
         let (insp_inner, insp, insp_frame) = (20, 21, 22);
         let pages = [page, 99];
+        let containers = [container, 98];
+        let target = |chain: &[usize], web: &[bool]| monitor_target(chain, web, &pages, &containers);
         // A click or the keyboard inside the page: the page.
-        assert_eq!(registered_page(&[inner, page, container, gpui], &pages), Some(1));
-        assert_eq!(registered_page(&[page, container, gpui], &pages), Some(0));
+        assert_eq!(
+            target(&[inner, page, dock, container, gpui], &[false, true, false, false, false]),
+            Some(Page(1))
+        );
+        assert_eq!(target(&[page, dock, container, gpui], &[true, false, false, false]), Some(Page(0)));
         // The inspector in its own window: a WKWebView too, but not ours.
-        assert_eq!(registered_page(&[insp_inner, insp, insp_frame], &pages), None);
-        // Docked beside the page, in the same container and window.
-        assert_eq!(registered_page(&[insp_inner, insp, container, gpui], &pages), None);
+        assert_eq!(target(&[insp_inner, insp, insp_frame], &[false, true, false]), None);
+        // Docked beside the page, in its dock view: the inspector's web
+        // view, never the page.
+        assert_eq!(
+            target(&[insp_inner, insp, dock, container, gpui], &[false, true, false, false, false]),
+            Some(Inspector(1))
+        );
+        // A web view nested inside the inspector's (its own frames): the
+        // outermost one below the container.
+        assert_eq!(
+            target(&[insp_inner, 30, insp, dock, container, gpui], &[false, true, true, false, false, false]),
+            Some(Inspector(2))
+        );
+        // In our container but in no web view at all: nothing.
+        assert_eq!(target(&[dock, container, gpui], &[false, false, false]), None);
         // gpui's own view (a hole, the address bar), and no page at all.
-        assert_eq!(registered_page(&[gpui], &pages), None);
-        assert_eq!(registered_page(&[inner, page, container, gpui], &[]), None);
-        assert_eq!(registered_page(&[], &pages), None);
+        assert_eq!(target(&[gpui], &[false]), None);
+        assert_eq!(
+            monitor_target(&[inner, page, dock, container, gpui], &[false, true, false, false, false], &[], &[]),
+            None
+        );
+        assert_eq!(target(&[], &[]), None);
+        // `web_views` shorter than the chain reads as "not a web view".
+        assert_eq!(target(&[insp, dock, container], &[]), None);
     }
 
     #[test]
-    fn a_newly_opened_inspector_is_moved_to_its_own_window_once() {
-        use InspectorPlace::{Docked, NotPlaced, OwnWindow, Unsupported};
-        // (pending, place) -> (detach, still pending).
-        // Nothing pending (closed, or already settled): never touched, so
-        // the user docking it from its own toolbar sticks.
-        for place in [Unsupported, NotPlaced, Docked, OwnWindow] {
-            assert_eq!(settle_inspector(false, place), (false, false), "{place:?}");
-        }
-        // Just opened, docked by WebKit: detach, once.
-        assert_eq!(settle_inspector(true, Docked), (true, false));
-        // Already in its own window: nothing to do.
-        assert_eq!(settle_inspector(true, OwnWindow), (false, false));
-        // Not in any window yet: ask again next time.
-        assert_eq!(settle_inspector(true, NotPlaced), (false, true));
-        // WebKit can't say where it is: leave it where it is.
-        assert_eq!(settle_inspector(true, Unsupported), (false, false));
+    fn a_docked_inspectors_side_is_read_from_the_frames() {
+        // An unflipped 800 x 600 dock view, as WebKit lays it out.
+        // Bottom: inspector (0,0,800,200), page above it (0,200,800,400).
+        assert_eq!(dock_side((0.0, 0.0, 800.0, 200.0), (0.0, 200.0, 800.0, 400.0)), Some(DockSide::Bottom));
+        // Right: page (0,0,500,600), inspector (500,0,300,600).
+        assert_eq!(dock_side((500.0, 0.0, 300.0, 600.0), (0.0, 0.0, 500.0, 600.0)), Some(DockSide::Right));
+        // Left: inspector (0,0,300,600), page (300,0,500,600).
+        assert_eq!(dock_side((0.0, 0.0, 300.0, 600.0), (300.0, 0.0, 500.0, 600.0)), Some(DockSide::Left));
+        // Fractional edges a half point off still read.
+        assert_eq!(dock_side((0.0, 0.0, 300.4, 600.0), (300.0, 0.0, 500.0, 600.0)), Some(DockSide::Left));
+        // Overlapping (WebKit mid-move, or the page not yet shrunk): unknown.
+        assert_eq!(dock_side((0.0, 0.0, 800.0, 200.0), (0.0, 0.0, 800.0, 600.0)), None);
+        // Above the page would be a flipped split: never a side WebKit
+        // docks on in an unflipped view.
+        assert_eq!(dock_side((0.0, 400.0, 800.0, 200.0), (0.0, 0.0, 800.0, 400.0)), None);
+        // An empty inspector frame says nothing.
+        assert_eq!(dock_side((0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 800.0, 600.0)), None);
+    }
+
+    #[test]
+    fn an_inspectors_place_comes_from_its_window_and_superview() {
+        use InspectorPlace::{Docked, DockedElsewhere, NotPlaced, OwnWindow};
+        let right = Some(DockSide::Right);
+        // (same window as the page?, beside the page?, side) -> place.
+        assert_eq!(place_of(None, false, None), NotPlaced);
+        assert_eq!(place_of(None, true, right), NotPlaced);
+        assert_eq!(place_of(Some(false), false, None), OwnWindow);
+        assert_eq!(place_of(Some(false), true, right), OwnWindow);
+        assert_eq!(place_of(Some(true), true, right), Docked(right));
+        assert_eq!(place_of(Some(true), true, None), Docked(None));
+        assert_eq!(place_of(Some(true), false, right), DockedElsewhere);
+    }
+
+    #[test]
+    fn webkit_sizes_the_page_only_while_an_inspector_is_docked() {
+        assert_eq!(page_sizer(false), PageSizer::Us);
+        assert_eq!(page_sizer(true), PageSizer::WebKit);
     }
 
     #[test]
