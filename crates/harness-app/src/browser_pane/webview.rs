@@ -152,6 +152,47 @@
 //!
 //! The holes are rects: around his figure, a square sprite, the tab's own
 //! background shows rather than the page.
+//!
+//! **Developer tools: WebKit's Web Inspector, through private API** (Task
+//! 12). WebKit has no public API to open the inspector or to offer Inspect
+//! Element, so two private pieces are used, each found at runtime:
+//! - **Inspect Element** in the page's context menu: the WKPreferences key
+//!   `developerExtrasEnabled`, set through KVC (`setValue:forKey:`, which
+//!   finds `_setDeveloperExtrasEnabled:`) on the configuration's
+//!   preferences before the view is made, as WebKit-based apps commonly do.
+//!   KVC raises `NSUndefinedKeyException` for an unknown key, and an ObjC
+//!   exception must not unwind through Rust, so the key is validated
+//!   instead of caught: it is set only if the preferences answer
+//!   `_setDeveloperExtrasEnabled:` or `setDeveloperExtrasEnabled:` (KVC's
+//!   setter search; [`developer_extras_settable`]).
+//! - **The address bar's Developer tools button**: `-[WKWebView _inspector]`
+//!   returns the page's `_WKInspector`, whose `show`, `close`, `isVisible`
+//!   (and, optionally, `isConnected`, `inspectorWebView`, `detach`) were
+//!   found by introspecting the runtime on macOS 27.3, not guessed.
+//!   [`inspector_available`] checks once, on the classes, that each needed
+//!   method exists with the shape we send it (no arguments; returns
+//!   nothing, a BOOL or an object: [`has_method`]); every call checks its
+//!   method again on the object it is sent to. Missing anything, the button
+//!   hides and the app logs it once.
+//!
+//! Acceptable because the app ships as a DMG and through Homebrew, not the
+//! Mac App Store, whose review rejects private API. It degrades rather than
+//! breaks: on a macOS that renamed or dropped any of it, Inspect Element
+//! and/or the button are simply absent; no message is ever sent that the
+//! object doesn't answer, so nothing crashes or throws. `isInspectable`
+//! stays on, so Safari's Develop menu still attaches either way.
+//!
+//! The inspector is the page's: dropping the view (the tab hidden or
+//! closed, see `mod.rs`) closes it first, and the page shown again starts
+//! with it closed (it doesn't reopen on its own). WebKit may dock a new
+//! inspector beside the page (its preference "starts attached"); the pane
+//! moves one it docked into its own window once, as it opens
+//! ([`settle_inspector`]), and leaves alone one the user docks later from
+//! the inspector's toolbar. Docked, it is native and above gpui like the
+//! page, next to it in the page's container. The key monitor acts
+//! only on events inside a page of ours ([`registered_page`]); the
+//! inspector is a `WKWebView` but not registered, so its keys and clicks
+//! go on untouched, in its own window or docked.
 
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
@@ -198,6 +239,44 @@ pub(crate) fn route_key(
         KeyRoute::Page
     } else {
         KeyRoute::AsUsual
+    }
+}
+
+/// Which view of `chain` is one of our live pages, if any: `chain` is a view
+/// and its superviews, nearest first (by address), `pages` the registered
+/// pages' web views. The key monitor acts only on an event whose
+/// first responder (a key) or hit view (a click) is inside one of our
+/// pages. A Web Inspector is a `WKWebView` too, in its own window or docked
+/// beside the page in the same container, but it is not registered, so its
+/// keys and clicks go on untouched: never to a page, never routed to gpui.
+pub(crate) fn registered_page(chain: &[usize], pages: &[usize]) -> Option<usize> {
+    chain.iter().position(|view| pages.contains(view))
+}
+
+/// Where a page's Web Inspector is, as far as AppKit can tell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InspectorPlace {
+    /// WebKit can't say (`inspectorWebView` is missing).
+    Unsupported,
+    /// Its view isn't in a window yet.
+    NotPlaced,
+    /// Docked in the page's own window, beside the page.
+    Docked,
+    /// In a window of its own.
+    OwnWindow,
+}
+
+/// What to do with an inspector that just opened (`pending`) and is at
+/// `place`: whether to detach it into its own window, and whether to ask
+/// again next time. WebKit docks a new inspector inside the page's area by
+/// default; its own window is preferred, so one WebKit docked is detached,
+/// once. Nothing pending is never touched, so a user who docks it from the
+/// inspector's own toolbar keeps it docked until it closes.
+pub(crate) fn settle_inspector(pending: bool, place: InspectorPlace) -> (bool, bool) {
+    match (pending, place) {
+        (true, InspectorPlace::Docked) => (true, false),
+        (true, InspectorPlace::NotPlaced) => (false, true),
+        _ => (false, false),
     }
 }
 
@@ -638,7 +717,9 @@ fn scheme_label(url: &str) -> String {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) use mac::{NativeWebView, set_punch_through, window_is_minimized_or_hidden};
+pub(crate) use mac::{
+    NativeWebView, inspector_available, set_punch_through, window_is_minimized_or_hidden,
+};
 
 #[cfg(target_os = "macos")]
 mod mac {
@@ -654,9 +735,9 @@ mod mac {
     use dispatch2::{DispatchQueue, MainThreadBound};
     use gpui::{Bounds, Pixels, Window};
     use objc2::rc::Retained;
-    use objc2::runtime::{AnyObject, NSObject, ProtocolObject, Sel};
+    use objc2::runtime::{AnyClass, AnyObject, NSObject, ProtocolObject, Sel};
     use objc2::{
-        DefinedClass, MainThreadMarker, MainThreadOnly, Message as _, define_class, msg_send, sel,
+        ClassType as _, DefinedClass, MainThreadMarker, MainThreadOnly, Message as _, define_class, msg_send, sel,
     };
     use objc2_app_kit::{
         NSApplication, NSAutoresizingMaskOptions, NSEvent, NSEventMask, NSEventModifierFlags,
@@ -665,22 +746,23 @@ mod mac {
     use objc2_core_graphics::CGMutablePath;
     use objc2_foundation::{
         NSBundle, NSDictionary, NSError, NSHTTPURLResponse, NSKeyValueChangeKey,
-        NSKeyValueObservingOptions, NSObjectNSKeyValueObserverRegistration, NSObjectProtocol,
-        NSPoint, NSRect, NSSize, NSString, NSURL, NSURLRequest, ns_string,
+        NSKeyValueObservingOptions, NSNumber, NSObjectNSKeyValueCoding,
+        NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+        NSURL, NSURLRequest, ns_string,
     };
     use objc2_quartz_core::{CAShapeLayer, CATransaction, kCAFillRuleEvenOdd};
     use objc2_web_kit::{
         WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
-        WKNavigationResponse, WKNavigationResponsePolicy, WKNavigationType, WKUIDelegate, WKWebView,
-        WKWebViewConfiguration, WKWebsiteDataStore, WKWindowFeatures,
+        WKNavigationResponse, WKNavigationResponsePolicy, WKNavigationType, WKPreferences,
+        WKUIDelegate, WKWebView, WKWebViewConfiguration, WKWebsiteDataStore, WKWindowFeatures,
     };
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     use super::{
-        APP_CHORDS, DOWNLOAD_UNSUPPORTED, Hole, KeyRoute, NavDecision, NavOrigin, NativeEvents,
-        PageMask, decide_download, decide_navigation, decide_new_window, event_chords, flip_y,
+        APP_CHORDS, DOWNLOAD_UNSUPPORTED, Hole, InspectorPlace, KeyRoute, NavDecision, NavOrigin,
+        NativeEvents, PageMask, decide_download, decide_navigation, decide_new_window, event_chords, flip_y,
         holes_in_page, in_any_hole, is_benign_failure, is_download, mask_changed, page_mask,
-        response_origin, route_key, safari_app_name, user_clicked, user_started,
+        registered_page, response_origin, route_key, safari_app_name, user_clicked, user_started,
     };
     use crate::shortcuts::{Chord, PageEdit, is_app_shortcut, page_edit};
 
@@ -705,6 +787,118 @@ mod mac {
                 .map(|v| v.to_string());
             safari_app_name(version.as_deref())
         })
+    }
+
+    /// The private WKPreferences key behind right-click → Inspect Element
+    /// (see the module docs). KVC finds it through `_setDeveloperExtrasEnabled:`.
+    const DEVELOPER_EXTRAS_KEY: &str = "developerExtrasEnabled";
+
+    /// Whether KVC can set [`DEVELOPER_EXTRAS_KEY`] without raising: KVC's
+    /// setter search (`set<Key>:`, then `_set<Key>:`) finds a method. The
+    /// ivar fallback is never relied on, so an unknown key can't reach
+    /// `setValue:forUndefinedKey:` (which raises `NSUndefinedKeyException`).
+    fn developer_extras_settable(responds: impl Fn(Sel) -> bool) -> bool {
+        responds(sel!(_setDeveloperExtrasEnabled:)) || responds(sel!(setDeveloperExtrasEnabled:))
+    }
+
+    /// Turns on WebKit's developer extras (the context menu's Inspect
+    /// Element, and what `_WKInspector` needs to connect) for a web view
+    /// about to be made with `prefs`. Validated first; skipped (and logged
+    /// once) if this WebKit lacks it.
+    fn enable_developer_extras(prefs: &WKPreferences) {
+        if !developer_extras_settable(|s| prefs.respondsToSelector(s)) {
+            log_devtools_missing("WKPreferences developerExtrasEnabled");
+            return;
+        }
+        // SAFETY: the key resolves to a BOOL setter (checked above), and KVC
+        // unboxes the NSNumber for it.
+        unsafe {
+            prefs.setValue_forKey(
+                Some(&NSNumber::new_bool(true)),
+                &NSString::from_str(DEVELOPER_EXTRAS_KEY),
+            );
+        }
+    }
+
+    /// The first private piece of the inspector API this WebKit lacks, if
+    /// any. Asked of the classes, so no web view is needed.
+    fn devtools_missing() -> Option<&'static str> {
+        if !developer_extras_settable(|s| WKPreferences::class().responds_to(s)) {
+            return Some("WKPreferences developerExtrasEnabled");
+        }
+        if !WKWebView::class().responds_to(sel!(_inspector)) {
+            return Some("-[WKWebView _inspector]");
+        }
+        if !has_method(WKWebView::class(), sel!(_inspector), Returns::Object) {
+            return Some("-[WKWebView _inspector] returning an object");
+        }
+        let Some(inspector) = AnyClass::get(c"_WKInspector") else {
+            return Some("_WKInspector");
+        };
+        [
+            (sel!(show), Returns::Nothing, "-[_WKInspector show]"),
+            (sel!(close), Returns::Nothing, "-[_WKInspector close]"),
+            (sel!(isVisible), Returns::Bool, "-[_WKInspector isVisible]"),
+        ]
+        .into_iter()
+        .find(|(sel, returns, _)| !has_method(inspector, *sel, *returns))
+        .map(|(_, _, name)| name)
+    }
+
+    /// What a private no-argument method returns, as we send it.
+    #[derive(Clone, Copy)]
+    enum Returns {
+        Nothing,
+        Bool,
+        Object,
+    }
+
+    /// Whether `class`'s instances have `sel` with the shape we send it: no
+    /// arguments (beyond self and _cmd), returning `returns`. Checked before
+    /// every private message, so a WebKit that changed one is skipped rather
+    /// than sent a message of the wrong type (which objc2 turns into a panic
+    /// in debug builds, and undefined behaviour otherwise).
+    fn has_method(class: &AnyClass, sel: Sel, returns: Returns) -> bool {
+        class.instance_method(sel).is_some_and(|m| {
+            let ret = m.return_type();
+            let ok = match returns {
+                Returns::Nothing => ret.to_bytes() == b"v",
+                // BOOL is `B` on arm64 and `c` (signed char) on x86_64.
+                Returns::Bool => matches!(ret.to_bytes(), b"B" | b"c"),
+                Returns::Object => ret.to_bytes() == b"@",
+            };
+            ok && m.arguments_count() == 2
+        })
+    }
+
+    /// Logs, once per process, that the developer tools are off for want of
+    /// `what`.
+    fn log_devtools_missing(what: &str) {
+        static LOGGED: std::sync::Once = std::sync::Once::new();
+        LOGGED.call_once(|| {
+            log::warn!("browser: no developer tools; this WebKit has no {what}");
+        });
+    }
+
+    /// Whether this WebKit has the private inspector API the Developer tools
+    /// button needs (see the module docs); checked once. Without it the
+    /// button hides, and Safari's Develop menu (`isInspectable`) remains.
+    pub(crate) fn inspector_available() -> bool {
+        static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *AVAILABLE.get_or_init(|| match devtools_missing() {
+            Some(what) => {
+                log_devtools_missing(what);
+                false
+            }
+            None => true,
+        })
+    }
+
+    /// Whether `object` answers `sel` with the shape we send it
+    /// ([`has_method`]): every private message below is sent only after
+    /// this says yes.
+    fn responds(object: &AnyObject, sel: Sel, returns: Returns) -> bool {
+        has_method(object.class(), sel, returns)
     }
 
     /// Whether the user clicked a link ([`user_clicked`], from the page's
@@ -1185,20 +1379,23 @@ mod mac {
         }
     }
 
-    /// The web view holding `window`'s keyboard focus (itself or a view
-    /// inside it), if any.
+    /// The page of ours holding `window`'s keyboard focus (itself or a view
+    /// inside it), if any. A Web Inspector holding it is no page of ours
+    /// ([`registered_page`]).
     fn focused_page(window: &NSWindow) -> Option<Retained<WKWebView>> {
-        page_containing(window.firstResponder()?.downcast::<NSView>().ok()?)
+        our_page(window.firstResponder()?.downcast::<NSView>().ok()?)
     }
 
-    /// The web view that is `view` or holds it.
-    fn page_containing(mut view: Retained<NSView>) -> Option<Retained<WKWebView>> {
-        loop {
-            match view.downcast::<WKWebView>() {
-                Ok(page) => return Some(page),
-                Err(other) => view = unsafe { other.superview() }?,
-            }
+    /// The page of ours that is `view` or holds it ([`registered_page`]).
+    fn our_page(view: Retained<NSView>) -> Option<Retained<WKWebView>> {
+        let mut chain = vec![view];
+        while let Some(up) = chain.last().and_then(|v| unsafe { v.superview() }) {
+            chain.push(up);
         }
+        let addrs: Vec<usize> = chain.iter().map(|v| Retained::as_ptr(v) as usize).collect();
+        let pages: Vec<usize> = PAGES.with(|p| p.borrow().iter().map(|e| e.view).collect());
+        let at = registered_page(&addrs, &pages)?;
+        chain.swap_remove(at).downcast::<WKWebView>().ok()
     }
 
     /// What the monitor needs of the page a mouse event lands on, if it
@@ -1215,7 +1412,7 @@ mod mac {
             .window(mtm)
             .and_then(|w| w.contentView())
             .and_then(|content| content.hitTest(event.locationInWindow()))
-            .and_then(page_containing)?;
+            .and_then(our_page)?;
         page_entry(&page)
     }
 
@@ -1535,6 +1732,9 @@ mod mac {
                 config
                     .preferences()
                     .setJavaScriptCanOpenWindowsAutomatically(false);
+                // Right-click → Inspect Element, and the Developer tools
+                // button's inspector (private; see the module docs).
+                enable_developer_extras(&config.preferences());
                 WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), NSRect::ZERO, &config)
             };
             // Safari's Web Inspector; macOS 13.3+ (we support 12).
@@ -1726,6 +1926,100 @@ mod mac {
         pub(crate) fn can_go_forward(&self) -> bool {
             unsafe { self.view.canGoForward() }
         }
+
+        /// The page's `_WKInspector` (private; see the module docs), or
+        /// `None` where WebKit lacks the API or has no inspector for it.
+        fn inspector(&self) -> Option<Retained<AnyObject>> {
+            if !inspector_available()
+                || !self.view.respondsToSelector(sel!(_inspector))
+                || !has_method(self.view.class(), sel!(_inspector), Returns::Object)
+            {
+                return None;
+            }
+            // SAFETY: answered above; `-[WKWebView _inspector]` takes no
+            // arguments and returns an object or nil (`@16@0:8`).
+            unsafe { msg_send![&*self.view, _inspector] }
+        }
+
+        /// Whether the page's Web Inspector is open, in its own window or
+        /// docked. `false` where the API is missing.
+        pub(crate) fn inspector_visible(&self) -> bool {
+            self.inspector()
+                .filter(|i| responds(i, sel!(isVisible), Returns::Bool))
+                // SAFETY: answered; `isVisible` returns a BOOL (`B16@0:8`).
+                .is_some_and(|i| unsafe { msg_send![&*i, isVisible] })
+        }
+
+        /// The Developer tools button: closes the page's Web Inspector if it
+        /// is open, else shows it (WebKit gives it its own window unless it
+        /// docks it; the pane then detaches it: [`settle_inspector`]). A
+        /// no-op where the API is missing (the button is hidden then).
+        pub(crate) fn toggle_inspector(&self) {
+            let Some(inspector) = self.inspector() else {
+                return;
+            };
+            if self.inspector_visible() {
+                if responds(&inspector, sel!(close), Returns::Nothing) {
+                    // SAFETY: answered; `close` takes and returns nothing.
+                    let _: () = unsafe { msg_send![&*inspector, close] };
+                }
+            } else if responds(&inspector, sel!(show), Returns::Nothing) {
+                // SAFETY: answered; `show` takes and returns nothing.
+                let _: () = unsafe { msg_send![&*inspector, show] };
+            }
+        }
+
+        /// Where the page's inspector is ([`InspectorPlace`]): docked when
+        /// its own web view (`inspectorWebView`) is in the page's window.
+        pub(crate) fn inspector_place(&self) -> InspectorPlace {
+            let Some(inspector) = self
+                .inspector()
+                .filter(|i| responds(i, sel!(inspectorWebView), Returns::Object))
+            else {
+                return InspectorPlace::Unsupported;
+            };
+            // SAFETY: answered; `inspectorWebView` returns a WKWebView or
+            // nil (`@16@0:8`).
+            let view: Option<Retained<WKWebView>> =
+                unsafe { msg_send![&*inspector, inspectorWebView] };
+            match view.and_then(|v| v.window()) {
+                None => InspectorPlace::NotPlaced,
+                Some(window) => {
+                    let docked = self.view.window().is_some_and(|w| ptr::eq(&*w, &*window));
+                    if docked {
+                        InspectorPlace::Docked
+                    } else {
+                        InspectorPlace::OwnWindow
+                    }
+                }
+            }
+        }
+
+        /// Moves a docked inspector into its own window. Only called when
+        /// [`Self::inspector_place`] says it is docked.
+        pub(crate) fn detach_inspector(&self) {
+            if let Some(inspector) = self.inspector().filter(|i| responds(i, sel!(detach), Returns::Nothing)) {
+                // SAFETY: answered; `detach` takes and returns nothing.
+                let _: () = unsafe { msg_send![&*inspector, detach] };
+            }
+        }
+
+        /// Closes the page's inspector if it is open or connected: the
+        /// inspector belongs to this view, which is going away.
+        fn close_inspector(&self) {
+            let Some(inspector) = self.inspector() else {
+                return;
+            };
+            let connected = responds(&inspector, sel!(isConnected), Returns::Bool)
+                // SAFETY: answered; `isConnected` returns a BOOL.
+                && unsafe { msg_send![&*inspector, isConnected] };
+            if (connected || self.inspector_visible())
+                && responds(&inspector, sel!(close), Returns::Nothing)
+            {
+                // SAFETY: answered; `close` takes and returns nothing.
+                let _: () = unsafe { msg_send![&*inspector, close] };
+            }
+        }
     }
 
     /// The window is minimized or the app is hidden (⌘H), as opposed to
@@ -1744,6 +2038,10 @@ mod mac {
 
     impl Drop for NativeWebView {
         fn drop(&mut self) {
+            // The inspector is this page's: it closes first, while the page
+            // is still whole. The next view (the tab shown again) starts
+            // with it closed.
+            self.close_inspector();
             unsafe {
                 for key in KVO_KEYS {
                     self.view.removeObserver_forKeyPath_context(
@@ -1787,6 +2085,36 @@ mod mac {
         #[cfg(debug_assertions)]
         fn container_class_registers() {
             assert_eq!(PageContainer::class().name().to_str(), Ok("HarnessPageContainer"));
+        }
+
+        /// The shape check every private message goes through, on methods
+        /// whose shapes are known.
+        #[test]
+        fn private_messages_are_checked_for_their_shape() {
+            use objc2::runtime::NSObject;
+            use objc2::sel;
+
+            use super::{Returns, has_method};
+            let class = NSObject::class();
+            assert!(has_method(class, sel!(description), Returns::Object));
+            assert!(!has_method(class, sel!(description), Returns::Nothing));
+            assert!(!has_method(class, sel!(description), Returns::Bool));
+            assert!(has_method(class, sel!(isProxy), Returns::Bool));
+            // One argument: not a message we would send bare.
+            assert!(!has_method(class, sel!(respondsToSelector:), Returns::Bool));
+            assert!(!has_method(class, sel!(harnessNoSuchMethod), Returns::Nothing));
+        }
+
+        /// The runtime check of the private inspector API, on the classes
+        /// alone (no web view, no window). It must not panic or throw
+        /// whatever this macOS has; the button's availability is exactly its
+        /// verdict. Not asserted present: a future macOS may drop it.
+        #[test]
+        fn the_inspector_api_check_runs_without_a_web_view() {
+            use super::{devtools_missing, inspector_available};
+            let missing = devtools_missing();
+            eprintln!("inspector API missing: {missing:?}");
+            assert_eq!(inspector_available(), missing.is_none());
         }
     }
 }
@@ -2119,6 +2447,45 @@ mod tests {
         // The page resized under a still conductor: the outer rect moved.
         let taller = page_mask(vec![a], 600.0, 520.0);
         assert!(mask_changed(mask.as_ref(), taller.as_ref()));
+    }
+
+    #[test]
+    fn the_monitor_acts_only_for_our_own_pages() {
+        // Views by address: a page's inner view, the page, its container,
+        // gpui's view; an inspector's inner view and its web view.
+        let (inner, page, container, gpui) = (10, 11, 12, 13);
+        let (insp_inner, insp, insp_frame) = (20, 21, 22);
+        let pages = [page, 99];
+        // A click or the keyboard inside the page: the page.
+        assert_eq!(registered_page(&[inner, page, container, gpui], &pages), Some(1));
+        assert_eq!(registered_page(&[page, container, gpui], &pages), Some(0));
+        // The inspector in its own window: a WKWebView too, but not ours.
+        assert_eq!(registered_page(&[insp_inner, insp, insp_frame], &pages), None);
+        // Docked beside the page, in the same container and window.
+        assert_eq!(registered_page(&[insp_inner, insp, container, gpui], &pages), None);
+        // gpui's own view (a hole, the address bar), and no page at all.
+        assert_eq!(registered_page(&[gpui], &pages), None);
+        assert_eq!(registered_page(&[inner, page, container, gpui], &[]), None);
+        assert_eq!(registered_page(&[], &pages), None);
+    }
+
+    #[test]
+    fn a_newly_opened_inspector_is_moved_to_its_own_window_once() {
+        use InspectorPlace::{Docked, NotPlaced, OwnWindow, Unsupported};
+        // (pending, place) -> (detach, still pending).
+        // Nothing pending (closed, or already settled): never touched, so
+        // the user docking it from its own toolbar sticks.
+        for place in [Unsupported, NotPlaced, Docked, OwnWindow] {
+            assert_eq!(settle_inspector(false, place), (false, false), "{place:?}");
+        }
+        // Just opened, docked by WebKit: detach, once.
+        assert_eq!(settle_inspector(true, Docked), (true, false));
+        // Already in its own window: nothing to do.
+        assert_eq!(settle_inspector(true, OwnWindow), (false, false));
+        // Not in any window yet: ask again next time.
+        assert_eq!(settle_inspector(true, NotPlaced), (false, true));
+        // WebKit can't say where it is: leave it where it is.
+        assert_eq!(settle_inspector(true, Unsupported), (false, false));
     }
 
     #[test]

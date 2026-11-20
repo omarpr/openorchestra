@@ -38,6 +38,16 @@
 //! [`BrowserHistory`] entity. Typing in the address bar suggests pages from
 //! it: a list gpui draws over the page, so while it is open the page hides
 //! as it does for any other overlay ([`Self::page_visible`]).
+//!
+//! **Developer tools.** The address bar's Developer tools button toggles
+//! WebKit's Web Inspector for the page, and right-click → Inspect Element
+//! opens it on an element (private WebKit API, guarded: `webview.rs`). The
+//! button is hidden where WebKit lacks that API and disabled without a page
+//! view (a blank tab). Its on state is polled from WebKit
+//! ([`INSPECTOR_POLL`]), since Inspect Element and the inspector's own close
+//! button change it too. The inspector lives and dies with the native view:
+//! hiding or closing the tab closes it and resets the button, and the tab
+//! shown again does not reopen it.
 
 mod history;
 mod webview;
@@ -63,7 +73,7 @@ use crate::workspace::{LookKind, browser_label, kind_icon, tip};
 pub(crate) use webview::{
     Hole, set_app_shortcuts, set_punch_through, window_is_minimized_or_hidden,
 };
-use webview::{NativeEvents, NativeWebView};
+use webview::{NativeEvents, NativeWebView, inspector_available, settle_inspector};
 
 /// What the address bar makes of what was typed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -243,6 +253,37 @@ fn activation_focus(has_page: bool) -> ActivationFocus {
     }
 }
 
+/// The address bar's Developer tools button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DevToolsButton {
+    /// WebKit lacks the private inspector API (`webview::inspector_available`).
+    Hidden,
+    /// No page view to inspect: a blank tab, or one not on screen.
+    Disabled,
+    /// Shows the inspector.
+    Off,
+    /// The inspector is open (its own window or docked); closes it.
+    On,
+}
+
+/// The button from whether WebKit has the inspector API (`available`), the
+/// tab has a native page view (`has_page_view`), and that page's inspector is
+/// open (`inspector_open`, polled from WebKit: the button, Inspect Element
+/// and the inspector's own close button all change it).
+fn devtools_button(available: bool, has_page_view: bool, inspector_open: bool) -> DevToolsButton {
+    match (available, has_page_view, inspector_open) {
+        (false, _, _) => DevToolsButton::Hidden,
+        (true, false, _) => DevToolsButton::Disabled,
+        (true, true, false) => DevToolsButton::Off,
+        (true, true, true) => DevToolsButton::On,
+    }
+}
+
+/// How often a page's inspector is asked whether it is open, for the
+/// button's state: Inspect Element and the inspector window's close button
+/// change it without telling the pane.
+const INSPECTOR_POLL: Duration = Duration::from_millis(500);
+
 /// The tab's name for a page: its title, else its host, else "Browser".
 pub(crate) fn page_label(url: Option<&str>, title: Option<&str>) -> String {
     let host = url
@@ -319,6 +360,10 @@ struct LoadFailure {
 struct Native {
     view: NativeWebView,
     _events: Task<()>,
+    /// Asks the page's inspector whether it is open, every
+    /// [`INSPECTOR_POLL`] (`BrowserPane::poll_inspector`); none where WebKit
+    /// lacks the API.
+    _inspector_poll: Option<Task<()>>,
 }
 
 /// How long a notice (e.g. an unsupported download) stays in the bar.
@@ -462,6 +507,12 @@ pub(crate) struct BrowserPane {
     fresh_load: bool,
     /// What a blank tab lists under "Running in this task" (`set_running`).
     running: Vec<RunningServer>,
+    /// The page's Web Inspector is open, as last polled
+    /// (`poll_inspector`). Reset when the view is dropped, which closes it.
+    inspector_open: bool,
+    /// The inspector just opened and may still be docked by WebKit; the
+    /// next poll moves it to its own window ([`settle_inspector`]).
+    inspector_settling: bool,
     /// Opens and refreshes the suggestions as the user types.
     _address_edits: gpui::Subscription,
 }
@@ -583,6 +634,8 @@ impl BrowserPane {
             reshow: None,
             fresh_load: false,
             running: Vec::new(),
+            inspector_open: false,
+            inspector_settling: false,
             _address_edits: address_edits,
         }
     }
@@ -751,7 +804,11 @@ impl BrowserPane {
         if shown {
             self.ensure_native(window, cx);
         } else {
+            // Dropping the view closes its inspector first (`webview.rs`);
+            // shown again, the page reloads with it closed.
             self.native = None;
+            self.inspector_open = false;
+            self.inspector_settling = false;
             self.loading = false;
             self.suggestions = None;
             // A focus request the page never got to take (e.g. Enter that
@@ -815,12 +872,25 @@ impl BrowserPane {
                         }
                     }
                 });
+                let inspector_poll = inspector_available().then(|| {
+                    cx.spawn_in(window, async move |this, cx| {
+                        loop {
+                            cx.background_executor().timer(INSPECTOR_POLL).await;
+                            if this.update(cx, |pane, cx| pane.poll_inspector(cx)).is_err() {
+                                break;
+                            }
+                        }
+                    })
+                });
                 self.failure = None;
                 self.reshow = (!std::mem::take(&mut self.fresh_load)).then(|| url.clone());
                 self.attempted = Some(url);
+                self.inspector_open = false;
+                self.inspector_settling = false;
                 self.native = Some(Native {
                     view,
                     _events: events,
+                    _inspector_poll: inspector_poll,
                 });
             }
             Err(e) => {
@@ -1007,6 +1077,39 @@ impl BrowserPane {
         cx.notify();
     }
 
+    /// The Developer tools button: show the page's Web Inspector, or close
+    /// it if open. The state is read back from WebKit right away; showing
+    /// may land a moment later, which the next poll picks up.
+    fn toggle_devtools(&mut self, cx: &mut Context<Self>) {
+        if let Some(native) = &self.native {
+            native.view.toggle_inspector();
+        }
+        self.poll_inspector(cx);
+    }
+
+    /// Catch up with the page's inspector: the button, Inspect Element and
+    /// the inspector's own close button all open or close it. One that just
+    /// opened is moved to its own window if WebKit docked it
+    /// ([`settle_inspector`]). Notifies only on a change.
+    fn poll_inspector(&mut self, cx: &mut Context<Self>) {
+        let Some(native) = &self.native else {
+            return;
+        };
+        let open = native.view.inspector_visible();
+        if open != self.inspector_open {
+            self.inspector_open = open;
+            self.inspector_settling = open;
+            cx.notify();
+        }
+        if self.inspector_settling {
+            let (detach, pending) = settle_inspector(true, native.view.inspector_place());
+            if detach {
+                native.view.detach_inspector();
+            }
+            self.inspector_settling = pending;
+        }
+    }
+
     fn render_bar(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> impl IntoElement {
         let native = self.native.as_ref().map(|n| &n.view);
         let can_back = native.is_some_and(|v| v.can_go_back());
@@ -1089,6 +1192,29 @@ impl BrowserPane {
                     .text_color(hx.amber)
                     .child(text)
             }))
+            .children(match devtools_button(
+                inspector_available(),
+                native.is_some(),
+                self.inspector_open,
+            ) {
+                DevToolsButton::Hidden => None,
+                state => {
+                    let enabled = state != DevToolsButton::Disabled;
+                    Some(
+                        bar_toggle(
+                            hx,
+                            "browser-devtools",
+                            ::ui::IconName::Code,
+                            "Developer tools",
+                            enabled,
+                            state == DevToolsButton::On,
+                        )
+                        .when(enabled, |d| {
+                            d.on_click(cx.listener(|pane, _, _, cx| pane.toggle_devtools(cx)))
+                        }),
+                    )
+                }
+            })
             .child(
                 bar_button(
                     hx,
@@ -1120,9 +1246,11 @@ impl BrowserPane {
             .occlude()
             .absolute()
             .top(px(32.0))
-            // Under the address field: past back, forward and reload.
+            // Under the address field: past back, forward and reload, and
+            // short of Open in default browser (and Developer tools, when
+            // shown: 24pt and a 4pt gap more).
             .left(px(92.0))
-            .right(px(36.0))
+            .right(px(if inspector_available() { 64.0 } else { 36.0 }))
             .max_w(px(640.0))
             .flex()
             .flex_col()
@@ -1502,7 +1630,24 @@ fn bar_button(
     label: &'static str,
     enabled: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    let color = if enabled { hx.tx1 } else { tint(hx.tx2, 0.5) };
+    bar_toggle(hx, id, icon, label, enabled, false)
+}
+
+/// [`bar_button`] for a toggle: while `on`, it shows the app's selected
+/// state (an accent tint behind an accent icon).
+fn bar_toggle(
+    hx: &HarnessTheme,
+    id: &'static str,
+    icon: ::ui::IconName,
+    label: &'static str,
+    enabled: bool,
+    on: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let color = match (enabled, on) {
+        (false, _) => tint(hx.tx2, 0.5),
+        (true, true) => hx.accent,
+        (true, false) => hx.tx1,
+    };
     div()
         .id(id)
         .flex()
@@ -1513,6 +1658,7 @@ fn bar_button(
         .rounded_md()
         .tooltip(tip(label))
         .child(svg().path(icon.path()).size(px(14.0)).text_color(color))
+        .when(on, |d| d.bg(tint(hx.accent, 0.16)))
         .when(enabled, |d| {
             d.cursor_pointer().hover(|d| d.bg(hx.surface_hover))
         })
@@ -1811,5 +1957,31 @@ mod tests {
         assert_eq!(page_label(Some("http://localhost:3000/x"), None), "Browser · localhost");
         assert_eq!(page_label(Some("http://localhost:3000/x"), Some("Vite")), "Browser · Vite");
         assert_eq!(page_label(Some("not a url"), None), "Browser");
+    }
+
+    #[test]
+    fn the_developer_tools_button_follows_webkit_the_page_and_the_inspector() {
+        use DevToolsButton::{Disabled, Hidden, Off, On};
+        // (available, has_page_view, inspector_open) -> button.
+        let table = [
+            // WebKit lacks the private inspector API: no button at all,
+            // whatever the tab shows.
+            ((false, false, false), Hidden),
+            ((false, true, false), Hidden),
+            ((false, true, true), Hidden),
+            // A blank tab, or one whose page isn't up (no native view).
+            ((true, false, false), Disabled),
+            // A stale "open" from a dropped view never shows as active.
+            ((true, false, true), Disabled),
+            ((true, true, false), Off),
+            ((true, true, true), On),
+        ];
+        for ((available, page, open), button) in table {
+            assert_eq!(
+                devtools_button(available, page, open),
+                button,
+                "available={available} page={page} open={open}"
+            );
+        }
     }
 }

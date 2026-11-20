@@ -21,7 +21,9 @@ Unreleased is empty.
   project remembers the pages its browser tabs open, and the address bar
   suggests them as you type (↑/↓ and Enter to pick one). **Settings ›
   General › Clear browsing history** forgets them. The conductor stays
-  visible over a browser page and can be dragged there.
+  visible over a browser page and can be dragged there. Browser tabs have
+  Developer tools (Web Inspector) from the address bar and from right-click
+  → Inspect Element.
 - Links to local addresses (localhost, your network, Tailscale) and ports
   opened from the current project or task open in a browser tab. Other links
   still use your default browser. Change it in **Settings › General**.
