@@ -24,6 +24,7 @@ mod diff_review;
 mod diff_watch;
 mod git_watch;
 mod harness_zed_theme;
+mod link_routing;
 mod login_env;
 mod markdown_preview;
 mod markdown_preview_button;

@@ -4259,6 +4259,7 @@ dependencies = [
  "tree-sitter-typescript",
  "tree-sitter-yaml",
  "ui",
+ "url",
  "util",
  "watch",
  "workspace",

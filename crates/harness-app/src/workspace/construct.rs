@@ -20,6 +20,7 @@ impl HarnessWorkspace {
         let archived_repos = load_repos(&archived_path);
         let prefs_path = data_dir.join("prefs.json");
         let prefs = load_prefs(&prefs_path);
+        crate::link_routing::set_routing_enabled(prefs.links_in_browser_tab);
         let reg_path = data_dir.join("registry.json");
         let panes_path = data_dir.join("panes.json");
         let mut panes_state = crate::panes_state::load(&panes_path);

@@ -170,6 +170,9 @@ pub(crate) struct Prefs {
     /// `Some(false)` = always leave them running (detached).
     #[serde(default)]
     pub(crate) close_terminals_on_exit: Option<bool>,
+    /// Open local/dev links in an in-app browser tab instead of the system browser.
+    #[serde(default = "default_true")]
+    pub(crate) links_in_browser_tab: bool,
 }
 
 pub(crate) fn default_true() -> bool {
@@ -215,6 +218,7 @@ impl Default for Prefs {
             sidebar_open: true,
             diff_open: true,
             close_terminals_on_exit: None,
+            links_in_browser_tab: true,
         }
     }
 }
@@ -484,5 +488,20 @@ mod collapsed_prefs_tests {
             "the rest of the Mac starts folded away"
         );
         assert!(!PortsTask.collapsed_by_default());
+    }
+}
+
+#[cfg(test)]
+mod links_pref_tests {
+    use super::Prefs;
+
+    #[test]
+    fn prefs_default_routes_links_and_old_files_get_the_default() {
+        assert!(Prefs::default().links_in_browser_tab);
+        // A prefs.json written before the setting existed.
+        let mut old = serde_json::to_value(Prefs::default()).unwrap();
+        old.as_object_mut().unwrap().remove("links_in_browser_tab");
+        let p: Prefs = serde_json::from_value(old).unwrap();
+        assert!(p.links_in_browser_tab);
     }
 }

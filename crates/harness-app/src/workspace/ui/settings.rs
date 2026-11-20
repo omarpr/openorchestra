@@ -674,6 +674,27 @@ impl HarnessWorkspace {
                     hx,
                 ));
 
+            // ---- Links -----------------------------------------------------------
+            let in_tab = self.prefs.links_in_browser_tab;
+            body = body.child(section_title("Links")).child(
+                toggle_row(
+                    focus,
+                    "links-in-browser-tab-toggle",
+                    "Open links in a browser tab",
+                    "Links to local addresses (localhost, your network, Tailscale) and ports you open from this project or task open in a browser tab. Other links always use your default browser. Turn off to send everything to your default browser.",
+                    in_tab,
+                    hx,
+                    cx,
+                )
+                .on_click(cx.listener(|ws, _, _, cx| {
+                    cx.stop_propagation();
+                    ws.prefs.links_in_browser_tab = !ws.prefs.links_in_browser_tab;
+                    crate::link_routing::set_routing_enabled(ws.prefs.links_in_browser_tab);
+                    save_prefs_to(&ws.prefs_path, &ws.prefs);
+                    cx.notify();
+                })),
+            );
+
             // ---- Conductor -------------------------------------------------------
             let always = self.prefs.conductor_always_on;
             body = body.child(section_title("Conductor")).child(
