@@ -414,17 +414,34 @@ enum InspectorWatch {
     /// It just opened; waiting to see where WebKit put it.
     Opening,
     /// The pane moved it to the user's placement; the next placement seen
-    /// is the result, not the user's doing.
-    Moved,
+    /// is the result, not the user's doing. The count is how many more
+    /// times a left/right dock is asked for while it hasn't landed
+    /// ([`DOCK_RETRIES`]); 0 for every other move.
+    Moved(u8),
     /// Settled at this placement (`None`: unknown). A different one seen
     /// from now on is the user's doing, from the inspector's own toolbar.
     Watching(Option<InspectorPlacement>),
 }
 
+/// How many more polls ask the inspector's page again to dock left or
+/// right while it hasn't: the request is a script in that page, which does
+/// nothing if it runs before the page's `InspectorFrontendHost` is ready.
+/// `attach`/`detach` act at once, so they are never repeated.
+const DOCK_RETRIES: u8 = 3;
+
+/// The [`InspectorWatch::Moved`] state after sending `to`.
+fn moved_after(to: InspectorMove) -> InspectorWatch {
+    match to {
+        InspectorMove::Dock(_) => InspectorWatch::Moved(DOCK_RETRIES),
+        InspectorMove::AttachBottom | InspectorMove::Detach => InspectorWatch::Moved(0),
+    }
+}
+
 /// What the pane does on a poll that sees the open inspector at `place`,
-/// with the user's placement `want`: the move to make (at most once per
-/// open), the next state, and a placement to remember (only one the user
-/// chose: never where it opened, nor the result of our own move).
+/// with the user's placement `want`: the move to make (once per open, but
+/// a left/right dock is asked again up to [`DOCK_RETRIES`] times while it
+/// hasn't landed), the next state, and a placement to remember (only one
+/// the user chose: never where it opened, nor the result of our own move).
 fn settle_inspector(
     watch: InspectorWatch,
     want: InspectorPlacement,
@@ -438,15 +455,20 @@ fn settle_inspector(
         (_, InspectorPlace::Unsupported, _) => (None, Watching(None), None),
         // Docked somewhere other than beside the page (never expected):
         // its own window, once.
-        (Opening, InspectorPlace::DockedElsewhere, _) => (Some(InspectorMove::Detach), Moved, None),
-        (Moved, InspectorPlace::DockedElsewhere, _) => (None, Watching(None), None),
+        (Opening, InspectorPlace::DockedElsewhere, _) => (Some(InspectorMove::Detach), Moved(0), None),
+        (Moved(_), InspectorPlace::DockedElsewhere, _) => (None, Watching(None), None),
         // Not in a window yet, or mid-move: ask again next time.
-        (Opening | Moved, _, None) => (None, watch, None),
-        (Opening, _, Some(p)) if p == want => (None, Watching(Some(p)), None),
-        // Elsewhere: moved once. WebKit may refuse (a page too small to
-        // dock beside); whatever comes of it is where it stays.
-        (Opening, _, Some(_)) => (Some(move_for(want)), Moved, None),
-        (Moved, _, Some(p)) => (None, Watching(Some(p)), None),
+        (Opening | Moved(_), _, None) => (None, watch, None),
+        (Opening | Moved(_), _, Some(p)) if p == want => (None, Watching(Some(p)), None),
+        // Elsewhere: moved. WebKit may refuse (a page too small to dock
+        // beside); whatever comes of it is where it stays.
+        (Opening, _, Some(_)) => {
+            let to = move_for(want);
+            (Some(to), moved_after(to), None)
+        }
+        // A left/right dock that hasn't landed: asked again, a few times.
+        (Moved(left), _, Some(_)) if left > 0 => (Some(move_for(want)), Moved(left - 1), None),
+        (Moved(_), _, Some(p)) => (None, Watching(Some(p)), None),
         // No baseline yet (it was never readable): this is one, not a move.
         (Watching(None), _, Some(p)) => (None, Watching(Some(p)), None),
         (Watching(Some(last)), _, Some(p)) if last != p => (None, Watching(Some(p)), Some(p)),
@@ -2275,6 +2297,8 @@ mod tests {
         }
     }
 
+    /// Mutates the process-wide placement mirror (an atomic) and restores
+    /// it; no other test may read it, since tests run in parallel.
     #[test]
     fn the_placement_mirror_round_trips() {
         let before = inspector_placement();
@@ -2313,23 +2337,40 @@ mod tests {
         // Opened elsewhere: moved, once, to the user's placement.
         assert_eq!(
             settle_inspector(Opening, P::Bottom, window),
-            (Some(InspectorMove::AttachBottom), Moved, None)
+            (Some(InspectorMove::AttachBottom), Moved(0), None)
         );
-        assert_eq!(settle_inspector(Opening, P::Window, bottom), (Some(InspectorMove::Detach), Moved, None));
+        assert_eq!(settle_inspector(Opening, P::Window, bottom), (Some(InspectorMove::Detach), Moved(0), None));
         assert_eq!(
             settle_inspector(Opening, P::Left, window),
-            (Some(InspectorMove::Dock(DockSide::Left)), Moved, None)
+            (Some(InspectorMove::Dock(DockSide::Left)), Moved(DOCK_RETRIES), None)
         );
         assert_eq!(
             settle_inspector(Opening, P::Right, left),
-            (Some(InspectorMove::Dock(DockSide::Right)), Moved, None)
+            (Some(InspectorMove::Dock(DockSide::Right)), Moved(DOCK_RETRIES), None)
         );
         // After our move: wherever it ended up is the baseline, never
         // remembered and never moved again (WebKit refuses to dock beside
         // a small page; no loop).
-        assert_eq!(settle_inspector(Moved, P::Bottom, window), (None, Watching(Some(P::Window)), None));
-        assert_eq!(settle_inspector(Moved, P::Left, left), (None, Watching(Some(P::Left)), None));
-        assert_eq!(settle_inspector(Moved, P::Left, mid), (None, Moved, None));
+        assert_eq!(settle_inspector(Moved(0), P::Bottom, window), (None, Watching(Some(P::Window)), None));
+        assert_eq!(settle_inspector(Moved(0), P::Left, left), (None, Watching(Some(P::Left)), None));
+        assert_eq!(settle_inspector(Moved(2), P::Left, mid), (None, Moved(2), None));
+        // A left/right dock that hasn't landed (its script ran before the
+        // inspector's page was ready) is asked again, at most DOCK_RETRIES
+        // times, then it stays where it is, not remembered.
+        let dock_left = Some(InspectorMove::Dock(DockSide::Left));
+        let mut watch = Moved(DOCK_RETRIES);
+        for _ in 0..DOCK_RETRIES {
+            let (to, next, chosen) = settle_inspector(watch, P::Left, window);
+            assert_eq!((to, chosen), (dock_left, None));
+            watch = next;
+        }
+        assert_eq!(watch, Moved(0));
+        assert_eq!(settle_inspector(watch, P::Left, window), (None, Watching(Some(P::Window)), None));
+        // Landing on a retry settles it there.
+        assert_eq!(settle_inspector(Moved(1), P::Left, left), (None, Watching(Some(P::Left)), None));
+        // Bottom/window moves are never repeated (attach/detach act at once;
+        // a refused attach must not loop).
+        assert_eq!(settle_inspector(Moved(0), P::Bottom, window), (None, Watching(Some(P::Window)), None));
         // Settled: a different placement is the user's, from the
         // inspector's toolbar; it is remembered. The same one is not.
         assert_eq!(settle_inspector(Watching(Some(P::Bottom)), P::Bottom, bottom), (None, Watching(Some(P::Bottom)), None));
@@ -2345,14 +2386,15 @@ mod tests {
         assert_eq!(settle_inspector(Watching(Some(P::Bottom)), P::Bottom, mid), (None, Watching(Some(P::Bottom)), None));
         // Docked outside the tab (never expected): its own window, once.
         let elsewhere = InspectorPlace::DockedElsewhere;
-        assert_eq!(settle_inspector(Opening, P::Bottom, elsewhere), (Some(InspectorMove::Detach), Moved, None));
-        assert_eq!(settle_inspector(Moved, P::Bottom, elsewhere), (None, Watching(None), None));
+        assert_eq!(settle_inspector(Opening, P::Bottom, elsewhere), (Some(InspectorMove::Detach), Moved(0), None));
+        assert_eq!(settle_inspector(Moved(0), P::Bottom, elsewhere), (None, Watching(None), None));
+        assert_eq!(settle_inspector(Moved(3), P::Left, elsewhere), (None, Watching(None), None));
         assert_eq!(settle_inspector(Watching(None), P::Bottom, elsewhere), (None, Watching(None), None));
         // A late result of that move, first readable now: the baseline,
         // not the user's choice.
         assert_eq!(settle_inspector(Watching(None), P::Bottom, window), (None, Watching(Some(P::Window)), None));
         // WebKit can't say where it is: left alone for good.
-        for watch in [Opening, Moved, Watching(Some(P::Left))] {
+        for watch in [Opening, Moved(0), Moved(DOCK_RETRIES), Watching(Some(P::Left))] {
             assert_eq!(
                 settle_inspector(watch, P::Bottom, InspectorPlace::Unsupported),
                 (None, Watching(None), None)

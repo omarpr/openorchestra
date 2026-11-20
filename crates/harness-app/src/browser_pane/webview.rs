@@ -255,8 +255,23 @@
 //!   stays in its window, and the pane doesn't try again.
 //! - `requestSetDockSide` exists on the inspector page's
 //!   `InspectorFrontendHost` (the installed Web Inspector's Main.js calls
-//!   it so). If not, the script does nothing and the inspector stays where
-//!   WebKit opened it (WebKit also remembers its last side itself).
+//!   it so). A script that runs before that page is ready does nothing, so
+//!   the pane asks again on the next few polls while it hasn't docked
+//!   (`DOCK_RETRIES` in `mod.rs`). If the function is gone, the inspector
+//!   stays where WebKit opened it (WebKit also remembers its last side
+//!   itself).
+//! - Only WebKit's docked inspector is ever beside the page in the dock
+//!   view: `something_beside_page` counts *any* other subview, hidden ones
+//!   included, as "WebKit sizes the page". If something else lands there
+//!   (a WebKit that leaves a hidden view behind), the page is not refilled
+//!   by us until it goes.
+//! - Our page uses autoresizing, not Auto Layout, so WebKit's newer Auto
+//!   Layout path (`WKInspectorAttachmentContainerView`, in WebKit `main`
+//!   but absent on 27.3) shouldn't apply. If a future WebKit wrapped the
+//!   page anyway, the page would leave our dock view (unsized by us) and
+//!   the inspector would no longer be its sibling there: that reads as
+//!   [`InspectorPlace::DockedElsewhere`] and the inspector is detached
+//!   into its own window; WebKit then puts the page back.
 //! - Removing the view holding the keyboard (the inspector closing or
 //!   popping out) leaves the window itself first responder; the pane then
 //!   hands it to gpui's view (`recover_focus`), and the toggle and `Drop`
