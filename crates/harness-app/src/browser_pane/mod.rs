@@ -153,6 +153,45 @@ pub(crate) fn web_view_visible(
     tab_active && pane_visible && !overlay_open && !load_failed
 }
 
+/// Whether gpui's focus is on the page's side of its tab: in the tab
+/// (`in_pane`, the pane's focus handle or anything under it) but not in its
+/// address bar (`in_address`). The key monitor's gpui input
+/// ([`webview::route_key`]).
+fn gpui_focus_on_page(in_pane: bool, in_address: bool) -> bool {
+    in_pane && !in_address
+}
+
+/// What a pending "the page takes the keyboard" request (`focus_page`) does
+/// this frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Refocus {
+    /// Give the page the keyboard; the request is done.
+    Take,
+    /// The request is done; the page doesn't take the keyboard.
+    Drop,
+    /// Leave the request as it is.
+    Keep,
+}
+
+/// Whether the page re-takes the keyboard now, from the pending request and
+/// where gpui's focus is (see [`gpui_focus_on_page`]). Back on the page's
+/// side of the tab it takes it; in the address bar the request is dropped,
+/// since the user chose to type there. Anywhere else (the tools panel after
+/// ⌘⇧F, an overlay's input) the request waits: frames keep coming meanwhile
+/// (a cursor blink is enough), and consuming it then would leave the page
+/// without the keyboard once gpui's focus comes back by keyboard.
+fn page_refocus(pending: bool, in_pane: bool, in_address: bool) -> Refocus {
+    if !pending {
+        Refocus::Keep
+    } else if in_address {
+        Refocus::Drop
+    } else if gpui_focus_on_page(in_pane, in_address) {
+        Refocus::Take
+    } else {
+        Refocus::Keep
+    }
+}
+
 /// The tab's name for a page: its title, else its host, else "Browser".
 pub(crate) fn page_label(url: Option<&str>, title: Option<&str>) -> String {
     let host = url
@@ -224,14 +263,19 @@ pub(crate) struct BrowserPane {
     native: Option<Native>,
     address: Entity<Editor>,
     focus_handle: FocusHandle,
-    /// Hand the page keyboard focus once its view is next placed (after
-    /// Enter or Esc in the address bar).
+    /// Hand the page keyboard focus once its view is next placed with gpui's
+    /// focus on the page's side of the tab ([`page_refocus`]): after Enter
+    /// or Esc in the address bar, an overlay that hid the page, or gpui's
+    /// focus leaving the tab while the page had the keyboard.
     focus_page: Cell<bool>,
     /// Creating the native view failed. Latched so render doesn't retry
     /// every frame; the in-tab Retry clears it.
     view_failed: bool,
     /// Hands the page's keyboard back when gpui's focus leaves the tab.
     _focus_out: gpui::Subscription,
+    /// Takes the keyboard from the page when the address bar gets gpui's
+    /// focus.
+    _address_focus_in: gpui::Subscription,
 }
 
 impl BrowserPane {
@@ -256,15 +300,33 @@ impl BrowserPane {
         // keyboard, and its ⌘-keys, under the panel's search box.
         // gpui also reports a window going inactive (⌘-Tab away) as focus
         // out; the page keeps the keyboard for when the user comes back.
+        // A page that had it asks for it back for when gpui's focus returns
+        // to the tab without a click (Esc, the panel toggled off): see
+        // `page_refocus`.
         let focus_out = cx.on_focus_out(&focus_handle, window, |pane, _, window, _| {
             if !window.is_window_active() {
                 return;
             }
             if let Some(native) = &pane.native {
                 native.view.set_pane_focused(false);
-                native.view.release_focus();
+                if native.view.release_focus() {
+                    pane.focus_page.set(true);
+                }
             }
         });
+        // The address bar is inside the pane's focus handle, so clicking it
+        // from the page fires no focus-out, and gpui's view never takes
+        // AppKit's first responder on a click: the page would keep the
+        // typing, ⌘A and ⌘V meant for the address bar. The user chose the
+        // address bar, so no request to give the page the keyboard back.
+        let address_focus_in =
+            cx.on_focus_in(&address.focus_handle(cx), window, |pane, _, _| {
+                pane.focus_page.set(false);
+                if let Some(native) = &pane.native {
+                    native.view.set_pane_focused(false);
+                    native.view.release_focus();
+                }
+            });
         Self {
             attempted: url.clone(),
             url,
@@ -281,6 +343,7 @@ impl BrowserPane {
             focus_page: Cell::new(false),
             view_failed: false,
             _focus_out: focus_out,
+            _address_focus_in: address_focus_in,
         }
     }
 
@@ -346,8 +409,9 @@ impl BrowserPane {
     /// it, losing its state on every ＋ menu); the tab body shows the theme
     /// background in its place. A page holding the keyboard hands it to
     /// gpui while hidden, so the overlay's own inputs and Esc work, and gets
-    /// it back after (if gpui's focus is still in this tab). Idempotent, and
-    /// it never notifies: the workspace calls it while rendering.
+    /// it back once it shows with gpui's focus on the page's side of this
+    /// tab ([`page_refocus`]). Idempotent, and it never notifies: the
+    /// workspace calls it while rendering.
     pub(crate) fn set_overlay_open(&mut self, open: bool) {
         if self.overlay_open == open {
             return;
@@ -435,8 +499,12 @@ impl BrowserPane {
             PageEvent::NewWindow(url) => cx.emit(BrowserEvent::NewWindow(url)),
             // AppKit already gave the page the keyboard; gpui's focus follows
             // to the tab (out of the address bar or the tools panel), so
-            // the key monitor routes the page's ⌘-keys to it.
-            PageEvent::Clicked => window.focus(&self.focus_handle, cx),
+            // the key monitor routes the page's ⌘-keys to it. A pending
+            // request to hand it the keyboard is already met.
+            PageEvent::Clicked => {
+                self.focus_page.set(false);
+                window.focus(&self.focus_handle, cx);
+            }
         }
         cx.notify();
     }
@@ -686,22 +754,29 @@ impl BrowserPane {
                         let Some(native) = &pane.native else {
                             return;
                         };
-                        // The key monitor's second input (`route_key`).
+                        let in_pane = pane.focus_handle.contains_focused(window, cx);
+                        let in_address = pane.address.focus_handle(cx).contains_focused(window, cx);
+                        // The key monitor's gpui input (`route_key`).
                         native
                             .view
-                            .set_pane_focused(pane.focus_handle.contains_focused(window, cx));
+                            .set_pane_focused(gpui_focus_on_page(in_pane, in_address));
                         if !pane.page_visible(true) {
                             native.view.set_visible(false);
                             return;
                         }
                         native.view.set_frame(bounds, window);
                         native.view.set_visible(true);
-                        // Only while gpui's focus is still in this tab: an
-                        // overlay may have closed by moving it elsewhere (a
-                        // tab rename), and the page must not take the keys.
-                        if pane.focus_page.take() && pane.focus_handle.contains_focused(window, cx)
-                        {
-                            native.view.focus();
+                        // Never while gpui's focus is elsewhere (an overlay
+                        // may have closed by moving it, say to a tab rename)
+                        // or in the address bar: the page must not take
+                        // their keys.
+                        match page_refocus(pane.focus_page.get(), in_pane, in_address) {
+                            Refocus::Take => {
+                                pane.focus_page.set(false);
+                                native.view.focus();
+                            }
+                            Refocus::Drop => pane.focus_page.set(false),
+                            Refocus::Keep => {}
                         }
                     },
                     |_, _, _, _| {},
@@ -935,6 +1010,64 @@ mod tests {
                 visible,
                 "tab_active={tab_active} pane_visible={pane_visible} \
                  overlay_open={overlay_open} load_failed={load_failed}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_address_bar_is_not_the_page_side_of_the_tab() {
+        // (in_pane, in_address) -> the page's ⌘-keys go to it. The address
+        // bar sits inside the pane's focus handle, so `in_address` implies
+        // `in_pane`; (false, true) can't happen and stays not-the-page.
+        let table = [
+            ((false, false), false),
+            ((false, true), false),
+            ((true, false), true),
+            // Clicked into the address bar: its ⌘A/⌘V are gpui's.
+            ((true, true), false),
+        ];
+        for ((in_pane, in_address), on_page) in table {
+            assert_eq!(
+                gpui_focus_on_page(in_pane, in_address),
+                on_page,
+                "in_pane={in_pane} in_address={in_address}"
+            );
+        }
+        // What the key monitor makes of it, with the page still holding
+        // AppKit's first responder: ⌘V in the address bar is the bar's.
+        use webview::{KeyRoute, route_key};
+        let in_address = gpui_focus_on_page(true, true);
+        assert_eq!(route_key(true, in_address, true, false), KeyRoute::AsUsual);
+        assert_eq!(route_key(true, gpui_focus_on_page(true, false), true, false), KeyRoute::Page);
+    }
+
+    #[test]
+    fn the_page_retakes_the_keyboard_only_once_gpui_focus_is_back_on_it() {
+        // (pending, in_pane, in_address) -> what the request does this frame.
+        use Refocus::{Drop, Keep, Take};
+        let table = [
+            // Nothing asked for.
+            ((false, false, false), Keep),
+            ((false, false, true), Keep),
+            ((false, true, false), Keep),
+            ((false, true, true), Keep),
+            // Focus is elsewhere (the tools panel after ⌘⇧F, an overlay's
+            // input): the request waits for it to come back, frame after
+            // frame.
+            ((true, false, false), Keep),
+            // Can't happen (the address bar is in the pane); never take.
+            ((true, false, true), Drop),
+            // Back in the tab (Esc, panel toggle, tab activation): the page
+            // has the keyboard again with no click.
+            ((true, true, false), Take),
+            // Back in the address bar: it keeps the keyboard.
+            ((true, true, true), Drop),
+        ];
+        for ((pending, in_pane, in_address), refocus) in table {
+            assert_eq!(
+                page_refocus(pending, in_pane, in_address),
+                refocus,
+                "pending={pending} in_pane={in_pane} in_address={in_address}"
             );
         }
     }

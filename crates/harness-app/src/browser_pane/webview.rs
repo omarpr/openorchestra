@@ -51,14 +51,21 @@
 //! ⌘V/⌘A/⌘← edited the address bar instead of the page.
 //!
 //! A chord is the page's only while the page holds AppKit's first responder
-//! *and* gpui's focus is in its tab ([`route_key`]). gpui moving its focus
-//! never moves AppKit's first responder, so after ⌘⇧F focused the tools
-//! panel's search box the page could still hold it and take that panel's
-//! ⌘C/⌘V. Two things keep the two in step: the pane hands the first
-//! responder back when gpui's focus leaves the tab (`set_pane_focused` and
-//! `release_focus`, from a focus-out listener), and a click into the page
-//! (the monitor also watches left mouse-downs) moves gpui's focus to the tab
-//! (`on_click`).
+//! *and* gpui's focus is on the page's side of its tab: in the tab but not
+//! in its address bar ([`route_key`]). gpui moving its focus never moves
+//! AppKit's first responder (gpui's view takes it only at window creation
+//! and on a simple-fullscreen switch, never on a click), so after ⌘⇧F
+//! focused the tools panel's search box, or a click focused the address
+//! bar, the page could still hold it and take their typing and ⌘C/⌘V. The
+//! pane keeps the two in step:
+//! - gpui's focus leaving the tab, or entering its address bar, hands the
+//!   first responder back to gpui's view (`set_pane_focused` and
+//!   `release_focus`, from focus-out and focus-in listeners);
+//! - leaving the tab while the page had it also asks for the page to get it
+//!   back once gpui's focus returns to the page's side without a click (Esc,
+//!   the panel toggled off); returning to the address bar drops the request;
+//! - a click into the page (the monitor also watches left mouse-downs)
+//!   moves gpui's focus to the tab (`on_click`).
 //!
 //! Bindings without ⌘ (`ctrl-q`) are untouched: the monitor lets them by,
 //! and gpui sees them first through its view's `performKeyEquivalent:` as
@@ -109,18 +116,20 @@ pub(crate) enum KeyRoute {
 }
 
 /// The monitor's routing decision. A ⌘-chord goes to the page only when the
-/// page has AppKit's keyboard (`page_has_keyboard`) *and* gpui's focus is in
-/// its tab (`pane_has_gpui_focus`), and it isn't one of the app's chords.
-/// gpui moving its focus never moves AppKit's first responder, so the page
-/// can still hold it after ⌘⇧F (say) focused the tools panel's search box;
-/// the second input keeps the page from taking that panel's keys.
+/// page has AppKit's keyboard (`page_has_keyboard`) *and* gpui's focus is on
+/// the page's side of its tab, in the tab but not its address bar
+/// (`page_has_gpui_focus`), and it isn't one of the app's chords. gpui
+/// moving its focus never moves AppKit's first responder, so the page can
+/// still hold it after ⌘⇧F (say) focused the tools panel's search box, or a
+/// click focused the address bar; the second input keeps the page from
+/// taking their keys.
 pub(crate) fn route_key(
     page_has_keyboard: bool,
-    pane_has_gpui_focus: bool,
+    page_has_gpui_focus: bool,
     command: bool,
     app_chord: bool,
 ) -> KeyRoute {
-    if page_has_keyboard && pane_has_gpui_focus && command && !app_chord {
+    if page_has_keyboard && page_has_gpui_focus && command && !app_chord {
         KeyRoute::Page
     } else {
         KeyRoute::AsUsual
@@ -721,7 +730,8 @@ mod mac {
     struct PageEntry {
         /// The `WKWebView`'s address; the entry goes when the view does.
         view: usize,
-        /// gpui's focus is in this page's tab (see [`route_key`]).
+        /// gpui's focus is on this page's side of its tab: in the tab, not
+        /// its address bar (see [`route_key`]).
         pane_focused: Rc<Cell<bool>>,
         events: Weak<NativeEvents>,
     }
@@ -926,8 +936,8 @@ mod mac {
         /// Owned here: the web view only holds its delegates weakly.
         delegate: Retained<Delegate>,
         _events: Rc<NativeEvents>,
-        /// gpui's focus is in this page's tab; shared with the monitor
-        /// through `PAGES`.
+        /// gpui's focus is on this page's side of its tab (not its address
+        /// bar); shared with the monitor through `PAGES`.
         pane_focused: Rc<Cell<bool>>,
     }
 
@@ -1047,9 +1057,10 @@ mod mac {
             had_focus
         }
 
-        /// Whether gpui's focus is in this page's tab: an input to the key
-        /// monitor's [`route_key`]. Only a flag; giving up the first
-        /// responder is [`Self::release_focus`].
+        /// Whether gpui's focus is on this page's side of its tab (in the
+        /// tab, not its address bar): an input to the key monitor's
+        /// [`route_key`]. Only a flag; giving up the first responder is
+        /// [`Self::release_focus`].
         pub(crate) fn set_pane_focused(&self, focused: bool) {
             self.pane_focused.set(focused);
         }
@@ -1366,7 +1377,9 @@ mod tests {
 
     #[test]
     fn only_a_focused_pages_own_chords_go_to_the_page() {
-        // (page_has_keyboard, pane_has_gpui_focus, command, app_chord) -> route.
+        // (page_has_keyboard, page_has_gpui_focus, command, app_chord) -> route.
+        // The second input is false with gpui's focus in the tab's address
+        // bar as well as outside the tab (`gpui_focus_on_page` in mod.rs).
         use KeyRoute::{AsUsual, Page};
         let table = [
             ((false, false, false, false), AsUsual),
@@ -1380,7 +1393,8 @@ mod tests {
             ((true, false, false, false), AsUsual),
             ((true, false, false, true), AsUsual),
             // The page kept AppKit's first responder after gpui's focus left
-            // the tab (⌘⇧F into the tools panel): the panel gets its keys.
+            // the tab (⌘⇧F into the tools panel) or moved to the address bar
+            // (a click on it): the panel or the address bar gets its keys.
             ((true, false, true, false), AsUsual),
             ((true, false, true, true), AsUsual),
             // Typing without ⌘ never passes through the monitor's routing.
