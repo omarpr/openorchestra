@@ -14,3 +14,6 @@ assets/openOrchestra.iconset/
 # artifact in this project that must never be committed by accident.
 training-data.jsonl
 *.training.jsonl
+
+# Local security review records: uncommitted by design, kept out of history.
+SECURITY-REVIEW-*.md
