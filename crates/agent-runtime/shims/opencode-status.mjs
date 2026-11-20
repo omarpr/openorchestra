@@ -151,6 +151,8 @@ export function sessionState(data, ids, tracker) {
  * every agent's hook shares: `.harness/status.json` plus
  * `status-tab-<HARNESS_AGENT_TAB_ID>.json`, stamped agent "opencode".
  * `load` resolves to that module; writes wait for it and keep their order.
+ * Each write returns a promise of whether it landed (false: the helper
+ * didn't load, or the write threw), so the reporter can try again.
  *
  * Exported for the test harness.
  */
@@ -168,14 +170,16 @@ export function statusWriter(load, cwd) {
 			tool: null,
 		};
 		const write = (module) => {
+			if (!module) return false;
 			try {
-				module?.writeStatusFiles(cwd, status);
+				module.writeStatusFiles(cwd, status);
+				return true;
 			} catch {
 				// Never let status bookkeeping break the agent.
+				return false;
 			}
 		};
-		if (helper) write(helper);
-		else ready.then(write);
+		return helper ? Promise.resolve(write(helper)) : ready.then(write);
 	};
 }
 
@@ -190,7 +194,28 @@ export function startStatusReporter(context, { write, env = process.env, interva
 	if (!env.HARNESS_AGENT_TAB_ID && !env.HARNESS_AGENT_WORKTREE && !env.HARNESS_REMOTE_SESSION) return undefined;
 	const shown = new Set();
 	const tracker = requestTracker();
+	// The state last handed to `write`, and whether that write failed (a
+	// full disk): the next update writes it again rather than skipping an
+	// unchanged state that never reached the file.
 	let last;
+	let failed = false;
+
+	function publish(state) {
+		last = state;
+		failed = false;
+		let written;
+		try {
+			written = write(state);
+		} catch {
+			written = false;
+		}
+		const lost = () => {
+			if (last === state) failed = true;
+		};
+		Promise.resolve(written).then((ok) => {
+			if (ok === false) lost();
+		}, lost);
+	}
 
 	function update() {
 		try {
@@ -205,9 +230,8 @@ export function startStatusReporter(context, { write, env = process.env, interva
 				const tree = ownSessions(context.data, [id]);
 				if (![...tree].some((member) => isRunning(context.data, member))) shown.delete(id);
 			}
-			if (state === last) return;
-			last = state;
-			write(state);
+			if (state === last && !failed) return;
+			publish(state);
 		} catch {
 			// A status read must never interrupt the terminal.
 		}
@@ -224,6 +248,6 @@ export function startStatusReporter(context, { write, env = process.env, interva
 		if (typeof stop === "function") stop();
 		clearInterval(timer);
 		// Quitting mid-turn must not leave the tab spinning.
-		if (last !== undefined && last !== "idle") write("idle");
+		if (last !== undefined && (last !== "idle" || failed)) write("idle");
 	};
 }

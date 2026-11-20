@@ -587,6 +587,39 @@ return { writes, outside: outside === undefined };
 }
 
 #[test]
+fn opencode_status_writes_again_after_a_failed_write() {
+    let Some(writes) = opencode_status_script(
+        r#"
+const env = { HARNESS_AGENT_TAB_ID: "7" };
+// The first two writes fail (a full disk), as the real writer reports it:
+// a promise of false.
+let failures = 2;
+const write = (s) => { writes.push(s); return Promise.resolve(failures-- <= 0); };
+const stop = core.startStatusReporter(context, { write, env, interval: 60000 });
+fake.route = { type: "session", sessionID: "mine" };
+fake.status.mine = "running"; fake.permission.mine = [{ id: "p" }];
+fake.emit("permission.asked");          // waiting: its write fails
+await Promise.resolve();
+fake.emit("session.status");            // still waiting, never written: again
+await Promise.resolve();
+fake.emit("permission.asked");          // written now: no duplicate
+await Promise.resolve();
+fake.emit("session.status");
+stop();
+return { writes };
+"#,
+    ) else {
+        eprintln!("node not installed — skipping opencode status retry check");
+        return;
+    };
+    // "idle" at start fails too (first of the two failures).
+    assert_eq!(
+        writes["writes"],
+        serde_json::json!(["idle", "waiting", "waiting", "idle"])
+    );
+}
+
+#[test]
 fn opencode_status_writes_the_shared_per_tab_status_file() {
     let wt = tempfile::tempdir().unwrap();
     let helper = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("shims/remote-tab.mjs");
