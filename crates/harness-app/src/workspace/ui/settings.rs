@@ -744,14 +744,22 @@ impl HarnessWorkspace {
                             .child("Clear browsing history")
                             .on_click(cx.listener(|ws, _, _, cx| {
                                 cx.stop_propagation();
+                                // The files go on the history thread; report
+                                // once they have.
                                 let cleared = ws.browser_history.update(cx, |h, cx| h.clear(cx));
-                                match cleared {
-                                    Ok(()) => ws.set_note("Browsing history cleared".into()),
-                                    Err(e) => ws.set_error_note(format!(
-                                        "Couldn't clear browsing history: {e}"
-                                    )),
-                                }
-                                cx.notify();
+                                cx.spawn(async move |ws, cx| {
+                                    let cleared = cleared.await;
+                                    let _ = ws.update(cx, |ws, cx| {
+                                        match cleared {
+                                            Ok(()) => ws.set_note("Browsing history cleared".into()),
+                                            Err(e) => ws.set_error_note(format!(
+                                                "Couldn't clear browsing history: {e}"
+                                            )),
+                                        }
+                                        cx.notify();
+                                    });
+                                })
+                                .detach();
                             })),
                     ),
                 )

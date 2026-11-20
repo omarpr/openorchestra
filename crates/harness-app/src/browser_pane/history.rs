@@ -13,10 +13,13 @@
 //! [`BrowserHistory`] entity keeps every loaded project in memory, records
 //! at once, and writes the changed projects [`SAVE_DELAY`] after the first
 //! unsaved change; quit flushes ([`BrowserHistory::flush`]). Older builds
-//! never look in that folder. A project's file is read on the history
-//! thread ([`Job`]), never the UI thread; visits recorded before it arrives
-//! are merged into what it held ([`History::merged`]), and the project isn't
-//! written until then, so a write can't replace the file with only those.
+//! never look in that folder. Every read, write and Clear runs on the
+//! history thread ([`Job`]), never the UI thread, one at a time in the order
+//! asked: two writes of one file never overlap, a write sent before a Clear
+//! is deleted by it, and quit waits for the writes it sends. Visits recorded
+//! before a project's file arrives are merged into what it held
+//! ([`History::merged`]), and the project isn't written until then, so a
+//! write can't replace the file with only those.
 //!
 //! **Two app instances** (Dev and release share `~/.openorchestra`) each
 //! keep their own copy in memory and write whole files: the last writer
@@ -39,6 +42,9 @@ pub(crate) const MAX_SUGGESTIONS: usize = 8;
 
 /// How long after the first unsaved change history is written.
 const SAVE_DELAY: Duration = Duration::from_secs(1);
+
+/// Most time quit waits for the history thread to write what's pending.
+const QUIT_WAIT: Duration = Duration::from_secs(2);
 
 /// One page in a project's history.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -338,8 +344,6 @@ fn remove_all(dir: &Path) -> std::io::Result<()> {
 /// suggest) and the workspace (which flushes on quit and clears from
 /// Settings).
 pub(crate) struct BrowserHistory {
-    /// `~/.openorchestra/browser-history`; a temp folder in tests.
-    dir: PathBuf,
     /// Every project asked for, by key. One still `loading` holds only the
     /// visits recorded since.
     projects: HashMap<String, History>,
@@ -353,9 +357,13 @@ pub(crate) struct BrowserHistory {
     save: Option<Task<()>>,
     /// Bumped by [`Self::clear`]: a read started before it is dropped.
     generation: u64,
-    /// The history thread ([`run_jobs`]).
+    /// The history thread ([`run_jobs`]), which owns the folder
+    /// (`~/.openorchestra/browser-history`; a temp folder in tests).
     jobs: std::sync::mpsc::Sender<Job>,
 }
+
+/// A write's outcome, for the write to try again when it failed.
+type Written = oneshot::Receiver<std::io::Result<()>>;
 
 /// File work for the history thread, done one at a time in the order sent.
 enum Job {
@@ -364,6 +372,20 @@ enum Job {
         project: String,
         reply: oneshot::Sender<History>,
     },
+    /// Write a project's history ([`save`]). `onto_file`: merge it onto
+    /// the file first, for a project quit writes before its read landed.
+    Save {
+        project: String,
+        history: History,
+        onto_file: bool,
+        reply: Option<oneshot::Sender<std::io::Result<()>>>,
+    },
+    /// Delete every project's file ([`remove_all`]).
+    RemoveAll {
+        reply: oneshot::Sender<std::io::Result<()>>,
+    },
+    /// Answer once every job sent before it is done.
+    Done { reply: std::sync::mpsc::Sender<()> },
 }
 
 /// The history thread: does each [`Job`] in turn until the history is
@@ -374,6 +396,30 @@ fn run_jobs(dir: PathBuf, jobs: std::sync::mpsc::Receiver<Job>) {
             Job::Load { project, reply } => {
                 let _ = reply.send(load(&dir, &project));
             }
+            Job::Save {
+                project,
+                history,
+                onto_file,
+                reply,
+            } => {
+                let history = match onto_file {
+                    true => load(&dir, &project).merged(history),
+                    false => history,
+                };
+                let result = save(&dir, &project, &history);
+                if let Err(e) = &result {
+                    log::warn!("browser history: could not write {project}'s: {e}");
+                }
+                if let Some(reply) = reply {
+                    let _ = reply.send(result);
+                }
+            }
+            Job::RemoveAll { reply } => {
+                let _ = reply.send(remove_all(&dir));
+            }
+            Job::Done { reply } => {
+                let _ = reply.send(());
+            }
         }
     }
 }
@@ -381,17 +427,15 @@ fn run_jobs(dir: PathBuf, jobs: std::sync::mpsc::Receiver<Job>) {
 impl BrowserHistory {
     pub(crate) fn new(dir: PathBuf) -> Self {
         let (jobs, rx) = std::sync::mpsc::channel();
-        let thread_dir = dir.clone();
         if let Err(e) = std::thread::Builder::new()
             .name("browser-history".into())
-            .spawn(move || run_jobs(thread_dir, rx))
+            .spawn(move || run_jobs(dir, rx))
         {
-            // Every read then finds nothing: history works for this run,
+            // Nothing is then read or written: history works for this run,
             // in memory only.
             log::warn!("browser history: could not start its thread: {e}");
         }
         Self {
-            dir,
             projects: HashMap::new(),
             loading: HashSet::new(),
             dirty: HashSet::new(),
@@ -488,20 +532,33 @@ impl BrowserHistory {
         if self.save.is_none() {
             self.save = Some(cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(SAVE_DELAY).await;
-                let _ = this.update(cx, |this, _| this.flush());
+                let _ = this.update(cx, |this, cx| {
+                    // `send_writes` drops this task (`self.save`), which
+                    // cancels it at its next await: the outcomes are
+                    // awaited by a task of their own.
+                    let (written, generation) = (this.send_writes(), this.generation);
+                    cx.spawn(async move |this, cx| {
+                        for (project, result) in written {
+                            if !matches!(result.await, Ok(Ok(()))) {
+                                let _ = this
+                                    .update(cx, |this, _| this.write_failed(project, generation));
+                            }
+                        }
+                    })
+                    .detach();
+                });
             }));
         }
         cx.notify();
     }
 
-    /// Write every changed project now (quit, or the pending write firing).
-    /// One that can't be written (a full disk) stays changed, so the next
-    /// write, started by the next change or quit, tries it again; nothing
-    /// retries on a timer, so a disk that stays full costs no spinning. One
-    /// still loading waits for its file: written now, it would lose it.
-    pub(crate) fn flush(&mut self) {
+    /// Hand every changed project's history to the history thread to
+    /// write, with what each write will report. A project still loading
+    /// waits for its file: written now, it would lose it.
+    fn send_writes(&mut self) -> Vec<(String, Written)> {
         self.save = None;
-        let (dir, projects, loading) = (&self.dir, &self.projects, &self.loading);
+        let mut written = Vec::new();
+        let (jobs, projects, loading) = (&self.jobs, &self.projects, &self.loading);
         self.dirty.retain(|project| {
             if loading.contains(project) {
                 return true;
@@ -509,26 +566,80 @@ impl BrowserHistory {
             let Some(history) = projects.get(project) else {
                 return false;
             };
-            match save(dir, project, history) {
-                Ok(()) => false,
-                Err(e) => {
-                    log::warn!("browser history: could not write {project}'s: {e}");
-                    true
-                }
+            let (reply, result) = oneshot::channel();
+            let job = Job::Save {
+                project: project.clone(),
+                history: history.clone(),
+                onto_file: false,
+                reply: Some(reply),
+            };
+            if jobs.send(job).is_err() {
+                return true;
             }
+            written.push((project.clone(), result));
+            false
         });
+        written
+    }
+
+    /// `project`'s write failed (a full disk): it stays changed, so the
+    /// next write, started by the next change or quit, tries it again.
+    /// Nothing retries on a timer, so a disk that stays full costs no
+    /// spinning. A Clear since (`generation`) has forgotten it.
+    fn write_failed(&mut self, project: String, generation: u64) {
+        if generation == self.generation && self.projects.contains_key(&project) {
+            self.dirty.insert(project);
+        }
+    }
+
+    /// Quit: write every changed project and wait for the history thread
+    /// to finish (at most [`QUIT_WAIT`]). A project still loading is merged
+    /// onto its file there, after the read already queued for it.
+    pub(crate) fn flush(&mut self) {
+        self.save = None;
+        for project in std::mem::take(&mut self.dirty) {
+            let Some(history) = self.projects.get(&project) else {
+                continue;
+            };
+            let job = Job::Save {
+                onto_file: self.loading.contains(&project),
+                project,
+                history: history.clone(),
+                reply: None,
+            };
+            if self.jobs.send(job).is_err() {
+                return;
+            }
+        }
+        let (reply, done) = std::sync::mpsc::channel();
+        if self.jobs.send(Job::Done { reply }).is_ok() && done.recv_timeout(QUIT_WAIT).is_err() {
+            log::warn!("browser history: still writing at quit; some visits may be lost");
+        }
     }
 
     /// Forget every project's history, in memory and on disk, including a
-    /// write still pending (it would bring a project back).
-    pub(crate) fn clear(&mut self, cx: &mut Context<Self>) -> std::io::Result<()> {
+    /// write still pending (it would bring a project back). The files go on
+    /// the history thread, after any write already sent; the result says
+    /// how that went.
+    pub(crate) fn clear(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> impl std::future::Future<Output = std::io::Result<()>> + use<> {
         self.save = None;
         self.dirty.clear();
         self.projects.clear();
         self.loading.clear();
         self.generation = self.generation.wrapping_add(1);
         cx.notify();
-        remove_all(&self.dir)
+        let (reply, removed) = oneshot::channel();
+        let sent = self.jobs.send(Job::RemoveAll { reply }).is_ok();
+        async move {
+            let stopped = || std::io::Error::other("the history thread isn't running");
+            match sent {
+                true => removed.await.unwrap_or_else(|_| Err(stopped())),
+                false => Err(stopped()),
+            }
+        }
     }
 }
 
@@ -877,39 +988,72 @@ mod tests {
         assert_eq!(disk.clone().merged(History::default()), disk);
     }
 
+    /// A history over `dir` with `project` holding one unsaved visit.
+    fn unsaved(dir: &Path, project: &str) -> BrowserHistory {
+        let mut history = BrowserHistory::new(dir.to_path_buf());
+        let mut h = History::default();
+        h.record("http://localhost:8765/", 5);
+        history.projects.insert(project.into(), h);
+        history.dirty.insert(project.into());
+        history
+    }
+
+    /// What each write reported, waiting for it.
+    fn outcomes(written: Vec<(String, Written)>) -> Vec<(String, bool)> {
+        written
+            .into_iter()
+            .map(|(p, r)| (p, matches!(futures::executor::block_on(r), Ok(Ok(())))))
+            .collect()
+    }
+
     #[test]
     fn a_project_still_loading_is_not_written() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("browser-history");
-        let mut history = BrowserHistory::new(dir.clone());
-        let mut h = History::default();
-        h.record("http://localhost:8765/", 5);
-        history.projects.insert("/repo/a".into(), h);
+        let mut history = unsaved(&dir, "/repo/a");
         history.loading.insert("/repo/a".into());
-        history.dirty.insert("/repo/a".into());
-        history.flush();
-        assert!(!dir.join(file_name("/repo/a")).exists());
+        assert!(history.send_writes().is_empty());
         assert!(history.dirty.contains("/repo/a"), "written once it loads");
     }
 
     #[test]
-    fn a_write_that_fails_is_tried_again_by_the_next_flush() {
+    fn a_write_that_fails_is_tried_again_by_the_next_write() {
         let tmp = tempfile::tempdir().unwrap();
         // A file where the folder should be: every write fails.
         let dir = tmp.path().join("browser-history");
         std::fs::write(&dir, b"").unwrap();
-        let mut history = BrowserHistory::new(dir.clone());
-        let mut h = History::default();
-        h.record("http://localhost:8765/", 5);
-        history.projects.insert("/repo/a".into(), h);
-        history.dirty.insert("/repo/a".into());
-        history.flush();
+        let mut history = unsaved(&dir, "/repo/a");
+        for (project, ok) in outcomes(history.send_writes()) {
+            assert!(!ok);
+            history.write_failed(project, history.generation);
+        }
         assert!(history.dirty.contains("/repo/a"), "kept for a retry");
-        // The disk recovers; quit's flush writes it with no new change.
+        // The disk recovers; the next write takes it with no new change.
         std::fs::remove_file(&dir).unwrap();
-        history.flush();
+        assert_eq!(outcomes(history.send_writes()), [("/repo/a".to_string(), true)]);
         assert!(history.dirty.is_empty());
         assert_eq!(load(&dir, "/repo/a").entries.len(), 1);
+    }
+
+    #[test]
+    fn quit_waits_for_its_writes_and_merges_one_still_loading() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("browser-history");
+        let mut on_disk = History::default();
+        on_disk.record("http://localhost:3000/older", 1);
+        save(&dir, "/repo/b", &on_disk).unwrap();
+        let mut history = unsaved(&dir, "/repo/a");
+        let mut h = History::default();
+        h.record("http://localhost:3000/new", 9);
+        history.projects.insert("/repo/b".into(), h);
+        history.loading.insert("/repo/b".into());
+        history.dirty.insert("/repo/b".into());
+        history.flush();
+        assert_eq!(load(&dir, "/repo/a").entries.len(), 1);
+        assert_eq!(
+            urls(&load(&dir, "/repo/b").entries),
+            ["http://localhost:3000/new", "http://localhost:3000/older"]
+        );
     }
 
     #[test]
