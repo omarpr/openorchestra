@@ -50,7 +50,22 @@
 //! gpui's focus left in the address bar (click it, then click the page)
 //! ⌘V/⌘A/⌘← edited the address bar instead of the page.
 //!
-//! While a page holds first responder, the monitor:
+//! A chord is the page's only while the page holds AppKit's first responder
+//! *and* gpui's focus is in its tab ([`route_key`]). gpui moving its focus
+//! never moves AppKit's first responder, so after ⌘⇧F focused the tools
+//! panel's search box the page could still hold it and take that panel's
+//! ⌘C/⌘V. Two things keep the two in step: the pane hands the first
+//! responder back when gpui's focus leaves the tab (`set_pane_focused` and
+//! `release_focus`, from a focus-out listener), and a click into the page
+//! (the monitor also watches left mouse-downs) moves gpui's focus to the tab
+//! (`on_click`).
+//!
+//! Bindings without ⌘ (`ctrl-q`) are untouched: the monitor lets them by,
+//! and gpui sees them first through its view's `performKeyEquivalent:` as
+//! before. Plain typing never passes gpui's key equivalents at all; it goes
+//! straight to the page's `keyDown:`.
+//!
+//! When it is the page's, the monitor:
 //! - lets a chord from `shortcuts::app_chords` (Global scope, with ⌘, the
 //!   user's rebindings applied; see [`set_app_shortcuts`]) through to gpui;
 //! - hands any other ⌘-chord to the page's `performKeyEquivalent:`, so the
@@ -81,6 +96,35 @@ thread_local! {
 /// whenever the keymap is (re)installed, so rebindings apply over pages too.
 pub(crate) fn set_app_shortcuts(chords: Vec<Chord>) {
     APP_CHORDS.with(|c| *c.borrow_mut() = chords);
+}
+
+/// Where the key monitor sends a keyDown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KeyRoute {
+    /// AppKit's usual path: gpui's view first, then the menu, then the
+    /// first responder.
+    AsUsual,
+    /// The page's `performKeyEquivalent:`, never gpui.
+    Page,
+}
+
+/// The monitor's routing decision. A ⌘-chord goes to the page only when the
+/// page has AppKit's keyboard (`page_has_keyboard`) *and* gpui's focus is in
+/// its tab (`pane_has_gpui_focus`), and it isn't one of the app's chords.
+/// gpui moving its focus never moves AppKit's first responder, so the page
+/// can still hold it after ⌘⇧F (say) focused the tools panel's search box;
+/// the second input keeps the page from taking that panel's keys.
+pub(crate) fn route_key(
+    page_has_keyboard: bool,
+    pane_has_gpui_focus: bool,
+    command: bool,
+    app_chord: bool,
+) -> KeyRoute {
+    if page_has_keyboard && pane_has_gpui_focus && command && !app_chord {
+        KeyRoute::Page
+    } else {
+        KeyRoute::AsUsual
+    }
 }
 
 /// The catalog's name (`t`, `]`, `down`) for the key of a ⌘-chord. `chars`
@@ -177,6 +221,10 @@ pub(crate) struct NativeEvents {
     pub on_notice: Box<dyn Fn(String)>,
     /// `target=_blank` or `window.open` asked for an http(s) page.
     pub on_new_window: Box<dyn Fn(String)>,
+    /// The user clicked into the page: gpui's focus should follow (AppKit's
+    /// first responder already has), so the tab, not whatever gpui had
+    /// focused before, owns the keys.
+    pub on_click: Box<dyn Fn()>,
     /// Navigation policy hand-off: http(s) loads in the page; what
     /// [`decide_navigation`] and [`decide_download`] send out (clicked
     /// app-scheme links, clicked main-frame http(s) downloads) goes here.
@@ -193,6 +241,7 @@ impl Default for NativeEvents {
             on_failed: Box::new(|_, _| {}),
             on_notice: Box::new(|_| {}),
             on_new_window: Box::new(|_| {}),
+            on_click: Box::new(|| {}),
             open_external: link_routing::open_external,
         }
     }
@@ -381,7 +430,7 @@ mod mac {
     };
     use objc2_app_kit::{
         NSApplication, NSAutoresizingMaskOptions, NSEvent, NSEventMask, NSEventModifierFlags,
-        NSView, NSWindow,
+        NSEventType, NSView, NSWindow,
     };
     use objc2_foundation::{
         NSBundle, NSDictionary, NSError, NSHTTPURLResponse, NSKeyValueChangeKey,
@@ -396,9 +445,9 @@ mod mac {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     use super::{
-        APP_CHORDS, DOWNLOAD_UNSUPPORTED, NavDecision, NavOrigin, NativeEvents,
+        APP_CHORDS, DOWNLOAD_UNSUPPORTED, KeyRoute, NavDecision, NavOrigin, NativeEvents,
         decide_download, decide_navigation, decide_new_window, event_chords, flip_y,
-        is_benign_failure, is_download, safari_app_name,
+        is_benign_failure, is_download, route_key, safari_app_name,
     };
     use crate::shortcuts::{Chord, PageEdit, is_app_shortcut, page_edit};
 
@@ -611,18 +660,9 @@ mod mac {
             unsafe { msg_send![super(this), init] }
         }
 
-        /// Queues `f` on the main dispatch queue (see [`NativeEvents`]). It is
-        /// skipped if the NativeWebView is gone by then.
+        /// Queues `f` on the main dispatch queue (see [`post_event`]).
         fn post(&self, f: impl FnOnce(&NativeEvents) + 'static) {
-            let job = MainThreadBound::new((self.ivars().events.clone(), f), self.mtm());
-            DispatchQueue::main().exec_async(move || {
-                // The main queue only ever runs on the main thread.
-                let mtm = MainThreadMarker::new().expect("main queue off the main thread");
-                let (events, f) = job.into_inner(mtm);
-                if let Some(events) = events.upgrade() {
-                    f(&events);
-                }
-            });
+            post_event(self.ivars().events.clone(), self.mtm(), f);
         }
 
         /// Carries out a cancel-side decision (the policy handler has
@@ -659,7 +699,35 @@ mod mac {
         }
     }
 
+    /// Queues `f` on the main dispatch queue (see [`NativeEvents`]). It is
+    /// skipped if the NativeWebView is gone by then.
+    fn post_event(
+        events: Weak<NativeEvents>,
+        mtm: MainThreadMarker,
+        f: impl FnOnce(&NativeEvents) + 'static,
+    ) {
+        let job = MainThreadBound::new((events, f), mtm);
+        DispatchQueue::main().exec_async(move || {
+            // The main queue only ever runs on the main thread.
+            let mtm = MainThreadMarker::new().expect("main queue off the main thread");
+            let (events, f) = job.into_inner(mtm);
+            if let Some(events) = events.upgrade() {
+                f(&events);
+            }
+        });
+    }
+
+    /// A live page, as the monitor looks it up from its view.
+    struct PageEntry {
+        /// The `WKWebView`'s address; the entry goes when the view does.
+        view: usize,
+        /// gpui's focus is in this page's tab (see [`route_key`]).
+        pane_focused: Rc<Cell<bool>>,
+        events: Weak<NativeEvents>,
+    }
+
     thread_local! {
+        static PAGES: RefCell<Vec<PageEntry>> = const { RefCell::new(Vec::new()) };
         static KEY_MONITOR: Cell<bool> = const { Cell::new(false) };
         /// The ⌘-chords lately handed to a page, newest last, retained so a
         /// pointer can't be reused by another event. WebKit sends back the
@@ -679,16 +747,20 @@ mod mac {
         }
         let handler = RcBlock::new(|event: NonNull<NSEvent>| -> *mut NSEvent {
             // SAFETY: AppKit hands the handler a live event for the call.
-            if route_page_key(unsafe { event.as_ref() }) {
+            let ev = unsafe { event.as_ref() };
+            if ev.r#type() == NSEventType::LeftMouseDown {
+                note_page_click(ev);
+                return event.as_ptr();
+            }
+            if route_page_key(ev) {
                 ptr::null_mut()
             } else {
                 event.as_ptr()
             }
         });
+        let mask = NSEventMask::KeyDown | NSEventMask::LeftMouseDown;
         // SAFETY: the block has the handler signature AppKit documents.
-        let monitor = unsafe {
-            NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &handler)
-        };
+        let monitor = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &handler) };
         match monitor {
             // Never removed: one monitor serves every web view in every
             // window, for the life of the app.
@@ -714,23 +786,31 @@ mod mac {
             let app = NSApplication::sharedApplication(mtm);
             if let Some(edit) = event_chords_of(event).first().and_then(page_edit) {
                 // SAFETY: a standard responder action, sent with no sender
-                // to the key window's first responder (the page).
-                unsafe { app.sendAction_to_from(edit_action(edit), None, None) };
-                return true;
+                // to the key window's first responder (the page). Nobody
+                // taking it lets AppKit go on rather than swallowing the key.
+                return unsafe { app.sendAction_to_from(edit_action(edit), None, None) };
             }
             return app.mainMenu().is_some_and(|menu| menu.performKeyEquivalent(event));
         }
-        if !event.modifierFlags().contains(NSEventModifierFlags::Command) {
+        let command = event.modifierFlags().contains(NSEventModifierFlags::Command);
+        if !command {
             return false;
         }
         let Some(page) = event.window(mtm).as_deref().and_then(focused_page) else {
             return false;
         };
+        let pane_focused = PAGES.with(|pages| {
+            let addr = Retained::as_ptr(&page) as usize;
+            pages
+                .borrow()
+                .iter()
+                .any(|p| p.view == addr && p.pane_focused.get())
+        });
         let for_app = APP_CHORDS.with(|app| {
             let app = app.borrow();
             event_chords_of(event).iter().any(|c| is_app_shortcut(c, &app))
         });
-        if for_app {
+        if route_key(true, pane_focused, command, for_app) != KeyRoute::Page {
             return false;
         }
         FORWARDED.with(|f| {
@@ -797,12 +877,45 @@ mod mac {
     /// The web view holding `window`'s keyboard focus (itself or a view
     /// inside it), if any.
     fn focused_page(window: &NSWindow) -> Option<Retained<WKWebView>> {
-        let mut view = window.firstResponder()?.downcast::<NSView>().ok()?;
+        page_containing(window.firstResponder()?.downcast::<NSView>().ok()?)
+    }
+
+    /// The web view that is `view` or holds it.
+    fn page_containing(mut view: Retained<NSView>) -> Option<Retained<WKWebView>> {
         loop {
             match view.downcast::<WKWebView>() {
                 Ok(page) => return Some(page),
                 Err(other) => view = unsafe { other.superview() }?,
             }
+        }
+    }
+
+    /// A left mouse-down: when it lands on one of our pages, that page's tab
+    /// takes gpui's focus (the click itself goes on to the page). Hidden
+    /// pages aren't hit.
+    fn note_page_click(event: &NSEvent) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let Some(page) = event
+            .window(mtm)
+            .and_then(|w| w.contentView())
+            .and_then(|content| content.hitTest(event.locationInWindow()))
+            .and_then(page_containing)
+        else {
+            return;
+        };
+        let addr = Retained::as_ptr(&page) as usize;
+        let events = PAGES.with(|pages| {
+            let pages = pages.borrow();
+            let entry = pages.iter().find(|p| p.view == addr)?;
+            // Now, not when gpui's focus lands: a ⌘V right after the click
+            // must already go to the page.
+            entry.pane_focused.set(true);
+            Some(entry.events.clone())
+        });
+        if let Some(events) = events {
+            post_event(events, mtm, |e| (e.on_click)());
         }
     }
 
@@ -813,6 +926,9 @@ mod mac {
         /// Owned here: the web view only holds its delegates weakly.
         delegate: Retained<Delegate>,
         _events: Rc<NativeEvents>,
+        /// gpui's focus is in this page's tab; shared with the monitor
+        /// through `PAGES`.
+        pane_focused: Rc<Cell<bool>>,
     }
 
     impl NativeWebView {
@@ -878,7 +994,15 @@ mod mac {
             // hit-testing reaches it first.
             parent.addSubview(&view);
 
-            let this = Self { view, delegate, _events: events };
+            let pane_focused = Rc::new(Cell::new(false));
+            PAGES.with(|pages| {
+                pages.borrow_mut().push(PageEntry {
+                    view: Retained::as_ptr(&view) as usize,
+                    pane_focused: pane_focused.clone(),
+                    events: Rc::downgrade(&events),
+                })
+            });
+            let this = Self { view, delegate, _events: events, pane_focused };
             if !url.is_empty() {
                 this.load(url);
             }
@@ -923,9 +1047,16 @@ mod mac {
             had_focus
         }
 
+        /// Whether gpui's focus is in this page's tab: an input to the key
+        /// monitor's [`route_key`]. Only a flag; giving up the first
+        /// responder is [`Self::release_focus`].
+        pub(crate) fn set_pane_focused(&self, focused: bool) {
+            self.pane_focused.set(focused);
+        }
+
         /// If the page (or anything in it) has the keyboard, give it to
         /// gpui's view, or gpui gets no keys until the user clicks.
-        fn release_focus(&self) -> bool {
+        pub(crate) fn release_focus(&self) -> bool {
             let Some(window) = self.view.window() else {
                 return false;
             };
@@ -1034,6 +1165,8 @@ mod mac {
             // The view goes away on every tab switch; the keyboard goes back
             // to gpui's view first.
             self.release_focus();
+            let addr = Retained::as_ptr(&self.view) as usize;
+            PAGES.with(|pages| pages.borrow_mut().retain(|p| p.view != addr));
             self.view.removeFromSuperview();
         }
     }
@@ -1229,6 +1362,41 @@ mod tests {
         assert_eq!(pressed, [Chord::new("z", true, true, false, false)]);
         // No shift, one chord.
         assert_eq!(event_chords("t", "T", 17, true, false, false, false).len(), 1);
+    }
+
+    #[test]
+    fn only_a_focused_pages_own_chords_go_to_the_page() {
+        // (page_has_keyboard, pane_has_gpui_focus, command, app_chord) -> route.
+        use KeyRoute::{AsUsual, Page};
+        let table = [
+            ((false, false, false, false), AsUsual),
+            ((false, false, false, true), AsUsual),
+            ((false, false, true, false), AsUsual),
+            ((false, false, true, true), AsUsual),
+            ((false, true, false, false), AsUsual),
+            ((false, true, false, true), AsUsual),
+            ((false, true, true, false), AsUsual),
+            ((false, true, true, true), AsUsual),
+            ((true, false, false, false), AsUsual),
+            ((true, false, false, true), AsUsual),
+            // The page kept AppKit's first responder after gpui's focus left
+            // the tab (⌘⇧F into the tools panel): the panel gets its keys.
+            ((true, false, true, false), AsUsual),
+            ((true, false, true, true), AsUsual),
+            // Typing without ⌘ never passes through the monitor's routing.
+            ((true, true, false, false), AsUsual),
+            ((true, true, false, true), AsUsual),
+            ((true, true, true, false), Page),
+            // An app chord reaches gpui even over a focused page.
+            ((true, true, true, true), AsUsual),
+        ];
+        for ((page, pane, command, app), route) in table {
+            assert_eq!(
+                route_key(page, pane, command, app),
+                route,
+                "page={page} pane={pane} command={command} app={app}"
+            );
+        }
     }
 
     #[test]

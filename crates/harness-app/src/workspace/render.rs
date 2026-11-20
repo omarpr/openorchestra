@@ -814,7 +814,19 @@ fn is_failure(note: &str) -> bool {
     .any(|w| n.contains(w))
 }
 
+/// Whether the toast hides the browser page (ruling R11): a failure is
+/// something the user has to see, so while one shows it counts as an
+/// overlay. Info toasts stay under the page where they overlap it.
+pub(crate) fn toast_hides_page(note: &str, showing: bool) -> bool {
+    showing && !note.is_empty() && is_failure(note)
+}
+
 impl HarnessWorkspace {
+    /// A failure toast is on screen (see [`toast_hides_page`]).
+    pub(crate) fn failure_toast_showing(&self) -> bool {
+        toast_hides_page(&self.note, self.note_at.is_some())
+    }
+
     /// Show a status message as a toast. Replaces the old always-on bottom
     /// bar, which kept the last message on screen forever.
     pub(crate) fn set_note(&mut self, note: String) {
@@ -881,7 +893,18 @@ impl HarnessWorkspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{CheckStatus, ci_summary, is_failure};
+    use super::{CheckStatus, ci_summary, is_failure, toast_hides_page};
+
+    #[test]
+    fn only_a_showing_failure_toast_hides_the_page() {
+        assert!(toast_hides_page("push failed: rejected", true));
+        assert!(toast_hides_page("Couldn't archive ‘x’", true));
+        // An info toast stays under the page (ruling R11).
+        assert!(!toast_hides_page("archived ‘x’", true));
+        // Expired or dismissed.
+        assert!(!toast_hides_page("push failed: rejected", false));
+        assert!(!toast_hides_page("", true));
+    }
 
     #[test]
     fn ci_remains_running_after_some_checks_pass() {

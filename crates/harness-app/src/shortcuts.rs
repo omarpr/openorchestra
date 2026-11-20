@@ -810,11 +810,16 @@ mod tests {
     fn every_global_command_chord_is_an_app_shortcut() {
         let all = entries();
         let app = app_chords(&all);
+        // Written out, not derived from the code under test.
+        let page_owned = ["cmd-c", "cmd-v", "cmd-x", "cmd-a", "cmd-z", "cmd-shift-z"];
+        let mut app_count = 0;
         for e in all.iter().filter(|e| e.scope == Scope::Global) {
-            let c = chord(&e.keys);
-            let expected = c.cmd && page_edit(&c).is_none();
-            assert_eq!(is_app_shortcut(&c, &app), expected, "{} ({})", e.keys, e.what);
+            let expected = e.keys.starts_with("cmd-") && !page_owned.contains(&e.keys.as_str());
+            app_count += usize::from(expected);
+            assert_eq!(is_app_shortcut(&chord(&e.keys), &app), expected, "{} ({})", e.keys, e.what);
         }
+        // Global entries are all ⌘-chords but `enter` and the diff ⌘C.
+        assert_eq!(app_count, all.iter().filter(|e| e.scope == Scope::Global).count() - 2);
     }
 
     #[test]

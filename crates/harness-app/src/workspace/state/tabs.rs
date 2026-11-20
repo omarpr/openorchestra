@@ -613,11 +613,13 @@ impl HarnessWorkspace {
     /// so while this is true it hides (see `BrowserPane::set_overlay_open`).
     /// Mirrors what `render` draws as an overlay; a new overlay belongs here.
     ///
-    /// Not counted, on purpose: the toast, the conductor and tooltips. They
-    /// float over the window without taking it over, and hiding the page for
-    /// each would blank it constantly; where they overlap the page they are
-    /// under it. Native `window.prompt` sheets (NSAlert) are their own
-    /// window, above the page, and need nothing.
+    /// A failure toast counts while it shows (ruling R11): the user has to
+    /// see it. Not counted, by design: info toasts, the conductor, tooltips
+    /// and drag previews. They float over the window without taking it
+    /// over, and hiding the page for each would blank it constantly; where
+    /// they overlap the page they are under it. Native `window.prompt`
+    /// sheets (NSAlert) are their own window, above the page, and need
+    /// nothing.
     pub(crate) fn overlay_open(&self, cx: &App) -> bool {
         self.tab_menu.is_some()
             || self.tab_context_menu.is_some()
@@ -637,6 +639,7 @@ impl HarnessWorkspace {
             // Drawn once its loss check is in (`render_end_confirm`).
             || self.end_confirm.as_ref().is_some_and(|c| c.losses.is_some())
             || self.hook_trust.is_some()
+            || self.failure_toast_showing()
             || self.zed_modal_open(cx)
     }
 

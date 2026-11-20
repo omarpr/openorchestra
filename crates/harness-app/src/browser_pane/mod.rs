@@ -179,6 +179,8 @@ enum PageEvent {
     Failed(Option<String>, String),
     Notice(String),
     NewWindow(String),
+    /// The user clicked into the page.
+    Clicked,
 }
 
 /// Whether `ev` still means something once its view is gone. Callbacks
@@ -228,6 +230,8 @@ pub(crate) struct BrowserPane {
     /// Creating the native view failed. Latched so render doesn't retry
     /// every frame; the in-tab Retry clears it.
     view_failed: bool,
+    /// Hands the page's keyboard back when gpui's focus leaves the tab.
+    _focus_out: gpui::Subscription,
 }
 
 impl BrowserPane {
@@ -246,6 +250,21 @@ impl BrowserPane {
             }
             e
         });
+        let focus_handle = cx.focus_handle();
+        // gpui's focus moving (⌘⇧F into the tools panel, say) never moves
+        // AppKit's first responder; without this the page would keep the
+        // keyboard, and its ⌘-keys, under the panel's search box.
+        // gpui also reports a window going inactive (⌘-Tab away) as focus
+        // out; the page keeps the keyboard for when the user comes back.
+        let focus_out = cx.on_focus_out(&focus_handle, window, |pane, _, window, _| {
+            if !window.is_window_active() {
+                return;
+            }
+            if let Some(native) = &pane.native {
+                native.view.set_pane_focused(false);
+                native.view.release_focus();
+            }
+        });
         Self {
             attempted: url.clone(),
             url,
@@ -258,9 +277,10 @@ impl BrowserPane {
             overlay_open: false,
             native: None,
             address,
-            focus_handle: cx.focus_handle(),
+            focus_handle,
             focus_page: Cell::new(false),
             view_failed: false,
+            _focus_out: focus_out,
         }
     }
 
@@ -413,6 +433,10 @@ impl BrowserPane {
             }
             PageEvent::Notice(text) => self.show_notice(text, cx),
             PageEvent::NewWindow(url) => cx.emit(BrowserEvent::NewWindow(url)),
+            // AppKit already gave the page the keyboard; gpui's focus follows
+            // to the tab (out of the address bar or the tools panel), so
+            // the key monitor routes the page's ⌘-keys to it.
+            PageEvent::Clicked => window.focus(&self.focus_handle, cx),
         }
         cx.notify();
     }
@@ -662,6 +686,10 @@ impl BrowserPane {
                         let Some(native) = &pane.native else {
                             return;
                         };
+                        // The key monitor's second input (`route_key`).
+                        native
+                            .view
+                            .set_pane_focused(pane.focus_handle.contains_focused(window, cx));
                         if !pane.page_visible(true) {
                             native.view.set_visible(false);
                             return;
@@ -705,6 +733,12 @@ fn page_events(tx: mpsc::UnboundedSender<PageEvent>) -> NativeEvents {
         }),
         on_notice: sender(PageEvent::Notice),
         on_new_window: sender(PageEvent::NewWindow),
+        on_click: {
+            let tx = tx.clone();
+            Box::new(move || {
+                let _ = tx.unbounded_send(PageEvent::Clicked);
+            })
+        },
         ..NativeEvents::default()
     }
 }
@@ -866,6 +900,7 @@ mod tests {
             PageEvent::Loading(true),
             PageEvent::Failed(None, "x".into()),
             PageEvent::Notice("n".into()),
+            PageEvent::Clicked,
         ] {
             assert!(!applies_without_view(&ev));
         }
@@ -874,17 +909,34 @@ mod tests {
 
     #[test]
     fn web_view_hidden_unless_active_visible_and_unobstructed() {
-        for bits in 0..16u8 {
-            let (tab_active, pane_visible, overlay_open, load_failed) =
-                (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0);
+        // The whole truth table, spelled out: (tab_active, pane_visible,
+        // overlay_open, load_failed) -> visible.
+        let table = [
+            ((false, false, false, false), false),
+            ((false, false, false, true), false),
+            ((false, false, true, false), false),
+            ((false, false, true, true), false),
+            ((false, true, false, false), false),
+            ((false, true, false, true), false),
+            ((false, true, true, false), false),
+            ((false, true, true, true), false),
+            ((true, false, false, false), false),
+            ((true, false, false, true), false),
+            ((true, false, true, false), false),
+            ((true, false, true, true), false),
+            ((true, true, false, false), true),
+            ((true, true, false, true), false),
+            ((true, true, true, false), false),
+            ((true, true, true, true), false),
+        ];
+        for ((tab_active, pane_visible, overlay_open, load_failed), visible) in table {
             assert_eq!(
                 web_view_visible(tab_active, pane_visible, overlay_open, load_failed),
-                tab_active && pane_visible && !overlay_open && !load_failed,
+                visible,
                 "tab_active={tab_active} pane_visible={pane_visible} \
                  overlay_open={overlay_open} load_failed={load_failed}"
             );
         }
-        assert!(web_view_visible(true, true, false, false));
     }
 
     #[test]
