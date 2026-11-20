@@ -1,5 +1,10 @@
 //! Decides which links open in the in-app browser tab: local and dev
-//! addresses only, gated by the "Open links in a browser tab" setting.
+//! addresses only, gated by the "Open links in a browser tab" setting. The
+//! interception itself is [`LinkRoutingPlatform`], which gpui starts with.
+
+mod platform;
+
+pub use platform::{LinkRoutingPlatform, take_routed_receiver};
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,14 +20,12 @@ pub fn set_routing_enabled(on: bool) {
     ROUTING_ENABLED.store(on, Ordering::Relaxed);
 }
 
-#[allow(dead_code)] // first caller arrives with link routing (Task 4)
 pub fn routing_enabled() -> bool {
     ROUTING_ENABLED.load(Ordering::Relaxed)
 }
 
 /// Whether `url` should open in the in-app browser tab rather than the
 /// system browser.
-#[allow(dead_code)] // first caller arrives with link routing (Task 4)
 pub fn should_route(url: &str, enabled: bool) -> bool {
     enabled && is_local_url(url)
 }
@@ -58,14 +61,13 @@ pub fn is_local_url(url: &str) -> bool {
     }
 }
 
-/// Hands `url` to the system: the default browser for web pages, the owning
-/// app for any other scheme. Bypasses routing, so the browser tab can send a
-/// page out without it bouncing back in. Only absolute URLs are passed on.
-/// At most one open per [`OPEN_INTERVAL`]; extras are dropped, so a page in a
-/// script loop can't spawn processes without bound.
-/// Interim: shells out to `/usr/bin/open` until Task 8's platform wrapper.
-/// For page-originated opens; a user's own click goes through
-/// [`open_external_now`].
+/// Hands `url` to the system (the real platform's `open_url`): the default
+/// browser for web pages, the owning app for any other scheme. Bypasses
+/// routing, so the browser tab can send a page out without it bouncing back
+/// in. Only absolute URLs are passed on. At most one open per
+/// [`OPEN_INTERVAL`]; extras are dropped, so a page in a script loop can't
+/// launch apps without bound. For page-originated opens; a user's own click
+/// goes through [`open_external_now`].
 pub fn open_external(url: &str) {
     let Some(url) = launch_target(url) else {
         log::warn!("open_external: not an absolute, openable URL");
@@ -80,7 +82,7 @@ pub fn open_external(url: &str) {
         }
         *last = Some(now);
     }
-    spawn_open(&url);
+    open_now(&url);
 }
 
 /// [`open_external`] without the rate limit, for something the user did
@@ -89,13 +91,13 @@ pub fn open_external(url: &str) {
 /// argument safety: only absolute URLs, never `file:` or `javascript:`.
 pub fn open_external_now(url: &str) {
     match launch_target(url) {
-        Some(url) => spawn_open(&url),
+        Some(url) => open_now(&url),
         None => log::warn!("open_external_now: not an absolute, openable URL"),
     }
 }
 
-/// What `open` is given for `url`: its normalized absolute form, unless it
-/// is a local file (`open file:///…/x.app` launches it) or a script.
+/// What the system is given for `url`: its normalized absolute form, unless
+/// it is a local file (opening `file:///…/x.app` launches it) or a script.
 fn launch_target(url: &str) -> Option<String> {
     let url = normalized_absolute_url(url)?;
     match scheme_of(&url) {
@@ -104,18 +106,13 @@ fn launch_target(url: &str) -> Option<String> {
     }
 }
 
-fn spawn_open(url: &str) {
-    // An absolute URL starts with a scheme letter, so `open` never reads it
-    // as an option.
-    match std::process::Command::new("/usr/bin/open").arg(url).spawn() {
-        // Reap off-thread so the caller (the main thread) never blocks and no
-        // zombie is left behind.
-        Ok(mut child) => {
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
-        }
-        Err(e) => log::warn!("open_external: could not run open: {e}"),
+/// Opens `url` through the real platform (`NSWorkspace openURL:` on macOS),
+/// never through the routing wrapper. Without one on this thread (unit tests,
+/// or a caller off the main thread) it's dropped with a log line rather than
+/// shelled out, so a test run can never launch the user's browser.
+fn open_now(url: &str) {
+    if !platform::open_with_inner(url) {
+        log::warn!("open_external: no platform on this thread; dropped a {}: link", scheme_of(url));
     }
 }
 
@@ -129,7 +126,7 @@ fn open_allowed(last: Option<Instant>, now: Instant) -> bool {
 }
 
 /// `url` as `url::Url` serializes it, when it is absolute (`url::Url` refuses
-/// relative references). That normalized form is what gets passed to `open`.
+/// relative references). That normalized form is what the system is given.
 fn normalized_absolute_url(url: &str) -> Option<String> {
     Url::parse(url).ok().map(|u| u.as_str().to_owned())
 }

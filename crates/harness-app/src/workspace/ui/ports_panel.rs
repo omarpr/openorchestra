@@ -495,9 +495,22 @@ impl HarnessWorkspace {
                     small_button(hx, port_action_id("open", section, row.pid, port), "Open")
                         .on_click({
                             let url = url.clone();
-                            cx.listener(move |_, _, _, cx| {
+                            let this_task = section == "task";
+                            cx.listener(move |ws, _, window, cx| {
                                 cx.stop_propagation();
-                                cx.open_url(&url);
+                                // This project/task's port: a browser tab in
+                                // the pane on screen (the setting allowing).
+                                // Any other port: the default browser.
+                                if !this_task {
+                                    crate::link_routing::open_external_now(&url);
+                                } else if !crate::link_routing::routing_enabled() {
+                                    cx.open_url(&url);
+                                } else if ws
+                                    .open_browser_tab(Some(url.clone()), window, cx)
+                                    .is_none()
+                                {
+                                    crate::link_routing::open_external_now(&url);
+                                }
                             })
                         }),
                 )

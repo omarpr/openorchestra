@@ -195,6 +195,10 @@ libc = "0.2"
 # Per-process CPU/RSS sampling for the sidebar resource band. 0.37.2 is already
 # resolved in this lockfile via the zed cone, so pinning here adds no new copy.
 sysinfo = "0.37"
+# Only to name `Platform::update_jump_list`'s argument type in the link
+# routing wrapper (link_routing/platform.rs); gpui doesn't re-export it.
+# 1.16.1 is already resolved in this lockfile through gpui.
+smallvec = "1"
 # Shell-quoting for paths dropped onto a terminal pane. Same version zed's own
 # `terminal_view` pins, so a dropped path is quoted here exactly as zed would
 # quote it — the format users already expect from every other terminal.

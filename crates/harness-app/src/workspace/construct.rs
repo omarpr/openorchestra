@@ -385,6 +385,39 @@ impl HarnessWorkspace {
         })
         .detach();
 
+        // Local and dev links the platform wrapper routed (link_routing):
+        // open each in a browser tab of the active worktree, or in the
+        // default browser when no worktree is selected. Taken once, so only
+        // the first workspace drains.
+        if let Some(mut routed) = crate::link_routing::take_routed_receiver() {
+            cx.spawn_in(window, async move |view, cx| {
+                use futures::StreamExt as _;
+                while let Some(url) = routed.next().await {
+                    let opened = view.update_in(cx, |ws, window, cx| {
+                        let opened = ws.open_browser_tab(Some(url.clone()), window, cx).is_some();
+                        // Usually already front (the click came from here).
+                        if opened && !window.is_window_active() {
+                            cx.activate(true);
+                            window.activate_window();
+                        }
+                        opened
+                    });
+                    match opened {
+                        Ok(true) => {}
+                        Ok(false) => crate::link_routing::open_external_now(&url),
+                        // The workspace is gone: this link goes out, and
+                        // dropping the receiver sends later ones straight to
+                        // the default browser.
+                        Err(_) => {
+                            crate::link_routing::open_external_now(&url);
+                            break;
+                        }
+                    }
+                }
+            })
+            .detach();
+        }
+
         cx.spawn(async move |view, cx| {
             loop {
                 match forge_rx.try_recv() {
