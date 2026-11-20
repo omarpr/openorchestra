@@ -12,7 +12,10 @@
 //! callbacks only `unbounded_send` a [`PageEvent`], and a `spawn_in` task
 //! holding a `WeakEntity<BrowserPane>` drains it and applies each event with
 //! a window and context. Channel and task live and die with that one view, so
-//! nothing an old view queued can reach the next one.
+//! nothing an old view queued can reach the next one. Within one view, a
+//! load failure carries the number of the navigation it belongs to, so one
+//! still queued when the user starts another navigation is dropped
+//! ([`failure_is_current`]).
 //!
 //! **Placement.** The tab body is a `canvas` whose prepaint reads the pane
 //! (no update, no notify) and hands its bounds to `set_frame`, so the page
@@ -215,7 +218,9 @@ enum PageEvent {
     Title(String),
     Url(String),
     Loading(bool),
-    Failed(Option<String>, String),
+    /// The failing URL (when WebKit names it), the reason, and the view's
+    /// navigation number at the time ([`failure_is_current`]).
+    Failed(Option<String>, String, u64),
     Notice(String),
     NewWindow(String),
     /// The user clicked into the page.
@@ -228,6 +233,14 @@ enum PageEvent {
 /// say, would leave a Stop button on a tab with no page.
 fn applies_without_view(ev: &PageEvent) -> bool {
     matches!(ev, PageEvent::NewWindow(_))
+}
+
+/// Whether a failure tagged with navigation `tagged` belongs to the view's
+/// `current` navigation. One from an earlier navigation, still queued when
+/// the user loaded another address (or reloaded, or went back), must not
+/// replace the new page with its error.
+fn failure_is_current(tagged: u64, current: u64) -> bool {
+    tagged == current
 }
 
 /// A load that failed, shown in place of the page.
@@ -487,7 +500,11 @@ impl BrowserPane {
                 self.sync_address(window, cx);
             }
             PageEvent::Loading(loading) => self.loading = loading,
-            PageEvent::Failed(url, reason) => {
+            PageEvent::Failed(url, reason, navigation) => {
+                let current = self.native.as_ref().map(|n| n.view.navigation());
+                if !current.is_some_and(|current| failure_is_current(navigation, current)) {
+                    return;
+                }
                 let url = url
                     .or_else(|| self.attempted.clone())
                     .or_else(|| self.url.clone())
@@ -803,8 +820,8 @@ fn page_events(tx: mpsc::UnboundedSender<PageEvent>) -> NativeEvents {
         on_loading: Box::new(move |loading| {
             let _ = loading_tx.unbounded_send(PageEvent::Loading(loading));
         }),
-        on_failed: Box::new(move |url, reason| {
-            let _ = failed_tx.unbounded_send(PageEvent::Failed(url, reason));
+        on_failed: Box::new(move |url, reason, navigation| {
+            let _ = failed_tx.unbounded_send(PageEvent::Failed(url, reason, navigation));
         }),
         on_notice: sender(PageEvent::Notice),
         on_new_window: sender(PageEvent::NewWindow),
@@ -973,13 +990,22 @@ mod tests {
             PageEvent::Title("t".into()),
             PageEvent::Url("http://localhost/".into()),
             PageEvent::Loading(true),
-            PageEvent::Failed(None, "x".into()),
+            PageEvent::Failed(None, "x".into(), 0),
             PageEvent::Notice("n".into()),
             PageEvent::Clicked,
         ] {
             assert!(!applies_without_view(&ev));
         }
         assert!(applies_without_view(&PageEvent::NewWindow("http://localhost/".into())));
+    }
+
+    #[test]
+    fn only_the_current_navigation_s_failure_shows() {
+        assert!(failure_is_current(3, 3));
+        // Queued from the navigation before the user's new address.
+        assert!(!failure_is_current(2, 3));
+        // The counter wraps rather than overflowing.
+        assert!(!failure_is_current(u64::MAX, 0));
     }
 
     #[test]

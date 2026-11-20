@@ -240,7 +240,11 @@ pub(crate) struct NativeEvents {
     /// view's own URL has already fallen back to the last committed page by
     /// then), and WebKit's message, e.g. "Could not connect to the server.".
     /// Cancellations, including our own policy cancels, are not failures.
-    pub on_failed: Box<dyn Fn(Option<String>, String)>,
+    /// The last argument is the view's navigation number when WebKit
+    /// reported it ([`NativeWebView::navigation`]), read before the
+    /// main-queue hop, so a failure that lands after the next
+    /// `load`/`reload`/`back`/`forward` can be told apart.
+    pub on_failed: Box<dyn Fn(Option<String>, String, u64)>,
     /// Something the user should hear about that is not a load failure; the
     /// page stays as it is. Today only [`DOWNLOAD_UNSUPPORTED`].
     pub on_notice: Box<dyn Fn(String)>,
@@ -263,7 +267,7 @@ impl Default for NativeEvents {
             on_title: Box::new(|_| {}),
             on_url: Box::new(|_| {}),
             on_loading: Box::new(|_| {}),
-            on_failed: Box::new(|_, _| {}),
+            on_failed: Box::new(|_, _, _| {}),
             on_notice: Box::new(|_| {}),
             on_new_window: Box::new(|_| {}),
             on_click: Box::new(|| {}),
@@ -540,6 +544,8 @@ mod mac {
         /// The page's last real gesture, stamped by the key monitor; shared
         /// with its `PageEntry`.
         gesture: Rc<Cell<Option<Instant>>>,
+        /// The view's navigation number (see [`NativeWebView::navigation`]).
+        navigation: Rc<Cell<u64>>,
     }
 
     define_class!(
@@ -676,7 +682,10 @@ mod mac {
 
             #[unsafe(method(webViewWebContentProcessDidTerminate:))]
             fn content_process_terminated(&self, _web_view: &WKWebView) {
-                self.post(|e| (e.on_failed)(None, "The page stopped unexpectedly.".to_string()));
+                let navigation = self.ivars().navigation.get();
+                self.post(move |e| {
+                    (e.on_failed)(None, "The page stopped unexpectedly.".to_string(), navigation)
+                });
             }
         }
 
@@ -704,9 +713,10 @@ mod mac {
         fn new(
             events: Weak<NativeEvents>,
             gesture: Rc<Cell<Option<Instant>>>,
+            navigation: Rc<Cell<u64>>,
             mtm: MainThreadMarker,
         ) -> Retained<Self> {
-            let this = Self::alloc(mtm).set_ivars(Ivars { events, gesture });
+            let this = Self::alloc(mtm).set_ivars(Ivars { events, gesture, navigation });
             unsafe { msg_send![super(this), init] }
         }
 
@@ -745,7 +755,10 @@ mod mac {
                 .and_then(|v| v.downcast::<NSString>().ok())
                 .map(|s| s.to_string())
                 .filter(|s| !s.is_empty());
-            self.post(move |e| (e.on_failed)(url, message));
+            // Read now: by the time the post runs, the pane may have started
+            // another navigation.
+            let navigation = self.ivars().navigation.get();
+            self.post(move |e| (e.on_failed)(url, message, navigation));
         }
     }
 
@@ -1031,6 +1044,9 @@ mod mac {
         /// gpui's focus is on this page's side of its tab (not its address
         /// bar); shared with the monitor through `PAGES`.
         pane_focused: Rc<Cell<bool>>,
+        /// Bumped by every navigation the pane starts; shared with the
+        /// delegate, which tags failures with it.
+        navigation: Rc<Cell<u64>>,
     }
 
     impl NativeWebView {
@@ -1080,7 +1096,9 @@ mod mac {
 
             let events = Rc::new(events);
             let gesture = Rc::new(Cell::new(None));
-            let delegate = Delegate::new(Rc::downgrade(&events), gesture.clone(), mtm);
+            let navigation = Rc::new(Cell::new(0));
+            let delegate =
+                Delegate::new(Rc::downgrade(&events), gesture.clone(), navigation.clone(), mtm);
             unsafe {
                 view.setNavigationDelegate(Some(ProtocolObject::from_ref(&*delegate)));
                 view.setUIDelegate(Some(ProtocolObject::from_ref(&*delegate)));
@@ -1106,7 +1124,7 @@ mod mac {
                     events: Rc::downgrade(&events),
                 })
             });
-            let this = Self { view, delegate, _events: events, pane_focused };
+            let this = Self { view, delegate, _events: events, pane_focused, navigation };
             if !url.is_empty() {
                 this.load(url);
             }
@@ -1176,31 +1194,47 @@ mod mac {
             page_has_focus
         }
 
+        /// The number of the navigation the pane last started here
+        /// (`load`, `reload`, `back`, `forward` each bump it). `on_failed`
+        /// carries the number current when WebKit reported the failure.
+        pub(crate) fn navigation(&self) -> u64 {
+            self.navigation.get()
+        }
+
+        fn begin_navigation(&self) {
+            self.navigation.set(self.navigation.get().wrapping_add(1));
+        }
+
         /// Loads an absolute URL. One NSURL can't parse is reported through
         /// `on_failed`.
         pub(crate) fn load(&self, url: &str) {
+            self.begin_navigation();
             match NSURL::URLWithString(&NSString::from_str(url)) {
                 Some(ns_url) => unsafe {
                     self.view.loadRequest(&NSURLRequest::requestWithURL(&ns_url));
                 },
                 None => {
                     let url = url.to_string();
+                    let navigation = self.navigation();
                     self.delegate.post(move |e| {
-                        (e.on_failed)(Some(url), "not a valid address".to_string())
+                        (e.on_failed)(Some(url), "not a valid address".to_string(), navigation)
                     });
                 }
             }
         }
 
         pub(crate) fn back(&self) {
+            self.begin_navigation();
             unsafe { self.view.goBack() };
         }
 
         pub(crate) fn forward(&self) {
+            self.begin_navigation();
             unsafe { self.view.goForward() };
         }
 
         pub(crate) fn reload(&self) {
+            self.begin_navigation();
             unsafe { self.view.reload() };
         }
 
@@ -1313,7 +1347,7 @@ mod tests {
         (events.on_title)("Home".into());
         (events.on_url)("http://localhost:3000/".into());
         (events.on_loading)(true);
-        (events.on_failed)(None, "Could not connect to the server.".into());
+        (events.on_failed)(None, "Could not connect to the server.".into(), 0);
         (events.on_notice)(DOWNLOAD_UNSUPPORTED.into());
         (events.on_new_window)("http://localhost:3000/new".into());
         assert_eq!(*seen.borrow(), ["title Home"]);
