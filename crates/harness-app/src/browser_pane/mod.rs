@@ -16,7 +16,8 @@
 //! page's new-window request, which is a tab of its own and must survive its
 //! view being dropped (a tab switch right after the click): it goes inline
 //! into a channel the pane owns, drained by a task that lives as long as the
-//! pane ([`BrowserPane::new`]). Within one view, a
+//! pane ([`BrowserPane::new`]), which opens at most one tab per second for
+//! it ([`new_window_allowed`]). Within one view, a
 //! load failure carries the number of the navigation it belongs to, so one
 //! still queued when the user starts another navigation is dropped
 //! ([`failure_is_current`]).
@@ -31,7 +32,7 @@
 mod webview;
 
 use std::cell::Cell;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use editor::Editor;
 use futures::StreamExt as _;
@@ -230,6 +231,18 @@ enum PageEvent {
     Clicked,
 }
 
+/// Least time between two new tabs one page opens (`target=_blank`,
+/// `window.open`). WebKit already wants a user gesture for `window.open`
+/// (`webview.rs`), but one gesture can run a script that opens many.
+const NEW_WINDOW_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Whether a page's new-window request may open a tab, given when its last
+/// one did. At most one per [`NEW_WINDOW_INTERVAL`]; the pane drops (and
+/// logs) the rest.
+fn new_window_allowed(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|t| now.saturating_duration_since(t) >= NEW_WINDOW_INTERVAL)
+}
+
 /// Whether a failure tagged with navigation `tagged` belongs to the view's
 /// `current` navigation. One from an earlier navigation, still queued when
 /// the user loaded another address (or reloaded, or went back), must not
@@ -357,7 +370,14 @@ impl BrowserPane {
             });
         let (new_window_tx, mut new_window_rx) = mpsc::unbounded::<String>();
         let new_windows = cx.spawn_in(window, async move |this, cx| {
+            let mut last_opened = None;
             while let Some(url) = new_window_rx.next().await {
+                let now = Instant::now();
+                if !new_window_allowed(last_opened, now) {
+                    log::info!("browser: dropped a page's new window (one tab per second)");
+                    continue;
+                }
+                last_opened = Some(now);
                 if this
                     .update(cx, |_, cx| cx.emit(BrowserEvent::NewWindow(url)))
                     .is_err()
@@ -1041,6 +1061,18 @@ mod tests {
         drop(rx);
         (events.on_new_window)("http://localhost:3000/new".into());
         assert_eq!(new_rx.try_recv().ok().as_deref(), Some("http://localhost:3000/new"));
+    }
+
+    #[test]
+    fn a_page_opens_at_most_one_tab_per_second() {
+        let t0 = Instant::now();
+        assert!(new_window_allowed(None, t0));
+        // A script's burst after one click: the rest are dropped.
+        assert!(!new_window_allowed(Some(t0), t0));
+        assert!(!new_window_allowed(Some(t0), t0 + Duration::from_millis(999)));
+        assert!(new_window_allowed(Some(t0), t0 + NEW_WINDOW_INTERVAL));
+        // A clock that reads earlier than the last open never panics.
+        assert!(!new_window_allowed(Some(t0 + NEW_WINDOW_INTERVAL), t0));
     }
 
     #[test]

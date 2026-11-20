@@ -49,6 +49,10 @@
 //!   fetched it already passed the policy (a script may load an http(s)
 //!   page), and the default browser fetches the file again itself.
 //! - `link_routing::open_external` also rate-limits to one open per second.
+//! - New windows (each a tab here) need a user gesture:
+//!   `javaScriptCanOpenWindowsAutomatically` is off (macOS defaults it on),
+//!   and the pane opens at most one tab per page per second
+//!   (`new_window_allowed` in `mod.rs`).
 //!
 //! **⌘-chords over a focused page: one app-wide local `NSEvent` monitor**
 //! (Task 7), not a `performKeyEquivalent:` override. The dispatch order was
@@ -1087,6 +1091,12 @@ mod mac {
                 config.setApplicationNameForUserAgent(Some(&NSString::from_str(
                     user_agent_app_name(),
                 )));
+                // macOS defaults this to YES: any script could open windows
+                // (each a new tab here) with no click. NO (iOS's default)
+                // keeps `window.open` to a user gesture.
+                config
+                    .preferences()
+                    .setJavaScriptCanOpenWindowsAutomatically(false);
                 WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), NSRect::ZERO, &config)
             };
             // Safari's Web Inspector; macOS 13.3+ (we support 12).
@@ -1419,8 +1429,11 @@ mod tests {
     #[test]
     fn new_windows_open_web_pages_only() {
         assert_eq!(decide_new_window("http://localhost:3000/a", CLICK), NavDecision::Load);
-        // window.open() from script still gets a tab (WebKit blocks popups
-        // without a user gesture itself).
+        // window.open() from script still gets a tab: a click handler's
+        // window.open isn't `LinkActivated`. What keeps a script from opening
+        // windows with no gesture is WebKit, with
+        // `javaScriptCanOpenWindowsAutomatically` off (`NativeWebView::new`),
+        // plus the pane's one-tab-per-second limit (`new_window_allowed`).
         assert_eq!(decide_new_window("https://example.com", SCRIPT), NavDecision::Load);
         assert_eq!(decide_new_window("mailto:a@b.c", CLICK), NavDecision::External);
         assert_eq!(decide_new_window("mailto:a@b.c", SCRIPT), NavDecision::Ignore);

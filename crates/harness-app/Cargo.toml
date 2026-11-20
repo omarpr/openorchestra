@@ -261,6 +261,7 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
     "WKNavigationAction",
     "WKNavigationDelegate",
     "WKNavigationResponse",
+    "WKPreferences",
     "WKUIDelegate",
     "WKWebView",
     "WKWebViewConfiguration",
