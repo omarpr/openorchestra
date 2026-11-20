@@ -185,9 +185,9 @@ enum Refocus {
     Keep,
 }
 
-/// Whether the page re-takes the keyboard now, from the pending request and
+/// Whether the page takes the keyboard now, from the pending request and
 /// where gpui's focus is (see [`gpui_focus_on_page`]). Back on the page's
-/// side of the tab it takes it; in the address bar the request is dropped,
+/// side of the tab (or put there by activating the tab) it takes it; in the address bar the request is dropped,
 /// since the user chose to type there. Anywhere else (the tools panel after
 /// ⌘⇧F, an overlay's input) the request waits: frames keep coming meanwhile
 /// (a cursor blink is enough), and consuming it then would leave the page
@@ -201,6 +201,25 @@ fn page_refocus(pending: bool, in_pane: bool, in_address: bool) -> Refocus {
         Refocus::Take
     } else {
         Refocus::Keep
+    }
+}
+
+/// Where the keyboard goes when a browser tab is activated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActivationFocus {
+    /// A blank tab: gpui's focus goes to the address bar, to type one.
+    AddressBar,
+    /// A tab with a page: gpui's focus goes to the pane, and the page asks
+    /// for AppKit's keyboard too (`focus_page`), so typing reaches it with
+    /// no click.
+    Page,
+}
+
+fn activation_focus(has_page: bool) -> ActivationFocus {
+    if has_page {
+        ActivationFocus::Page
+    } else {
+        ActivationFocus::AddressBar
     }
 }
 
@@ -289,9 +308,10 @@ pub(crate) struct BrowserPane {
     address: Entity<Editor>,
     focus_handle: FocusHandle,
     /// Hand the page keyboard focus once its view is next placed with gpui's
-    /// focus on the page's side of the tab ([`page_refocus`]): after Enter
-    /// or Esc in the address bar, an overlay that hid the page, or gpui's
-    /// focus leaving the tab while the page had the keyboard.
+    /// focus on the page's side of the tab ([`page_refocus`]): after the
+    /// tab is activated ([`Self::activate_focus`]), Enter or Esc in the
+    /// address bar, an overlay that hid the page, or gpui's focus leaving
+    /// the tab while the page had the keyboard.
     focus_page: Cell<bool>,
     /// Creating the native view failed. Latched so render doesn't retry
     /// every frame; the in-tab Retry clears it.
@@ -426,13 +446,19 @@ impl BrowserPane {
         page_label(self.url(), self.title())
     }
 
-    /// Where keyboard focus goes when the tab is activated: the address bar
-    /// of a blank tab, the pane otherwise.
-    pub(crate) fn focus_target(&self, cx: &App) -> FocusHandle {
-        if self.url.is_none() {
-            self.address.focus_handle(cx)
-        } else {
-            self.focus_handle.clone()
+    /// Where gpui's focus goes when the tab is activated (a tab click,
+    /// ⌘1..9, a routed or Ports open, the restored active tab: all through
+    /// `HarnessWorkspace::focus_active_pane`): the address bar of a blank
+    /// tab; otherwise the pane, and the page asks for the keyboard, taken
+    /// once its view is placed with gpui's focus still there
+    /// ([`page_refocus`]).
+    pub(crate) fn activate_focus(&self, cx: &App) -> FocusHandle {
+        match activation_focus(self.url.is_some()) {
+            ActivationFocus::AddressBar => self.address.focus_handle(cx),
+            ActivationFocus::Page => {
+                self.focus_page.set(true);
+                self.focus_handle.clone()
+            }
         }
     }
 
@@ -1163,8 +1189,9 @@ mod tests {
             ((true, false, false), Keep),
             // Can't happen (the address bar is in the pane); never take.
             ((true, false, true), Drop),
-            // Back in the tab (Esc, panel toggle, tab activation): the page
-            // has the keyboard again with no click.
+            // On the page's side of the tab: back there (Esc, the panel
+            // toggled off) or put there by activating the tab
+            // (`activate_focus`). The page takes the keyboard with no click.
             ((true, true, false), Take),
             // Back in the address bar: it keeps the keyboard.
             ((true, true, true), Drop),
@@ -1176,6 +1203,15 @@ mod tests {
                 "pending={pending} in_pane={in_pane} in_address={in_address}"
             );
         }
+    }
+
+    #[test]
+    fn activating_a_tab_gives_its_page_the_keyboard_unless_it_is_blank() {
+        assert_eq!(activation_focus(false), ActivationFocus::AddressBar);
+        assert_eq!(activation_focus(true), ActivationFocus::Page);
+        // The request then waits for gpui's focus on the page's side of
+        // the tab, which activation just put there.
+        assert_eq!(page_refocus(true, true, false), Refocus::Take);
     }
 
     #[test]

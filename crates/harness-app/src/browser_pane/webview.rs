@@ -84,7 +84,11 @@
 //!   the panel toggled off); returning to the address bar drops the request;
 //! - a click into the page (the monitor also watches left mouse-downs, and
 //!   stamps them as the page's last gesture) moves gpui's focus to the tab
-//!   (`on_click`).
+//!   (`on_click`);
+//! - activating a tab with a page (a tab click, ⌘1..9, a routed or Ports
+//!   open, the restored active tab) puts gpui's focus on the tab and asks
+//!   for the page to get the first responder (`activate_focus`), so it
+//!   takes typing with no click. A blank tab focuses its address bar.
 //!
 //! Bindings without ⌘ (`ctrl-q`) are untouched: the monitor lets them by,
 //! and gpui sees them first through its view's `performKeyEquivalent:` as

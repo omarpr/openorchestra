@@ -802,7 +802,7 @@ impl HarnessWorkspace {
                     }
                 }
                 TabContent::Chat(c) => c.read(cx).focus_handle(cx),
-                TabContent::Browser(page) => page.read(cx).focus_target(cx),
+                TabContent::Browser(page) => page.read(cx).activate_focus(cx),
                 TabContent::Diff => self.diff_surface_focus.clone(),
                 TabContent::ReviewOverview(_) => self.focus_handle.clone(),
                 TabContent::Editor(ws) => {
