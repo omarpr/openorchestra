@@ -16,6 +16,7 @@
 #![cfg_attr(debug_assertions, allow(linker_messages))]
 
 mod app_assets;
+mod browser_pane;
 mod chat_pane;
 mod conductor;
 mod curated_languages;

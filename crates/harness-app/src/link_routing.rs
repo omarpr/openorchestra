@@ -57,6 +57,35 @@ pub fn is_local_url(url: &str) -> bool {
     }
 }
 
+/// Hands `url` to the system: the default browser for web pages, the owning
+/// app for any other scheme. Bypasses routing, so the browser tab can send a
+/// page out without it bouncing back in. Only absolute URLs are passed on.
+/// Interim: shells out to `/usr/bin/open` until Task 8's platform wrapper.
+#[allow(dead_code)] // first caller is the browser tab's web view (Task 6)
+pub fn open_external(url: &str) {
+    if !is_absolute_url(url) {
+        log::warn!("open_external: not an absolute URL: {url:?}");
+        return;
+    }
+    // An absolute URL starts with a scheme letter, so `open` never reads it
+    // as an option.
+    match std::process::Command::new("/usr/bin/open").arg(url).spawn() {
+        // Reap off-thread so the caller (the main thread) never blocks and no
+        // zombie is left behind.
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        Err(e) => log::warn!("open_external: could not run open: {e}"),
+    }
+}
+
+/// True when `url` has a scheme (`url::Url` refuses relative references).
+fn is_absolute_url(url: &str) -> bool {
+    Url::parse(url).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,6 +137,16 @@ mod tests {
         assert!(should_route("http://localhost:3000", true));
         assert!(!should_route("http://localhost:3000", false));
         assert!(!should_route("https://github.com", true));
+    }
+
+    #[test]
+    fn open_external_takes_only_absolute_urls() {
+        for u in ["http://localhost:3000", "https://github.com", "mailto:a@b.c", "zed://x"] {
+            assert!(is_absolute_url(u), "{u}");
+        }
+        for u in ["", "/relative/path", "//host/x", "-n", "not a url"] {
+            assert!(!is_absolute_url(u), "{u}");
+        }
     }
 
     // The only test that touches the process-global flag.

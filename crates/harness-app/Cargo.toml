@@ -243,6 +243,37 @@ objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-user-notifications = "0.3"
 block2 = "0.6"
+# The browser tab's WKWebView (browser_pane/webview.rs). Same objc2 0.6 family
+# as above; objc2-app-kit 0.3.2 and dispatch2 0.3.1 are already in the lockfile
+# via gpui_macos, so this adds exactly one crate (objc2-web-kit). Chosen over
+# wry: see the header of webview.rs.
+objc2-web-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "objc2-app-kit",
+    "objc2-core-foundation",
+    "WKFrameInfo",
+    "WKNavigation",
+    "WKNavigationAction",
+    "WKNavigationDelegate",
+    "WKNavigationResponse",
+    "WKUIDelegate",
+    "WKWebView",
+    "WKWebViewConfiguration",
+    "WKWebsiteDataStore",
+    "WKWindowFeatures",
+] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSResponder",
+    "NSView",
+    "NSWindow",
+] }
+# Posts web view callbacks back onto the main queue (see NativeEvents).
+dispatch2 = { version = "0.3", default-features = false, features = ["std", "objc2"] }
+# gpui's Window hands out its NSView through HasWindowHandle.
+raw-window-handle = "0.6"
 
 # zed's own dev profile carries these same four overrides, and they are
 # load-bearing, not a speed nicety: zed's `with_parser` attaches a
