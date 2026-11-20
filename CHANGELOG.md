@@ -12,6 +12,8 @@ Unreleased is empty.
 
 ## Unreleased
 
+## 1.4.0 - 2026-11-20
+
 ### Added
 
 - **Browser** tabs (＋ → Browser): a WebKit page next to your shells and
