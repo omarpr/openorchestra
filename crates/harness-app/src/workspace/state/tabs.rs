@@ -231,7 +231,7 @@ impl HarnessWorkspace {
                         ws.flush_a2a_inbox_for_pane(&key);
                     }
                     let active = ws.resolve().map(|r| r.key).unwrap_or_default();
-                    ws.evict_stale_panes(&active);
+                    ws.evict_stale_panes(&active, cx);
                     cx.notify();
                 });
             })
@@ -595,8 +595,8 @@ impl HarnessWorkspace {
     /// apps and animated titles), and each full save rewrites and syncs
     /// three files on the UI thread, which WebKit's input shares. Replacing
     /// the task cancels the previous one, so a burst ends in one save; any
-    /// other save (open, close, move, quit) clears it, having written the
-    /// same state.
+    /// other save (open, close, move, quit, an eviction) clears it, having
+    /// written the same state.
     fn schedule_browser_save(&mut self, cx: &mut Context<Self>) {
         self.browser_save = Some(cx.spawn(async move |ws, cx| {
             cx.background_executor().timer(BROWSER_SAVE_DELAY).await;
@@ -723,13 +723,21 @@ impl HarnessWorkspace {
 
     /// Drop the least-recently-used pane sets beyond [`MAX_LIVE_PANES`],
     /// keeping the active pane and any panes still starting agents.
-    pub(crate) fn evict_stale_panes(&mut self, keep: &str) {
+    ///
+    /// `save_panes` records only live panes, so a browser change still
+    /// waiting for its debounced save ([`Self::schedule_browser_save`]) is
+    /// saved first: otherwise the evicted pane's new URL and title would be
+    /// lost, and reselecting the worktree would restore the old page.
+    pub(crate) fn evict_stale_panes(&mut self, keep: &str, cx: &App) {
         while self.panes.len() > MAX_LIVE_PANES {
             let Some(victim) = pane_to_evict(&self.panes, keep, &self.pending_agent_launches)
             else {
                 break;
             };
             let victim = victim.to_owned();
+            if self.browser_save.is_some() {
+                self.save_panes(cx);
+            }
             log::info!("evicting pane {victim} (over the {MAX_LIVE_PANES}-pane cap)");
             // Dropping the terminal closes its pty and detaches the tmux client.
             self.panes.remove(&victim);

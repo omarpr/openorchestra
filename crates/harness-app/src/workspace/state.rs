@@ -272,7 +272,7 @@ impl HarnessWorkspace {
                 None => self.open_tab(TabKind::Shell, window, cx),
             }
         }
-        self.evict_stale_panes(&r.key);
+        self.evict_stale_panes(&r.key, cx);
     }
 
     /// Fidelity for notifications: prefs signal profile for custom agents,
