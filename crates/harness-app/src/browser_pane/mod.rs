@@ -355,6 +355,19 @@ fn commit_title(same_document: bool, title: Option<&str>) -> Option<&str> {
     title.filter(|_| same_document)
 }
 
+/// A title event: store `arrived` as the tab's title (`held`; blank is
+/// none) and say whether the tab relabels (it changed) and which title
+/// history gets. History gets every non-blank title, changed or not: a
+/// restored tab starts with its saved title, and many sites share one
+/// title across pages, so a "changed only" rule would leave their entries
+/// untitled (`History::set_title` skips one it already has).
+fn take_title(held: &mut Option<String>, arrived: String) -> (bool, Option<String>) {
+    let arrived = Some(arrived).filter(|t| !t.trim().is_empty());
+    let relabel = *held != arrived;
+    *held = arrived.clone();
+    (relabel, arrived)
+}
+
 /// How many recent pages a blank tab lists.
 const RECENT_ON_BLANK: usize = 8;
 
@@ -805,13 +818,12 @@ impl BrowserPane {
         }
         match ev {
             PageEvent::Title(title) => {
-                let title = Some(title).filter(|t| !t.trim().is_empty());
-                if title != self.title {
-                    self.title = title;
-                    if let (Some(url), Some(title)) = (self.url.clone(), self.title.clone()) {
-                        self.record_title(&url, &title, cx);
-                    }
+                let (relabel, record) = take_title(&mut self.title, title);
+                if relabel {
                     cx.emit(BrowserEvent::TitleChanged);
+                }
+                if let (Some(url), Some(title)) = (self.url.clone(), record) {
+                    self.record_title(&url, &title, cx);
                 }
             }
             PageEvent::Url(url) => {
@@ -1722,6 +1734,18 @@ mod tests {
         assert_eq!(commit_title(true, Some("Docs")), Some("Docs"));
         assert_eq!(commit_title(false, Some("Previous page")), None);
         assert_eq!(commit_title(true, None), None);
+    }
+
+    #[test]
+    fn every_title_reaches_history_but_only_a_change_relabels() {
+        let mut held = Some("Docs".to_string());
+        // The same title as held (a restored tab, a site-wide title).
+        assert_eq!(take_title(&mut held, "Docs".into()), (false, Some("Docs".into())));
+        assert_eq!(take_title(&mut held, "API".into()), (true, Some("API".into())));
+        assert_eq!(held.as_deref(), Some("API"));
+        assert_eq!(take_title(&mut held, "  ".into()), (true, None));
+        assert_eq!(held, None);
+        assert_eq!(take_title(&mut held, String::new()), (false, None));
     }
 
     #[test]
