@@ -21,7 +21,9 @@
 //! load failure carries the number of the navigation that produced it
 //! (`webview::Navigations`, matched by its `WKNavigation`), so one from an
 //! earlier navigation, or still queued when the user or the page starts
-//! another, is dropped ([`failure_is_current`]).
+//! another, is dropped ([`failure_is_current`]). While a failure shows,
+//! the address bar names the address that failed, not the page WebKit
+//! stayed on ([`address_text`]); Back, Forward and a new address clear it.
 //!
 //! **Placement.** The tab body is a `canvas` whose prepaint reads the pane
 //! (no update, no notify) and hands its bounds to `set_frame`, so the page
@@ -548,6 +550,29 @@ fn failure_is_current(tagged: u64, current: u64) -> bool {
     tagged == current
 }
 
+/// What the address bar is set to now, or `None` to leave it alone: the
+/// user is typing in it (`focused` and `edited`, see [`address_edited`]).
+/// While a load failure shows, the address that failed (`failed`), not the
+/// page's URL: a load that fails before committing leaves WebKit on the
+/// previous page, whose URL it reports again, and the bar would name a page
+/// that isn't the one the error is about. Otherwise the page's URL
+/// (`page`; empty for a blank tab).
+fn address_text<'a>(
+    page: Option<&'a str>,
+    failed: Option<&'a str>,
+    focused: bool,
+    edited: bool,
+) -> Option<&'a str> {
+    (!(focused && edited)).then(|| failed.or(page).unwrap_or_default())
+}
+
+/// Whether the bar's `text` is the user's own: neither the page's URL nor
+/// the failed address, whichever the pane last put there.
+fn address_edited(text: &str, page: Option<&str>, failed: Option<&str>) -> bool {
+    let text = text.trim();
+    text != page.unwrap_or_default() && failed.is_none_or(|f| text != f)
+}
+
 /// A load that failed, shown in place of the page.
 struct LoadFailure {
     url: String,
@@ -924,12 +949,13 @@ impl BrowserPane {
 
     /// The user typed in the address bar: show the history pages matching
     /// it, or close the list when nothing does. Our own `set_text` (the
-    /// page's URL put back, an address loaded) edits the bar too; those
-    /// leave it equal to the page's URL, or out of focus, and open nothing.
+    /// page's URL or a failed address put back, an address loaded) edits
+    /// the bar too; those leave it unedited ([`address_edited`]), or out of
+    /// focus, and open nothing.
     fn update_suggestions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.address.read(cx).text(cx);
         let typing = self.address.focus_handle(cx).is_focused(window)
-            && text.trim() != self.url.as_deref().unwrap_or_default();
+            && address_edited(&text, self.url.as_deref(), self.failed_url());
         let items: Vec<history::HistoryEntry> = match (&self.project, typing) {
             (Some(project), true) => self
                 .history
@@ -1182,6 +1208,9 @@ impl BrowserPane {
                     .unwrap_or_default();
                 self.failure = Some(LoadFailure { url, reason });
                 self.loading = false;
+                // WebKit's URL may already be back on the previous page
+                // (`Url` before this); the bar names the failed address.
+                self.sync_address(window, cx);
             }
             PageEvent::Notice(text) => self.show_notice(text, cx),
             // AppKit already gave the page the keyboard; gpui's focus follows
@@ -1196,21 +1225,38 @@ impl BrowserPane {
         cx.notify();
     }
 
-    /// Show the page's URL in the address bar, unless the user is typing
+    /// Show the page's URL in the address bar, or the failed address while
+    /// its error shows ([`address_text`]), unless the user is typing
     /// (leaving the bar catches it up: `_address_focus_out`).
     fn sync_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.address.focus_handle(cx).is_focused(window) {
-            self.reset_address(window, cx);
-        }
+        let focused = self.address.focus_handle(cx).is_focused(window);
+        self.set_address(focused, window, cx);
     }
 
-    /// Put the page's URL back in the address bar.
+    /// Put the page's URL (or the failed address) back in the address bar,
+    /// whatever was typed there.
     fn reset_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.url.clone().unwrap_or_default();
-        if self.address.read(cx).text(cx) != text {
+        self.set_address(false, window, cx);
+    }
+
+    /// [`address_text`] into the bar, if it changes it.
+    fn set_address(&mut self, focused: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let failed = self.failed_url();
+        let current = self.address.read(cx).text(cx);
+        let edited = address_edited(&current, self.url.as_deref(), failed);
+        let Some(text) = address_text(self.url.as_deref(), failed, focused, edited) else {
+            return;
+        };
+        if current != text {
+            let text = text.to_string();
             self.address
                 .update(cx, |e, cx| e.set_text(text.as_str(), window, cx));
         }
+    }
+
+    /// The address whose load failure shows in place of the page.
+    fn failed_url(&self) -> Option<&str> {
+        self.failure.as_ref().map(|f| f.url.as_str())
     }
 
     fn show_notice(&mut self, text: String, cx: &mut Context<Self>) {
@@ -1263,16 +1309,21 @@ impl BrowserPane {
         cx.notify();
     }
 
-    fn back(&mut self, cx: &mut Context<Self>) {
+    /// Back, from a page or from a load failure. Clearing the failure puts
+    /// the page's URL back in the bar; the URL that loads follows.
+    fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.failure = None;
+        self.sync_address(window, cx);
         if let Some(native) = &self.native {
             native.view.back();
         }
         cx.notify();
     }
 
-    fn forward(&mut self, cx: &mut Context<Self>) {
+    /// Forward; as [`Self::back`].
+    fn forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.failure = None;
+        self.sync_address(window, cx);
         if let Some(native) = &self.native {
             native.view.forward();
         }
@@ -1281,6 +1332,8 @@ impl BrowserPane {
 
     /// Reload, or after a failed load try that address again: WebKit's own
     /// reload repeats the last *committed* page, not the one that failed.
+    /// The bar keeps the failed address meanwhile (no sync here): WebKit
+    /// reports it while it loads, and the page's own once it commits.
     fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(failure) = self.failure.take() {
             self.attempted = Some(failure.url.clone());
@@ -1421,7 +1474,7 @@ impl BrowserPane {
             .child(
                 bar_button(hx, "browser-back", ::ui::IconName::ArrowLeft, "Back", can_back)
                     .when(can_back, |d| {
-                        d.on_click(cx.listener(|pane, _, _, cx| pane.back(cx)))
+                        d.on_click(cx.listener(|pane, _, window, cx| pane.back(window, cx)))
                     }),
             )
             .child(
@@ -1433,7 +1486,7 @@ impl BrowserPane {
                     can_forward,
                 )
                 .when(can_forward, |d| {
-                    d.on_click(cx.listener(|pane, _, _, cx| pane.forward(cx)))
+                    d.on_click(cx.listener(|pane, _, window, cx| pane.forward(window, cx)))
                 }),
             )
             .child(reload)
@@ -2299,6 +2352,52 @@ mod tests {
             reshow_page(PageLoad::Restored, url).as_deref(),
             "http://localhost:8765/login"
         ));
+    }
+
+    #[test]
+    fn the_address_bar_shows_the_failed_address_unless_the_user_is_typing() {
+        let page = Some("http://localhost:3000/");
+        let failed = Some("http://localhost:9/");
+        // (page, failed, focused, edited) → what the bar is set to.
+        let cases = [
+            // A page and no error: its URL, unless the user is typing.
+            (page, None, false, false, Some("http://localhost:3000/")),
+            (page, None, true, false, Some("http://localhost:3000/")),
+            (page, None, false, true, Some("http://localhost:3000/")),
+            (page, None, true, true, None),
+            // A failed load: WebKit put the old page's URL back, but the
+            // bar names the address that failed.
+            (page, failed, false, false, Some("http://localhost:9/")),
+            (page, failed, true, false, Some("http://localhost:9/")),
+            (page, failed, false, true, Some("http://localhost:9/")),
+            (page, failed, true, true, None),
+            // A first load that failed, and a blank tab.
+            (None, failed, false, false, Some("http://localhost:9/")),
+            (None, None, false, false, Some("")),
+        ];
+        for (page, failed, focused, edited, want) in cases {
+            assert_eq!(
+                address_text(page, failed, focused, edited),
+                want,
+                "page {page:?}, failed {failed:?}, focused {focused}, edited {edited}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_address_bar_is_edited_when_it_names_neither_the_page_nor_the_failure() {
+        let page = Some("http://localhost:3000/");
+        let failed = Some("http://localhost:9/");
+        assert!(!address_edited("http://localhost:3000/", page, None));
+        assert!(!address_edited(" http://localhost:3000/ ", page, None));
+        assert!(!address_edited("http://localhost:9/", page, failed));
+        // The page's URL still in the bar when the error arrives: not
+        // typed, so it gives way to the failed address.
+        assert!(!address_edited("http://localhost:3000/", page, failed));
+        assert!(address_edited("localhost:3", page, failed));
+        assert!(address_edited("http://localhost:9/", page, None));
+        assert!(!address_edited("", None, None));
+        assert!(address_edited("loc", None, None));
     }
 
     #[test]
