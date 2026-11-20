@@ -273,8 +273,9 @@ impl EventEmitter<BrowserEvent> for BrowserPane {}
 enum PageEvent {
     Title(String),
     Url(String),
-    /// The page is now at this URL for real (`NativeEvents::on_commit`).
-    Committed(String),
+    /// The page is now at this URL for real (`NativeEvents::on_commit`);
+    /// `true` for a change within the same document.
+    Committed(String, bool),
     Loading(bool),
     /// The failing URL (when WebKit names it), the reason, and the view's
     /// navigation number at the time ([`failure_is_current`]).
@@ -805,10 +806,15 @@ impl BrowserPane {
                 }
                 self.sync_address(window, cx);
             }
-            PageEvent::Committed(url) => {
+            PageEvent::Committed(url, same_document) => {
                 self.record_visit(&url, cx);
-                // A title that came before its page was recorded.
-                self.record_title(cx);
+                // Within the same document the title is the page's own (and
+                // may have changed before the URL did). A new document's
+                // title still in hand can be the previous page's; its own
+                // title event names it.
+                if same_document {
+                    self.record_title(cx);
+                }
             }
             PageEvent::Loading(loading) => self.loading = loading,
             PageEvent::Failed(url, reason, navigation) => {
@@ -1334,7 +1340,12 @@ fn page_events(
     NativeEvents {
         on_title: sender(PageEvent::Title),
         on_url: sender(PageEvent::Url),
-        on_commit: sender(PageEvent::Committed),
+        on_commit: {
+            let tx = tx.clone();
+            Box::new(move |url, same_document| {
+                let _ = tx.unbounded_send(PageEvent::Committed(url, same_document));
+            })
+        },
         on_loading: Box::new(move |loading| {
             let _ = loading_tx.unbounded_send(PageEvent::Loading(loading));
         }),

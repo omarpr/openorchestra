@@ -255,10 +255,11 @@ pub(crate) struct NativeEvents {
     /// is not a visit: see `on_commit`.
     pub on_url: Box<dyn Fn(String)>,
     /// The page is now at this URL for real: a top-level navigation
-    /// committed (`didCommitNavigation`), or the URL changed in place with
-    /// nothing loading (`pushState`, a `#fragment`). What browsing history
+    /// committed (`didCommitNavigation`; `false`), or the URL changed in
+    /// place with nothing loading (`pushState`, a `#fragment`; `true`, the
+    /// same document, whose title is still its own). What browsing history
     /// records.
-    pub on_commit: Box<dyn Fn(String)>,
+    pub on_commit: Box<dyn Fn(String, bool)>,
     pub on_loading: Box<dyn Fn(bool)>,
     /// A page load failed: the URL that failed, when WebKit names it (the
     /// view's own URL has already fallen back to the last committed page by
@@ -292,7 +293,7 @@ impl Default for NativeEvents {
         Self {
             on_title: Box::new(|_| {}),
             on_url: Box::new(|_| {}),
-            on_commit: Box::new(|_| {}),
+            on_commit: Box::new(|_, _| {}),
             on_loading: Box::new(|_| {}),
             on_failed: Box::new(|_, _, _| {}),
             on_notice: Box::new(|_| {}),
@@ -646,7 +647,7 @@ mod mac {
                             // commits nothing but is where the page now is.
                             if !unsafe { view.isLoading() } {
                                 let committed = url.clone();
-                                self.post(move |e| (e.on_commit)(committed));
+                                self.post(move |e| (e.on_commit)(committed, true));
                             }
                             self.post(move |e| (e.on_url)(url));
                         }
@@ -735,7 +736,7 @@ mod mac {
             fn did_commit(&self, web_view: &WKWebView, _navigation: Option<&WKNavigation>) {
                 let url = url_string(unsafe { web_view.URL() });
                 if !url.is_empty() {
-                    self.post(move |e| (e.on_commit)(url));
+                    self.post(move |e| (e.on_commit)(url, false));
                 }
             }
 
