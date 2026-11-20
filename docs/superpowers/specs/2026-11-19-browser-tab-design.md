@@ -359,7 +359,10 @@ note where what shipped differs.
   the conductor stay under the page (conductor can be dragged off the
   page; hiding the page whenever he speaks would blank it constantly) —
   cost if wrong: conductor bubble unseen while over a page; mention to
-  user.
+  user. *As built (Task 11):* the conductor is no longer under the page.
+  His figure and bubble or badge are cut out of it (a mask on the page's
+  container view, whose hit test lets clicks there through to gpui), so he
+  shows and can be dragged over a page; the rest stay under it.
 
 ### CodeRabbit review (PR #28)
 

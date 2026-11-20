@@ -6,6 +6,7 @@ use super::super::*;
 
 use gpui::{RenderImage, img};
 
+use crate::browser_pane::Hole;
 use crate::conductor::scene::FRAME_PX;
 
 /// The figure's on-screen size; frames are rendered at 2× this.
@@ -27,6 +28,20 @@ pub(crate) struct ConductorDrag {
 /// The theme accent as the renderer wants it.
 fn accent_of(hx: &HarnessTheme) -> [f32; 3] {
     [hx.accent.r, hx.accent.g, hx.accent.b]
+}
+
+/// What the conductor's drawn children cut out of a browser page, from
+/// their laid-out `bounds` and, in the same order, each one's corner radius
+/// (`None`: it cuts nothing, like the full-window drag shield).
+pub(crate) fn conductor_holes(
+    bounds: &[gpui::Bounds<Pixels>],
+    radii: &[Option<f32>],
+) -> Vec<Hole> {
+    bounds
+        .iter()
+        .zip(radii)
+        .filter_map(|(b, r)| r.map(|r| Hole::from_bounds(*b, r)))
+        .collect()
 }
 
 /// "(repo)" for a main checkout, "(repo · worktree)" otherwise.
@@ -214,7 +229,25 @@ impl HarnessWorkspace {
 
     /// The conductor and his speech bubble, floating over everything but
     /// modal overlays. The bubble sits on whichever side has room.
+    ///
+    /// A browser page is native and sits above all of this, so he and his
+    /// bubble or badge are cut out of it each frame, from their laid-out
+    /// bounds (`browser_pane::set_punch_through`): he shows through the
+    /// page and takes the pointer there. No conductor, no holes.
     pub(crate) fn render_conductor(
+        &self,
+        hx: &HarnessTheme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let conductor = self.conductor_element(hx, window, cx);
+        if conductor.is_none() {
+            crate::browser_pane::set_punch_through(window, Vec::new());
+        }
+        conductor
+    }
+
+    fn conductor_element(
         &self,
         hx: &HarnessTheme,
         window: &Window,
@@ -415,12 +448,28 @@ impl HarnessWorkspace {
             self.track_conductor_pointer(s, cx)
         });
 
+        // What each child below cuts out of a browser page, in child order:
+        // the bubble with its `rounded_lg` corners (half a rem), the badge
+        // as a pill (clamped to half its height), him as a square. Not the
+        // shield: it covers the whole window, and only while dragging.
+        let radii: Vec<Option<f32>> = shield
+            .is_some()
+            .then_some(None)
+            .into_iter()
+            .chain(bubble.is_some().then_some(Some(f32::from(window.rem_size()) * 0.5)))
+            .chain(badge.is_some().then_some(Some(f32::MAX)))
+            .chain([Some(0.0)])
+            .collect();
+
         Some(
             div()
                 .absolute()
                 .size_full()
                 .top_0()
                 .left_0()
+                .on_children_prepainted(move |bounds, window, _| {
+                    crate::browser_pane::set_punch_through(window, conductor_holes(&bounds, &radii));
+                })
                 .children(shield)
                 .children(bubble)
                 .children(badge)
@@ -432,7 +481,28 @@ impl HarnessWorkspace {
 
 #[cfg(test)]
 mod tests {
-    use super::conductor_label;
+    use gpui::{Bounds, point, px, size};
+
+    use super::{conductor_holes, conductor_label};
+    use crate::browser_pane::Hole;
+
+    #[test]
+    fn the_shield_cuts_nothing_and_the_rest_keep_their_corners() {
+        let b = |x: f32, y: f32, w: f32, h: f32| Bounds::new(point(px(x), px(y)), size(px(w), px(h)));
+        // While dragging with the bubble open: shield, bubble, figure.
+        let bounds = [b(0.0, 0.0, 1200.0, 800.0), b(900.0, 680.0, 230.0, 60.0), b(1120.0, 700.0, 64.0, 64.0)];
+        let radii = [None, Some(8.0), Some(0.0)];
+        assert_eq!(
+            conductor_holes(&bounds, &radii),
+            [
+                Hole { x: 900.0, y: 680.0, w: 230.0, h: 60.0, radius: 8.0 },
+                Hole { x: 1120.0, y: 700.0, w: 64.0, h: 64.0, radius: 0.0 },
+            ]
+        );
+        // Him alone.
+        assert_eq!(conductor_holes(&bounds[2..], &[Some(0.0)]).len(), 1);
+        assert!(conductor_holes(&[], &[]).is_empty());
+    }
 
     #[test]
     fn labels_name_the_project_and_any_worktree() {

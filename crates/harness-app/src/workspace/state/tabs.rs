@@ -682,8 +682,11 @@ impl HarnessWorkspace {
     /// A failure toast counts while it shows (ruling R11): the user has to
     /// see it. Not counted, by design: info toasts, the conductor, tooltips
     /// and drag previews. They float over the window without taking it
-    /// over, and hiding the page for each would blank it constantly; where
-    /// they overlap the page they are under it. Native `window.prompt`
+    /// over, and hiding the page for each would blank it constantly. The
+    /// conductor (his figure and his bubble or badge) is cut out of the page
+    /// instead, so he shows through it and can be clicked and dragged there
+    /// (`browser_pane::set_punch_through`); the rest, where they overlap the
+    /// page, are under it. Native `window.prompt`
     /// sheets (NSAlert) are their own window, above the page, and need
     /// nothing.
     ///

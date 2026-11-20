@@ -119,6 +119,39 @@
 //!
 //! The monitor exists for the life of the app, so dropping a view from
 //! inside it (⌘W closing the tab) can't pull it out from under itself.
+//!
+//! **The conductor shows through the page** (Task 11). The page sits above
+//! everything gpui draws, so the always-on conductor would vanish behind it
+//! wherever they overlap, and hiding the page for him would blank it
+//! constantly (he talks all the time). Instead the page is cut away where he
+//! is. Each page lives in a container `NSView` of ours (`PageContainer`): the
+//! container is what is added to gpui's view, framed, shown and hidden, and
+//! the `WKWebView` fills it, so WebKit's own layers are never touched.
+//! - **Rects.** Each frame, the conductor's wrapper element reports the laid
+//!   out bounds of his figure and his bubble or badge (gpui's
+//!   `on_children_prepainted`) through [`set_punch_through`], in gpui window
+//!   coordinates, per window; no conductor reports none. He prepaints after
+//!   the page's slot, so a changed set recuts that window's pages right
+//!   then, and `set_frame` recuts a page that moved from the last set.
+//!   [`holes_in_page`] subtracts the page's origin (the same top-left
+//!   window coordinates `set_frame` takes; the container is flipped, so
+//!   those are its own) and drops holes that miss the page: no holes, no
+//!   mask, as before.
+//! - **Mask.** The container's layer gets a `CAShapeLayer` mask: its bounds
+//!   with the holes cut out by the even-odd rule, rounded like the bubble
+//!   and badge, converted with `convertRectToLayer:` rather than a guess at
+//!   the layer's flip. It is redone only when [`mask_changed`] says so, with
+//!   implicit animations off.
+//! - **Pointer.** The container's `hitTest:` answers nil inside a hole
+//!   ([`in_any_hole`]), so AppKit hands a click, drag or scroll there to
+//!   gpui's view and he can be dragged or clicked over the page. The monitor's
+//!   `page_hit` asks this same hit test, so a click in a hole never counts as
+//!   a page click (no gesture stamp, no focus move to the tab). `hitTest:`
+//!   doesn't steer tracking areas, so WebKit may still see the mouse move
+//!   over a hole (its hover effects, its cursor).
+//!
+//! The holes are rects: around his figure, a square sprite, the tab's own
+//! background shows rather than the page.
 
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
@@ -463,6 +496,108 @@ pub(crate) fn flip_y(bounds_y: f32, height: f32, parent_height: f32) -> f32 {
     parent_height - bounds_y - height
 }
 
+/// A rect the page is cut away from so gpui's drawing under it shows (and
+/// takes the pointer) there: the conductor's figure, his bubble or badge.
+/// In gpui window coordinates (logical points, top-left origin) as
+/// [`set_punch_through`] takes them; [`holes_in_page`] makes them
+/// page-local. `radius` rounds the corners, as the element draws them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Hole {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub radius: f32,
+}
+
+impl Hole {
+    pub(crate) fn from_bounds(bounds: gpui::Bounds<gpui::Pixels>, radius: f32) -> Self {
+        Self {
+            x: f32::from(bounds.origin.x),
+            y: f32::from(bounds.origin.y),
+            w: f32::from(bounds.size.width),
+            h: f32::from(bounds.size.height),
+            radius,
+        }
+    }
+}
+
+/// The window's `holes` that touch a page placed at `page` (x, y, width,
+/// height, in the same window coordinates `set_frame` takes), moved into
+/// the page's own top-left coordinates. Holes that miss the page or have
+/// no area are dropped, so a conductor off the page means no mask at all.
+/// Corner radii are clamped to half the shorter side (CoreGraphics refuses
+/// more). Holes are not clipped to the page: the mask's even-odd fill only
+/// matters inside it.
+pub(crate) fn holes_in_page(holes: &[Hole], page: (f32, f32, f32, f32)) -> Vec<Hole> {
+    let (px, py, pw, ph) = page;
+    holes
+        .iter()
+        .map(|h| Hole {
+            x: h.x - px,
+            y: h.y - py,
+            radius: h.radius.min(h.w / 2.0).min(h.h / 2.0).max(0.0),
+            ..*h
+        })
+        .filter(|h| h.w > 0.0 && h.h > 0.0 && h.x < pw && h.x + h.w > 0.0 && h.y < ph && h.y + h.h > 0.0)
+        .collect()
+}
+
+/// Whether the page-local point (`x`, `y`, top-left origin) falls in one
+/// of the page-local `holes`, rounded corners included: the container's
+/// `hitTest:` answers nil there, so the click goes to gpui.
+pub(crate) fn in_any_hole(holes: &[Hole], x: f32, y: f32) -> bool {
+    holes.iter().any(|h| {
+        if x < h.x || x >= h.x + h.w || y < h.y || y >= h.y + h.h {
+            return false;
+        }
+        // Inside the rect; in a corner square, it must be inside the arc.
+        let r = h.radius.min(h.w / 2.0).min(h.h / 2.0).max(0.0);
+        let cx = x.clamp(h.x + r, h.x + h.w - r);
+        let cy = y.clamp(h.y + r, h.y + h.h - r);
+        (x - cx).powi(2) + (y - cy).powi(2) <= r * r
+    })
+}
+
+/// What a page's mask cuts: its size and its page-local holes. `None` is
+/// no mask (no holes).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PageMask {
+    pub width: f32,
+    pub height: f32,
+    pub holes: Vec<Hole>,
+}
+
+/// The mask for a page of `width` × `height` with page-local `holes`.
+pub(crate) fn page_mask(holes: Vec<Hole>, width: f32, height: f32) -> Option<PageMask> {
+    (!holes.is_empty()).then_some(PageMask { width, height, holes })
+}
+
+/// Whether the applied mask must be redone for `next`: a hole appeared,
+/// went or moved, or the page changed size (the mask's outer rect is the
+/// page's bounds). Sub-hundredth-of-a-point float noise is no change, so a
+/// resting conductor never touches the layer.
+pub(crate) fn mask_changed(applied: Option<&PageMask>, next: Option<&PageMask>) -> bool {
+    const EPSILON: f32 = 0.01;
+    let near = |a: f32, b: f32| (a - b).abs() < EPSILON;
+    match (applied, next) {
+        (None, None) => false,
+        (Some(a), Some(b)) => {
+            !(near(a.width, b.width)
+                && near(a.height, b.height)
+                && a.holes.len() == b.holes.len()
+                && a.holes.iter().zip(&b.holes).all(|(p, q)| {
+                    near(p.x, q.x)
+                        && near(p.y, q.y)
+                        && near(p.w, q.w)
+                        && near(p.h, q.h)
+                        && near(p.radius, q.radius)
+                }))
+        }
+        _ => true,
+    }
+}
+
 /// Safari's version when it can't be read from Safari.app (Safari 26
 /// shipped with macOS 26, the fall 2025 release). Only the fallback; the
 /// installed Safari's own version is preferred.
@@ -503,7 +638,7 @@ fn scheme_label(url: &str) -> String {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) use mac::{NativeWebView, window_is_minimized_or_hidden};
+pub(crate) use mac::{NativeWebView, set_punch_through, window_is_minimized_or_hidden};
 
 #[cfg(target_os = "macos")]
 mod mac {
@@ -525,13 +660,15 @@ mod mac {
     };
     use objc2_app_kit::{
         NSApplication, NSAutoresizingMaskOptions, NSEvent, NSEventMask, NSEventModifierFlags,
-        NSEventType, NSView, NSWindow,
+        NSEventType, NSResponder, NSView, NSWindow,
     };
+    use objc2_core_graphics::CGMutablePath;
     use objc2_foundation::{
         NSBundle, NSDictionary, NSError, NSHTTPURLResponse, NSKeyValueChangeKey,
         NSKeyValueObservingOptions, NSObjectNSKeyValueObserverRegistration, NSObjectProtocol,
         NSPoint, NSRect, NSSize, NSString, NSURL, NSURLRequest, ns_string,
     };
+    use objc2_quartz_core::{CAShapeLayer, CATransaction, kCAFillRuleEvenOdd};
     use objc2_web_kit::{
         WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
         WKNavigationResponse, WKNavigationResponsePolicy, WKNavigationType, WKUIDelegate, WKWebView,
@@ -540,10 +677,10 @@ mod mac {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     use super::{
-        APP_CHORDS, DOWNLOAD_UNSUPPORTED, KeyRoute, NavDecision, NavOrigin, NativeEvents,
-        decide_download, decide_navigation, decide_new_window, event_chords, flip_y,
-        is_benign_failure, is_download, response_origin, route_key, safari_app_name, user_clicked,
-        user_started,
+        APP_CHORDS, DOWNLOAD_UNSUPPORTED, Hole, KeyRoute, NavDecision, NavOrigin, NativeEvents,
+        PageMask, decide_download, decide_navigation, decide_new_window, event_chords, flip_y,
+        holes_in_page, in_any_hole, is_benign_failure, is_download, mask_changed, page_mask,
+        response_origin, route_key, safari_app_name, user_clicked, user_started,
     };
     use crate::shortcuts::{Chord, PageEdit, is_app_shortcut, page_edit};
 
@@ -881,10 +1018,15 @@ mod mac {
         /// The page's last real gesture (see the module docs).
         gesture: Rc<Cell<Option<Instant>>>,
         events: Weak<NativeEvents>,
+        /// The view holding the page, which carries its punch-through mask.
+        container: Retained<PageContainer>,
     }
 
     thread_local! {
         static PAGES: RefCell<Vec<PageEntry>> = const { RefCell::new(Vec::new()) };
+        /// Each window's punch-through holes ([`set_punch_through`]), by
+        /// the address of its gpui view. A window with none has no entry.
+        static HOLES: RefCell<Vec<(usize, Vec<Hole>)>> = const { RefCell::new(Vec::new()) };
         static KEY_MONITOR: Cell<bool> = const { Cell::new(false) };
         /// The ⌘-chords lately handed to a page, newest last, retained so a
         /// pointer can't be reused by another event. WebKit sends back the
@@ -1125,10 +1267,225 @@ mod mac {
         }
     }
 
+    /// The page container's state.
+    struct ContainerIvars {
+        /// Where `set_frame` last put the page, in gpui window coordinates
+        /// (x, y, width, height); `None` before its first frame.
+        page: Cell<Option<(f32, f32, f32, f32)>>,
+        /// The mask in place, page-local; `hitTest:` reads its holes too, so
+        /// clicks fall through exactly where the page is cut away. `None`:
+        /// no mask.
+        mask: RefCell<Option<PageMask>>,
+    }
+
+    define_class!(
+        // The page's container (see the module docs): a plain layer-backed
+        // view whose only subview is the WKWebView, so the mask and the hit
+        // test are ours and WebKit's own layers stay untouched. Flipped, so
+        // its coordinates are the page-local top-left ones the holes use.
+        #[unsafe(super(NSView, NSResponder, NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "HarnessPageContainer"]
+        #[ivars = ContainerIvars]
+        struct PageContainer;
+
+        impl PageContainer {
+            #[unsafe(method(isFlipped))]
+            fn is_flipped(&self) -> bool {
+                true
+            }
+
+            /// Nothing here inside a hole, so AppKit goes on to gpui's view
+            /// under it: the conductor gets the click or drag. The key
+            /// monitor's `page_hit` asks this same hit test, so it never
+            /// counts such a click as the page's.
+            #[unsafe(method_id(hitTest:))]
+            fn hit_test(&self, point: NSPoint) -> Option<Retained<NSView>> {
+                // `point` is in the superview's coordinates.
+                let parent = unsafe { self.superview() };
+                let local = self.convertPoint_fromView(point, parent.as_deref());
+                let in_hole = self
+                    .ivars()
+                    .mask
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|m| in_any_hole(&m.holes, local.x as f32, local.y as f32));
+                if in_hole {
+                    None
+                } else {
+                    unsafe { msg_send![super(self), hitTest: point] }
+                }
+            }
+        }
+    );
+
+    impl PageContainer {
+        fn new(mtm: MainThreadMarker) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(ContainerIvars {
+                page: Cell::new(None),
+                mask: RefCell::new(None),
+            });
+            let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+            this.setWantsLayer(true);
+            this
+        }
+
+        /// Recuts the mask from the window's holes and where the page now
+        /// is, if that changed it ([`mask_changed`]); otherwise the layer
+        /// isn't touched.
+        fn refresh_mask(&self) {
+            let Some(page) = self.ivars().page.get() else {
+                return;
+            };
+            let Some(parent) = (unsafe { self.superview() }) else {
+                return;
+            };
+            let holes = window_holes(Retained::as_ptr(&parent) as usize);
+            let next = page_mask(holes_in_page(&holes, page), page.2, page.3);
+            if !mask_changed(self.ivars().mask.borrow().as_ref(), next.as_ref()) {
+                return;
+            }
+            if self.apply_mask(next.as_ref()) {
+                *self.ivars().mask.borrow_mut() = next;
+            }
+        }
+
+        /// Sets (or, for `None`, removes) the layer mask: the container's
+        /// bounds with the holes cut out by the even-odd rule. Holes never
+        /// overlap each other (the conductor's bubble and badge sit beside
+        /// him); two that did would cancel where they meet. With implicit
+        /// animations off, so the cut follows him instead of easing after
+        /// him. `false` when there is no layer yet: nothing was applied.
+        fn apply_mask(&self, mask: Option<&PageMask>) -> bool {
+            let Some(layer) = self.layer() else {
+                return false;
+            };
+            CATransaction::begin();
+            CATransaction::setDisableActions(true);
+            match mask {
+                None => unsafe { layer.setMask(None) },
+                Some(mask) => {
+                    // AppKit's conversion to the layer's own coordinates,
+                    // rather than a guess at whether it is flipped.
+                    let outer = self.convertRectToLayer(self.bounds());
+                    let path = CGMutablePath::new();
+                    let local = |r: NSRect| {
+                        NSRect::new(
+                            NSPoint::new(r.origin.x - outer.origin.x, r.origin.y - outer.origin.y),
+                            r.size,
+                        )
+                    };
+                    unsafe { CGMutablePath::add_rect(Some(&path), ptr::null(), local(outer)) };
+                    for hole in &mask.holes {
+                        let rect = local(self.convertRectToLayer(NSRect::new(
+                            NSPoint::new(hole.x as f64, hole.y as f64),
+                            NSSize::new(hole.w as f64, hole.h as f64),
+                        )));
+                        // `holes_in_page` clamped the radius to what
+                        // CoreGraphics accepts.
+                        let r = hole.radius as f64;
+                        unsafe {
+                            if r > 0.0 {
+                                CGMutablePath::add_rounded_rect(Some(&path), ptr::null(), rect, r, r);
+                            } else {
+                                CGMutablePath::add_rect(Some(&path), ptr::null(), rect);
+                            }
+                        }
+                    }
+                    let shape = layer
+                        .mask()
+                        .and_then(|m| m.downcast::<CAShapeLayer>().ok())
+                        .unwrap_or_else(CAShapeLayer::new);
+                    shape.setFrame(outer);
+                    shape.setFillRule(unsafe { kCAFillRuleEvenOdd });
+                    shape.setPath(Some(&path));
+                    if let Some(window) = self.window() {
+                        shape.setContentsScale(window.backingScaleFactor());
+                    }
+                    unsafe { layer.setMask(Some(&shape)) };
+                }
+            }
+            CATransaction::commit();
+            true
+        }
+    }
+
+    /// The holes [`set_punch_through`] last gave for the window whose gpui
+    /// view is at `parent`.
+    fn window_holes(parent: usize) -> Vec<Hole> {
+        HOLES.with(|h| {
+            h.borrow()
+                .iter()
+                .find(|(view, _)| *view == parent)
+                .map(|(_, holes)| holes.clone())
+                .unwrap_or_default()
+        })
+    }
+
+    /// The gpui view of `window`, which the pages are added to.
+    fn gpui_view(window: &Window) -> Option<Retained<NSView>> {
+        // Window has an inherent `window_handle()` (gpui's own handle
+        // type); this is the raw-window-handle one.
+        let handle = HasWindowHandle::window_handle(window).ok()?;
+        let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+            return None;
+        };
+        // SAFETY: gpui hands out its live GPUIView, an NSView subclass,
+        // valid while `window` is borrowed. We retain it for the call.
+        unsafe { Retained::retain(appkit.ns_view.as_ptr().cast::<NSView>()) }
+    }
+
+    /// Where gpui draws something that must show through, and take the
+    /// pointer, over any page in `window`: rects in window coordinates
+    /// (see [`Hole`]). Called with every frame's rects (empty for none); a
+    /// set like the last one costs a comparison. A change recuts each of
+    /// the window's pages, and `set_frame` recuts a page that moved.
+    pub(crate) fn set_punch_through(window: &Window, holes: Vec<Hole>) {
+        let Some(parent) = gpui_view(window) else {
+            return;
+        };
+        let parent = Retained::as_ptr(&parent) as usize;
+        let changed = HOLES.with(|h| {
+            let mut h = h.borrow_mut();
+            let at = h.iter().position(|(view, _)| *view == parent);
+            match (at, holes.is_empty()) {
+                (Some(i), _) if h[i].1 == holes => false,
+                (None, true) => false,
+                (Some(i), true) => {
+                    h.remove(i);
+                    true
+                }
+                (Some(i), false) => {
+                    h[i].1 = holes;
+                    true
+                }
+                (None, false) => {
+                    h.push((parent, holes));
+                    true
+                }
+            }
+        });
+        if !changed {
+            return;
+        }
+        let containers: Vec<Retained<PageContainer>> =
+            PAGES.with(|pages| pages.borrow().iter().map(|p| p.container.clone()).collect());
+        for container in containers {
+            if unsafe { container.superview() }
+                .is_some_and(|v| Retained::as_ptr(&v) as usize == parent)
+            {
+                container.refresh_mask();
+            }
+        }
+    }
+
     /// A `WKWebView` living on top of the gpui window's view. Main thread
     /// only (it is neither `Send` nor `Sync`).
     pub(crate) struct NativeWebView {
         view: Retained<WKWebView>,
+        /// The view holding `view`, the one added to gpui's view: it is
+        /// what is framed, shown and hidden, and it carries the mask.
+        container: Retained<PageContainer>,
         /// Owned here: the web view only holds its delegates weakly.
         delegate: Retained<Delegate>,
         _events: Rc<NativeEvents>,
@@ -1181,11 +1538,18 @@ mod mac {
             if view.respondsToSelector(sel!(setInspectable:)) {
                 unsafe { view.setInspectable(true) };
             }
-            view.setHidden(true);
+            // The page fills its container, which is what moves.
+            view.setAutoresizingMask(
+                NSAutoresizingMaskOptions::ViewWidthSizable
+                    | NSAutoresizingMaskOptions::ViewHeightSizable,
+            );
+            let container = PageContainer::new(mtm);
+            container.addSubview(&view);
+            container.setHidden(true);
             // Keep the top edge pinned while the window resizes, until the
             // next frame's set_frame lands; otherwise an unflipped parent
             // drags the page down with its bottom edge for that frame.
-            view.setAutoresizingMask(if parent.isFlipped() {
+            container.setAutoresizingMask(if parent.isFlipped() {
                 NSAutoresizingMaskOptions::ViewMaxYMargin
             } else {
                 NSAutoresizingMaskOptions::ViewMinYMargin
@@ -1209,8 +1573,8 @@ mod mac {
                 }
             }
             // Last subview, so it draws above gpui's Metal layer and AppKit
-            // hit-testing reaches it first.
-            parent.addSubview(&view);
+            // hit-testing reaches it first (outside its holes).
+            parent.addSubview(&container);
 
             let pane_focused = Rc::new(Cell::new(false));
             PAGES.with(|pages| {
@@ -1219,9 +1583,10 @@ mod mac {
                     pane_focused: pane_focused.clone(),
                     gesture,
                     events: Rc::downgrade(&events),
+                    container: container.clone(),
                 })
             });
-            let this = Self { view, delegate, _events: events, pane_focused, navigation };
+            let this = Self { view, container, delegate, _events: events, pane_focused, navigation };
             if !url.is_empty() {
                 this.load(url);
             }
@@ -1232,8 +1597,9 @@ mod mac {
         /// points, top-left origin), which are the parent view's points.
         /// `_window` is part of the interface; the parent's own bounds and
         /// `isFlipped` are what AppKit positions against, so those are used.
+        /// The page's holes follow: it is recut if the move changed them.
         pub(crate) fn set_frame(&self, bounds: Bounds<Pixels>, _window: &Window) {
-            let Some(parent) = (unsafe { self.view.superview() }) else {
+            let Some(parent) = (unsafe { self.container.superview() }) else {
                 return;
             };
             let (x, y) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
@@ -1243,15 +1609,18 @@ mod mac {
             } else {
                 flip_y(y, h, parent.bounds().size.height as f32)
             };
-            self.view.setFrame(NSRect::new(
-                NSPoint::new(x as f64, y as f64),
-                NSSize::new(w as f64, h as f64),
-            ));
+            let size = NSSize::new(w as f64, h as f64);
+            self.container
+                .setFrame(NSRect::new(NSPoint::new(x as f64, y as f64), size));
+            self.view.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), size));
+            let page = (f32::from(bounds.origin.x), f32::from(bounds.origin.y), w, h);
+            self.container.ivars().page.set(Some(page));
+            self.container.refresh_mask();
         }
 
         pub(crate) fn set_visible(&self, visible: bool) {
             if visible {
-                self.view.setHidden(false);
+                self.container.setHidden(false);
             } else {
                 self.hide();
             }
@@ -1262,7 +1631,7 @@ mod mac {
         /// view is). Returns whether it had it, so it can be given back.
         pub(crate) fn hide(&self) -> bool {
             let had_focus = self.release_focus();
-            self.view.setHidden(true);
+            self.container.setHidden(true);
             had_focus
         }
 
@@ -1285,7 +1654,8 @@ mod mac {
                 .and_then(|r| r.downcast::<NSView>().ok())
                 .is_some_and(|v| v.isDescendantOf(&self.view));
             if page_has_focus {
-                let parent = unsafe { self.view.superview() };
+                // gpui's view, not the container.
+                let parent = unsafe { self.container.superview() };
                 window.makeFirstResponder(parent.as_deref().map(|p| &**p));
             }
             page_has_focus
@@ -1362,16 +1732,7 @@ mod mac {
         let Some(mtm) = MainThreadMarker::new() else {
             return false;
         };
-        let Ok(handle) = HasWindowHandle::window_handle(window) else {
-            return false;
-        };
-        let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
-            return false;
-        };
-        // SAFETY: as in `NativeWebView::new`, gpui's live view, retained for
-        // the call.
-        let Some(view) = (unsafe { Retained::retain(appkit.ns_view.as_ptr().cast::<NSView>()) })
-        else {
+        let Some(view) = gpui_view(window) else {
             return false;
         };
         view.window().is_some_and(|w| w.isMiniaturized())
@@ -1397,7 +1758,7 @@ mod mac {
             self.release_focus();
             let addr = Retained::as_ptr(&self.view) as usize;
             PAGES.with(|pages| pages.borrow_mut().retain(|p| p.view != addr));
-            self.view.removeFromSuperview();
+            self.container.removeFromSuperview();
         }
     }
 
@@ -1405,7 +1766,7 @@ mod mac {
     mod tests {
         use objc2::ClassType as _;
 
-        use super::Delegate;
+        use super::{Delegate, PageContainer};
 
         /// Registering the class runs objc2's debug-build checks: the KVO
         /// override's type encoding must match NSObject's, and every delegate
@@ -1415,6 +1776,14 @@ mod mac {
         #[cfg(debug_assertions)]
         fn delegate_class_registers() {
             assert_eq!(Delegate::class().name().to_str(), Ok("HarnessWebViewDelegate"));
+        }
+
+        /// Likewise for the page container: its `isFlipped` and `hitTest:`
+        /// overrides must match NSView's signatures.
+        #[test]
+        #[cfg(debug_assertions)]
+        fn container_class_registers() {
+            assert_eq!(PageContainer::class().name().to_str(), Ok("HarnessPageContainer"));
         }
     }
 }
@@ -1671,6 +2040,82 @@ mod tests {
                 "page={page} pane={pane} command={command} app={app}"
             );
         }
+    }
+
+    fn hole(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Hole {
+        Hole { x, y, w, h, radius }
+    }
+
+    #[test]
+    fn holes_move_into_the_pages_own_coordinates() {
+        // A page below a 40pt bar and right of a 200pt sidebar, 600×500.
+        let page = (200.0, 40.0, 600.0, 500.0);
+        // The figure near the window's bottom-right corner, over the page.
+        let figure = hole(700.0, 460.0, 64.0, 64.0, 0.0);
+        assert_eq!(holes_in_page(&[figure], page), [hole(500.0, 420.0, 64.0, 64.0, 0.0)]);
+        // Half off the page's right edge: kept, not clipped.
+        let edge = hole(780.0, 100.0, 64.0, 64.0, 8.0);
+        assert_eq!(holes_in_page(&[edge], page), [hole(580.0, 60.0, 64.0, 64.0, 8.0)]);
+        // Over the sidebar, or just touching the page's edge: no hole.
+        let sidebar = hole(20.0, 460.0, 64.0, 64.0, 0.0);
+        let touching = hole(136.0, 100.0, 64.0, 64.0, 0.0);
+        assert!(holes_in_page(&[sidebar, touching], page).is_empty());
+        // Zero area (an empty bubble mid-layout): no hole.
+        assert!(holes_in_page(&[hole(300.0, 100.0, 0.0, 40.0, 0.0)], page).is_empty());
+        // The badge's pill radius (`rounded_full`) clamps to half its height.
+        let badge = hole(500.0, 300.0, 120.0, 20.0, f32::MAX);
+        assert_eq!(holes_in_page(&[badge], page), [hole(300.0, 260.0, 120.0, 20.0, 10.0)]);
+        assert_eq!(holes_in_page(&[hole(300.0, 100.0, 10.0, 40.0, -3.0)], page)[0].radius, 0.0);
+        // Order is kept.
+        assert_eq!(holes_in_page(&[figure, sidebar, edge], page).len(), 2);
+    }
+
+    #[test]
+    fn a_point_is_in_a_hole_only_inside_its_rounded_rect() {
+        let holes = [hole(100.0, 100.0, 64.0, 64.0, 0.0), hole(300.0, 50.0, 230.0, 80.0, 8.0)];
+        assert!(in_any_hole(&holes, 100.0, 100.0));
+        assert!(in_any_hole(&holes, 163.9, 163.9));
+        assert!(in_any_hole(&holes, 400.0, 90.0));
+        // Just outside each edge.
+        assert!(!in_any_hole(&holes, 99.9, 120.0));
+        assert!(!in_any_hole(&holes, 164.0, 120.0));
+        assert!(!in_any_hole(&holes, 120.0, 164.0));
+        // Between the two, and with no holes at all.
+        assert!(!in_any_hole(&holes, 200.0, 100.0));
+        assert!(!in_any_hole(&[], 120.0, 120.0));
+        // The bubble's corner, cut by its 8pt radius: the very corner is
+        // the page's, a point inside the arc is the bubble's.
+        assert!(!in_any_hole(&holes, 300.5, 50.5));
+        assert!(in_any_hole(&holes, 303.0, 53.0));
+        assert!(in_any_hole(&holes, 300.5, 58.0));
+    }
+
+    #[test]
+    fn the_mask_changes_only_when_its_holes_or_size_do() {
+        let a = hole(500.0, 420.0, 64.0, 64.0, 0.0);
+        let mask = page_mask(vec![a], 600.0, 500.0);
+        assert_eq!(
+            mask,
+            Some(PageMask { width: 600.0, height: 500.0, holes: vec![a] })
+        );
+        // No holes is no mask.
+        assert_eq!(page_mask(Vec::new(), 600.0, 500.0), None);
+        assert!(!mask_changed(None, None));
+        // Every frame of a resting conductor: nothing to do.
+        assert!(!mask_changed(mask.as_ref(), mask.as_ref()));
+        let noise = page_mask(vec![hole(500.001, 420.0, 64.0, 64.0, 0.0)], 600.0, 500.0);
+        assert!(!mask_changed(mask.as_ref(), noise.as_ref()));
+        // He appears, goes, moves, or his bubble opens.
+        assert!(mask_changed(None, mask.as_ref()));
+        assert!(mask_changed(mask.as_ref(), None));
+        let moved = page_mask(vec![hole(499.0, 420.0, 64.0, 64.0, 0.0)], 600.0, 500.0);
+        assert!(mask_changed(mask.as_ref(), moved.as_ref()));
+        let bubble = hole(270.0, 400.0, 230.0, 60.0, 8.0);
+        let opened = page_mask(vec![bubble, a], 600.0, 500.0);
+        assert!(mask_changed(mask.as_ref(), opened.as_ref()));
+        // The page resized under a still conductor: the outer rect moved.
+        let taller = page_mask(vec![a], 600.0, 520.0);
+        assert!(mask_changed(mask.as_ref(), taller.as_ref()));
     }
 
     #[test]

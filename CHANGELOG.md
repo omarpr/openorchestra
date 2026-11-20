@@ -20,7 +20,8 @@ Unreleased is empty.
   pages, a click away. Each
   project remembers the pages its browser tabs open, and the address bar
   suggests them as you type (↑/↓ and Enter to pick one). **Settings ›
-  General › Clear browsing history** forgets them.
+  General › Clear browsing history** forgets them. The conductor stays
+  visible over a browser page and can be dragged there.
 - Links to local addresses (localhost, your network, Tailscale) and ports
   opened from the current project or task open in a browser tab. Other links
   still use your default browser. Change it in **Settings › General**.

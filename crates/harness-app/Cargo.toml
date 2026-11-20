@@ -279,7 +279,19 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSResponder",
     "NSView",
     "NSWindow",
+    # The browser page's container layer (its punch-through mask).
+    "objc2-quartz-core",
 ] }
+# The browser page's punch-through mask (webview.rs): a CAShapeLayer on the
+# page's container. Both are already in the lockfile via gpui_macos.
+objc2-quartz-core = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2-core-graphics",
+    "CALayer",
+    "CAShapeLayer",
+    "CATransaction",
+] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGPath"] }
 # Posts web view callbacks back onto the main queue (see NativeEvents).
 dispatch2 = { version = "0.3", default-features = false, features = ["std", "objc2"] }
 # gpui's Window hands out its NSView through HasWindowHandle.
