@@ -630,6 +630,8 @@ impl HarnessWorkspace {
     /// dialog or screen. The native page sits above everything gpui draws,
     /// so while this is true it hides (see `BrowserPane::set_overlay_open`).
     /// Mirrors what `render` draws as an overlay; a new overlay belongs here.
+    /// zed's own context menus (the Files/Git panels') count while they
+    /// are alive (`zed_menus`): they can flip left over the center column.
     ///
     /// A failure toast counts while it shows (ruling R11): the user has to
     /// see it. Not counted, by design: info toasts, the conductor, tooltips
@@ -659,6 +661,7 @@ impl HarnessWorkspace {
             || self.hook_trust.is_some()
             || self.failure_toast_showing()
             || self.zed_modal_open(cx)
+            || self.zed_menus.get() > 0
     }
 
     /// The one place that decides which browser tab has a native view: the
