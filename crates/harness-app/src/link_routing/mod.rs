@@ -32,8 +32,12 @@ pub fn should_route(url: &str, enabled: bool) -> bool {
 
 /// True for http(s) URLs whose host is a loopback, `.localhost`, `.local`,
 /// private-range (10/8, 172.16/12, 192.168/16), Tailscale CGNAT (100.64/10)
-/// or `.ts.net` address. The host comes from `url::Url`, never string
-/// prefixes, so `localhost.evil.com` and `localhost@evil.com` stay external.
+/// or `.ts.net` address, the unspecified address dev servers print when
+/// bound to all interfaces (`0.0.0.0`, `[::]`), or Tailscale's IPv6 range
+/// (`fd7a:115c:a1e0::/48`). A name may end in the root dot (`localhost.`),
+/// and an IPv4-mapped IPv6 address (`[::ffff:127.0.0.1]`) counts as its
+/// IPv4 address. The host comes from `url::Url`, never string prefixes, so
+/// `localhost.evil.com` and `localhost@evil.com` stay external.
 pub fn is_local_url(url: &str) -> bool {
     let Ok(parsed) = Url::parse(url) else {
         return false;
@@ -43,22 +47,33 @@ pub fn is_local_url(url: &str) -> bool {
     }
     match parsed.host() {
         Some(Host::Domain(d)) => {
+            let d = d.strip_suffix('.').unwrap_or(d);
             [".localhost", ".local", ".ts.net"]
                 .iter()
                 .any(|s| d.ends_with(s))
                 || d == "localhost"
         }
-        Some(Host::Ipv4(ip)) => {
-            let [a, b, ..] = ip.octets();
-            a == 127
-                || a == 10
-                || (a == 172 && (16..=31).contains(&b))
-                || (a == 192 && b == 168)
-                || (a == 100 && (64..=127).contains(&b))
+        Some(Host::Ipv4(ip)) => is_local_v4(ip),
+        Some(Host::Ipv6(ip)) => {
+            let [a, b, c, ..] = ip.segments();
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || (a, b, c) == (0xfd7a, 0x115c, 0xa1e0)
+                || ip.to_ipv4_mapped().is_some_and(is_local_v4)
         }
-        Some(Host::Ipv6(ip)) => ip.is_loopback(),
         None => false,
     }
+}
+
+/// [`is_local_url`]'s IPv4 ranges.
+fn is_local_v4(ip: std::net::Ipv4Addr) -> bool {
+    let [a, b, ..] = ip.octets();
+    ip.is_unspecified()
+        || a == 127
+        || a == 10
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && b == 168)
+        || (a == 100 && (64..=127).contains(&b))
 }
 
 /// Hands `url` to the system (the real platform's `open_url`): the default
@@ -178,6 +193,19 @@ mod tests {
             "http://100.64.0.1",
             "http://100.127.255.255",
             "http://evil.com@localhost/",
+            // Dev servers bound to every interface print these.
+            "http://0.0.0.0:3000",
+            "http://[::]:5173",
+            // Tailscale's IPv6 range.
+            "http://[fd7a:115c:a1e0::1]:3000",
+            "http://[fd7a:115c:a1e0:ab12:4843:cd96:6258:b240]/",
+            // A name ending in the root dot.
+            "http://localhost.:3000",
+            "http://app.localhost./",
+            "https://mac.tail1234.ts.net./",
+            // IPv4-mapped IPv6 of a local address.
+            "http://[::ffff:127.0.0.1]:3000",
+            "http://[::ffff:192.168.1.5]/",
         ] {
             assert!(is_local_url(u), "{u}");
         }
@@ -193,6 +221,12 @@ mod tests {
             "http://172.32.0.1",
             "http://100.128.0.1",
             "https://ts.net.evil.com",
+            "http://localhost.evil.com.",
+            "http://evil.com.",
+            "http://0.0.0.1",
+            "http://[::ffff:8.8.8.8]/",
+            "http://[fd7a:115c:a1e1::1]/",
+            "http://[fd00::1]/",
             "file:///etc/hosts",
             "mailto:a@localhost",
             "zed://x",

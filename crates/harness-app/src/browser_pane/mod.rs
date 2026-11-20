@@ -63,9 +63,10 @@ pub(crate) enum Address {
 /// - `host:port` (digits after the first colon) is checked *before* URL
 ///   parsing, which would read `localhost:3000` as scheme `localhost`; it
 ///   gets `http://`.
-/// - With no scheme: `http://` for local and dev hosts (localhost,
-///   `.localhost`, `.local`, loopback and private addresses), `https://`
-///   otherwise, Tailscale `.ts.net` names included.
+/// - With no scheme: `http://` for local and dev hosts
+///   ([`link_routing::is_local_url`]: localhost, `.localhost`, `.local`,
+///   loopback, unspecified (`0.0.0.0`, `[::]`) and private addresses),
+///   `https://` otherwise, Tailscale `.ts.net` names included.
 /// - `http`/`https` load; `file:`, `javascript:` and the page-internal
 ///   `about:`, `data:`, `blob:` are refused; any other scheme goes out.
 pub(crate) fn normalize_address(input: &str) -> Option<Address> {
@@ -139,7 +140,10 @@ fn wants_http(input: &str) -> bool {
     link_routing::is_local_url(&candidate)
         && !url::Url::parse(&candidate)
             .ok()
-            .and_then(|u| u.host_str().map(|h| h.ends_with(".ts.net")))
+            .and_then(|u| {
+                u.host_str()
+                    .map(|h| h.strip_suffix('.').unwrap_or(h).ends_with(".ts.net"))
+            })
             .unwrap_or(false)
 }
 
@@ -1018,6 +1022,15 @@ mod tests {
         // Tailscale names serve https.
         assert_eq!(normalize_address("mac.tail1.ts.net"), web("https://mac.tail1.ts.net/"));
         assert_eq!(normalize_address("HTTP://LOCALHOST:3000"), web("http://localhost:3000/"));
+        // What dev servers bound to every interface print.
+        assert_eq!(normalize_address("0.0.0.0:3000"), web("http://0.0.0.0:3000/"));
+        assert_eq!(normalize_address("0.0.0.0"), web("http://0.0.0.0/"));
+        assert_eq!(normalize_address("[::]:5173"), web("http://[::]:5173/"));
+        assert_eq!(normalize_address("[::]"), web("http://[::]/"));
+        assert_eq!(normalize_address("[fd7a:115c:a1e0::1]"), web("http://[fd7a:115c:a1e0::1]/"));
+        assert_eq!(normalize_address("[::ffff:127.0.0.1]"), web("http://[::ffff:7f00:1]/"));
+        assert_eq!(normalize_address("localhost."), web("http://localhost./"));
+        assert_eq!(normalize_address("mac.tail1.ts.net."), web("https://mac.tail1.ts.net./"));
     }
 
     #[test]
