@@ -987,6 +987,7 @@ mod tests {
         // Guards still apply on the way out.
         link_routing::open_external_now("file:///Applications/Calculator.app");
         link_routing::open_external_now("javascript:alert(1)");
+        link_routing::open_external_now("data:text/html,hi");
         assert_eq!(
             *opened.borrow(),
             ["http://localhost:3000/a%20b", "http://127.0.0.1:8080/"]

@@ -88,7 +88,8 @@ pub fn open_external(url: &str) {
 /// [`open_external`] without the rate limit, for something the user did
 /// themselves: the browser tab's "Open in default browser" button, or an
 /// app address (`mailto:`, `vscode:` …) typed into its address bar. Same
-/// argument safety: only absolute URLs, never `file:` or `javascript:`.
+/// argument safety: only absolute URLs, never `file:`, `javascript:` or a
+/// page-internal `about:`, `data:` or `blob:` URL.
 pub fn open_external_now(url: &str) {
     match launch_target(url) {
         Some(url) => open_now(&url),
@@ -97,11 +98,15 @@ pub fn open_external_now(url: &str) {
 }
 
 /// What the system is given for `url`: its normalized absolute form, unless
-/// it is a local file (opening `file:///…/x.app` launches it) or a script.
+/// it is a local file (opening `file:///…/x.app` launches it), a script, or
+/// a page's own plumbing (`about:`, `data:`, `blob:`): the browser tab loads
+/// those inside the page (`webview.rs`), and a top-level `data:` page's
+/// content is the page's to choose, so "Open in default browser" on one
+/// must not hand it to the system.
 fn launch_target(url: &str) -> Option<String> {
     let url = normalized_absolute_url(url)?;
     match scheme_of(&url) {
-        "file" | "javascript" => None,
+        "file" | "javascript" | "about" | "data" | "blob" => None,
         _ => Some(url),
     }
 }
@@ -208,7 +213,7 @@ mod tests {
     }
 
     #[test]
-    fn user_opens_refuse_local_files_and_scripts() {
+    fn user_opens_refuse_local_files_scripts_and_page_internal_urls() {
         assert_eq!(launch_target("mailto:a@b.c").as_deref(), Some("mailto:a@b.c"));
         assert_eq!(
             launch_target("HTTP://Example.COM/a b").as_deref(),
@@ -219,6 +224,10 @@ mod tests {
             "file:///etc/hosts",
             "FILE:///Applications/Calc.app",
             "javascript:alert(1)",
+            "about:blank",
+            "ABOUT:srcdoc",
+            "data:text/html,<h1>hi</h1>",
+            "blob:http://localhost:3000/1f2e",
             "",
             "-n",
             "/relative",
