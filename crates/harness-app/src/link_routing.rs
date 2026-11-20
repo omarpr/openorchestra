@@ -1,7 +1,9 @@
 //! Decides which links open in the in-app browser tab: local and dev
 //! addresses only, gated by the "Open links in a browser tab" setting.
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use url::{Host, Url};
 
@@ -60,16 +62,27 @@ pub fn is_local_url(url: &str) -> bool {
 /// Hands `url` to the system: the default browser for web pages, the owning
 /// app for any other scheme. Bypasses routing, so the browser tab can send a
 /// page out without it bouncing back in. Only absolute URLs are passed on.
+/// At most one open per [`OPEN_INTERVAL`]; extras are dropped, so a page in a
+/// script loop can't spawn processes without bound.
 /// Interim: shells out to `/usr/bin/open` until Task 8's platform wrapper.
 #[allow(dead_code)] // first caller is the browser tab's web view (Task 6)
 pub fn open_external(url: &str) {
-    if !is_absolute_url(url) {
-        log::warn!("open_external: not an absolute URL: {url:?}");
+    let Some(url) = normalized_absolute_url(url) else {
+        log::warn!("open_external: not an absolute URL");
         return;
+    };
+    {
+        let mut last = LAST_OPEN.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        if !open_allowed(*last, now) {
+            log::info!("open_external: dropped a {}: link (rate limit)", scheme_of(&url));
+            return;
+        }
+        *last = Some(now);
     }
     // An absolute URL starts with a scheme letter, so `open` never reads it
     // as an option.
-    match std::process::Command::new("/usr/bin/open").arg(url).spawn() {
+    match std::process::Command::new("/usr/bin/open").arg(&url).spawn() {
         // Reap off-thread so the caller (the main thread) never blocks and no
         // zombie is left behind.
         Ok(mut child) => {
@@ -81,9 +94,23 @@ pub fn open_external(url: &str) {
     }
 }
 
-/// True when `url` has a scheme (`url::Url` refuses relative references).
-fn is_absolute_url(url: &str) -> bool {
-    Url::parse(url).is_ok()
+/// Minimum time between two [`open_external`] launches.
+const OPEN_INTERVAL: Duration = Duration::from_secs(1);
+
+static LAST_OPEN: Mutex<Option<Instant>> = Mutex::new(None);
+
+fn open_allowed(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|t| now.saturating_duration_since(t) >= OPEN_INTERVAL)
+}
+
+/// `url` as `url::Url` serializes it, when it is absolute (`url::Url` refuses
+/// relative references). That normalized form is what gets passed to `open`.
+fn normalized_absolute_url(url: &str) -> Option<String> {
+    Url::parse(url).ok().map(|u| u.as_str().to_owned())
+}
+
+fn scheme_of(url: &str) -> &str {
+    url.split(':').next().unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -142,11 +169,31 @@ mod tests {
     #[test]
     fn open_external_takes_only_absolute_urls() {
         for u in ["http://localhost:3000", "https://github.com", "mailto:a@b.c", "zed://x"] {
-            assert!(is_absolute_url(u), "{u}");
+            assert!(normalized_absolute_url(u).is_some(), "{u}");
         }
         for u in ["", "/relative/path", "//host/x", "-n", "not a url"] {
-            assert!(!is_absolute_url(u), "{u}");
+            assert!(normalized_absolute_url(u).is_none(), "{u}");
         }
+    }
+
+    #[test]
+    fn open_external_passes_the_normalized_url() {
+        assert_eq!(
+            normalized_absolute_url("HTTP://Example.COM:80/a b").as_deref(),
+            Some("http://example.com/a%20b")
+        );
+        assert_eq!(normalized_absolute_url("mailto:a@b.c").as_deref(), Some("mailto:a@b.c"));
+    }
+
+    #[test]
+    fn open_external_allows_one_open_per_second() {
+        let t0 = Instant::now();
+        assert!(open_allowed(None, t0));
+        assert!(!open_allowed(Some(t0), t0));
+        assert!(!open_allowed(Some(t0), t0 + Duration::from_millis(999)));
+        assert!(open_allowed(Some(t0), t0 + OPEN_INTERVAL));
+        // A clock that reads earlier than the last open never panics.
+        assert!(!open_allowed(Some(t0 + OPEN_INTERVAL), t0));
     }
 
     // The only test that touches the process-global flag.

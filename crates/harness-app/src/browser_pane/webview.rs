@@ -21,6 +21,20 @@
 //! `objc2-web-kit` 0.3.2 adds one crate to the lockfile (its `objc2-app-kit`,
 //! `block2` and `objc2-foundation` are already there through gpui_macos), and
 //! gives the full delegate and KVO surface directly.
+//!
+//! **Navigation policy is fail-safe** (Task 5 review ruling): a page must not
+//! be able to launch apps or local files on its own.
+//! - `file:`, `javascript:` and unclassifiable URLs are never handed out.
+//! - App schemes (`mailto:`, `vscode:`, `zed:` …) go to the system only for a
+//!   link click (`LinkActivated`) whose source frame is the main frame and
+//!   whose target is the main frame or a new window. Script navigations,
+//!   iframes and redirects the user didn't click are ignored with a log line
+//!   (scheme only). Accepted cost: "open in app" redirect flows that weren't
+//!   started by a click don't launch; "Open in default browser" is the way out.
+//! - Downloads go out only from the main frame (and, for `<a download>`, only
+//!   on a click), and only http(s); `blob:`/`data:` downloads report
+//!   "not supported" through `on_failed`.
+//! - `link_routing::open_external` also rate-limits to one open per second.
 
 use crate::link_routing;
 
@@ -43,8 +57,9 @@ pub(crate) struct NativeEvents {
     pub on_failed: Box<dyn Fn(String)>,
     /// `target=_blank` or `window.open` asked for an http(s) page.
     pub on_new_window: Box<dyn Fn(String)>,
-    /// Navigation policy: http(s) loads in the page (see
-    /// [`decide_navigation`]); downloads and every other scheme go here.
+    /// Navigation policy hand-off: http(s) loads in the page; what
+    /// [`decide_navigation`] and [`decide_download`] send out (clicked
+    /// app-scheme links, clicked main-frame http(s) downloads) goes here.
     /// Called inline (it doesn't touch gpui).
     pub open_external: fn(&str),
 }
@@ -71,46 +86,91 @@ pub(crate) enum NavDecision {
     External,
     /// Cancel it quietly.
     Ignore,
+    /// Cancel it and tell the user through `on_failed` (a download we can't
+    /// hand over), so the click isn't dead.
+    Unsupported,
 }
 
-/// http(s) loads in the page. `about:`, `data:` and `blob:` load too: they
-/// are the page's own plumbing (the blank tab, iframes, generated content)
-/// and must never reach the default browser. Any other scheme (`mailto:`,
-/// `zed:`, `file:` …) leaves the app when the main frame navigates to it,
-/// and is dropped when a subframe does, so an iframe can't launch apps.
-pub(crate) fn decide_navigation(url: &str, main_frame: bool) -> NavDecision {
+/// Where a navigation comes from, as WebKit reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NavOrigin {
+    /// The user clicked a link (`WKNavigationTypeLinkActivated`), as opposed
+    /// to a script (`location = …`), a form, a reload or our own `load`.
+    pub user_initiated: bool,
+    /// The frame that started it (`sourceFrame`) is the main frame.
+    pub from_main_frame: bool,
+}
+
+impl NavOrigin {
+    /// Only a click in the top-level page may leave the app.
+    fn may_leave_app(self) -> bool {
+        self.user_initiated && self.from_main_frame
+    }
+}
+
+/// Fail-safe navigation policy (Task 5 review ruling):
+/// - http(s) loads in the page, as do `about:`, `data:` and `blob:`: the
+///   page's own plumbing (the blank tab, iframes, generated content), which
+///   must never reach the default browser.
+/// - `file:`, `javascript:` and anything we can't classify are ignored,
+///   never handed out: `open file:///…/x.app` would launch local files.
+/// - Any other scheme (`mailto:`, `tel:`, `vscode:`, `zed:`, `slack:` …)
+///   leaves the app only when the user clicked a link in the main frame and
+///   the target is the main frame (or a new window). Scripts, iframes and
+///   navigations the user didn't click are ignored with a log line, so a page
+///   can't launch apps on its own. Cost: an "open in app" redirect chain that
+///   wasn't started by a click won't launch; the tab's "Open in default
+///   browser" button is the way out.
+pub(crate) fn decide_navigation(url: &str, to_main_frame: bool, origin: NavOrigin) -> NavDecision {
     match scheme(url).as_deref() {
-        // WebKit hands us its own URLs; one `url` can't parse is left to
-        // WebKit, which reports it through on_failed if it can't load it.
-        None => NavDecision::Load,
         Some("http" | "https" | "about" | "data" | "blob") => NavDecision::Load,
-        Some(_) if main_frame => NavDecision::External,
-        Some(_) => NavDecision::Ignore,
+        None | Some("file" | "javascript") => {
+            log::info!("browser: ignoring a navigation to {}", scheme_label(url));
+            NavDecision::Ignore
+        }
+        Some(_) if to_main_frame && origin.may_leave_app() => NavDecision::External,
+        Some(s) => {
+            log::info!("browser: not opening {s}: no link click in the main frame");
+            NavDecision::Ignore
+        }
     }
 }
 
 /// A new-window request: http(s) becomes a new tab (`Load`), other schemes
-/// leave the app, and `window.open()` with no URL or `about:blank` (scripts
-/// that write into the new window) is ignored: there is no window to give it.
-pub(crate) fn decide_new_window(url: &str) -> NavDecision {
-    match decide_navigation(url, true) {
+/// follow [`decide_navigation`], and `window.open()` with no URL or
+/// `about:blank` (scripts that write into the new window) is ignored: there
+/// is no window to give it.
+pub(crate) fn decide_new_window(url: &str, origin: NavOrigin) -> NavDecision {
+    match decide_navigation(url, true, origin) {
         NavDecision::Load if is_web(url) => NavDecision::Load,
         NavDecision::Load => NavDecision::Ignore,
         other => other,
     }
 }
 
-/// Where a download goes: the default browser, which fetches it again, so
-/// only http(s) can be handed over (`External`). Page-generated downloads
-/// (`blob:`, `data:`, e.g. "export JSON") exist only inside the page and are
-/// dropped (`Ignore`); they must never reach `open`.
-pub(crate) fn decide_download(url: &str) -> NavDecision {
-    if is_web(url) {
-        NavDecision::External
-    } else {
+/// Where a download goes. Only the main frame's downloads are handed out, and
+/// only those the user clicked for (a response has no navigation type, so the
+/// response path passes `user_initiated: true`; its navigation already passed
+/// [`decide_navigation`]). The default browser fetches the file again, so
+/// only http(s) can go (`External`). Page-generated downloads (`blob:`,
+/// `data:`, e.g. "export JSON") exist only inside the page: `Unsupported`.
+pub(crate) fn decide_download(url: &str, origin: NavOrigin) -> NavDecision {
+    if !origin.from_main_frame {
+        log::info!("browser: ignoring a download from a subframe ({})", scheme_label(url));
         NavDecision::Ignore
+    } else if !is_web(url) {
+        log::info!("browser: downloads from {} aren't supported", scheme_label(url));
+        NavDecision::Unsupported
+    } else if !origin.user_initiated {
+        log::info!("browser: ignoring a download the user didn't click for");
+        NavDecision::Ignore
+    } else {
+        NavDecision::External
     }
 }
+
+/// The text `on_failed` gets for an [`NavDecision::Unsupported`] download.
+pub(crate) const DOWNLOAD_UNSUPPORTED: &str = "Downloads from this page aren't supported yet";
 
 /// A response WebKit can't show, or one the server marks as an attachment,
 /// is a download.
@@ -147,6 +207,12 @@ fn is_web(url: &str) -> bool {
     matches!(scheme(url).as_deref(), Some("http" | "https"))
 }
 
+/// The scheme alone, for log lines: never the URL, whose query may carry
+/// tokens.
+fn scheme_label(url: &str) -> String {
+    scheme(url).map_or_else(|| "an unparsable URL".to_string(), |s| format!("{s}:"))
+}
+
 #[cfg(target_os = "macos")]
 #[allow(unused_imports)] // first used by the browser tab (Task 6)
 pub(crate) use mac::NativeWebView;
@@ -171,14 +237,14 @@ mod mac {
     };
     use objc2_web_kit::{
         WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
-        WKNavigationResponse, WKNavigationResponsePolicy, WKUIDelegate, WKWebView,
+        WKNavigationResponse, WKNavigationResponsePolicy, WKNavigationType, WKUIDelegate, WKWebView,
         WKWebViewConfiguration, WKWebsiteDataStore, WKWindowFeatures,
     };
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     use super::{
-        NavDecision, NativeEvents, decide_download, decide_navigation, decide_new_window,
-        flip_y, is_benign_failure, is_download,
+        DOWNLOAD_UNSUPPORTED, NavDecision, NavOrigin, NativeEvents, decide_download,
+        decide_navigation, decide_new_window, flip_y, is_benign_failure, is_download,
     };
 
     /// The WKWebView properties we observe. All are documented KVO-compliant.
@@ -189,6 +255,15 @@ mod mac {
 
     fn kvo_context() -> *mut c_void {
         &KVO_TAG as *const u8 as *mut c_void
+    }
+
+    /// Whether the user clicked a link, and whether the main frame started it.
+    /// A nil `sourceFrame` (an app-initiated load) is not the main frame.
+    fn origin_of(action: &WKNavigationAction) -> NavOrigin {
+        NavOrigin {
+            user_initiated: unsafe { action.navigationType() } == WKNavigationType::LinkActivated,
+            from_main_frame: unsafe { action.sourceFrame() }.is_some_and(|f| unsafe { f.isMainFrame() }),
+        }
     }
 
     fn url_string(url: Option<Retained<NSURL>>) -> String {
@@ -269,26 +344,22 @@ mod mac {
             ) {
                 let url = url_string(unsafe { action.request() }.URL());
                 // No target frame = a new-window request. Judge it like a
-                // main-frame load: web URLs go on to createWebView (below),
-                // anything else leaves the app here.
-                let main_frame =
+                // main-frame load: web URLs go on to createWebView (below).
+                let to_main_frame =
                     unsafe { action.targetFrame() }.is_none_or(|f| unsafe { f.isMainFrame() });
+                let origin = origin_of(action);
                 // `<a download>` and the like. macOS 11.3+; we require 12.
                 let decision = if unsafe { action.shouldPerformDownload() } {
-                    decide_download(&url)
+                    decide_download(&url, origin)
                 } else {
-                    decide_navigation(&url, main_frame)
+                    decide_navigation(&url, to_main_frame, origin)
                 };
                 let policy = match decision {
                     NavDecision::Load => WKNavigationActionPolicy::Allow,
-                    NavDecision::External | NavDecision::Ignore => {
-                        WKNavigationActionPolicy::Cancel
-                    }
+                    _ => WKNavigationActionPolicy::Cancel,
                 };
                 handler.call((policy,));
-                if decision == NavDecision::External {
-                    self.open_external(&url);
-                }
+                self.act_on(decision, &url);
             }
 
             #[unsafe(method(webView:decidePolicyForNavigationResponse:decisionHandler:))]
@@ -308,9 +379,13 @@ mod mac {
                     // browser does downloads, so no download delegate here.
                     handler.call((WKNavigationResponsePolicy::Cancel,));
                     let url = url_string(response.URL());
-                    if decide_download(&url) == NavDecision::External {
-                        self.open_external(&url);
-                    }
+                    // A response carries no navigation type; the navigation
+                    // that fetched it already passed decide_navigation.
+                    let origin = NavOrigin {
+                        user_initiated: true,
+                        from_main_frame: unsafe { navigation.isForMainFrame() },
+                    };
+                    self.act_on(decide_download(&url, origin), &url);
                 } else {
                     handler.call((WKNavigationResponsePolicy::Allow,));
                 }
@@ -352,10 +427,9 @@ mod mac {
                 _features: &WKWindowFeatures,
             ) -> Option<Retained<WKWebView>> {
                 let url = url_string(unsafe { action.request() }.URL());
-                match decide_new_window(&url) {
+                match decide_new_window(&url, origin_of(action)) {
                     NavDecision::Load => self.post(move |e| (e.on_new_window)(url)),
-                    NavDecision::External => self.open_external(&url),
-                    NavDecision::Ignore => {}
+                    other => self.act_on(other, &url),
                 }
                 // We never hand WebKit a second view; the app opens a tab.
                 None
@@ -383,9 +457,19 @@ mod mac {
             });
         }
 
-        fn open_external(&self, url: &str) {
-            if let Some(events) = self.ivars().events.upgrade() {
-                (events.open_external)(url);
+        /// Carries out a cancel-side decision (the policy handler has
+        /// already been called).
+        fn act_on(&self, decision: NavDecision, url: &str) {
+            match decision {
+                NavDecision::External => {
+                    if let Some(events) = self.ivars().events.upgrade() {
+                        (events.open_external)(url);
+                    }
+                }
+                NavDecision::Unsupported => {
+                    self.post(|e| (e.on_failed)(DOWNLOAD_UNSUPPORTED.to_string()));
+                }
+                NavDecision::Load | NavDecision::Ignore => {}
             }
         }
 
@@ -630,6 +714,13 @@ mod tests {
         assert_eq!(flip_y(40.0, 540.5, 600.5), 20.0);
     }
 
+    /// A link the user clicked in the top-level page.
+    const CLICK: NavOrigin = NavOrigin { user_initiated: true, from_main_frame: true };
+    /// `location = …` / a redirect / our own load, from the top-level page.
+    const SCRIPT: NavOrigin = NavOrigin { user_initiated: false, from_main_frame: true };
+    /// A link the user clicked inside an iframe (even one targeting `_top`).
+    const SUBFRAME_CLICK: NavOrigin = NavOrigin { user_initiated: true, from_main_frame: false };
+
     #[test]
     fn web_schemes_load_in_the_page() {
         for u in [
@@ -640,38 +731,64 @@ mod tests {
             "data:text/html,hi",
             "blob:http://localhost:3000/1f2e",
         ] {
-            assert_eq!(decide_navigation(u, true), NavDecision::Load, "{u}");
-            assert_eq!(decide_navigation(u, false), NavDecision::Load, "{u}");
+            for origin in [CLICK, SCRIPT, SUBFRAME_CLICK] {
+                assert_eq!(decide_navigation(u, true, origin), NavDecision::Load, "{u}");
+                assert_eq!(decide_navigation(u, false, origin), NavDecision::Load, "{u}");
+            }
         }
     }
 
     #[test]
-    fn other_schemes_leave_from_the_main_frame_only() {
-        for u in ["mailto:a@b.c", "zed://file/x", "file:///etc/hosts", "vscode://x", "tel:123"] {
-            assert_eq!(decide_navigation(u, true), NavDecision::External, "{u}");
-            assert_eq!(decide_navigation(u, false), NavDecision::Ignore, "{u}");
+    fn app_schemes_leave_only_on_a_main_frame_click() {
+        for u in ["mailto:a@b.c", "zed://file/x", "vscode://x", "slack://open", "tel:123"] {
+            assert_eq!(decide_navigation(u, true, CLICK), NavDecision::External, "{u}");
+            // Script `location = …` or a redirect the user didn't click.
+            assert_eq!(decide_navigation(u, true, SCRIPT), NavDecision::Ignore, "{u}");
+            // A click inside an iframe, including one that navigates `top`.
+            assert_eq!(decide_navigation(u, true, SUBFRAME_CLICK), NavDecision::Ignore, "{u}");
+            // A main-frame click that targets a subframe.
+            assert_eq!(decide_navigation(u, false, CLICK), NavDecision::Ignore, "{u}");
+        }
+    }
+
+    #[test]
+    fn file_javascript_and_unknown_never_leave() {
+        for u in ["file:///etc/hosts", "file:///Applications/Calc.app", "javascript:alert(1)", ""] {
+            for origin in [CLICK, SCRIPT, SUBFRAME_CLICK] {
+                assert_eq!(decide_navigation(u, true, origin), NavDecision::Ignore, "{u}");
+            }
         }
     }
 
     #[test]
     fn new_windows_open_web_pages_only() {
-        assert_eq!(decide_new_window("http://localhost:3000/a"), NavDecision::Load);
-        assert_eq!(decide_new_window("https://example.com"), NavDecision::Load);
-        assert_eq!(decide_new_window("mailto:a@b.c"), NavDecision::External);
-        assert_eq!(decide_new_window(""), NavDecision::Ignore);
-        assert_eq!(decide_new_window("about:blank"), NavDecision::Ignore);
-        assert_eq!(decide_new_window("data:text/html,hi"), NavDecision::Ignore);
+        assert_eq!(decide_new_window("http://localhost:3000/a", CLICK), NavDecision::Load);
+        // window.open() from script still gets a tab (WebKit blocks popups
+        // without a user gesture itself).
+        assert_eq!(decide_new_window("https://example.com", SCRIPT), NavDecision::Load);
+        assert_eq!(decide_new_window("mailto:a@b.c", CLICK), NavDecision::External);
+        assert_eq!(decide_new_window("mailto:a@b.c", SCRIPT), NavDecision::Ignore);
+        assert_eq!(decide_new_window("mailto:a@b.c", SUBFRAME_CLICK), NavDecision::Ignore);
+        assert_eq!(decide_new_window("file:///etc/hosts", CLICK), NavDecision::Ignore);
+        assert_eq!(decide_new_window("", CLICK), NavDecision::Ignore);
+        assert_eq!(decide_new_window("about:blank", CLICK), NavDecision::Ignore);
+        assert_eq!(decide_new_window("data:text/html,hi", CLICK), NavDecision::Ignore);
     }
 
     #[test]
-    fn only_web_downloads_leave_the_app() {
-        assert_eq!(decide_download("https://example.com/a.zip"), NavDecision::External);
-        assert_eq!(decide_download("http://localhost:3000/dl"), NavDecision::External);
-        // Page-generated: nothing outside the page can fetch these.
-        assert_eq!(decide_download("blob:http://localhost:3000/1f2e"), NavDecision::Ignore);
-        assert_eq!(decide_download("data:application/json,{}"), NavDecision::Ignore);
-        assert_eq!(decide_download("about:blank"), NavDecision::Ignore);
-        assert_eq!(decide_download(""), NavDecision::Ignore);
+    fn only_clicked_main_frame_web_downloads_leave_the_app() {
+        assert_eq!(decide_download("https://example.com/a.zip", CLICK), NavDecision::External);
+        assert_eq!(decide_download("http://localhost:3000/dl", CLICK), NavDecision::External);
+        // Subframe downloads (hidden iframes, attachment responses) stay in.
+        assert_eq!(decide_download("https://example.com/a.zip", SUBFRAME_CLICK), NavDecision::Ignore);
+        assert_eq!(decide_download("blob:http://localhost:3000/1f2e", SUBFRAME_CLICK), NavDecision::Ignore);
+        // A script-started download in the main frame.
+        assert_eq!(decide_download("https://example.com/a.zip", SCRIPT), NavDecision::Ignore);
+        // Page-generated: nothing outside the page can fetch these; tell the user.
+        assert_eq!(decide_download("blob:http://localhost:3000/1f2e", CLICK), NavDecision::Unsupported);
+        assert_eq!(decide_download("data:application/json,{}", CLICK), NavDecision::Unsupported);
+        assert_eq!(decide_download("file:///etc/hosts", CLICK), NavDecision::Unsupported);
+        assert_eq!(decide_download("", CLICK), NavDecision::Unsupported);
     }
 
     #[test]
