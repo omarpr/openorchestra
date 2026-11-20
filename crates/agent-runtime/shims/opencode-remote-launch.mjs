@@ -7,11 +7,47 @@ import { fileURLToPath } from "node:url";
 const cliConfig = "OPENCODE_CLI_CONFIG_CONTENT";
 const shims = path.dirname(fileURLToPath(import.meta.url));
 
+// OpenCode reads cli.json as JSONC (comments, trailing commas); JSON.parse
+// would reject those and silently skip our plugins. Strip both outside
+// strings, then parse.
+function parseJsonc(text) {
+  // Each pass copies strings untouched and rewrites only what is outside them.
+  const outside = (source, rewrite) => {
+    let out = "";
+    for (let i = 0; i < source.length; i++) {
+      if (source[i] === '"') {
+        let end = i + 1;
+        while (end < source.length && source[end] !== '"') end += source[end] === "\\" ? 2 : 1;
+        out += source.slice(i, end + 1);
+        i = end;
+        continue;
+      }
+      const [kept, skip] = rewrite(source, i);
+      out += kept;
+      i += skip;
+    }
+    return out;
+  };
+  const uncommented = outside(text, (source, i) => {
+    if (source.startsWith("//", i)) {
+      const end = source.indexOf("\n", i);
+      return ["\n", (end < 0 ? source.length : end) - i];
+    }
+    if (source.startsWith("/*", i)) {
+      const end = source.indexOf("*/", i + 2);
+      return [" ", (end < 0 ? source.length : end + 1) - i];
+    }
+    return [source[i], 0];
+  });
+  return JSON.parse(outside(uncommented, (source, i) =>
+    source[i] === "," && /^\s*[}\]]/.test(source.slice(i + 1)) ? ["", 0] : [source[i], 0]));
+}
+
 function configuredPlugins() {
   const root = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
   const directory = path.join(root, "opencode");
   try {
-    return (JSON.parse(fs.readFileSync(path.join(directory, "cli.json"), "utf8")).plugins ?? []).map((entry) => {
+    return (parseJsonc(fs.readFileSync(path.join(directory, "cli.json"), "utf8")).plugins ?? []).map((entry) => {
       const spec = typeof entry === "string" ? entry : entry.package;
       if (!spec?.startsWith("./") && !spec?.startsWith("../")) return entry;
       const absolute = path.resolve(directory, spec);

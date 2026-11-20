@@ -304,8 +304,20 @@ fn opencode_launches_through_the_plugin_launcher() {
 /// Run `opencode-remote-launch.mjs` from an installed state dir with `env`,
 /// exec'ing node to print the env OpenCode would see. `None` without node.
 fn opencode_launch_env(env: &[(&str, &str)]) -> Option<serde_json::Value> {
+    opencode_launch_env_with(env, None)
+}
+
+/// [`opencode_launch_env`] with the user's `cli.json` set to `cli_json`.
+fn opencode_launch_env_with(
+    env: &[(&str, &str)],
+    cli_json: Option<&str>,
+) -> Option<serde_json::Value> {
     let state = tempfile::tempdir().unwrap();
     let config = tempfile::tempdir().unwrap();
+    if let Some(text) = cli_json {
+        std::fs::create_dir_all(config.path().join("opencode")).unwrap();
+        std::fs::write(config.path().join("opencode/cli.json"), text).unwrap();
+    }
     OpenCodeRuntime::new(state.path())
         .with_state_dir(state.path())
         .on_spawn(state.path())
@@ -388,6 +400,32 @@ fn opencode_launcher_injects_the_status_plugin_in_every_app_tab() {
     // Outside the app nothing changes.
     let outside = opencode_launch_env(&[]).unwrap();
     assert!(outside["config"].is_null());
+}
+
+#[test]
+fn opencode_launcher_keeps_plugins_from_a_jsonc_cli_config() {
+    // OpenCode parses cli.json as JSONC. Comments and trailing commas must not
+    // make the launcher drop the user's plugins, or skip ours.
+    let cli_json = r#"{
+  // the user's own plugins
+  "plugins": [
+    "/opt/odd,]//name", /* a comma-bracket and slashes inside a string */
+    { "package": "/opt/with-options", "options": { "a": [1, 2,], }, },
+  ],
+}"#;
+    let Some(env) = opencode_launch_env_with(&[("HARNESS_AGENT_TAB_ID", "7")], Some(cli_json))
+    else {
+        eprintln!("node not installed — skipping launcher check");
+        return;
+    };
+    assert_eq!(
+        env["config"],
+        serde_json::json!({ "plugins": [
+            "/opt/odd,]//name",
+            { "package": "/opt/with-options", "options": { "a": [1, 2] } },
+            "$STATE/shims/opencode-status",
+        ] })
+    );
 }
 
 /// Drive `opencode-status.mjs` with a fake TUI context. `script` runs with
@@ -525,6 +563,13 @@ fake.permission.child = []; fake.emit("permission.replied");
 fake.route = { type: "plugin", id: "opencode.diffs", name: "diffs" };
 fake.emit("session.status");
 fake.status.mine = "idle"; fake.emit("session.execution.succeeded");
+// Off screen and finished: no longer ours. Another tab now runs it and
+// asks permission; this tab stays quiet.
+fake.status.mine = "running"; fake.emit("session.execution.started");
+fake.permission.mine = [{ id: "b" }]; fake.emit("permission.asked");
+fake.status.mine = "idle"; fake.permission.mine = []; fake.emit("session.execution.succeeded");
+// Back on screen, this tab runs it again.
+fake.route = { type: "session", sessionID: "mine" };
 fake.status.mine = "running"; fake.emit("session.execution.started");
 stop();  // quitting mid-turn
 const outside = core.startStatusReporter(context, { write: () => writes.push("outside"), env: {} });

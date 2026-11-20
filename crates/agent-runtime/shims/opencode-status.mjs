@@ -24,9 +24,11 @@
 // and never counts again.
 //
 // Own sessions only: the service streams every session on the Mac. A tab
-// reports the sessions its own TUI has shown since launch, plus their
-// subagent sessions. The set does not shrink when the TUI goes home or to a
-// plugin view, because a turn keeps running there.
+// reports the session its TUI shows, plus any it showed earlier that is
+// still running (a turn keeps going while the TUI is home, in a plugin view
+// or on another in-TUI tab), plus their subagent sessions. A session leaves
+// the set once it is neither on screen nor running, so a session another
+// tab later runs is not reported here.
 //
 // Never fail loudly. Status is bookkeeping and must not break the TUI.
 
@@ -193,8 +195,16 @@ export function startStatusReporter(context, { write, env = process.env, interva
 	function update() {
 		try {
 			const route = context.ui.router.current();
-			if (route?.type === "session" && typeof route.sessionID === "string") shown.add(route.sessionID);
+			const current = route?.type === "session" && typeof route.sessionID === "string" ? route.sessionID : undefined;
+			if (current) shown.add(current);
 			const state = sessionState(context.data, ownSessions(context.data, shown), tracker);
+			// After the read, so a turn's end is still reported before its
+			// session leaves the set.
+			for (const id of [...shown]) {
+				if (id === current) continue;
+				const tree = ownSessions(context.data, [id]);
+				if (![...tree].some((member) => isRunning(context.data, member))) shown.delete(id);
+			}
 			if (state === last) return;
 			last = state;
 			write(state);

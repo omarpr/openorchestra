@@ -57,13 +57,20 @@
 //! there. For 1.x only, [`AgentRuntime::subscribe`] keeps the old fallback:
 //! the per-session server's SSE `/event` on port 4096, mapped by
 //! [`classify`]. That stream carries no tab id. The installed CLI's
-//! `--version` decides, off the UI thread; OpenCode 2 gets no stream.
+//! `--version` decides, off the UI thread and once per binary; OpenCode 2
+//! gets no stream.
+//!
+//! The launcher injects the plugin into every app tab without checking the
+//! version, so 1.x tabs get it too. How 1.x treats that entry (ignored, or
+//! a plugin-load error) is unverified: no 1.x was available to try.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::SystemTime;
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
@@ -226,7 +233,7 @@ impl AgentRuntime for OpenCodeRuntime {
         std::thread::Builder::new()
             .name("opencode-events".into())
             .spawn(move || {
-                if probe.is_some_and(|program| !legacy_server(&cli_version(&program))) {
+                if probe.is_some_and(|program| !is_legacy_cli(&program)) {
                     return; // OpenCode 2: dropping `tx` ends the stream.
                 }
                 pump(&host, port, &root, &tx, &stopped)
@@ -234,6 +241,24 @@ impl AgentRuntime for OpenCodeRuntime {
             .ok()?;
         Some(rx)
     }
+}
+
+/// Whether `program` is OpenCode 1.x, probed once per binary: the answer is
+/// cached for the process, keyed by path and modification time so an
+/// upgrade in place is probed again.
+fn is_legacy_cli(program: &Path) -> bool {
+    type Probes = Mutex<HashMap<(PathBuf, Option<SystemTime>), bool>>;
+    static PROBES: OnceLock<Probes> = OnceLock::new();
+    let modified = fs::metadata(program).and_then(|m| m.modified()).ok();
+    let key = (program.to_path_buf(), modified);
+    let probes = PROBES.get_or_init(Default::default);
+    if let Some(&legacy) = probes.lock().unwrap().get(&key) {
+        return legacy;
+    }
+    // Probed outside the lock: concurrent launches may both run it once.
+    let legacy = legacy_server(&cli_version(program));
+    probes.lock().unwrap().insert(key, legacy);
+    legacy
 }
 
 /// `opencode --version`, or empty when it cannot be run.
@@ -339,7 +364,27 @@ pub fn classify(event_name: &Option<String>, data: &str) -> Option<(AgentState, 
 
 #[cfg(test)]
 mod tests {
-    use super::legacy_server;
+    use super::{is_legacy_cli, legacy_server};
+
+    #[cfg(unix)]
+    #[test]
+    fn the_version_probe_runs_once_per_binary() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("opencode");
+        let runs = dir.path().join("runs");
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\necho x >> '{}'\necho 1.0.150\n", runs.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(is_legacy_cli(&program));
+        assert!(is_legacy_cli(&program));
+        assert_eq!(std::fs::read_to_string(&runs).unwrap().lines().count(), 1);
+    }
 
     #[test]
     fn only_opencode_1_gets_the_sse_fallback() {
