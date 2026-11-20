@@ -1318,12 +1318,6 @@ mod mac {
             }
         }
 
-        #[allow(dead_code)] // the pane tracks the URL from KVO; kept for callers
-        pub(crate) fn url(&self) -> Option<String> {
-            let url = url_string(unsafe { self.view.URL() });
-            (!url.is_empty()).then_some(url)
-        }
-
         pub(crate) fn can_go_back(&self) -> bool {
             unsafe { self.view.canGoBack() }
         }

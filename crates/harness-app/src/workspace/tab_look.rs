@@ -110,8 +110,8 @@ pub(crate) fn browser_label(page_title: Option<&str>, host: Option<&str>) -> Str
 }
 
 /// The name a tab shows. Stored titles ("claude", "❯_ shell") are kept as
-/// is for saved panes and paired phones, but never shown for kinds that
-/// have a name of their own; File and Review Overview show their stored
+/// is in saved panes, but never shown for kinds that have a name of their
+/// own (paired phones get these names too, `remote.rs`); File and Review Overview show their stored
 /// title (the file's name, the review's heading). A Browser tab's title is
 /// kept equal to its page's label (`BrowserPane::label`) by the workspace.
 pub(crate) fn tab_label(tab: &Tab) -> String {
@@ -161,19 +161,12 @@ pub(crate) enum MenuEntry {
 /// Browser, then the enabled agents in Settings order under their heading,
 /// then pi chat. `pi_chat` is the caller's gate: a worktree is selected and
 /// pi is enabled.
-pub(crate) fn tab_menu_entries(
-    prefs: &Prefs,
-    diff_in_tab: bool,
-    browser: bool,
-    pi_chat: bool,
-) -> Vec<MenuEntry> {
+pub(crate) fn tab_menu_entries(prefs: &Prefs, diff_in_tab: bool, pi_chat: bool) -> Vec<MenuEntry> {
     let mut out = vec![MenuEntry::Kind(TabKind::Shell), MenuEntry::Kind(TabKind::Editor)];
     if diff_in_tab {
         out.push(MenuEntry::Kind(TabKind::Diff));
     }
-    if browser {
-        out.push(MenuEntry::Kind(TabKind::Browser));
-    }
+    out.push(MenuEntry::Kind(TabKind::Browser));
     let agents = enabled_agents(prefs);
     if !agents.is_empty() {
         out.push(MenuEntry::Separator("Agents"));
@@ -244,7 +237,7 @@ mod tests {
         for k in ["pi", "opencode", "kimi"] {
             prefs.agents.entry(k.into()).or_default().disabled = true;
         }
-        let e = tab_menu_entries(&prefs, true, true, true);
+        let e = tab_menu_entries(&prefs, true, true);
         assert_eq!(
             e,
             vec![
@@ -259,7 +252,8 @@ mod tests {
                 MenuEntry::PiChat,
             ]
         );
-        let e = tab_menu_entries(&prefs, false, true, false);
+        let e = tab_menu_entries(&prefs, false, false);
         assert!(!e.contains(&MenuEntry::Kind(TabKind::Diff)) && !e.contains(&MenuEntry::PiChat));
+        assert!(e.contains(&MenuEntry::Kind(TabKind::Browser)));
     }
 }

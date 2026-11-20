@@ -420,7 +420,8 @@ impl HarnessWorkspace {
 
         // Local and dev links the platform wrapper routed (link_routing):
         // open each in a browser tab of the active worktree, or in the
-        // default browser when no worktree is selected. Taken once, so only
+        // default browser when no worktree is selected or its pane isn't
+        // live. Taken once, so only
         // the first workspace drains.
         if let Some(mut routed) = crate::link_routing::take_routed_receiver() {
             cx.spawn_in(window, async move |view, cx| {

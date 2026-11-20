@@ -341,11 +341,10 @@ impl HarnessWorkspace {
             )
     }
 
-    /// What a tab shows: its icon and its name, in the ＋ menu's words —
-    /// "Claude Code", "Terminal", "Editor" — taken from what the tab *is*
-    /// rather than from its stored title. The stored title is whatever the
-    /// tab was created with ("claude", "❯_ shell") and is kept as is, since
-    /// saved panes and paired phones read it.
+    /// What a tab shows: its kind's icon and its name ([`tab_label`]:
+    /// "Shell", "Claude", "Editor"), taken from what the tab *is* rather
+    /// than from its stored title. The stored title is whatever the tab was
+    /// created with ("claude", "❯_ shell") and is kept as is in saved panes.
     fn tab_face(&self, hx: &HarnessTheme, tab: &Tab, active: bool) -> (AnyElement, String) {
         match (&tab.content, &tab.agent) {
             (TabContent::Terminal(_), Some(kind)) => (agent_icon(kind, 15.0), tab_label(tab)),
@@ -356,7 +355,8 @@ impl HarnessWorkspace {
             }
             (TabContent::Editor(_), _) => (kind_icon(hx, LookKind::Editor, 14.0), tab_label(tab)),
             (TabContent::Diff, _) => (kind_icon(hx, LookKind::Diff, 14.0), tab_label(tab)),
-            (TabContent::Chat(_), _) => (tab_glyph(hx, "π"), tab_label(tab)),
+            // The ＋ menu's pi chat row wears the same mark.
+            (TabContent::Chat(_), _) => (agent_icon(&AgentKind::Pi, 15.0), tab_label(tab)),
             (TabContent::Browser(_), _) => {
                 (kind_icon(hx, LookKind::Browser, 14.0), tab_label(tab))
             }
@@ -809,7 +809,6 @@ impl HarnessWorkspace {
         let entries = tab_menu_entries(
             &self.prefs,
             self.prefs.diff_location == DiffLocation::Tab,
-            true,
             // The chat tab is pi's RPC surface specifically — approvals as UI,
             // session capture for training (§4.4) — so it appears only for
             // worktrees and only while pi is enabled.
@@ -962,13 +961,3 @@ fn tab_icon_slot(icon: AnyElement) -> gpui::Div {
         .child(icon)
 }
 
-/// A text glyph used as an item's icon. Never italic, even on a preview tab.
-fn tab_glyph(hx: &HarnessTheme, glyph: &str) -> AnyElement {
-    div()
-        .text_xs()
-        .not_italic()
-        .font_family(hx.font_mono)
-        .text_color(hx.tx2)
-        .child(glyph.to_string())
-        .into_any_element()
-}
