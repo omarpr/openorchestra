@@ -21,6 +21,11 @@ impl Render for HarnessWorkspace {
         let scale = self.prefs.font_size.unwrap_or(13.0) / 13.0;
         window.set_rem_size(px(16.0 * scale));
 
+        // Catch-all for every other way the visible tab changes (opening,
+        // restoring, closing, file-tab sync, tools maximized): the native
+        // page view must match what this frame draws.
+        self.sync_browser_views(window, cx);
+
         let hx = theme(cx).clone();
         self.ensure_conductor(&hx, cx);
         self.ensure_indicator_ticker(cx);

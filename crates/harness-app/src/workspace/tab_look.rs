@@ -12,8 +12,6 @@ pub(crate) enum LookKind {
     Shell,
     Editor,
     Diff,
-    // Constructed once the Browser tab lands.
-    #[allow(dead_code)]
     Browser,
 }
 
@@ -101,7 +99,6 @@ pub(crate) fn terminal_label(agent: Option<&AgentKind>) -> String {
 
 /// A browser tab's name: "Browser · <page title>", else the host, else
 /// plain "Browser".
-#[allow(dead_code)] // used by the Browser tab once it lands
 pub(crate) fn browser_label(page_title: Option<&str>, host: Option<&str>) -> String {
     fn nonempty(s: Option<&str>) -> Option<&str> {
         s.map(str::trim).filter(|s| !s.is_empty())
@@ -115,14 +112,17 @@ pub(crate) fn browser_label(page_title: Option<&str>, host: Option<&str>) -> Str
 /// The name a tab shows. Stored titles ("claude", "❯_ shell") are kept as
 /// is for saved panes and paired phones, but never shown for kinds that
 /// have a name of their own; File and Review Overview show their stored
-/// title (the file's name, the review's heading).
+/// title (the file's name, the review's heading). A Browser tab's title is
+/// kept equal to its page's label (`BrowserPane::label`) by the workspace.
 pub(crate) fn tab_label(tab: &Tab) -> String {
     match (&tab.content, &tab.agent) {
         (TabContent::Terminal(_), agent) => terminal_label(agent.as_ref()),
         (TabContent::Editor(_), _) => "Editor".to_string(),
         (TabContent::Diff, _) => "Diff".to_string(),
         (TabContent::Chat(_), _) => "pi chat".to_string(),
-        (TabContent::File { .. }, _) | (TabContent::ReviewOverview(_), _) => tab.title.clone(),
+        (TabContent::File { .. }, _)
+        | (TabContent::ReviewOverview(_), _)
+        | (TabContent::Browser(_), _) => tab.title.clone(),
     }
 }
 

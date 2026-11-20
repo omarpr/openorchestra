@@ -14,6 +14,8 @@ Unreleased is empty.
 
 ### Added
 
+- **Browser** tabs (＋ → Browser): a WebKit page next to your shells and
+  agents, with back, forward, reload and Open in default browser.
 - Drag agents by their grip in **Settings › Agents** to reorder them. The
   order is used in the **+** menu and the new-task picker. New tasks start
   with your last-used agent, or the top of the list if you haven't used one;

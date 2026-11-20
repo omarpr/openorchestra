@@ -106,6 +106,7 @@ impl HarnessWorkspace {
                     }
                 }
                 TabContent::Chat(c) => c.clone().into_any_element(),
+                TabContent::Browser(page) => page.clone().into_any_element(),
                 TabContent::Diff => self.render_diff_surface(hx, None, true, cx),
                 TabContent::ReviewOverview(overview) => {
                     self.render_review_overview(overview, hx, cx)
@@ -356,6 +357,9 @@ impl HarnessWorkspace {
             (TabContent::Editor(_), _) => (kind_icon(hx, LookKind::Editor, 14.0), tab_label(tab)),
             (TabContent::Diff, _) => (kind_icon(hx, LookKind::Diff, 14.0), tab_label(tab)),
             (TabContent::Chat(_), _) => (tab_glyph(hx, "π"), tab_label(tab)),
+            (TabContent::Browser(_), _) => {
+                (kind_icon(hx, LookKind::Browser, 14.0), tab_label(tab))
+            }
             // A file tab is a view into zed, so it wears the Editor's mark,
             // with the file's own name.
             (TabContent::File { .. }, _) => {
@@ -481,7 +485,7 @@ impl HarnessWorkspace {
                 if dragged.key != drop_key {
                     return;
                 }
-                ws.move_tab(&drop_key, dragged.id, onto);
+                ws.move_tab(&drop_key, dragged.id, onto, cx);
                 cx.notify();
             }))
             .when(remote_on, |d| {
@@ -802,11 +806,10 @@ impl HarnessWorkspace {
             .agents
             .get(AgentKind::Pi.as_str())
             .is_some_and(|p| p.disabled);
-        // Browser is wired in Task 6; until then it never shows.
         let entries = tab_menu_entries(
             &self.prefs,
             self.prefs.diff_location == DiffLocation::Tab,
-            false,
+            true,
             // The chat tab is pi's RPC surface specifically — approvals as UI,
             // session capture for training (§4.4) — so it appears only for
             // worktrees and only while pi is enabled.

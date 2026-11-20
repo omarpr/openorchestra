@@ -35,6 +35,9 @@ impl HarnessWorkspace {
         }
         self.recompute_diff(cx);
         self.focus_active_pane(window, cx);
+        // Worktree switch: the previous worktree's page goes, this one's
+        // active browser tab (if any) comes up.
+        self.sync_browser_views(window, cx);
         // The hosted zed workspaces set the window title themselves (folder —
         // file), and only when *their* active item changes. Switching to
         // another worktree changed neither, so the title kept naming the

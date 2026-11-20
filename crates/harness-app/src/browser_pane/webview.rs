@@ -33,7 +33,7 @@
 //!   started by a click don't launch; "Open in default browser" is the way out.
 //! - Downloads go out only from the main frame (and, for `<a download>`, only
 //!   on a click), and only http(s); `blob:`/`data:` downloads report
-//!   "not supported" through `on_failed`.
+//!   "not supported" through `on_notice` (not a load failure: the page stays).
 //! - `link_routing::open_external` also rate-limits to one open per second.
 
 use crate::link_routing;
@@ -44,17 +44,20 @@ use crate::link_routing;
 /// fires synchronously inside our own `load`/`reload` calls, so an inline
 /// callback that updated the gpui entity calling `load` would re-borrow it and
 /// panic. Callbacks queued when the view is dropped are discarded.
-#[allow(dead_code)] // first built by the browser tab (Task 6)
 pub(crate) struct NativeEvents {
     /// The page title; empty when the page has none.
     pub on_title: Box<dyn Fn(String)>,
     /// The page URL, including `pushState` changes.
     pub on_url: Box<dyn Fn(String)>,
     pub on_loading: Box<dyn Fn(bool)>,
-    /// A load failed (WebKit's own message, e.g. "Could not connect to the
-    /// server."). Cancellations, including our own policy cancels, are not
-    /// failures.
-    pub on_failed: Box<dyn Fn(String)>,
+    /// A page load failed: the URL that failed, when WebKit names it (the
+    /// view's own URL has already fallen back to the last committed page by
+    /// then), and WebKit's message, e.g. "Could not connect to the server.".
+    /// Cancellations, including our own policy cancels, are not failures.
+    pub on_failed: Box<dyn Fn(Option<String>, String)>,
+    /// Something the user should hear about that is not a load failure; the
+    /// page stays as it is. Today only [`DOWNLOAD_UNSUPPORTED`].
+    pub on_notice: Box<dyn Fn(String)>,
     /// `target=_blank` or `window.open` asked for an http(s) page.
     pub on_new_window: Box<dyn Fn(String)>,
     /// Navigation policy hand-off: http(s) loads in the page; what
@@ -70,7 +73,8 @@ impl Default for NativeEvents {
             on_title: Box::new(|_| {}),
             on_url: Box::new(|_| {}),
             on_loading: Box::new(|_| {}),
-            on_failed: Box::new(|_| {}),
+            on_failed: Box::new(|_, _| {}),
+            on_notice: Box::new(|_| {}),
             on_new_window: Box::new(|_| {}),
             open_external: link_routing::open_external,
         }
@@ -86,7 +90,7 @@ pub(crate) enum NavDecision {
     External,
     /// Cancel it quietly.
     Ignore,
-    /// Cancel it and tell the user through `on_failed` (a download we can't
+    /// Cancel it and tell the user through `on_notice` (a download we can't
     /// hand over), so the click isn't dead.
     Unsupported,
 }
@@ -169,7 +173,7 @@ pub(crate) fn decide_download(url: &str, origin: NavOrigin) -> NavDecision {
     }
 }
 
-/// The text `on_failed` gets for an [`NavDecision::Unsupported`] download.
+/// The text `on_notice` gets for an [`NavDecision::Unsupported`] download.
 pub(crate) const DOWNLOAD_UNSUPPORTED: &str = "Downloads from this page aren't supported yet";
 
 /// A response WebKit can't show, or one the server marks as an attachment,
@@ -214,8 +218,7 @@ fn scheme_label(url: &str) -> String {
 }
 
 #[cfg(target_os = "macos")]
-#[allow(unused_imports)] // first used by the browser tab (Task 6)
-pub(crate) use mac::NativeWebView;
+pub(crate) use mac::{NativeWebView, window_is_minimized_or_hidden};
 
 #[cfg(target_os = "macos")]
 mod mac {
@@ -229,7 +232,7 @@ mod mac {
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
     use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
-    use objc2_app_kit::{NSAutoresizingMaskOptions, NSView};
+    use objc2_app_kit::{NSApplication, NSAutoresizingMaskOptions, NSView};
     use objc2_foundation::{
         NSDictionary, NSError, NSHTTPURLResponse, NSKeyValueChangeKey,
         NSKeyValueObservingOptions, NSObjectNSKeyValueObserverRegistration, NSObjectProtocol,
@@ -413,7 +416,7 @@ mod mac {
 
             #[unsafe(method(webViewWebContentProcessDidTerminate:))]
             fn content_process_terminated(&self, _web_view: &WKWebView) {
-                self.post(|e| (e.on_failed)("The page stopped unexpectedly.".to_string()));
+                self.post(|e| (e.on_failed)(None, "The page stopped unexpectedly.".to_string()));
             }
         }
 
@@ -467,7 +470,7 @@ mod mac {
                     }
                 }
                 NavDecision::Unsupported => {
-                    self.post(|e| (e.on_failed)(DOWNLOAD_UNSUPPORTED.to_string()));
+                    self.post(|e| (e.on_notice)(DOWNLOAD_UNSUPPORTED.to_string()));
                 }
                 NavDecision::Load | NavDecision::Ignore => {}
             }
@@ -478,13 +481,21 @@ mod mac {
                 return;
             }
             let message = error.localizedDescription().to_string();
-            self.post(move |e| (e.on_failed)(message));
+            // NSURLErrorFailingURLStringErrorKey's value. WebKit sets it on
+            // its load errors; without it the pane falls back to what it
+            // asked for last.
+            let url = error
+                .userInfo()
+                .objectForKey(ns_string!("NSErrorFailingURLStringKey"))
+                .and_then(|v| v.downcast::<NSString>().ok())
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty());
+            self.post(move |e| (e.on_failed)(url, message));
         }
     }
 
     /// A `WKWebView` living on top of the gpui window's view. Main thread
     /// only (it is neither `Send` nor `Sync`).
-    #[allow(dead_code)] // first built by the browser tab (Task 6)
     pub(crate) struct NativeWebView {
         view: Retained<WKWebView>,
         /// Owned here: the web view only holds its delegates weakly.
@@ -492,7 +503,6 @@ mod mac {
         _events: Rc<NativeEvents>,
     }
 
-    #[allow(dead_code)] // first used by the browser tab (Task 6)
     impl NativeWebView {
         /// Adds a hidden web view to `window`'s view and starts loading `url`
         /// (nothing, for an empty `url`). Call `set_frame` and
@@ -590,8 +600,10 @@ mod mac {
                     self.view.loadRequest(&NSURLRequest::requestWithURL(&ns_url));
                 },
                 None => {
-                    let message = format!("Not a valid address: {url}");
-                    self.delegate.post(move |e| (e.on_failed)(message));
+                    let url = url.to_string();
+                    self.delegate.post(move |e| {
+                        (e.on_failed)(Some(url), "not a valid address".to_string())
+                    });
                 }
             }
         }
@@ -619,6 +631,7 @@ mod mac {
             }
         }
 
+        #[allow(dead_code)] // the pane tracks the URL from KVO; kept for callers
         pub(crate) fn url(&self) -> Option<String> {
             let url = url_string(unsafe { self.view.URL() });
             (!url.is_empty()).then_some(url)
@@ -631,6 +644,29 @@ mod mac {
         pub(crate) fn can_go_forward(&self) -> bool {
             unsafe { self.view.canGoForward() }
         }
+    }
+
+    /// The window is minimized or the app is hidden (⌘H), as opposed to
+    /// merely covered by another window or on another Space: gpui reports
+    /// all of those as one `WindowVisibility::Hidden`.
+    pub(crate) fn window_is_minimized_or_hidden(window: &Window) -> bool {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return false;
+        };
+        let Ok(handle) = HasWindowHandle::window_handle(window) else {
+            return false;
+        };
+        let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+            return false;
+        };
+        // SAFETY: as in `NativeWebView::new`, gpui's live view, retained for
+        // the call.
+        let Some(view) = (unsafe { Retained::retain(appkit.ns_view.as_ptr().cast::<NSView>()) })
+        else {
+            return false;
+        };
+        view.window().is_some_and(|w| w.isMiniaturized())
+            || NSApplication::sharedApplication(mtm).isHidden()
     }
 
     impl Drop for NativeWebView {
@@ -701,7 +737,8 @@ mod tests {
         (events.on_title)("Home".into());
         (events.on_url)("http://localhost:3000/".into());
         (events.on_loading)(true);
-        (events.on_failed)("Could not connect to the server.".into());
+        (events.on_failed)(None, "Could not connect to the server.".into());
+        (events.on_notice)(DOWNLOAD_UNSUPPORTED.into());
         (events.on_new_window)("http://localhost:3000/new".into());
         assert_eq!(*seen.borrow(), ["title Home"]);
 

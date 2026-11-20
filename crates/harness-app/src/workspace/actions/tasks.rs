@@ -385,7 +385,7 @@ impl HarnessWorkspace {
             None => tab,
         };
         pane.active = front;
-        self.save_panes();
+        self.save_panes(cx);
         self.focus_active_pane(window, cx);
 
         if !self.has_tmux {

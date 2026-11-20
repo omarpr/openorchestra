@@ -24,6 +24,9 @@ license = "GPL-3.0-or-later"
 
 [dependencies]
 crossbeam-channel = "0.5"
+# The browser tab's web view callbacks → gpui bridge (an unbounded channel the
+# pane awaits). Already in the lockfile through gpui; was dev-only.
+futures = "0.3"
 # Live diff-watcher (diff_watch.rs). The [patch.crates-io] below redirects this
 # to zed's notify fork, the same one status-watch resolves.
 notify = "8"
@@ -209,9 +212,6 @@ tempfile = "3"
 # root Cargo.toml at the pinned rev). calloop and the rest follow the
 # revs zed itself pins at v1.28.1. windows-capture (via zed-scap) only
 # compiles on Windows, so it is untested here — replicated for lock fidelity.
-[dev-dependencies]
-futures = "0.3"
-
 [patch.crates-io]
 # Mirrors zed's own [patch.crates-io] at the pinned rev (v1.28.1). Entries for
 # crates outside our cone (cpal, crash-context) are left out, and zed's
@@ -266,6 +266,7 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
     "objc2-core-foundation",
+    "NSApplication",
     "NSResponder",
     "NSView",
     "NSWindow",

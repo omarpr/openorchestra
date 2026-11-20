@@ -158,7 +158,7 @@ impl HarnessWorkspace {
                             report,
                         });
                         overview.set_report(saved, cx);
-                        ws.save_panes();
+                        ws.save_panes(cx);
                     }
                     Err(error) => overview.status = OverviewStatus::Failed(error),
                 }

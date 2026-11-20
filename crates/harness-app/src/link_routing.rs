@@ -31,7 +31,6 @@ pub fn should_route(url: &str, enabled: bool) -> bool {
 /// private-range (10/8, 172.16/12, 192.168/16), Tailscale CGNAT (100.64/10)
 /// or `.ts.net` address. The host comes from `url::Url`, never string
 /// prefixes, so `localhost.evil.com` and `localhost@evil.com` stay external.
-#[allow(dead_code)] // first caller arrives with link routing (Task 4)
 pub fn is_local_url(url: &str) -> bool {
     let Ok(parsed) = Url::parse(url) else {
         return false;
@@ -65,10 +64,11 @@ pub fn is_local_url(url: &str) -> bool {
 /// At most one open per [`OPEN_INTERVAL`]; extras are dropped, so a page in a
 /// script loop can't spawn processes without bound.
 /// Interim: shells out to `/usr/bin/open` until Task 8's platform wrapper.
-#[allow(dead_code)] // first caller is the browser tab's web view (Task 6)
+/// For page-originated opens; a user's own click goes through
+/// [`open_external_now`].
 pub fn open_external(url: &str) {
-    let Some(url) = normalized_absolute_url(url) else {
-        log::warn!("open_external: not an absolute URL");
+    let Some(url) = launch_target(url) else {
+        log::warn!("open_external: not an absolute, openable URL");
         return;
     };
     {
@@ -80,9 +80,34 @@ pub fn open_external(url: &str) {
         }
         *last = Some(now);
     }
+    spawn_open(&url);
+}
+
+/// [`open_external`] without the rate limit, for something the user did
+/// themselves: the browser tab's "Open in default browser" button, or an
+/// app address (`mailto:`, `vscode:` …) typed into its address bar. Same
+/// argument safety: only absolute URLs, never `file:` or `javascript:`.
+pub fn open_external_now(url: &str) {
+    match launch_target(url) {
+        Some(url) => spawn_open(&url),
+        None => log::warn!("open_external_now: not an absolute, openable URL"),
+    }
+}
+
+/// What `open` is given for `url`: its normalized absolute form, unless it
+/// is a local file (`open file:///…/x.app` launches it) or a script.
+fn launch_target(url: &str) -> Option<String> {
+    let url = normalized_absolute_url(url)?;
+    match scheme_of(&url) {
+        "file" | "javascript" => None,
+        _ => Some(url),
+    }
+}
+
+fn spawn_open(url: &str) {
     // An absolute URL starts with a scheme letter, so `open` never reads it
     // as an option.
-    match std::process::Command::new("/usr/bin/open").arg(&url).spawn() {
+    match std::process::Command::new("/usr/bin/open").arg(url).spawn() {
         // Reap off-thread so the caller (the main thread) never blocks and no
         // zombie is left behind.
         Ok(mut child) => {
@@ -183,6 +208,26 @@ mod tests {
             Some("http://example.com/a%20b")
         );
         assert_eq!(normalized_absolute_url("mailto:a@b.c").as_deref(), Some("mailto:a@b.c"));
+    }
+
+    #[test]
+    fn user_opens_refuse_local_files_and_scripts() {
+        assert_eq!(launch_target("mailto:a@b.c").as_deref(), Some("mailto:a@b.c"));
+        assert_eq!(
+            launch_target("HTTP://Example.COM/a b").as_deref(),
+            Some("http://example.com/a%20b")
+        );
+        assert_eq!(launch_target("vscode://file/x").as_deref(), Some("vscode://file/x"));
+        for u in [
+            "file:///etc/hosts",
+            "FILE:///Applications/Calc.app",
+            "javascript:alert(1)",
+            "",
+            "-n",
+            "/relative",
+        ] {
+            assert!(launch_target(u).is_none(), "{u}");
+        }
     }
 
     #[test]

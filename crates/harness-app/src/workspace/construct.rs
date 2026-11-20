@@ -227,6 +227,7 @@ impl HarnessWorkspace {
             tab_menu: None,
             tab_context_menu: None,
             diff_base_menu: None,
+            browser_window_hidden: false,
             close_prompt: None,
             edit_prompt: None,
             ending: HashMap::new(),
@@ -332,6 +333,15 @@ impl HarnessWorkspace {
         if window.focused(cx).is_none() {
             window.focus(&this.focus_handle, cx);
         }
+
+        // Browser tabs drop their native view while the window is minimized
+        // or the app hidden (memory; the page reloads when shown). gpui
+        // draws no frames for a hidden window, so `render`'s reconcile can't
+        // see this; the visibility observer can.
+        cx.observe_window_visibility(window, |ws, visibility, window, cx| {
+            ws.window_visibility_changed(visibility, window, cx);
+        })
+        .detach();
 
         // Route the window's close button (red X) through the same
         // keep-or-close-terminals prompt as ⌘Q. `request_quit` returns whether

@@ -147,7 +147,7 @@ impl HarnessWorkspace {
     /// quit, `false` when we've instead opened the keep-or-close prompt and are
     /// waiting on the user.
     pub(crate) fn request_quit(&mut self, cx: &mut Context<Self>) -> bool {
-        self.save_panes();
+        self.save_panes(cx);
         let sessions = self.live_harness_sessions();
         // Nothing of ours is running — no reason to ask.
         if sessions.is_empty() {

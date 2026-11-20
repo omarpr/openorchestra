@@ -40,8 +40,9 @@ impl HarnessWorkspace {
             return;
         }
 
-        // Task 6 wires the Browser tab; until then there is nothing to open.
+        // A blank page, after the active tab, with the address bar focused.
         if kind == TabKind::Browser {
+            self.open_browser_tab(None, window, cx);
             return;
         }
 
@@ -133,7 +134,7 @@ impl HarnessWorkspace {
                 };
                 (TabContent::Editor(ws), "{ } editor".to_string())
             }
-            // Handled above; Task 6 builds the tab.
+            // Handled above (`open_browser_tab`).
             TabKind::Browser => return,
             TabKind::Chat => {
                 let path = r.path.clone();
@@ -167,7 +168,7 @@ impl HarnessWorkspace {
             self.remote.forget_session(&r.path, a.as_str());
         }
         self.focus_active_pane(window, cx);
-        self.save_panes();
+        self.save_panes(cx);
         if kind == TabKind::ReviewOverview {
             self.run_review_overview(cx);
         }
@@ -205,7 +206,7 @@ impl HarnessWorkspace {
                             .unwrap_or_else(|| "shell".to_string());
                         if tab.title != label {
                             tab.title = label;
-                            ws.save_panes();
+                            ws.save_panes(cx);
                         }
                         let launch = term_pane
                             .update(cx, |pane, cx| pane.launch(command, session, window, cx));
@@ -314,7 +315,7 @@ impl HarnessWorkspace {
     /// Sorts the existing tabs rather than rebuilding them, so the live
     /// entities — a pty and the process on the other end of it — travel with
     /// their tab instead of being dropped and respawned.
-    pub(crate) fn move_tab(&mut self, key: &str, dragged: u64, onto: u64) {
+    pub(crate) fn move_tab(&mut self, key: &str, dragged: u64, onto: u64, cx: &App) {
         let Some(pane) = self.panes.get_mut(key) else {
             return;
         };
@@ -325,7 +326,7 @@ impl HarnessWorkspace {
         }
         pane.tabs
             .sort_by_key(|t| order.iter().position(|i| *i == t.id).unwrap_or(usize::MAX));
-        self.save_panes();
+        self.save_panes(cx);
     }
 
     /// Close a tab, dropping whatever it held — a terminal's pty and its
@@ -452,6 +453,11 @@ impl HarnessWorkspace {
         let Some(ix) = pane.tabs.iter().position(|t| t.id == id) else {
             return;
         };
+        // A closing browser tab takes its page down now, not when the
+        // entity is finally released.
+        if let TabContent::Browser(page) = &pane.tabs[ix].content {
+            page.update(cx, |page, cx| page.set_shown(false, window, cx));
+        }
         // The pane keeps its agent on record even when its last agent tab is
         // closed on purpose: a task needs every agent, so a closed one shows
         // STOPPED with a Restart like one lost to a computer restart.
@@ -461,9 +467,195 @@ impl HarnessWorkspace {
             self.open_tab(TabKind::Shell, window, cx); // saves panes itself
             return;
         }
+        // The tab after it may be a browser tab: show its page.
+        self.sync_browser_views(window, cx);
         self.focus_active_pane(window, cx);
-        self.save_panes();
+        self.save_panes(cx);
         cx.notify();
+    }
+
+    /// Focus the active worktree's browser tab already showing `url`, or
+    /// open a new browser tab just after the active tab (always a new, blank
+    /// one for `None`). Returns the tab's id; 0 when no worktree is selected
+    /// (tab ids start at 1).
+    pub(crate) fn open_browser_tab(
+        &mut self,
+        url: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        let Some(r) = self.resolve() else { return 0 };
+        self.open_browser_tab_in(&r.key, url, window, cx)
+    }
+
+    /// [`Self::open_browser_tab`] in pane `key`: a page's new window opens
+    /// beside it, in the pane that owns that page.
+    fn open_browser_tab_in(
+        &mut self,
+        key: &str,
+        url: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        let url = url.filter(|u| !u.is_empty());
+        let existing = url.as_deref().and_then(|url| {
+            let records: Vec<_> = self
+                .panes
+                .get(key)?
+                .tabs
+                .iter()
+                .filter_map(|t| t.record(cx))
+                .collect();
+            find_browser_tab(&records, url)
+        });
+        let id = match existing {
+            Some(id) => {
+                if let Some(pane) = self.panes.get_mut(key) {
+                    pane.active = id;
+                }
+                id
+            }
+            None => {
+                let id = self.next_tab_id();
+                let page = self.new_browser_pane(key, url, None, window, cx);
+                let title = page.read(cx).label();
+                self.pane_clock = self.pane_clock.wrapping_add(1);
+                let pane = self
+                    .panes
+                    .entry(key.to_string())
+                    .or_insert_with(|| PaneSet {
+                        tabs: Vec::new(),
+                        active: 0,
+                        last_used: 0,
+                    });
+                pane.last_used = self.pane_clock;
+                pane.insert_after_active(Tab {
+                    id,
+                    title,
+                    content: TabContent::Browser(page),
+                    agent: None,
+                });
+                self.save_panes(cx);
+                id
+            }
+        };
+        self.sync_browser_views(window, cx);
+        self.focus_active_pane(window, cx);
+        cx.notify();
+        id
+    }
+
+    /// A browser pane for a tab in pane `key`, wired to the workspace: a
+    /// changed URL or title relabels the tab and saves, and a page's new
+    /// window opens as another browser tab in the same pane. The
+    /// subscription ends when the pane is released.
+    fn new_browser_pane(
+        &mut self,
+        key: &str,
+        url: Option<String>,
+        title: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<crate::browser_pane::BrowserPane> {
+        use crate::browser_pane::{BrowserEvent, BrowserPane};
+        let page = cx.new(|cx| BrowserPane::new(url, title, window, cx));
+        let key = key.to_string();
+        cx.subscribe_in(&page, window, move |ws, page, event: &BrowserEvent, window, cx| {
+            match event {
+                BrowserEvent::Changed => {
+                    let label = page.read(cx).label();
+                    if let Some(tab) = ws.panes.get_mut(&key).and_then(|p| {
+                        p.tabs
+                            .iter_mut()
+                            .find(|t| matches!(&t.content, TabContent::Browser(b) if b == page))
+                    }) {
+                        tab.title = label;
+                    }
+                    ws.save_panes(cx);
+                    cx.notify();
+                }
+                BrowserEvent::NewWindow(url) => {
+                    ws.open_browser_tab_in(&key, Some(url.clone()), window, cx);
+                }
+            }
+        })
+        .detach();
+        page
+    }
+
+    /// The browser pane whose page should be on screen: the selected
+    /// worktree's active tab, when it is a browser tab, the center is drawn
+    /// (not covered by the maximized tools panel) and the window isn't
+    /// minimized or hidden.
+    fn shown_browser(&self) -> Option<EntityId> {
+        if self.browser_window_hidden || (self.prefs.diff_open && self.tools_maximized) {
+            return None;
+        }
+        let r = self.resolve()?;
+        match &self.panes.get(&r.key)?.active_tab()?.content {
+            TabContent::Browser(page) => Some(page.entity_id()),
+            _ => None,
+        }
+    }
+
+    /// The one place that decides which browser tab has a native view: the
+    /// one [`Self::shown_browser`] names, and no other, in any pane. Every
+    /// other browser tab drops its view (it reloads when shown again).
+    /// Idempotent; called on tab and worktree switches, on close, and at the
+    /// top of every render as the catch-all.
+    pub(crate) fn sync_browser_views(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let shown = self.shown_browser();
+        let pages: Vec<Entity<crate::browser_pane::BrowserPane>> = self
+            .panes
+            .values()
+            .flat_map(|p| p.tabs.iter())
+            .filter_map(|t| match &t.content {
+                TabContent::Browser(page) => Some(page.clone()),
+                _ => None,
+            })
+            .collect();
+        // Hide before show, so two pages are never up at once.
+        let (show, hide): (Vec<_>, Vec<_>) = pages
+            .into_iter()
+            .partition(|page| Some(page.entity_id()) == shown);
+        for page in hide {
+            page.update(cx, |page, cx| page.set_shown(false, window, cx));
+        }
+        for page in show {
+            page.update(cx, |page, cx| page.set_shown(true, window, cx));
+        }
+    }
+
+    /// gpui reports a covered window, another Space, a minimized window and
+    /// a hidden app all as `Hidden`. Only the last two drop the page; AppKit
+    /// settles those states around the occlusion change, so look again a
+    /// moment later. Back to visible, the next render brings the page back.
+    pub(crate) fn window_visibility_changed(
+        &mut self,
+        visibility: gpui::WindowVisibility,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if visibility.is_visible() {
+            if self.browser_window_hidden {
+                self.browser_window_hidden = false;
+                cx.notify();
+            }
+            return;
+        }
+        cx.spawn_in(window, async move |ws, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
+            let _ = ws.update_in(cx, |ws, window, cx| {
+                if !window.is_visible() && crate::browser_pane::window_is_minimized_or_hidden(window)
+                {
+                    ws.browser_window_hidden = true;
+                    ws.sync_browser_views(window, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// Drop the least-recently-used pane sets beyond [`MAX_LIVE_PANES`],
@@ -521,6 +713,7 @@ impl HarnessWorkspace {
                     }
                 }
                 TabContent::Chat(c) => c.read(cx).focus_handle(cx),
+                TabContent::Browser(page) => page.read(cx).focus_target(cx),
                 TabContent::Diff => self.diff_surface_focus.clone(),
                 TabContent::ReviewOverview(_) => self.focus_handle.clone(),
                 TabContent::Editor(ws) => {
@@ -581,24 +774,14 @@ impl HarnessWorkspace {
     /// write them. Worktrees not in `self.panes` right now (evicted, or not yet
     /// restored this session) keep their existing records, so lazy
     /// restore-on-reselect still finds them — eviction stays non-destructive.
-    pub(crate) fn save_panes(&mut self) {
+    pub(crate) fn save_panes(&mut self, cx: &App) {
         use crate::panes_state::{TabRecord, WorktreePanes};
         // Collect first to avoid borrowing self.panes and self.panes_state at once.
         let updates: Vec<(String, WorktreePanes)> = self
             .panes
             .iter()
             .map(|(key, pane)| {
-                let tabs: Vec<TabRecord> = pane
-                    .tabs
-                    .iter()
-                    .filter_map(|t| {
-                        Some(TabRecord {
-                            id: t.id,
-                            kind: t.kind_tag()?,
-                            title: t.title.clone(),
-                        })
-                    })
-                    .collect();
+                let tabs: Vec<TabRecord> = pane.tabs.iter().filter_map(|t| t.record(cx)).collect();
                 let active = tabs
                     .iter()
                     .find(|t| t.id == pane.active)
@@ -717,8 +900,23 @@ impl HarnessWorkspace {
                         },
                     );
                 }
-                // Task 6 wires Browser restore once `TabContent::Browser` exists.
-                K::Browser { .. } => {}
+                // In place, with its saved id, like Review Overview. No
+                // native view yet: `sync_browser_views` makes one if this
+                // ends up the visible tab.
+                K::Browser { url, title } => {
+                    let url = (!url.is_empty()).then_some(url);
+                    let page = self.new_browser_pane(key, url, title, window, cx);
+                    let title = page.read(cx).label();
+                    self.attach_tab(
+                        key,
+                        Tab {
+                            id,
+                            title,
+                            content: TabContent::Browser(page),
+                            agent: None,
+                        },
+                    );
+                }
                 K::Shell => self.restore_terminal_tab(key, id, None, &title, &live, window, cx),
                 K::Agent(a) => {
                     self.restore_terminal_tab(key, id, Some(a), &title, &live, window, cx)
@@ -749,7 +947,7 @@ impl HarnessWorkspace {
         let restored = self.panes.contains_key(key);
         if restored {
             self.replay_adopted_status(key, &adopted_agents, window, cx);
-            self.save_panes();
+            self.save_panes(cx);
         }
         restored
     }
@@ -799,7 +997,7 @@ impl HarnessWorkspace {
             "{kind_label} is not on PATH. The review was not opened in a terminal. The report is still in Review Overview."
         ));
         self.focus_active_pane(window, cx);
-        self.save_panes();
+        self.save_panes(cx);
         cx.notify();
     }
 
@@ -862,6 +1060,19 @@ impl HarnessWorkspace {
         pane.active = tab.id;
         pane.tabs.push(tab);
     }
+}
+
+/// The browser tab among `tabs` showing `url`, compared as parsed URLs (so
+/// `http://localhost:3000` matches `http://localhost:3000/`). A blank tab, or
+/// an unparsable `url`, never matches.
+pub(crate) fn find_browser_tab(tabs: &[crate::panes_state::TabRecord], url: &str) -> Option<u64> {
+    use crate::panes_state::TabRecordKind as K;
+    let comparable = |u: &str| url::Url::parse(u.trim()).ok().map(String::from);
+    let want = comparable(url)?;
+    tabs.iter().find_map(|t| match &t.kind {
+        K::Browser { url, .. } if comparable(url).as_ref() == Some(&want) => Some(t.id),
+        _ => None,
+    })
 }
 
 /// The status file an adopted tab already wrote. `Unknown` and a missing
@@ -957,6 +1168,63 @@ mod tests {
                 ids[closing]
             );
         }
+    }
+
+    #[test]
+    fn new_browser_tabs_land_after_the_active_tab() {
+        let tab = |id| Tab {
+            id,
+            title: String::new(),
+            content: TabContent::Diff,
+            agent: None,
+        };
+        let mut pane = PaneSet {
+            tabs: vec![tab(1), tab(2), tab(3)],
+            active: 2,
+            last_used: 0,
+        };
+        pane.insert_after_active(tab(9));
+        let ids: Vec<u64> = pane.tabs.iter().map(|t| t.id).collect();
+        assert_eq!(ids, [1, 2, 9, 3]);
+        assert_eq!(pane.active, 9);
+        // No active tab: at the end.
+        pane.active = 0;
+        pane.insert_after_active(tab(10));
+        let ids: Vec<u64> = pane.tabs.iter().map(|t| t.id).collect();
+        assert_eq!(ids, [1, 2, 9, 3, 10]);
+    }
+
+    #[test]
+    fn find_browser_tab_matches_the_same_url_only() {
+        use crate::panes_state::{TabRecord, TabRecordKind};
+        let browser = |id: u64, url: &str| TabRecord {
+            id,
+            kind: TabRecordKind::Browser {
+                url: url.into(),
+                title: None,
+            },
+            title: "Browser".into(),
+        };
+        let tabs = vec![
+            TabRecord {
+                id: 1,
+                kind: TabRecordKind::Shell,
+                title: "Shell".into(),
+            },
+            browser(2, ""),
+            browser(3, "http://localhost:3000/"),
+            browser(4, "http://localhost:3000/docs"),
+        ];
+        // Equal after URL normalization (trailing slash, case of the host).
+        assert_eq!(find_browser_tab(&tabs, "http://localhost:3000"), Some(3));
+        assert_eq!(find_browser_tab(&tabs, "http://LOCALHOST:3000/"), Some(3));
+        assert_eq!(find_browser_tab(&tabs, "http://localhost:3000/docs"), Some(4));
+        // A different path, port or scheme is another page.
+        assert_eq!(find_browser_tab(&tabs, "http://localhost:3000/other"), None);
+        assert_eq!(find_browser_tab(&tabs, "http://localhost:3001/"), None);
+        assert_eq!(find_browser_tab(&tabs, "https://localhost:3000/"), None);
+        // A blank tab is never "the same page".
+        assert_eq!(find_browser_tab(&tabs, ""), None);
     }
 
     #[test]

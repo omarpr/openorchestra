@@ -147,6 +147,9 @@ enum TabContent {
     /// second copy that could disagree with the dock's.
     Diff,
     ReviewOverview(OverviewTab),
+    /// An in-app web page. The pane owns the URL and title; the tab's
+    /// `title` mirrors its label (`BrowserPane::label`) for the strip.
+    Browser(Entity<crate::browser_pane::BrowserPane>),
 }
 
 #[derive(Default)]
@@ -338,10 +341,18 @@ pub(crate) struct Tab {
 impl Tab {
     /// Classify this tab for persistence (`panes_state`). `TabContent` holds
     /// live entities that can't be matched by kind ergonomically at the call
-    /// site, so `save_panes` goes through this instead.
-    fn kind_tag(&self) -> Option<crate::panes_state::TabRecordKind> {
+    /// site, so `save_panes` goes through this instead. `cx` reads a browser
+    /// tab's URL and title from its pane.
+    fn kind_tag(&self, cx: &App) -> Option<crate::panes_state::TabRecordKind> {
         use crate::panes_state::TabRecordKind as K;
         Some(match &self.content {
+            TabContent::Browser(pane) => {
+                let pane = pane.read(cx);
+                K::Browser {
+                    url: pane.url().unwrap_or_default().to_string(),
+                    title: pane.title().map(str::to_string),
+                }
+            }
             TabContent::File { .. } => return None,
             TabContent::ReviewOverview(overview) => K::ReviewOverview(overview.last_report.clone()),
             TabContent::Chat(_) => K::Chat,
@@ -351,6 +362,15 @@ impl Tab {
                 Some(a) => K::Agent(a.clone()),
                 None => K::Shell,
             },
+        })
+    }
+
+    /// This tab as `save_panes` records it; `None` for tabs never saved.
+    fn record(&self, cx: &App) -> Option<crate::panes_state::TabRecord> {
+        Some(crate::panes_state::TabRecord {
+            id: self.id,
+            kind: self.kind_tag(cx)?,
+            title: self.title.clone(),
         })
     }
 }
@@ -538,6 +558,18 @@ struct PaneSet {
 impl PaneSet {
     fn active_tab(&self) -> Option<&Tab> {
         self.tabs.iter().find(|t| t.id == self.active)
+    }
+
+    /// Put `tab` just after the active tab (at the end when none is
+    /// active) and make it active.
+    fn insert_after_active(&mut self, tab: Tab) {
+        let at = self
+            .tabs
+            .iter()
+            .position(|t| t.id == self.active)
+            .map_or(self.tabs.len(), |i| i + 1);
+        self.active = tab.id;
+        self.tabs.insert(at, tab);
     }
 
     fn remove_tab_at(&mut self, index: usize) {
@@ -738,6 +770,9 @@ pub struct HarnessWorkspace {
     tab_context_menu: Option<(u64, Pixels)>,
     /// Open diff-base menu, anchored under its button in the diff header.
     diff_base_menu: Option<gpui::Point<Pixels>>,
+    /// The window is minimized or the app hidden: no browser tab keeps its
+    /// native view (see `sync_browser_views`).
+    browser_window_hidden: bool,
     /// The quit confirmation is open (keep vs. close terminals). Present only
     /// while the user is deciding; carries the "remember my choice" checkbox.
     close_prompt: Option<ClosePrompt>,
@@ -973,7 +1008,7 @@ impl Render for TextTooltip {
 
 /// Build the closure `.tooltip()` wants: it hands back a fresh tooltip view
 /// each time the pointer settles on the element it is attached to.
-fn tip(
+pub(crate) fn tip(
     text: impl Into<gpui::SharedString>,
 ) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
     let text = text.into();

@@ -638,7 +638,7 @@ impl HarnessWorkspace {
             }
             // Moving the diff back to the dock should also show it there.
             self.prefs.diff_open = true;
-            self.save_panes();
+            self.save_panes(cx);
         }
         self.save_prefs(cx);
         self.focus_active_pane(window, cx);
