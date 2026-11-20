@@ -73,6 +73,9 @@ Unreleased is empty.
 - The update prompt for Homebrew installs now gives the full cask name,
   `brew upgrade --cask omarpr/tap/openorchestra`, so the copied command
   targets the openOrchestra tap.
+- Status messages are shown in red only when something failed. A success
+  message that happens to name something like "Error Phone" stays in the
+  normal color.
 
 ## 1.3.0 - 2026-11-19
 

@@ -748,7 +748,7 @@ impl HarnessWorkspace {
             return;
         }
         if let Err(e) = oo_remote::certs::retire_ca(&self.remote.state_dir.join("remote")) {
-            self.set_note(format!("remote: could not replace the certificate: {e}"));
+            self.set_error_note(format!("remote: could not replace the certificate: {e}"));
             return;
         }
         log::info!("remote: new certificate requested; restarting the server");
@@ -780,7 +780,7 @@ impl HarnessWorkspace {
         let status = server.status();
         self.remote.status = Some(status);
         if let Err(e) = result {
-            self.set_note(format!("remote: could not save network setting: {e}"));
+            self.set_error_note(format!("remote: could not save network setting: {e}"));
         }
         cx.notify();
     }
@@ -900,7 +900,7 @@ impl HarnessWorkspace {
     pub(crate) fn remote_set_enabled(&mut self, on: bool, cx: &mut Context<Self>) {
         if let Err(e) = self.remote.store.update(|f| f.enabled = on) {
             log::warn!("remote: saving enabled={on} failed: {e}");
-            self.set_note(format!("remote: could not save setting: {e}"));
+            self.set_error_note(format!("remote: could not save setting: {e}"));
         }
         self.remote.reload();
         // An explicit enable retries a failed start.
@@ -913,7 +913,7 @@ impl HarnessWorkspace {
     pub(crate) fn remote_set_keep_awake(&mut self, on: bool, cx: &mut Context<Self>) {
         if let Err(e) = self.remote.store.update(|f| f.keep_awake = on) {
             log::warn!("remote: saving keep_awake={on} failed: {e}");
-            self.set_note(format!("remote: could not save setting: {e}"));
+            self.set_error_note(format!("remote: could not save setting: {e}"));
         }
         self.remote.reload();
         self.remote.sync_keep_awake();
@@ -930,7 +930,7 @@ impl HarnessWorkspace {
         };
         if let Err(e) = result {
             log::warn!("remote: toggling mark failed: {e}");
-            self.set_note(format!("remote: could not save mark: {e}"));
+            self.set_error_note(format!("remote: could not save mark: {e}"));
         }
         self.remote.reload();
         self.remote_refresh(cx);
@@ -1123,7 +1123,7 @@ impl HarnessWorkspace {
         self.remote.ui.revoke_armed = None;
         if let Err(e) = auth::revoke(&self.remote.store, device_id) {
             log::warn!("remote: revoking {device_id} failed: {e}");
-            self.set_note(format!("remote: could not revoke device: {e}"));
+            self.set_error_note(format!("remote: could not revoke device: {e}"));
         }
         self.remote.reload();
         self.remote_refresh(cx);
@@ -1138,7 +1138,7 @@ impl HarnessWorkspace {
     ) {
         if let Err(e) = auth::set_read_only(&self.remote.store, device_id, read_only) {
             log::warn!("remote: saving read_only for {device_id} failed: {e}");
-            self.set_note(format!("remote: could not save setting: {e}"));
+            self.set_error_note(format!("remote: could not save setting: {e}"));
         }
         self.remote.reload();
         cx.notify();

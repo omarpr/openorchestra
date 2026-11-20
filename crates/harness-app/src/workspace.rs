@@ -792,6 +792,9 @@ pub struct HarnessWorkspace {
     /// as a toast until [`NOTE_TTL`] after `note_at`. Set it with `set_note`.
     note: String,
     note_at: Option<std::time::Instant>,
+    /// The toast reports a failure (`set_error_note`): drawn in red, and it
+    /// hides a browser page while it shows ([`render::toast_hides_page`]).
+    note_failed: bool,
     forge_status: HashMap<PathBuf, HashMap<String, BranchStatus>>,
     agent_status: HashMap<PathBuf, AgentState>,
     /// oo-remote: marks cache, phone server lifecycle, keep-awake.

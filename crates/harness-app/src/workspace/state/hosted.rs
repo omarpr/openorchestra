@@ -281,7 +281,7 @@ impl HarnessWorkspace {
                     "could not open project for {}: {e}",
                     r.editor_path.display()
                 );
-                self.set_note(format!("could not open project: {e}"));
+                self.set_error_note(format!("could not open project: {e}"));
                 cx.notify();
                 None
             }

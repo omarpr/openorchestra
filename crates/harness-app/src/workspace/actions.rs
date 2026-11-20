@@ -270,7 +270,7 @@ impl HarnessWorkspace {
             Ok(Some(store)) => self.task_store = store,
             Ok(None) => return,
             Err(e) => {
-                self.set_note(format!("couldn't save the task order: {e}"));
+                self.set_error_note(format!("couldn't save the task order: {e}"));
                 cx.notify();
                 return;
             }
@@ -562,7 +562,7 @@ impl HarnessWorkspace {
                     );
                     save_prefs_to(&self.prefs_path, &self.prefs);
                 } else {
-                    self.set_note(if slug.is_empty() {
+                    self.set_error_note(if slug.is_empty() {
                         "agent name can't be empty".to_string()
                     } else {
                         format!("'{slug}' is not a valid new agent name")

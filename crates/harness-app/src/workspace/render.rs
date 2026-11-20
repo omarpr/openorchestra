@@ -797,40 +797,37 @@ pub(crate) fn ci_summary(checks: &[forge::CheckRun]) -> Option<CheckStatus> {
 /// How long a status toast stays up.
 pub(crate) const NOTE_TTL: Duration = Duration::from_secs(6);
 
-/// Whether a status message reports something going wrong.
-fn is_failure(note: &str) -> bool {
-    let n = note.to_ascii_lowercase();
-    [
-        "fail",
-        "error",
-        "could not",
-        "couldn't",
-        "cannot",
-        "can't",
-        "not trusted",
-        "skipped",
-    ]
-    .iter()
-    .any(|w| n.contains(w))
-}
-
 /// Whether the toast hides the browser page (ruling R11): a failure is
 /// something the user has to see, so while one shows it counts as an
 /// overlay. Info toasts stay under the page where they overlap it.
-pub(crate) fn toast_hides_page(note: &str, showing: bool) -> bool {
-    showing && !note.is_empty() && is_failure(note)
+/// `failed` is the severity its producer gave (`set_error_note`), never read
+/// from the text: a device named "Error Phone" pairing is still good news.
+pub(crate) fn toast_hides_page(note: &str, failed: bool, showing: bool) -> bool {
+    showing && !note.is_empty() && failed
 }
 
 impl HarnessWorkspace {
     /// A failure toast is on screen (see [`toast_hides_page`]).
     pub(crate) fn failure_toast_showing(&self) -> bool {
-        toast_hides_page(&self.note, self.note_at.is_some())
+        toast_hides_page(&self.note, self.note_failed, self.note_at.is_some())
     }
 
     /// Show a status message as a toast. Replaces the old always-on bottom
     /// bar, which kept the last message on screen forever.
     pub(crate) fn set_note(&mut self, note: String) {
+        self.set_note_as(note, false);
+    }
+
+    /// [`Self::set_note`] for something that went wrong: red, and it hides
+    /// a browser page while it shows.
+    pub(crate) fn set_error_note(&mut self, note: String) {
+        self.set_note_as(note, true);
+    }
+
+    /// A toast whose severity the caller decides at run time.
+    pub(crate) fn set_note_as(&mut self, note: String, failed: bool) {
         self.note = note;
+        self.note_failed = failed;
         self.note_at = (!self.note.is_empty()).then(std::time::Instant::now);
     }
 
@@ -839,6 +836,7 @@ impl HarnessWorkspace {
         if self.note_at.is_some_and(|t| t.elapsed() >= NOTE_TTL) {
             self.note.clear();
             self.note_at = None;
+            self.note_failed = false;
             return true;
         }
         false
@@ -850,7 +848,7 @@ impl HarnessWorkspace {
         if self.note.is_empty() {
             return None;
         }
-        let failed = is_failure(&self.note);
+        let failed = self.note_failed;
         Some(
             div()
                 .absolute()
@@ -882,6 +880,7 @@ impl HarnessWorkspace {
                         .on_click(cx.listener(|ws, _, _, cx| {
                             ws.note.clear();
                             ws.note_at = None;
+                            ws.note_failed = false;
                             cx.notify();
                         }))
                         .child(self.note.clone()),
@@ -893,17 +892,20 @@ impl HarnessWorkspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{CheckStatus, ci_summary, is_failure, toast_hides_page};
+    use super::{CheckStatus, ci_summary, toast_hides_page};
 
     #[test]
     fn only_a_showing_failure_toast_hides_the_page() {
-        assert!(toast_hides_page("push failed: rejected", true));
-        assert!(toast_hides_page("Couldn't archive ‘x’", true));
+        assert!(toast_hides_page("push failed: rejected", true, true));
+        assert!(toast_hides_page("Couldn't archive ‘x’", true, true));
         // An info toast stays under the page (ruling R11).
-        assert!(!toast_hides_page("archived ‘x’", true));
+        assert!(!toast_hides_page("archived ‘x’", false, true));
+        // Severity comes from the producer, not the words: good news that
+        // names an "Error Phone" stays under the page.
+        assert!(!toast_hides_page("Paired ‘Error Phone’", false, true));
         // Expired or dismissed.
-        assert!(!toast_hides_page("push failed: rejected", false));
-        assert!(!toast_hides_page("", true));
+        assert!(!toast_hides_page("push failed: rejected", true, false));
+        assert!(!toast_hides_page("", true, true));
     }
 
     #[test]
@@ -922,14 +924,5 @@ mod tests {
         );
         test.status = CheckStatus::Pass;
         assert_eq!(ci_summary(&[build, test]), Some(CheckStatus::Pass));
-    }
-
-    #[test]
-    fn failures_are_told_apart_from_progress() {
-        assert!(is_failure("push failed: rejected"));
-        assert!(is_failure("could not trust hooks in /x"));
-        assert!(is_failure("setup skipped: hooks not approved"));
-        assert!(!is_failure("archived ‘login’"));
-        assert!(!is_failure("running setup… (see shell)"));
     }
 }

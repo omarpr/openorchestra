@@ -282,7 +282,7 @@ impl HarnessWorkspace {
                 }
             }
             Err(e) => {
-                self.set_note(format!("create failed: {e}"));
+                self.set_error_note(format!("create failed: {e}"));
                 cx.notify();
             }
         }
@@ -328,7 +328,7 @@ impl HarnessWorkspace {
                     untrusted.push((m.repo.clone(), repo_root, scripts));
                 }
                 Err(e) => {
-                    self.set_note(format!("hooks load {}: {e}", m.repo));
+                    self.set_error_note(format!("hooks load {}: {e}", m.repo));
                     cx.notify();
                 }
             }
@@ -417,11 +417,11 @@ impl HarnessWorkspace {
                     errors.push(format!("setup {}: {e}", m.repo));
                 }
             }
-            self.set_note(if errors.is_empty() {
-                "setup finished".into()
-            } else {
-                errors.join("; ")
-            });
+            let failed = !errors.is_empty();
+            self.set_note_as(
+                if failed { errors.join("; ") } else { "setup finished".into() },
+                failed,
+            );
             cx.notify();
             return;
         }
@@ -437,7 +437,7 @@ impl HarnessWorkspace {
             &member_paths,
             &members,
         ) {
-            self.set_note(format!("write setup runner: {e}"));
+            self.set_error_note(format!("write setup runner: {e}"));
             cx.notify();
             return;
         }

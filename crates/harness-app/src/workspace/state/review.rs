@@ -399,7 +399,7 @@ impl HarnessWorkspace {
         }
         match std::fs::write(&file, md) {
             Ok(()) => self.set_note(format!("saved {}", file.display())),
-            Err(e) => self.set_note(format!("could not save review: {e}")),
+            Err(e) => self.set_error_note(format!("could not save review: {e}")),
         }
         cx.notify();
     }

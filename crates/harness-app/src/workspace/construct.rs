@@ -236,6 +236,7 @@ impl HarnessWorkspace {
             hook_trust: None,
             note: String::new(),
             note_at: None,
+            note_failed: false,
             forge_status: HashMap::new(),
             agent_status: HashMap::new(),
             remote: super::remote::RemoteRuntime::new(&data_dir),

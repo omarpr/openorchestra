@@ -128,7 +128,7 @@ impl HarnessWorkspace {
                     return;
                 }
                 let Some(ws) = self.ensure_ide_workspace(window, cx) else {
-                    self.set_note("could not open the editor for this worktree".to_string());
+                    self.set_error_note("could not open the editor for this worktree".to_string());
                     cx.notify();
                     return;
                 };
@@ -302,7 +302,7 @@ impl HarnessWorkspace {
         cx: &mut Context<Self>,
     ) {
         let Some(hosted) = self.ensure_service_workspace(window, cx) else {
-            self.set_note("could not open an editor".to_string());
+            self.set_error_note("could not open an editor".to_string());
             cx.notify();
             return;
         };
