@@ -123,15 +123,19 @@ fn icon_button(
 }
 
 impl HarnessWorkspace {
-    /// Put the keyboard on the Agents section's tab in the Settings rail,
-    /// a control that survives any change to the agent list. Called before
-    /// removing the focused control (a removed agent's ×, or Reset going
-    /// inert): gpui would otherwise route the next key from the window
-    /// root, outside the Settings card, and Tab would leave Settings.
-    fn focus_agents_section(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let tab = self
-            .settings_focus
-            .control_focus(SettingsSection::Agents.focus_id(), cx);
+    /// Put the keyboard on `section`'s tab in the Settings rail, a control
+    /// that survives any change to the section's contents. Called before
+    /// removing the focused control (a removed agent's ×, or a Reset button
+    /// that goes away or inert once nothing is left to reset): gpui would
+    /// otherwise route the next key from the window root, outside the
+    /// Settings card, and Tab would leave Settings.
+    fn focus_section_tab(
+        &self,
+        section: SettingsSection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let tab = self.settings_focus.control_focus(section.focus_id(), cx);
         window.focus(&tab, cx);
     }
 
@@ -786,7 +790,7 @@ impl HarnessWorkspace {
                         // The button goes inert once nothing is left to
                         // reset; the keyboard moves first, or Tab would no
                         // longer reach Settings.
-                        ws.focus_agents_section(window, cx);
+                        ws.focus_section_tab(SettingsSection::Agents, window, cx);
                         // Drop built-in overrides and the custom order; keep
                         // the user's custom agents, which have no "default"
                         // to reset to.
@@ -911,8 +915,12 @@ impl HarnessWorkspace {
                         .cursor_pointer()
                         .hover(|d| d.bg(hx.surface_hover).text_color(hx.tx0))
                         .child("Reset shortcuts to defaults")
-                        .on_click(cx.listener(|ws, _, _, cx| {
+                        .on_click(cx.listener(|ws, _, window, cx| {
                             cx.stop_propagation();
+                            // The button goes once nothing is rebound; the
+                            // keyboard moves first, or Tab would no longer
+                            // reach Settings.
+                            ws.focus_section_tab(SettingsSection::Shortcuts, window, cx);
                             ws.prefs.shortcuts.clear();
                             save_prefs_to(&ws.prefs_path, &ws.prefs);
                             ws.apply_shortcuts(cx);
@@ -1265,7 +1273,7 @@ impl HarnessWorkspace {
                 .on_click(cx.listener(move |ws, _, window, cx| {
                     cx.stop_propagation();
                     // This row, and its focused × with it, is about to go.
-                    ws.focus_agents_section(window, cx);
+                    ws.focus_section_tab(SettingsSection::Agents, window, cx);
                     ws.prefs.agents.remove(&remove_key);
                     ws.prefs.agent_order.retain(|k| *k != remove_key);
                     save_prefs_to(&ws.prefs_path, &ws.prefs);
