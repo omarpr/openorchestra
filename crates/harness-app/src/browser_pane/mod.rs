@@ -56,7 +56,7 @@ use gpui::{
 
 use crate::link_routing;
 use crate::theme::{HarnessTheme, theme, tint};
-use crate::workspace::{browser_label, tip};
+use crate::workspace::{LookKind, browser_label, kind_icon, tip};
 
 pub(crate) use webview::{set_app_shortcuts, window_is_minimized_or_hidden};
 use webview::{NativeEvents, NativeWebView};
@@ -325,6 +325,20 @@ pub(crate) struct BrowserProject {
     pub name: String,
 }
 
+/// A server running in the selected task, as a blank tab lists it: the
+/// Ports panel's row for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RunningServer {
+    pub port: u16,
+    /// The Ports row's text after its port ("Python · localhost only").
+    pub detail: String,
+    /// What Ports' Open would load.
+    pub url: String,
+}
+
+/// How many recent pages a blank tab lists.
+const RECENT_ON_BLANK: usize = 8;
+
 /// The address bar's suggestion list: pages from the project's history
 /// matching what was typed.
 struct Suggestions {
@@ -396,6 +410,8 @@ pub(crate) struct BrowserPane {
     project: Option<BrowserProject>,
     /// The address bar's suggestion list, while open.
     suggestions: Option<Suggestions>,
+    /// What a blank tab lists under "Running in this task" (`set_running`).
+    running: Vec<RunningServer>,
     /// Opens and refreshes the suggestions as the user types.
     _address_edits: gpui::Subscription,
 }
@@ -514,6 +530,7 @@ impl BrowserPane {
             history,
             project: None,
             suggestions: None,
+            running: Vec::new(),
             _address_edits: address_edits,
         }
     }
@@ -530,6 +547,21 @@ impl BrowserPane {
             self.history.update(cx, |h, _| h.ensure_loaded(&p.key));
         }
         self.project = project;
+    }
+
+    /// Whether the tab has no page yet: the blank tab, which lists running
+    /// servers and recent pages.
+    pub(crate) fn is_blank(&self) -> bool {
+        self.url.is_none()
+    }
+
+    /// The selected task's running servers, for the blank tab's list
+    /// (empty hides it). Compare-and-set, and it never notifies: the
+    /// workspace calls it while rendering, before this pane draws.
+    pub(crate) fn set_running(&mut self, running: Vec<RunningServer>) {
+        if self.running != running {
+            self.running = running;
+        }
     }
 
     /// The page committed `url`: a visit to record, unless it is already
@@ -1085,6 +1117,128 @@ impl BrowserPane {
         Some(list.into_any_element())
     }
 
+    /// The blank tab: what to type, then the servers running in the task
+    /// and the project's recent pages, each a click away. A list with
+    /// nothing in it isn't shown.
+    fn render_blank(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let mut block = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .max_w(px(520.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_2()
+                    .child(kind_icon(hx, LookKind::Browser, 40.0))
+                    .child(div().text_sm().text_color(hx.tx1).child("Open a page"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(hx.tx2)
+                            .child("Type an address above, or pick one below."),
+                    ),
+            );
+        if !self.running.is_empty() {
+            block = block.child(blank_section_label(hx, "RUNNING IN THIS TASK".into()));
+            for (i, server) in self.running.iter().enumerate() {
+                let url = server.url.clone();
+                block = block.child(
+                    blank_row(hx, ("browser-blank-running", i))
+                        .on_click(cx.listener(move |pane, _, window, cx| {
+                            if let Some(Address::Web(url)) = normalize_address(&url) {
+                                pane.load_here(url, window, cx);
+                            }
+                        }))
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(56.0))
+                                .font_family(hx.font_mono)
+                                .text_sm()
+                                .text_color(hx.tx0)
+                                .child(format!(":{}", server.port)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_xs()
+                                .text_color(hx.tx2)
+                                .child(server.detail.clone()),
+                        ),
+                );
+            }
+        }
+        let recent = self.project.as_ref().and_then(|project| {
+            let history = self.history.read(cx).get(&project.key)?;
+            let recent = history.recent(RECENT_ON_BLANK);
+            (!recent.is_empty()).then(|| (project.name.to_uppercase(), recent.to_vec()))
+        });
+        if let Some((name, recent)) = recent {
+            let now = history::unix_now();
+            block = block.child(blank_section_label(hx, format!("RECENT IN {name}")));
+            for (i, entry) in recent.into_iter().enumerate() {
+                let shown_url = history::display_url(&entry.url).to_string();
+                let title = if entry.title.is_empty() {
+                    shown_url.clone()
+                } else {
+                    entry.title.clone()
+                };
+                let when = history::relative_time(entry.last_visited, now);
+                let url = entry.url;
+                block = block.child(
+                    blank_row(hx, ("browser-blank-recent", i))
+                        .tooltip(tip(url.clone()))
+                        .on_click(cx.listener(move |pane, _, window, cx| {
+                            pane.load_here(url.clone(), window, cx);
+                        }))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_xs()
+                                .text_color(hx.tx0)
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_xs()
+                                .text_color(hx.tx2)
+                                .child(shown_url),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_xs()
+                                .text_color(hx.tx2)
+                                .child(when),
+                        ),
+                );
+            }
+        }
+        div()
+            .id("browser-blank")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .items_center()
+            .justify_center()
+            .px_4()
+            .py_6()
+            .overflow_y_scroll()
+            .child(block)
+            .into_any_element()
+    }
+
     fn render_body(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> gpui::AnyElement {
         if self.view_failed {
             return error_view(
@@ -1107,16 +1261,7 @@ impl BrowserPane {
             );
         }
         if self.url.is_none() {
-            return div()
-                .flex()
-                .flex_1()
-                .min_h_0()
-                .items_center()
-                .justify_center()
-                .text_xs()
-                .text_color(hx.tx2)
-                .child("Type an address above, like localhost:3000")
-                .into_any_element();
+            return self.render_blank(hx, cx);
         }
         // The page's slot. Prepaint reads the pane (never updates it or
         // notifies, so placing the view can't trigger another frame) and
@@ -1241,6 +1386,35 @@ fn error_view(
                 .hover(|d| d.bg(tint(hx.accent, 0.24))),
         )
         .into_any_element()
+}
+
+/// A small upper-case label over one of the blank tab's lists, styled like
+/// the app's section headers.
+fn blank_section_label(hx: &HarnessTheme, label: String) -> gpui::Div {
+    div()
+        .pt_5()
+        .pb_1()
+        .px_2()
+        .text_xs()
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(hx.tx2)
+        .truncate()
+        .child(label)
+}
+
+/// One clickable row in a blank tab's list (the caller adds its cells and
+/// click).
+fn blank_row(hx: &HarnessTheme, id: impl Into<gpui::ElementId>) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap_3()
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .cursor_pointer()
+        .hover(|d| d.bg(hx.surface))
 }
 
 /// An icon button in the address bar; dimmed and inert when `enabled` is

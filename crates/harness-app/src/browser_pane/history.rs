@@ -85,6 +85,11 @@ impl History {
         true
     }
 
+    /// The `n` newest entries, for the blank tab's Recent list.
+    pub(crate) fn recent(&self, n: usize) -> &[HistoryEntry] {
+        &self.entries[..n.min(self.entries.len())]
+    }
+
     /// Whether `url` is already the newest entry: seeing it again is a
     /// reload, or a tab's page coming back when the tab is shown again, not
     /// another visit.
@@ -153,6 +158,39 @@ fn host_starts_with(url: &str, query: &str) -> bool {
 fn score(e: &HistoryEntry, now: u64) -> f64 {
     let days = now.saturating_sub(e.last_visited) as f64 / 86_400.0;
     f64::from(e.visits.max(1)) * 0.5_f64.powf(days)
+}
+
+/// When a page was last visited, as the Recent list shows it: "just now",
+/// "2m ago", "3h ago", "yesterday" (24–48 hours ago), then the date ("Nov 3",
+/// with the year when it isn't this one). Dates are UTC.
+pub(crate) fn relative_time(then: u64, now: u64) -> String {
+    const HOUR: u64 = 3600;
+    const DAY: u64 = 24 * HOUR;
+    let ago = now.saturating_sub(then);
+    match ago {
+        0..60 => "just now".to_string(),
+        60..HOUR => format!("{}m ago", ago / 60),
+        HOUR..DAY => format!("{}h ago", ago / HOUR),
+        DAY..172_800 => "yesterday".to_string(),
+        _ => {
+            let date = |secs: u64| {
+                i64::try_from(secs)
+                    .ok()
+                    .and_then(|s| time::OffsetDateTime::from_unix_timestamp(s).ok())
+            };
+            match (date(then), date(now)) {
+                (Some(then), Some(now)) => {
+                    let month = &then.month().to_string()[..3];
+                    if then.year() == now.year() {
+                        format!("{month} {}", then.day())
+                    } else {
+                        format!("{month} {}, {}", then.day(), then.year())
+                    }
+                }
+                _ => String::new(),
+            }
+        }
+    }
 }
 
 /// A URL without its scheme, as the suggestions and the Recent list show
@@ -493,6 +531,46 @@ mod tests {
         assert_eq!(got.len(), MAX_SUGGESTIONS);
         // Equal visits: the newest first.
         assert_eq!(got[0].url, "http://localhost:3000/19");
+    }
+
+    #[test]
+    fn visit_times_read_as_minutes_hours_yesterday_then_a_date() {
+        // 2026-11-20T12:00:00Z
+        let now = 1_795_176_000;
+        assert_eq!(relative_time(now, now), "just now");
+        assert_eq!(relative_time(now - 59, now), "just now");
+        // A clock that went back: not "in the future".
+        assert_eq!(relative_time(now + 30, now), "just now");
+        assert_eq!(relative_time(now - 60, now), "1m ago");
+        assert_eq!(relative_time(now - 125, now), "2m ago");
+        assert_eq!(relative_time(now - 3599, now), "59m ago");
+        assert_eq!(relative_time(now - 3600, now), "1h ago");
+        assert_eq!(relative_time(now - 3 * 3600 - 59, now), "3h ago");
+        assert_eq!(relative_time(now - 86_399, now), "23h ago");
+        assert_eq!(relative_time(now - 86_400, now), "yesterday");
+        assert_eq!(relative_time(now - 2 * 86_400 + 1, now), "yesterday");
+        assert_eq!(relative_time(now - 2 * 86_400, now), "Nov 18");
+        assert_eq!(relative_time(now - 17 * 86_400, now), "Nov 3");
+        // 2025-12-30T12:00:00Z: last year shows the year.
+        assert_eq!(relative_time(1_767_096_000, now), "Dec 30, 2025");
+    }
+
+    #[test]
+    fn the_recent_list_is_the_newest_few() {
+        let mut h = History::default();
+        for i in 0..12 {
+            h.record(&format!("http://localhost:3000/{i}"), i);
+        }
+        let recent: Vec<&str> = h.recent(3).iter().map(|e| e.url.as_str()).collect();
+        assert_eq!(
+            recent,
+            [
+                "http://localhost:3000/11",
+                "http://localhost:3000/10",
+                "http://localhost:3000/9"
+            ]
+        );
+        assert_eq!(History::default().recent(8).len(), 0);
     }
 
     #[test]

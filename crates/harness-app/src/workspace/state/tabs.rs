@@ -742,6 +742,30 @@ impl HarnessWorkspace {
         let (show, hide): (Vec<_>, Vec<_>) = pages
             .into_iter()
             .partition(|page| Some(page.entity_id()) == shown);
+        // A blank tab lists the task's servers: Ports' task rows, from its
+        // sample, which is taken meanwhile (`ports_wanted`), starting now.
+        let blank = show.iter().any(|page| page.read(cx).is_blank());
+        if blank && !self.blank_browser_shown {
+            self.blank_browser_shown = true;
+            self.refresh_ports(cx);
+        }
+        self.blank_browser_shown = blank;
+        let running: Vec<crate::browser_pane::RunningServer> = if blank && self.ports_current() {
+            self.ports_view()
+                .map(|view| {
+                    view.task
+                        .iter()
+                        .map(|row| crate::browser_pane::RunningServer {
+                            port: row.port,
+                            detail: crate::workspace::ui::ports_panel::port_row_detail(row),
+                            url: crate::ports::url_for(row),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         for page in hide {
             page.update(cx, |page, cx| page.set_shown(false, window, cx));
         }
@@ -753,6 +777,7 @@ impl HarnessWorkspace {
                 if let Some(project) = shown_project.clone() {
                     page.set_project(Some(project), cx);
                 }
+                page.set_running(running.clone());
                 page.set_shown(true, window, cx);
             });
         }

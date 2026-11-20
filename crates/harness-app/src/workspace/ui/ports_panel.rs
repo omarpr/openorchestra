@@ -19,6 +19,12 @@ impl HarnessWorkspace {
         self.prefs.diff_open && self.prefs.tool_tab == ToolTab::Ports
     }
 
+    /// Whether anything on screen shows ports: the Ports tab, or a blank
+    /// browser tab, which lists the task's servers. Ports samples only then.
+    pub(crate) fn ports_wanted(&self) -> bool {
+        self.ports_visible() || self.blank_browser_shown
+    }
+
     /// The tmux session prefixes whose processes count as "this task", using
     /// the same keys the footprint monitor attributes by (`apply_resource`),
     /// plus each one's folder so Compose containers started there count too.
@@ -86,7 +92,7 @@ impl HarnessWorkspace {
 
     /// The current sample classified against the current selection. `None`
     /// before the first sample lands.
-    fn ports_view(&self) -> Option<PortsView> {
+    pub(crate) fn ports_view(&self) -> Option<PortsView> {
         let sample = self.ports_sample.as_ref()?;
         let mut view = ports::classify(sample, &self.ports_scopes());
         ports::sort_rows(&mut view.task, self.prefs.ports_sort);
@@ -234,7 +240,7 @@ impl HarnessWorkspace {
     }
 
     /// Whether the shown sample is recent enough to present as current.
-    fn ports_current(&self) -> bool {
+    pub(crate) fn ports_current(&self) -> bool {
         self.ports_sample_at
             .is_some_and(|at| ports::is_current(at.elapsed()))
     }
@@ -274,7 +280,7 @@ impl HarnessWorkspace {
                 cx.notify();
             }
         }
-        if self.ports_gate.finish() && self.ports_visible() {
+        if self.ports_gate.finish() && self.ports_wanted() {
             self.refresh_ports(cx);
         }
     }
@@ -411,28 +417,7 @@ impl HarnessWorkspace {
     ) -> impl IntoElement {
         let port = row.port;
         let url = ports::url_for(row);
-        let loopback_only = row
-            .addrs
-            .iter()
-            .all(|a| a == "127.0.0.1" || a == "::1" || a == "localhost");
-        let reach = if loopback_only {
-            "localhost only".to_string()
-        } else {
-            row.addrs.join(", ")
-        };
-        // A container port reads as the container ("db · urbital · → 5432"),
-        // not as the engine process that happens to hold the socket.
-        let what = match &row.container {
-            Some(c) if c.matched_by_name => {
-                format!("{} · → {} · matched by name", c.label, c.container_port)
-            }
-            Some(c) => format!("{} · → {}", c.label, c.container_port),
-            None => format!("{} · {reach}", row.name),
-        };
-        let detail = match &row.member {
-            Some(m) => format!("{what} · {m}"),
-            None => what,
-        };
+        let detail = port_row_detail(row);
         let hover = match &row.container {
             Some(c) => {
                 let why = if c.matched_by_name {
@@ -527,6 +512,35 @@ impl HarnessWorkspace {
     }
 }
 
+/// What a port row says after its `:port`: the process and where it
+/// listens ("Python · localhost only"), or the container behind it, and
+/// the task member when the task has several. Shared with a blank browser
+/// tab's "Running in this task" list.
+pub(crate) fn port_row_detail(row: &PortRow) -> String {
+    let loopback_only = row
+        .addrs
+        .iter()
+        .all(|a| a == "127.0.0.1" || a == "::1" || a == "localhost");
+    let reach = if loopback_only {
+        "localhost only".to_string()
+    } else {
+        row.addrs.join(", ")
+    };
+    // A container port reads as the container ("db · urbital · → 5432"),
+    // not as the engine process that happens to hold the socket.
+    let what = match &row.container {
+        Some(c) if c.matched_by_name => {
+            format!("{} · → {} · matched by name", c.label, c.container_port)
+        }
+        Some(c) => format!("{} · → {}", c.label, c.container_port),
+        None => format!("{} · {reach}", row.name),
+    };
+    match &row.member {
+        Some(m) => format!("{what} · {m}"),
+        None => what,
+    }
+}
+
 /// The count at the right of a section header, styled like ARCHIVED's.
 fn count_badge(hx: &HarnessTheme, n: usize) -> AnyElement {
     div()
@@ -578,7 +592,7 @@ fn dismisses(
 
 #[cfg(test)]
 mod tests {
-    use super::{SortMenu, dismisses, port_action_id};
+    use super::{PortRow, SortMenu, dismisses, port_action_id, port_row_detail};
     use gpui::{point, px};
 
     #[test]
@@ -606,6 +620,47 @@ mod tests {
             Some((SortMenu::Order, button)),
             button
         ));
+    }
+
+    fn port_row(addrs: &[&str]) -> PortRow {
+        PortRow {
+            port: 8765,
+            addrs: addrs.iter().map(|a| a.to_string()).collect(),
+            pid: 42,
+            name: "Python".into(),
+            member: None,
+            container: None,
+            cwd: None,
+        }
+    }
+
+    #[test]
+    fn a_port_row_names_its_process_reach_container_and_member() {
+        assert_eq!(
+            port_row_detail(&port_row(&["127.0.0.1", "::1"])),
+            "Python · localhost only"
+        );
+        assert_eq!(
+            port_row_detail(&port_row(&["*"])),
+            "Python · *"
+        );
+        let mut row = port_row(&["127.0.0.1"]);
+        row.member = Some("web".into());
+        assert_eq!(port_row_detail(&row), "Python · localhost only · web");
+        row.container = Some(crate::ports::ContainerInfo {
+            label: "db · urbital".into(),
+            container_port: 5432,
+            name: "urbital-db-1".into(),
+            image: "postgres".into(),
+            matched_by_name: false,
+        });
+        assert_eq!(port_row_detail(&row), "db · urbital · → 5432 · web");
+        row.member = None;
+        row.container.as_mut().unwrap().matched_by_name = true;
+        assert_eq!(
+            port_row_detail(&row),
+            "db · urbital · → 5432 · matched by name"
+        );
     }
 
     #[test]

@@ -15,7 +15,9 @@ Unreleased is empty.
 ### Added
 
 - **Browser** tabs (＋ → Browser): a WebKit page next to your shells and
-  agents, with back, forward, reload and Open in default browser. Each
+  agents, with back, forward, reload and Open in default browser. A blank
+  browser tab lists the servers running in the task and the project's recent
+  pages, a click away. Each
   project remembers the pages its browser tabs open, and the address bar
   suggests them as you type (↑/↓ and Enter to pick one). **Settings ›
   General › Clear browsing history** forgets them.

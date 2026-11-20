@@ -784,6 +784,9 @@ pub struct HarnessWorkspace {
     /// Every project's browsing history, shared with the browser tabs
     /// (`~/.openorchestra/browser-history`).
     browser_history: Entity<crate::browser_pane::BrowserHistory>,
+    /// A blank browser tab was on screen at the last `sync_browser_views`:
+    /// it lists the task's servers, so Ports samples meanwhile.
+    blank_browser_shown: bool,
     /// The quit confirmation is open (keep vs. close terminals). Present only
     /// while the user is deciding; carries the "remember my choice" checkbox.
     close_prompt: Option<ClosePrompt>,
