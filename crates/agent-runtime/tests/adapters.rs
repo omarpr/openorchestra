@@ -450,6 +450,8 @@ fake.permission.s = []; out.push(at(["s"]));            // permission.replied
 fake.form.s = [{ id: "f1" }]; out.push(at(["s"]));      // form.created (a question)
 fake.form.s = []; fake.status.s = "idle"; out.push(at(["s"])); // execution.succeeded
 fake.status.s = { type: "busy" }; out.push(at(["s"]));  // 1.x-shaped status
+// Interrupted with a prompt open: the stale request must not pin waiting.
+fake.permission.s = [{ id: "p2" }]; fake.status.s = "idle"; out.push(at(["s"]));
 return out;
 "#,
     ) else {
@@ -458,7 +460,9 @@ return out;
     };
     assert_eq!(
         states,
-        serde_json::json!(["idle", "running", "waiting", "running", "waiting", "idle", "running"])
+        serde_json::json!([
+            "idle", "running", "waiting", "running", "waiting", "idle", "running", "idle"
+        ])
     );
 }
 

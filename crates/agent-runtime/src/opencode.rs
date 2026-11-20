@@ -33,7 +33,7 @@
 //!
 //! | OpenCode 2 event (1.x name) | → |
 //! |---|---|
-//! | `permission.asked` (`permission.updated`), `form.created` | `Waiting` / `PermissionPrompt` |
+//! | `permission.asked` (`permission.updated`), `form.created`, during a turn | `Waiting` / `PermissionPrompt` |
 //! | `permission.replied`, `form.replied` / `form.cancelled` | back to `Running` (or `Idle`) |
 //! | `session.execution.started` | `Running` |
 //! | `session.execution.succeeded` / `failed` / `interrupted` (`session.idle` / `session.error`) | `Idle` / `TurnComplete` |

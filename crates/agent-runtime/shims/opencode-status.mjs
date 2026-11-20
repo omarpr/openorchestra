@@ -11,7 +11,8 @@
 // The state comes from the TUI's own session store (`context.data`), which
 // OpenCode keeps current from the service's event stream:
 //
-//   pending permission (`permission.asked`) or question (`form.created`)  -> waiting
+//   pending permission (`permission.asked`) or question (`form.created`)
+//   while a turn runs                                                     -> waiting
 //   `session.status(id) === "running"` (`session.execution.started`)      -> running
 //   otherwise (`session.execution.succeeded|failed|interrupted`,
 //              `permission.replied`, `form.replied|cancelled` cleared it) -> idle
@@ -86,13 +87,18 @@ export function ownSessions(data, shown) {
  */
 export function sessionState(data, ids) {
 	let running = false;
+	let pending = false;
 	for (const id of ids) {
-		if (count(() => data.session.permission.list(id)) > 0) return "waiting";
-		if (count(() => data.session.form.list(id)) > 0) return "waiting";
+		if (count(() => data.session.permission.list(id)) > 0) pending = true;
+		if (count(() => data.session.form.list(id)) > 0) pending = true;
 		const status = attempt(() => data.session.status(id), "idle");
 		if (RUNNING.has(typeof status === "string" ? status : status?.type)) running = true;
 	}
-	return running ? "running" : "idle";
+	// A prompt only blocks a turn in progress. The store does not drop a
+	// pending request when a turn ends (an interrupt with a prompt open), and
+	// a stale one must not pin the tab on waiting: a false waiting notifies.
+	if (!running) return "idle";
+	return pending ? "waiting" : "running";
 }
 
 /**
