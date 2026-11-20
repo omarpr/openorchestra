@@ -16,7 +16,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const REPO_URL: &str = "https://github.com/omarpr/openorchestra";
 const RELEASES_URL: &str = "https://github.com/omarpr/openorchestra/releases";
 const LATEST_API: &str = "https://api.github.com/repos/omarpr/openorchestra/releases/latest";
-const BREW_UPGRADE: &str = "brew upgrade --cask openorchestra";
+/// Fully qualified: the cask lives in a third-party tap (omarpr/tap), the
+/// same name the README and `brew install` use.
+const BREW_UPGRADE: &str = "brew upgrade --cask omarpr/tap/openorchestra";
 
 /// The newest published release.
 #[derive(Debug, Clone, PartialEq, Eq)]

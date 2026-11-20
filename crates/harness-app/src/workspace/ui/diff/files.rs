@@ -23,6 +23,7 @@ impl HarnessWorkspace {
             .min_h_0()
             .items_start()
             .overflow_scroll()
+            .track_scroll(&self.diff_files_scroll)
             .px_2()
             .pb_1();
         files = if two_pane {
@@ -146,12 +147,18 @@ impl HarnessWorkspace {
                 .px_2()
                 .py_1()
                 .rounded_md()
-                .when(open, |d| d.bg(hx.surface))
+                // The open file in the accent tint: the plain surface colour
+                // it used to get was too close to the list's own background
+                // to tell which file the diff beside it belonged to.
+                .when(two_pane && open, |d| d.bg(tint(hx.accent, 0.2)))
+                .when(!two_pane && open, |d| d.bg(hx.surface))
                 .cursor_pointer()
-                .hover(|d| d.bg(hx.surface))
-                .on_click(cx.listener(move |ws, _, _, cx| {
+                .when(!(two_pane && open), |d| d.hover(|d| d.bg(hx.surface)))
+                .on_click(cx.listener(move |ws, _, window, cx| {
                     if two_pane {
                         ws.diff_focus = Some(toggle_path.clone());
+                        // So ↑/↓ move through the list from here.
+                        window.focus(&ws.diff_surface_focus, cx);
                     } else if !ws.expanded.remove(&toggle_path) {
                         ws.expanded.insert(toggle_path.clone());
                     }
@@ -234,7 +241,13 @@ impl HarnessWorkspace {
                         // match the Files and Git panels beside this tab.
                         .text_sm()
                         .font_family(hx.font_ui)
-                        .text_color(if reviewed { hx.tx2 } else { hx.tx1 })
+                        .text_color(if two_pane && open {
+                            hx.tx0
+                        } else if reviewed {
+                            hx.tx2
+                        } else {
+                            hx.tx1
+                        })
                         .whitespace_nowrap()
                         .overflow_hidden();
                     // The two-pane list is narrow by design, and middle-ellipsing
@@ -321,6 +334,45 @@ impl HarnessWorkspace {
             }
         }
         files
+    }
+
+    /// ↑/↓ in the two-pane layout: show the previous or next changed file,
+    /// in list order, and scroll the list to keep it in view. Stops at the
+    /// ends rather than wrapping. Returns whether the key was used.
+    pub(crate) fn step_diff_file(&mut self, down: bool, cx: &mut Context<Self>) -> bool {
+        let keys: Vec<&str> = self.diff.files.iter().map(|f| f.path.as_str()).collect();
+        if keys.is_empty() {
+            return false;
+        }
+        let current = self
+            .focused_file()
+            .and_then(|f| keys.iter().position(|k| *k == f))
+            .unwrap_or(0);
+        let next = if down {
+            (current + 1).min(keys.len() - 1)
+        } else {
+            current.saturating_sub(1)
+        };
+        self.diff_focus = Some(keys[next].to_string());
+        // The list's children include a heading before each project's files
+        // in a multi-repo task, so the row's child index runs ahead of its
+        // file index by the headings above it.
+        let headings = if self.unified_diff.files.is_empty() {
+            0
+        } else {
+            let mut seen: Option<&str> = None;
+            self.unified_diff.files[..=next.min(self.unified_diff.files.len() - 1)]
+                .iter()
+                .filter(|uf| {
+                    let new = seen != Some(uf.repo.as_str());
+                    seen = Some(uf.repo.as_str());
+                    new
+                })
+                .count()
+        };
+        self.diff_files_scroll.scroll_to_item(next + headings);
+        cx.notify();
+        true
     }
 
     /// Which file the two-pane layout is showing.

@@ -12,6 +12,38 @@ Unreleased is empty.
 
 ## Unreleased
 
+### Added
+
+- Drag agents by their grip in **Settings › Agents** to reorder them. The
+  order is used in the **+** menu and the new-task picker. New tasks start
+  with your last-used agent, or the top of the list if you haven't used one;
+  a ★ after its name marks which one that is.
+- Agent tabs show a spinner while that agent is running. With several agents
+  in one task or project, each tab shows its own.
+- In the Review panel, ↑ and ↓ move between changed files once you've
+  clicked one.
+- In a changed line, the words that changed get a stronger highlight, in
+  both unified and split view.
+
+### Changed
+
+- Settings are tidier. The long explainer above Agents is gone; its useful
+  parts are now tooltips on the command field and the Codex row. A built-in
+  agent with an edited command has a ↺ button that restores the default.
+  On/off settings use switches. A custom agent's status and hook options are
+  now visible choices instead of chips you click to cycle.
+- A new **General** settings pane, where Settings now opens, holds Terminals
+  on quit and the always-on conductor. "Show gitignored files" moved to
+  **Editor**, and the Diff pane is now called **Review**.
+- With no saved order, OpenCode now appears first in the **+** menu, since
+  it's the out-of-the-box default.
+- The **+** menu lists agents under their own **Agents** heading, and every
+  item's label now lines up.
+- Tabs use the **+** menu's names and spacing: "Claude Code" rather than
+  "claude", "Terminal" rather than "❯_ shell". An agent tab's running spinner
+  sits after its icon. Editor and file tabs show Zed's logo in Zed blue, and
+  Terminal's `❯_` is cyan, in the menu and on tabs.
+
 ### Fixed
 
 - Tab and Shift-Tab cycle through controls in Settings, New Task, and New
@@ -25,6 +57,13 @@ Unreleased is empty.
   full name.
 - The tools panel labels Git's count as changed files. Review shows the comment
   count with its comment actions and in the tab tooltip.
+- The selected file in the Review panel's file list is now clearly
+  highlighted.
+- Added and removed lines in the diff are tinted across the full width
+  instead of stopping where the text ends.
+- The update prompt for Homebrew installs now gives the full cask name,
+  `brew upgrade --cask omarpr/tap/openorchestra`, so the copied command
+  targets the openOrchestra tap.
 
 ## 1.3.0 - 2026-11-19
 

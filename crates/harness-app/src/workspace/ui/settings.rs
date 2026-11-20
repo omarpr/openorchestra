@@ -2,7 +2,7 @@
 //! `impl HarnessWorkspace` methods for this feature area.
 
 use super::super::*;
-use super::{modal_button, modal_control, toggled};
+use super::{ModalFocus, modal_button, modal_control, toggled};
 
 /// A Settings section heading. Shared by every pane (and `settings_remote`).
 pub(super) fn section_title(label: &str, hx: &HarnessTheme) -> gpui::Div {
@@ -33,6 +33,93 @@ pub(super) fn chip(label: String, selected: bool, hx: &HarnessTheme) -> gpui::Di
         .text_color(if selected { hx.accent } else { hx.tx1 })
         .hover(|d| d.bg(hx.surface_hover))
         .child(label)
+}
+
+/// One short line of help under a setting. Shared by every pane.
+pub(super) fn hint(text: &'static str, hx: &HarnessTheme) -> gpui::Div {
+    div().pb_1().text_xs().text_color(hx.tx2).child(text)
+}
+
+/// An on/off switch: a pill with a knob that sits right and fills with the
+/// accent when on. Every on/off setting uses it, so on and off read the same
+/// way everywhere.
+pub(super) fn switch(on: bool, hx: &HarnessTheme) -> gpui::Div {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .when(on, |d| d.justify_end())
+        .w(px(28.0))
+        .h(px(16.0))
+        .px(px(2.0))
+        .rounded_full()
+        .border_1()
+        .border_color(if on { hx.accent } else { hx.border })
+        .bg(if on { hx.accent } else { hx.surface_hover })
+        .cursor_pointer()
+        .child(div().size(px(10.0)).rounded_full().bg(if on {
+            gpui::white()
+        } else {
+            hx.tx2.into()
+        }))
+}
+
+/// An on/off setting: what it is, one short line on what it does, and the
+/// switch on the right. The whole row toggles.
+pub(super) fn toggle_row(
+    focus: &ModalFocus,
+    id: &'static str,
+    title: &'static str,
+    detail: &'static str,
+    on: bool,
+    hx: &HarnessTheme,
+    cx: &mut App,
+) -> gpui::Stateful<gpui::Div> {
+    focus
+        .scroll_control(id, title, gpui::Role::Switch, hx, cx)
+        .aria_description(detail)
+        .aria_toggled(toggled(on))
+        .flex()
+        .items_center()
+        .gap_3()
+        .py_1()
+        .mb_1()
+        .cursor_pointer()
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(div().text_sm().text_color(hx.tx0).child(title))
+                .child(div().text_xs().text_color(hx.tx2).child(detail)),
+        )
+        .child(switch(on, hx))
+}
+
+/// A small square glyph button with a tooltip, for per-row actions.
+fn icon_button(
+    focus: &ModalFocus,
+    id: String,
+    glyph: &'static str,
+    label: String,
+    hx: &HarnessTheme,
+    hover: Rgba,
+    cx: &mut App,
+) -> gpui::Stateful<gpui::Div> {
+    focus
+        .scroll_button(id, label.clone(), hx, cx)
+        .flex_none()
+        .w(px(20.0))
+        .py_0p5()
+        .rounded_md()
+        .text_center()
+        .text_sm()
+        .text_color(hx.tx2)
+        .cursor_pointer()
+        .hover(move |d| d.bg(hx.surface_hover).text_color(hover))
+        .tooltip(tip(label))
+        .child(glyph)
 }
 
 impl HarnessWorkspace {
@@ -377,6 +464,28 @@ impl HarnessWorkspace {
                         ),
                 );
             }
+            // ---- Files: gitignored entries ---------------------------------
+            let enabled = self.prefs.show_ignored_files;
+            body = body.child(section_title("Files")).child(
+                toggle_row(
+                    focus,
+                    "show-ignored-toggle",
+                    "Show gitignored files",
+                    "In the file tree and ⌘P.",
+                    enabled,
+                    hx,
+                    cx,
+                )
+                .on_click(cx.listener(|ws, _, _, cx| {
+                    cx.stop_propagation();
+                    ws.prefs.show_ignored_files = !ws.prefs.show_ignored_files;
+                    save_prefs_to(&ws.prefs_path, &ws.prefs);
+                    // Rebuilds the zed settings JSON, which is where the tree
+                    // and the file finder read it from.
+                    ws.apply_appearance(cx);
+                    cx.notify();
+                })),
+            );
         }
 
         if sec == S::Notifications {
@@ -462,93 +571,7 @@ impl HarnessWorkspace {
             }
             body = body.child(section_title("Notification sound")).child(list);
         }
-        if sec == S::Notifications {
-            // ---- Extras --------------------------------------------------------
-            {
-                body = body.child(section_title("Extras"));
-                let always = self.prefs.conductor_always_on;
-                body = body.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .pb_1()
-                    .child(
-                        focus.scroll_control("conductor-toggle", "Always-on conductor", gpui::Role::Switch, hx, cx).aria_toggled(toggled(always))
-                            .child(chip(
-                                if always { "on".into() } else { "off".into() },
-                                always,
-                                hx,
-                            ))
-                            .on_click(cx.listener(|ws, _, _, cx| {
-                                cx.stop_propagation();
-                                ws.prefs.conductor_always_on = !ws.prefs.conductor_always_on;
-                                if !ws.prefs.conductor_always_on {
-                                    ws.conductor_view = None;
-                                }
-                                save_prefs_to(&ws.prefs_path, &ws.prefs);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .child(div().text_sm().text_color(hx.tx1).child("Always-on conductor"))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(hx.tx2)
-                                    .child("Stays on screen, conducts while agents work, and says what they're doing. Drag him anywhere."),
-                            ),
-                    ),
-            );
-            }
-        }
-
         if sec == S::Diff {
-            // ---- Files: gitignored entries ---------------------------------------
-            {
-                let enabled = self.prefs.show_ignored_files;
-                body = body.child(section_title("Files")).child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .pb_1()
-                        .child(
-                            focus
-                                .scroll_control(
-                                    "show-ignored-toggle",
-                                    "Show gitignored files",
-                                    gpui::Role::Switch,
-                                    hx,
-                                    cx,
-                                )
-                                .aria_toggled(toggled(enabled))
-                                .child(chip(
-                                    if enabled { "on".into() } else { "off".into() },
-                                    enabled,
-                                    hx,
-                                ))
-                                .on_click(cx.listener(|ws, _, _, cx| {
-                                    cx.stop_propagation();
-                                    ws.prefs.show_ignored_files = !ws.prefs.show_ignored_files;
-                                    save_prefs_to(&ws.prefs_path, &ws.prefs);
-                                    // Rebuilds the zed settings JSON, which is where
-                                    // the tree and the file finder read it from.
-                                    ws.apply_appearance(cx);
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(hx.tx1)
-                                .child("Show gitignored files in the file tree and ⌘P"),
-                        ),
-                );
-            }
             // ---- Review / tools panel ------------------------------------------
             {
                 let location = self.prefs.diff_location;
@@ -571,10 +594,9 @@ impl HarnessWorkspace {
                 body = body
                     .child(section_title("Review location"))
                     .child(row)
-                    .child(div().text_xs().text_color(hx.tx2).pb_1().child(
-                        "Tools panel keeps Review beside Files and Git on the right. \
-                         A center tab gives Review the whole window; Files and Git \
-                         still use the tools panel when it is open.",
+                    .child(hint(
+                        "A center tab gives Review the whole window. Files and Git stay in the tools panel.",
+                        hx,
                     ));
 
                 let view = self.prefs.diff_view;
@@ -600,274 +622,103 @@ impl HarnessWorkspace {
                 body = body
                     .child(section_title("Diff layout"))
                     .child(view_row)
-                    .child(div().text_xs().text_color(hx.tx2).pb_1().child(
-                        "Split shows old and new side by side. A panel too narrow for two \
-                         readable columns draws unified until you widen it.",
+                    .child(hint(
+                        "Split falls back to unified when the panel is too narrow.",
+                        hx,
                     ));
             }
 
             body = body
                 .child(section_title("Review Overview"))
                 .child(self.render_review_overview_settings(hx, window, cx));
-
-            if !self.has_tmux {
-                body =
-                    body.child(div().text_xs().text_color(hx.tx2).pb_1().child(
-                        "Install tmux for terminal/agent sessions that survive app restarts.",
-                    ));
-            }
         }
 
-        if sec == S::Agents {
-            // ---- Agents: enable/disable + launch-command override -------------
-            let default_agent = default_enabled_agent(&self.prefs);
-            let mut agents = div().flex().flex_col().gap_1().pb_1();
-            for kind in agent_catalog(&self.prefs) {
-                let key = kind.as_str().to_string();
-                let pref = self.prefs.agents.get(&key).cloned().unwrap_or_default();
-                let is_custom = matches!(kind, AgentKind::Other(_));
-                // The command each adapter actually launches when no override is
-                // set — defined once per agent in agent-runtime, not here.
-                let default_cmd = agent_runtime::default_command_display(&kind);
-                let editing = matches!(self.edit_kind(), Some(EditKind::AgentCmd(k)) if *k == key);
-
-                let display_name = agent_display(&kind);
-                let is_default = default_agent.as_ref() == Some(&kind);
-                let toggle_key = key.clone();
-                let edit_key_ = key.clone();
-                // Prefill what the user SEES — the override if set, else the
-                // default — so editing refines the current command instead of
-                // starting from a blank line.
-                let prefill = pref.command.clone().unwrap_or_else(|| default_cmd.clone());
-                let cmd_display = pref.command.clone().unwrap_or_else(|| default_cmd.clone());
-
-                let mut row = div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .py_1()
-                    .child(
-                        div()
-                            .w(px(18.0))
-                            .h(px(18.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(agent_icon(&kind, 16.0)),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(124.0))
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .items_start()
-                            .gap_0p5()
-                            .child(
-                                div().max_w_full().truncate().text_sm()
-                                    .text_color(if pref.disabled { hx.tx2 } else { hx.tx0 })
-                                    .child(display_name.clone()),
-                            )
-                            .when(is_default, |d| {
-                                d.child(
-                                    div().id(format!("agent-default-{key}"))
-                                        .px_1().rounded_sm().bg(tint(hx.accent, 0.14))
-                                        .text_xs().text_color(hx.accent)
-                                        .tooltip(tip("New tasks start with the last agent you used, or the first enabled agent in this list."))
-                                        .child("Default"),
-                                )
-                            }),
-                    )
-                    .child(
-                        // Fixed width + centered so "on"/"off" occupy the same
-                        // box — otherwise the wider "off" pill shoves the command
-                        // field right and the column stops aligning.
-                        focus.scroll_control(format!("agent-en-{key}"), format!("Enable {display_name}"), gpui::Role::Switch, hx, cx).aria_toggled(toggled(!pref.disabled))
-                            .flex_none()
-                            .w(px(38.0))
-                            .py_0p5()
-                            .rounded_md()
-                            .border_1()
-                            .text_xs()
-                            .text_center()
-                            .cursor_pointer()
-                            .border_color(if pref.disabled { hx.border } else { hx.accent })
-                            .bg(if pref.disabled {
-                                hx.surface
-                            } else {
-                                tint(hx.accent, 0.16)
-                            })
-                            .text_color(if pref.disabled { hx.tx1 } else { hx.accent })
-                            .hover(|d| d.bg(hx.surface_hover))
-                            .child(if pref.disabled { "off" } else { "on" })
-                            .on_click(cx.listener(move |ws, _, _, cx| {
-                                cx.stop_propagation();
-                                let is_custom_key =
-                                    AgentKind::known().iter().all(|k| k.as_str() != toggle_key);
-                                let e = ws.prefs.agents.entry(toggle_key.clone()).or_default();
-                                if is_custom_key {
-                                    e.custom = true;
-                                }
-                                e.disabled = !e.disabled;
-                                save_prefs_to(&ws.prefs_path, &ws.prefs);
-                                cx.notify();
-                            })),
-                    );
-                if let Some(editor) = editing.then(|| self.edit_editor()).flatten() {
-                    row = row.child(div().flex_1().child(self.render_input(hx, editor, cx)));
-                } else {
-                    row = row.child(
-                        focus
-                            .scroll_button(
-                                format!("agent-cmd-{key}"),
-                                format!("Edit {display_name} launch command"),
-                                hx,
-                                cx,
-                            )
-                            .flex_1()
-                            // Without min_w_0 a flex child keeps its content width
-                            // (min-width: auto), so a long default like codex's
-                            // refuses to shrink and shoves the row out of
-                            // alignment. min_w_0 lets it shrink; truncate clips the
-                            // overflow with an ellipsis.
-                            .min_w_0()
-                            .truncate()
-                            .px_2()
-                            .py_0p5()
-                            .rounded_md()
-                            .bg(hx.surface)
-                            .border_1()
-                            .border_color(hx.border)
-                            .text_xs()
-                            .font_family(hx.font_mono)
-                            .text_color(if pref.command.is_some() {
-                                hx.tx0
-                            } else {
-                                hx.tx2
-                            })
-                            .cursor_pointer()
-                            .hover(|d| d.bg(hx.surface_hover))
-                            .child(cmd_display)
-                            .on_click(cx.listener(move |ws, _, window, cx| {
-                                cx.stop_propagation();
-                                ws.begin_edit(
-                                    EditKind::AgentCmd(edit_key_.clone()),
-                                    &prefill,
-                                    "launch command…",
-                                    window,
-                                    cx,
-                                );
-                            })),
-                    );
-                }
-                if is_custom {
-                    let remove_key = key.clone();
-                    row = row.child(
-                        focus
-                            .scroll_button(
-                                format!("agent-rm-{key}"),
-                                format!("Remove {display_name}"),
-                                hx,
-                                cx,
-                            )
-                            .flex_none()
-                            .w(px(20.0))
-                            .py_0p5()
-                            .rounded_md()
-                            .text_center()
-                            .text_sm()
-                            .text_color(hx.tx2)
-                            .cursor_pointer()
-                            .hover(|d| d.bg(hx.surface_hover).text_color(hx.red))
-                            .child("×")
-                            .on_click(cx.listener(move |ws, _, _, cx| {
-                                cx.stop_propagation();
-                                ws.prefs.agents.remove(&remove_key);
-                                save_prefs_to(&ws.prefs_path, &ws.prefs);
-                                cx.notify();
-                            })),
-                    );
-                }
-                agents = agents.child(row);
-                // Signal / hook controls — custom agents only. Built-ins keep
-                // their dedicated adapters; these prefs drive ConfigurableRuntime.
-                if is_custom {
-                    agents = agents.child(self.render_agent_signal_row(hx, &key, &pref, cx));
-                }
-            }
-            // Add-a-custom-agent affordance: a slug field (prefilled empty) that
-            // creates a new `AgentKind::Other` on commit.
-            let adding = matches!(self.edit_kind(), Some(EditKind::NewAgent));
-            if let Some(editor) = adding.then(|| self.edit_editor()).flatten() {
-                agents = agents.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .py_1()
-                        .child(
-                            div()
-                                .w(px(18.0))
-                                .text_center()
-                                .font_weight(gpui::FontWeight::BOLD)
-                                .text_color(hx.tx2)
-                                .child("◇"),
-                        )
-                        .child(div().flex_1().child(self.render_input(hx, editor, cx))),
-                );
-            } else {
-                agents = agents.child(
+        if sec == S::General {
+            // ---- Terminals on quit ----------------------------------------------
+            // The same choice the quit prompt's "Remember" box saves. Without this
+            // row, a remembered answer could only be undone by editing prefs.json.
+            let current = self.prefs.close_terminals_on_exit;
+            let mut row = div().flex().gap_1p5().pb_1();
+            for (label, value) in [
+                ("Ask", None),
+                ("Keep running", Some(false)),
+                ("Close", Some(true)),
+            ] {
+                row = row.child(
                     focus
-                        .scroll_button("agent-add", "Add agent", hx, cx)
-                        .mt_1()
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(hx.border)
-                        .bg(hx.surface)
-                        .text_xs()
-                        .text_color(hx.tx1)
-                        .cursor_pointer()
-                        .hover(|d| d.bg(hx.surface_hover).text_color(hx.tx0))
-                        .child("+ Add agent")
-                        .on_click(cx.listener(|ws, _, window, cx| {
+                        .scroll_choice(
+                            format!("quit-terminals-{label}"),
+                            label,
+                            current == value,
+                            hx,
+                            cx,
+                        )
+                        .child(chip(label.to_string(), current == value, hx))
+                        .on_click(cx.listener(move |ws, _, _, cx| {
                             cx.stop_propagation();
-                            ws.begin_edit(EditKind::NewAgent, "", "agent name…", window, cx);
+                            ws.prefs.close_terminals_on_exit = value;
+                            save_prefs_to(&ws.prefs_path, &ws.prefs);
+                            cx.notify();
                         })),
                 );
             }
             body = body
-            .child(section_title("Agents"))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(hx.tx2)
-                    .pb_1()
-                    .child("Click a command to edit it (runs via $SHELL -lic, so your aliases and ~/.zshrc apply; empty restores the default). Custom agents can enable status hooks for busy/idle notifications. Enter saves, Esc cancels."),
-            )
-            .child(
-                div().text_xs().text_color(hx.tx2).pb_1()
-                    .child("Codex uses trusted hooks for Running and Idle. If status is missing, review the openOrchestra hooks in Codex with /hooks. Approval prompts appear in the terminal and do not send an attention notification."),
-            )
-            .child(agents);
+                .child(section_title("Terminals on quit"))
+                .child(row)
+                .child(hint(
+                    if self.has_tmux {
+                        "Keep running lets agents pick up where they left off next launch."
+                    } else {
+                        "Install tmux so agent sessions survive app restarts."
+                    },
+                    hx,
+                ));
+
+            // ---- Conductor -------------------------------------------------------
+            let always = self.prefs.conductor_always_on;
+            body = body.child(section_title("Conductor")).child(
+                toggle_row(
+                    focus,
+                    "conductor-toggle",
+                    "Always-on conductor",
+                    "Stays on screen and narrates what agents are doing. Drag him anywhere.",
+                    always,
+                    hx,
+                    cx,
+                )
+                .on_click(cx.listener(|ws, _, _, cx| {
+                    cx.stop_propagation();
+                    ws.prefs.conductor_always_on = !ws.prefs.conductor_always_on;
+                    if !ws.prefs.conductor_always_on {
+                        ws.conductor_view = None;
+                    }
+                    save_prefs_to(&ws.prefs_path, &ws.prefs);
+                    cx.notify();
+                })),
+            );
+        }
+
+        if sec == S::Agents {
+            body = body
+                .child(section_title("Agents"))
+                .child(self.render_agent_list(hx, cx));
             // The reset button is always shown for discoverability, but stays
             // greyed out and inert while every built-in agent is already at its
             // default — clicking it would undo nothing. Custom agents are the
             // user's own additions, not defaults, so reset never touches them.
-            let agents_dirty = self
-                .prefs
-                .agents
-                .values()
-                .any(|a| !a.custom && (a.disabled || a.command.is_some()));
+            let agents_dirty = !self.prefs.agent_order.is_empty()
+                || self
+                    .prefs
+                    .agents
+                    .values()
+                    .any(|a| !a.custom && (a.disabled || a.command.is_some()));
             let reset = if agents_dirty {
                 focus.scroll_button("agents-reset", "Reset agents to defaults", hx, cx)
             } else {
                 div().id("agents-reset")
             };
             let mut reset = reset
-                .mt_1()
+                .mt_2()
                 .px_3()
                 .py_1()
                 .rounded_md()
@@ -883,57 +734,18 @@ impl HarnessWorkspace {
                     .hover(|d| d.bg(hx.surface_hover).text_color(hx.tx0))
                     .on_click(cx.listener(|ws, _, _, cx| {
                         cx.stop_propagation();
-                        // Drop built-in overrides only; keep the user's custom
-                        // agents, which have no "default" to reset to.
+                        // Drop built-in overrides and the custom order; keep
+                        // the user's custom agents, which have no "default"
+                        // to reset to.
                         ws.prefs.agents.retain(|_, a| a.custom);
+                        ws.prefs.agent_order.clear();
                         save_prefs_to(&ws.prefs_path, &ws.prefs);
                         cx.notify();
                     }));
             } else {
                 reset = reset.text_color(hx.tx2);
             }
-            body = body.child(reset);
-
-            // ---- Terminals on quit ----------------------------------------------
-            // The same choice the quit prompt's "Remember" box saves. Without this
-            // row, a remembered answer could only be undone by editing prefs.json.
-            {
-                let current = self.prefs.close_terminals_on_exit;
-                let mut row = div().flex().gap_1p5().pb_1();
-                for (label, value) in [
-                    ("Ask", None),
-                    ("Keep running", Some(false)),
-                    ("Close", Some(true)),
-                ] {
-                    row = row.child(
-                        focus
-                            .scroll_choice(
-                                format!("quit-terminals-{label}"),
-                                label,
-                                current == value,
-                                hx,
-                                cx,
-                            )
-                            .child(chip(label.to_string(), current == value, hx))
-                            .on_click(cx.listener(move |ws, _, _, cx| {
-                                cx.stop_propagation();
-                                ws.prefs.close_terminals_on_exit = value;
-                                save_prefs_to(&ws.prefs_path, &ws.prefs);
-                                cx.notify();
-                            })),
-                    );
-                }
-                body = body
-                .child(section_title("Terminals on quit"))
-                .child(row)
-                .child(
-                    div()
-                        .pb_1()
-                        .text_xs()
-                        .text_color(hx.tx2)
-                        .child("Keep running leaves agent tmux sessions alive so they reattach on the next launch."),
-                );
-            }
+            body = body.child(div().flex().child(reset));
         }
 
         if sec == S::Remote {
@@ -1167,8 +979,342 @@ impl HarnessWorkspace {
             .into_any_element()
     }
 
-    /// Second row under a custom agent: cycle signal fidelity and hook-install
-    /// dialect; when Manual + signal on, show the shim invocation to wire.
+    /// Settings › Agents: one row per agent, in the user's order.
+    ///
+    /// Row: grip · icon · name · launch command · restore · switch · remove.
+    /// Only the grip starts a drag — the rest of the row holds a switch, a
+    /// click-to-edit command and, while editing, a live text input, none of
+    /// which should turn into a drag. The whole row (with a custom agent's
+    /// status controls) is the drop target, so the pair moves together.
+    fn render_agent_list(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> gpui::Div {
+        let default_agent = default_enabled_agent(&self.prefs);
+        let focus = &self.settings_focus;
+        let mut agents = div().flex().flex_col().gap_0p5().pb_1();
+        for kind in agent_catalog(&self.prefs) {
+            let key = kind.as_str().to_string();
+            let pref = self.prefs.agents.get(&key).cloned().unwrap_or_default();
+            let is_custom = matches!(kind, AgentKind::Other(_));
+            // The command each adapter actually launches when no override is
+            // set — defined once per agent in agent-runtime, not here.
+            let default_cmd = agent_runtime::default_command_display(&kind);
+            let editing = matches!(self.edit_kind(), Some(EditKind::AgentCmd(k)) if *k == key);
+            let is_default = default_agent.as_ref() == Some(&kind);
+            // A built-in with its own command; customs have no default to
+            // restore.
+            let overridden = !is_custom && pref.command.is_some();
+            // Prefill what the user SEES — the override if set, else the
+            // default — so editing refines the current command instead of
+            // starting from a blank line.
+            let prefill = pref.command.clone().unwrap_or_else(|| default_cmd.clone());
+            let cmd_display = prefill.clone();
+            let on = !pref.disabled;
+            let display_name = agent_display(&kind);
+
+            let ghost_kind = kind.clone();
+            let ghost_theme = hx.clone();
+            let grip = div()
+                .id(gpui::SharedString::from(format!("agent-grip-{key}")))
+                .flex_none()
+                .w(px(14.0))
+                .h(px(20.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_sm()
+                .cursor(gpui::CursorStyle::OpenHand)
+                .hover(|d| d.bg(hx.surface_hover))
+                .tooltip(tip("Drag to reorder"))
+                .child(grip_dots(hx.tx2))
+                .on_drag(DraggedAgentRow { key: key.clone() }, move |_, _, _, cx| {
+                    let kind = ghost_kind.clone();
+                    let hx = ghost_theme.clone();
+                    cx.new(|_| AgentRowGhost { kind, hx })
+                });
+
+            let name = div()
+                .id(gpui::SharedString::from(format!("agent-name-{key}")))
+                .flex_none()
+                .w(px(150.0))
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(18.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .when(!on, |d| d.opacity(0.5))
+                        .child(agent_icon(&kind, 16.0)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_sm()
+                                .text_color(if on { hx.tx0 } else { hx.tx2 })
+                                .child(display_name.clone()),
+                        )
+                        // A star after the name marks the default at a glance,
+                        // without a word competing with the name for width.
+                        .when(is_default, |d| {
+                            d.child(
+                                div()
+                                    .id(gpui::SharedString::from(format!("agent-default-{key}")))
+                                    .flex_none()
+                                    .text_sm()
+                                    .text_color(hx.amber)
+                                    .tooltip(tip(
+                                        "Default for new tasks: the last agent you used, or the first enabled agent in this list.",
+                                    ))
+                                    .child("★"),
+                            )
+                        }),
+                )
+                .when(is_custom, |d| d.tooltip(tip(display_name.clone())))
+                // The one thing worth knowing about Codex status, where it is
+                // asked about rather than in a paragraph over every agent.
+                .when(matches!(kind, AgentKind::Codex), |d| {
+                    d.tooltip(tip(
+                        "Running and Idle come from Codex hooks. \
+                         If they're missing, check /hooks in Codex.",
+                    ))
+                });
+
+            let command: AnyElement =
+                if let Some(editor) = editing.then(|| self.edit_editor()).flatten() {
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(self.render_input(hx, editor, cx))
+                        .into_any_element()
+                } else {
+                    let edit_key = key.clone();
+                    focus
+                        .scroll_button(
+                            format!("agent-cmd-{key}"),
+                            format!("Edit {display_name} launch command"),
+                            hx,
+                            cx,
+                        )
+                        .flex_1()
+                        // Without min_w_0 a flex child keeps its content width
+                        // (min-width: auto), so a long default like codex's
+                        // refuses to shrink and shoves the row out of
+                        // alignment. min_w_0 lets it shrink; truncate clips the
+                        // overflow with an ellipsis.
+                        .min_w_0()
+                        .truncate()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_md()
+                        .bg(hx.surface)
+                        .border_1()
+                        .border_color(hx.border)
+                        .text_xs()
+                        .font_family(hx.font_mono)
+                        .text_color(if on && pref.command.is_some() {
+                            hx.tx0
+                        } else {
+                            hx.tx2
+                        })
+                        .cursor_pointer()
+                        .hover(|d| d.bg(hx.surface_hover))
+                        .tooltip(tip(
+                            "Launch command. Runs in your login shell, so aliases apply.",
+                        ))
+                        .child(cmd_display)
+                        .on_click(cx.listener(move |ws, _, window, cx| {
+                            cx.stop_propagation();
+                            ws.begin_edit(
+                                EditKind::AgentCmd(edit_key.clone()),
+                                &prefill,
+                                "launch command…",
+                                window,
+                                cx,
+                            );
+                        }))
+                        .into_any_element()
+                };
+
+            // Fixed-width slots, filled or not, so every row's switch lines up.
+            let restore = if overridden {
+                let restore_key = key.clone();
+                icon_button(
+                    focus,
+                    format!("agent-restore-{key}"),
+                    "↺",
+                    format!("Restore the default {display_name} command"),
+                    hx,
+                    hx.tx0,
+                    cx,
+                )
+                .on_click(cx.listener(move |ws, _, _, cx| {
+                    cx.stop_propagation();
+                    if let Some(e) = ws.prefs.agents.get_mut(&restore_key) {
+                        e.command = None;
+                    }
+                    save_prefs_to(&ws.prefs_path, &ws.prefs);
+                    cx.notify();
+                }))
+                .into_any_element()
+            } else {
+                div().flex_none().w(px(20.0)).into_any_element()
+            };
+
+            let toggle_key = key.clone();
+            let switch_el = focus
+                .scroll_control(
+                    format!("agent-en-{key}"),
+                    format!("Enable {display_name}"),
+                    gpui::Role::Switch,
+                    hx,
+                    cx,
+                )
+                .aria_toggled(toggled(on))
+                .flex_none()
+                .tooltip(tip(if on {
+                    "On: offered in the + menu"
+                } else {
+                    "Off: hidden from the + menu"
+                }))
+                .child(switch(on, hx))
+                .on_click(cx.listener(move |ws, _, _, cx| {
+                    cx.stop_propagation();
+                    let is_custom_key = AgentKind::known().iter().all(|k| k.as_str() != toggle_key);
+                    let e = ws.prefs.agents.entry(toggle_key.clone()).or_default();
+                    if is_custom_key {
+                        e.custom = true;
+                    }
+                    e.disabled = !e.disabled;
+                    save_prefs_to(&ws.prefs_path, &ws.prefs);
+                    cx.notify();
+                }));
+
+            let remove = if is_custom {
+                let remove_key = key.clone();
+                icon_button(
+                    focus,
+                    format!("agent-rm-{key}"),
+                    "×",
+                    format!("Remove {display_name}"),
+                    hx,
+                    hx.red,
+                    cx,
+                )
+                .on_click(cx.listener(move |ws, _, _, cx| {
+                    cx.stop_propagation();
+                    ws.prefs.agents.remove(&remove_key);
+                    ws.prefs.agent_order.retain(|k| *k != remove_key);
+                    save_prefs_to(&ws.prefs_path, &ws.prefs);
+                    cx.notify();
+                }))
+                .into_any_element()
+            } else {
+                div().flex_none().w(px(20.0)).into_any_element()
+            };
+
+            let row = div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .py_1()
+                .child(grip)
+                .child(name)
+                .child(command)
+                .child(restore)
+                .child(switch_el)
+                .child(remove);
+
+            let drop_key = key.clone();
+            let drop_bg = tint(hx.accent, 0.16);
+            let mut item = div()
+                .id(gpui::SharedString::from(format!("agent-item-{key}")))
+                .flex()
+                .flex_col()
+                .px_1()
+                .rounded_md()
+                .drag_over::<DraggedAgentRow>(move |d, _, _, _| d.bg(drop_bg))
+                .on_drop(cx.listener(move |ws, dragged: &DraggedAgentRow, _, cx| {
+                    // Dropped where it started: nothing moved, so save nothing
+                    // (a saved order would light up "Reset" for no change).
+                    if dragged.key == drop_key {
+                        return;
+                    }
+                    ws.prefs.agent_order =
+                        agent_order_after_move(&ws.prefs, &dragged.key, &drop_key);
+                    save_prefs_to(&ws.prefs_path, &ws.prefs);
+                    cx.notify();
+                }))
+                .child(row);
+            // Status controls — custom agents only. Built-ins keep their
+            // dedicated adapters; these prefs drive ConfigurableRuntime.
+            if is_custom {
+                item = item.child(self.render_agent_signal_row(hx, &key, &pref, cx));
+            }
+            agents = agents.child(item);
+        }
+
+        // Add-a-custom-agent affordance: a slug field (prefilled empty) that
+        // creates a new `AgentKind::Other` on commit.
+        let adding = matches!(self.edit_kind(), Some(EditKind::NewAgent));
+        if let Some(editor) = adding.then(|| self.edit_editor()).flatten() {
+            agents = agents.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_1()
+                    .py_1()
+                    .child(div().flex_none().w(px(14.0)))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(18.0))
+                            .text_center()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(hx.tx2)
+                            .child("◇"),
+                    )
+                    .child(div().flex_1().child(self.render_input(hx, editor, cx))),
+            );
+        } else {
+            agents = agents.child(
+                div().flex().pt_1().child(
+                    focus
+                        .scroll_button("agent-add", "Add agent", hx, cx)
+                        .px_3()
+                        .py_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(hx.border)
+                        .bg(hx.surface)
+                        .text_xs()
+                        .text_color(hx.tx1)
+                        .cursor_pointer()
+                        .hover(|d| d.bg(hx.surface_hover).text_color(hx.tx0))
+                        .child("+ Add agent")
+                        .on_click(cx.listener(|ws, _, window, cx| {
+                            cx.stop_propagation();
+                            ws.begin_edit(EditKind::NewAgent, "", "agent name…", window, cx);
+                        })),
+                ),
+            );
+        }
+        agents
+    }
+
+    /// Status controls under a custom agent, as visible choices rather than
+    /// chips that cycle on click: how status is detected, and (when on) how
+    /// its hooks get installed. Manual install shows the shim to wire up.
     fn render_agent_signal_row(
         &self,
         hx: &HarnessTheme,
@@ -1178,146 +1324,222 @@ impl HarnessWorkspace {
     ) -> impl IntoElement {
         use agent_runtime::{HookInstall, SignalProfile, WaitFidelity};
 
-        let fidelity_label = match pref.signal.as_ref().map(|s| s.fidelity) {
-            None => "signal: off",
-            Some(WaitFidelity::BestEffort) => "signal: best",
-            Some(WaitFidelity::Exact) => "signal: exact",
-            Some(WaitFidelity::TerminalOnly) => "signal: off",
-        };
-        let install = pref.signal.as_ref().map(|s| s.install);
-        let effective_install = install.unwrap_or_default().effective(key);
-        let install_label = match install {
-            None | Some(HookInstall::None) => "hooks: manual",
-            Some(HookInstall::Auto) => "hooks: auto",
-            Some(HookInstall::ClaudeLocalSettings) => "hooks: claude",
-            Some(HookInstall::CodexUserHooks) => "hooks: codex",
-            Some(HookInstall::CursorUserHooks) => "hooks: cursor",
-        };
-        let install_detail = match effective_install {
-            HookInstall::Auto | HookInstall::None => "Use the status shim in your own hook config",
-            HookInstall::ClaudeLocalSettings => "Install Claude Code hooks when the agent launches",
-            HookInstall::CodexUserHooks => {
-                "Install Codex hooks when the agent launches. Review them with /hooks."
-            }
-            HookInstall::CursorUserHooks => "Install Cursor Agent hooks when the agent launches",
-        };
-        let signal_on = pref
+        let fidelity = pref
             .signal
             .as_ref()
-            .is_some_and(|s| !matches!(s.fidelity, WaitFidelity::TerminalOnly));
-        let show_shim = signal_on && effective_install == HookInstall::None;
+            .map(|s| s.fidelity)
+            .filter(|f| !matches!(f, WaitFidelity::TerminalOnly));
+        let install = pref
+            .signal
+            .as_ref()
+            .map(|s| s.install)
+            .unwrap_or(HookInstall::None);
+        let signal_on = fidelity.is_some();
+        let show_shim = signal_on && install.effective(key) == HookInstall::None;
         let shim_cmd = agent_runtime::harness_status_shim_command(&self.state_dir);
 
-        let focus = &self.settings_focus;
-        let fid_key = key.to_string();
-        let inst_key = key.to_string();
+        let label = |text: &'static str| {
+            div()
+                .flex_none()
+                .w(px(44.0))
+                .text_xs()
+                .text_color(hx.tx2)
+                .child(text)
+        };
 
-        let mut row = div()
+        let mut status = div()
             .flex()
+            .flex_wrap()
             .items_center()
-            .gap_2()
-            .pl(px(28.0))
-            .pb_1()
-            .child(
-                focus
-                    .scroll_button(
-                        format!("agent-sig-{key}"),
-                        format!("{key} {fidelity_label}"),
+            .gap_1p5()
+            .child(label("Status"));
+        for (text, value, detail) in [
+            (
+                "Off",
+                None,
+                "No status hooks: the terminal is the only signal.",
+            ),
+            (
+                "Best effort",
+                Some(WaitFidelity::BestEffort),
+                "Hooks report busy and idle. Approval prompts may not notify.",
+            ),
+            (
+                "Exact",
+                Some(WaitFidelity::Exact),
+                "Hooks also report when the agent is waiting on you.",
+            ),
+        ] {
+            let k = key.to_string();
+            status = status.child(
+                self.settings_focus
+                    .scroll_choice(
+                        format!("agent-sig-{key}-{text}"),
+                        format!("{key} status: {text}"),
+                        fidelity == value,
                         hx,
                         cx,
                     )
-                    .flex_none()
-                    .px_2()
-                    .py_0p5()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(hx.border)
-                    .bg(hx.surface)
-                    .text_xs()
-                    .text_color(if signal_on { hx.accent } else { hx.tx2 })
-                    .cursor_pointer()
-                    .hover(|d| d.bg(hx.surface_hover))
-                    .child(fidelity_label)
+                    .tooltip(tip(detail))
+                    .child(chip(text.to_string(), fidelity == value, hx))
                     .on_click(cx.listener(move |ws, _, _, cx| {
                         cx.stop_propagation();
-                        let e = ws.prefs.agents.entry(fid_key.clone()).or_default();
+                        let e = ws.prefs.agents.entry(k.clone()).or_default();
                         e.custom = true;
                         let install = e
                             .signal
                             .as_ref()
                             .map(|s| s.install)
                             .unwrap_or(HookInstall::None);
-                        e.signal = match e.signal.as_ref().map(|s| s.fidelity) {
-                            None | Some(WaitFidelity::TerminalOnly) => {
-                                Some(SignalProfile::best_effort(install))
-                            }
-                            Some(WaitFidelity::BestEffort) => Some(SignalProfile::exact(install)),
-                            Some(WaitFidelity::Exact) => None,
+                        e.signal = match value {
+                            None => None,
+                            Some(WaitFidelity::Exact) => Some(SignalProfile::exact(install)),
+                            Some(_) => Some(SignalProfile::best_effort(install)),
                         };
                         save_prefs_to(&ws.prefs_path, &ws.prefs);
                         cx.notify();
                     })),
-            )
-            .child(
-                focus
-                    .scroll_button(
-                        format!("agent-inst-{key}"),
-                        format!("{key} {install_label}"),
-                        hx,
-                        cx,
-                    )
-                    .flex_none()
-                    .px_2()
-                    .py_0p5()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(hx.border)
-                    .bg(hx.surface)
-                    .text_xs()
-                    .text_color(if signal_on { hx.tx0 } else { hx.tx2 })
-                    .cursor_pointer()
-                    .hover(|d| d.bg(hx.surface_hover))
-                    .tooltip(tip(install_detail))
-                    .child(install_label)
-                    .on_click(cx.listener(move |ws, _, _, cx| {
-                        cx.stop_propagation();
-                        let e = ws.prefs.agents.entry(inst_key.clone()).or_default();
-                        e.custom = true;
-                        // Turning on hooks without a fidelity still enables
-                        // best-effort so install is meaningful.
-                        let fidelity = e
-                            .signal
-                            .as_ref()
-                            .map(|s| s.fidelity)
-                            .filter(|f| !matches!(f, WaitFidelity::TerminalOnly))
-                            .unwrap_or(WaitFidelity::BestEffort);
-                        let next_install = match e.signal.as_ref().map(|s| s.install) {
-                            None | Some(HookInstall::None) => HookInstall::Auto,
-                            Some(HookInstall::Auto) => HookInstall::ClaudeLocalSettings,
-                            Some(HookInstall::ClaudeLocalSettings) => HookInstall::CodexUserHooks,
-                            Some(HookInstall::CodexUserHooks) => HookInstall::CursorUserHooks,
-                            Some(HookInstall::CursorUserHooks) => HookInstall::None,
-                        };
-                        e.signal = Some(SignalProfile {
-                            fidelity,
-                            install: next_install,
-                        });
-                        save_prefs_to(&ws.prefs_path, &ws.prefs);
-                        cx.notify();
-                    })),
-            );
-        if show_shim {
-            row = row.child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_xs()
-                    .font_family(hx.font_mono)
-                    .text_color(hx.tx2)
-                    .child(shim_cmd),
             );
         }
-        row
+
+        // Indented past the grip and icon, so it reads as part of the agent.
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .pl(px(46.0))
+            .pb_1p5()
+            .child(status);
+
+        if signal_on {
+            let mut hooks = div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_1p5()
+                .child(label("Hooks"));
+            for (text, value, detail) in [
+                (
+                    "Manual",
+                    HookInstall::None,
+                    "Wire the status shim into your own hook config.",
+                ),
+                (
+                    "Auto",
+                    HookInstall::Auto,
+                    "Pick the hook format from the agent's name.",
+                ),
+                (
+                    "Claude",
+                    HookInstall::ClaudeLocalSettings,
+                    "Install Claude Code hooks when the agent launches.",
+                ),
+                (
+                    "Codex",
+                    HookInstall::CodexUserHooks,
+                    "Install Codex hooks when the agent launches. Review them with /hooks.",
+                ),
+                (
+                    "Cursor",
+                    HookInstall::CursorUserHooks,
+                    "Install Cursor Agent hooks when the agent launches.",
+                ),
+            ] {
+                let k = key.to_string();
+                hooks = hooks.child(
+                    self.settings_focus
+                        .scroll_choice(
+                            format!("agent-inst-{key}-{text}"),
+                            format!("{key} hooks: {text}"),
+                            install == value,
+                            hx,
+                            cx,
+                        )
+                        .tooltip(tip(detail))
+                        .child(chip(text.to_string(), install == value, hx))
+                        .on_click(cx.listener(move |ws, _, _, cx| {
+                            cx.stop_propagation();
+                            let e = ws.prefs.agents.entry(k.clone()).or_default();
+                            e.custom = true;
+                            let fidelity = e
+                                .signal
+                                .as_ref()
+                                .map(|s| s.fidelity)
+                                .filter(|f| !matches!(f, WaitFidelity::TerminalOnly))
+                                .unwrap_or(WaitFidelity::BestEffort);
+                            e.signal = Some(SignalProfile {
+                                fidelity,
+                                install: value,
+                            });
+                            save_prefs_to(&ws.prefs_path, &ws.prefs);
+                            cx.notify();
+                        })),
+                );
+            }
+            col = col.child(hooks);
+        }
+        if show_shim {
+            col = col.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .child(label("Shim"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .font_family(hx.font_mono)
+                            .text_color(hx.tx1)
+                            .child(shim_cmd),
+                    ),
+            );
+        }
+        col
+    }
+}
+
+/// The 2×2 dots a drag handle shows.
+fn grip_dots(color: Rgba) -> gpui::Div {
+    let dot = || div().size(px(3.0)).rounded_full().bg(color);
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(3.0))
+        .child(div().flex().gap(px(3.0)).child(dot()).child(dot()))
+        .child(div().flex().gap(px(3.0)).child(dot()).child(dot()))
+}
+
+/// What follows the cursor while an agent row is dragged: the agent itself.
+struct AgentRowGhost {
+    kind: AgentKind,
+    hx: HarnessTheme,
+}
+
+impl Render for AgentRowGhost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let hx = &self.hx;
+        div()
+            .w(px(220.0))
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(hx.surface2)
+            .border_1()
+            .border_color(hx.accent)
+            .shadow_lg()
+            .child(grip_dots(hx.tx1))
+            .child(agent_icon(&self.kind, 16.0))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(hx.tx0)
+                    .child(self.kind.to_string()),
+            )
     }
 }

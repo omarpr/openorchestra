@@ -51,6 +51,7 @@ const SWATCHES: [u32; 8] = [
 /// Notifications somewhere to exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsSection {
+    General,
     Appearance,
     Editor,
     Diff,
@@ -61,7 +62,8 @@ pub(crate) enum SettingsSection {
 }
 
 impl SettingsSection {
-    pub(crate) const ALL: [SettingsSection; 7] = [
+    pub(crate) const ALL: [SettingsSection; 8] = [
+        SettingsSection::General,
         SettingsSection::Appearance,
         SettingsSection::Editor,
         SettingsSection::Diff,
@@ -73,9 +75,12 @@ impl SettingsSection {
 
     pub(crate) fn label(self) -> &'static str {
         match self {
+            SettingsSection::General => "General",
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Editor => "Editor",
-            SettingsSection::Diff => "Diff",
+            // The pane holds Review location, diff layout and Review
+            // Overview: named for the panel it configures.
+            SettingsSection::Diff => "Review",
             SettingsSection::Agents => "Agents",
             SettingsSection::Notifications => "Notifications",
             SettingsSection::Remote => "Remote",
@@ -285,6 +290,11 @@ fn move_task_on_disk(
 pub(crate) enum ReorderList {
     Projects,
     Tasks,
+}
+
+/// An agent row being dragged in Settings › Agents: its catalog key.
+pub(crate) struct DraggedAgentRow {
+    key: String,
 }
 
 /// A row being dragged in a reorder panel: its list, and the project name or
@@ -812,6 +822,9 @@ pub struct HarnessWorkspace {
     /// focus path. Without it a Diff tab would take focus nowhere and swallow
     /// nothing, which reads as the trigger simply not working.
     diff_surface_focus: FocusHandle,
+    /// Scroll state of the changed-files list, so ↑/↓ can keep the selected
+    /// file in view.
+    diff_files_scroll: gpui::ScrollHandle,
     /// Latest resource sample driving the sidebar band; `None` until the first
     /// tick lands (and while CPU has no delta yet).
     resource: Option<crate::resource_monitor::Snapshot>,

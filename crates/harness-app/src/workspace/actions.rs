@@ -523,11 +523,21 @@ impl HarnessWorkspace {
                 // Preserve custom-ness: or_default yields custom:false, which
                 // would drop a custom agent from the catalog after an edit.
                 let is_custom_key = AgentKind::known().iter().all(|k| k.as_str() != kind);
+                let default_cmd =
+                    agent_runtime::default_command_display(&AgentKind::from(kind.as_str()));
                 let entry = self.prefs.agents.entry(kind).or_default();
                 if is_custom_key {
                     entry.custom = true;
                 }
-                entry.command = if cmd.is_empty() { None } else { Some(cmd) };
+                // The field is prefilled with the default, so saving it as-is
+                // (or emptying it) means "the default": no override, and no
+                // restore button for a command that was never changed.
+                let is_default = !is_custom_key && cmd == default_cmd;
+                entry.command = if cmd.is_empty() || is_default {
+                    None
+                } else {
+                    Some(cmd)
+                };
                 save_prefs_to(&self.prefs_path, &self.prefs);
                 self.settings_focus.focus(window, cx);
                 cx.notify();

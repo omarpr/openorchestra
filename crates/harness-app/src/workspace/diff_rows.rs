@@ -34,6 +34,11 @@ pub struct DiffRow {
     /// lines carry the *old* file's number, everything else the new file's.
     pub number: Option<u32>,
     pub text: String,
+    /// Byte ranges of `text` that changed against the line this one replaced
+    /// (or was replaced by): the words to emphasize inside a modified line.
+    /// Empty for context, pure insertions and deletions, and lines rewritten
+    /// so thoroughly that marking words would only be noise.
+    pub emphasis: Vec<std::ops::Range<usize>>,
 }
 
 /// Parse a `@@ -old,n +new,n @@ section` header.
@@ -65,7 +70,12 @@ pub fn readable_diff_lines(unified: &str) -> Vec<DiffRow> {
         "similarity index ",
         "dissimilarity index ",
     ];
-    let row = |kind, number, text: String| DiffRow { kind, number, text };
+    let row = |kind, number, text: String| DiffRow {
+        kind,
+        number,
+        text,
+        emphasis: Vec::new(),
+    };
 
     let mut out: Vec<DiffRow> = Vec::new();
     let (mut old_no, mut new_no) = (0u32, 0u32);
@@ -153,7 +163,147 @@ pub fn readable_diff_lines(unified: &str) -> Vec<DiffRow> {
         };
         out.push(row(kind, number, text.to_string()));
     }
+    mark_word_changes(&mut out);
     out
+}
+
+/// Pair each change block's removed lines with its added lines, k-th with
+/// k-th — the same pairing split view draws side by side — and record which
+/// words changed within each pair.
+fn mark_word_changes(rows: &mut [DiffRow]) {
+    let mut i = 0;
+    while i < rows.len() {
+        if rows[i].kind != DiffLineKind::Removed {
+            i += 1;
+            continue;
+        }
+        let dels = i;
+        while i < rows.len() && rows[i].kind == DiffLineKind::Removed {
+            i += 1;
+        }
+        let adds = i;
+        while i < rows.len() && rows[i].kind == DiffLineKind::Added {
+            i += 1;
+        }
+        for k in 0..(adds - dels).min(i - adds) {
+            if let Some((old, new)) = word_changes(&rows[dels + k].text, &rows[adds + k].text) {
+                rows[dels + k].emphasis = old;
+                rows[adds + k].emphasis = new;
+            }
+        }
+    }
+}
+
+/// Split a line into words (letters, digits, `_`), whitespace runs, and
+/// single punctuation characters, as byte ranges.
+fn word_tokens(s: &str) -> Vec<std::ops::Range<usize>> {
+    fn class(c: char) -> u8 {
+        if c.is_alphanumeric() || c == '_' {
+            0
+        } else if c.is_whitespace() {
+            1
+        } else {
+            2
+        }
+    }
+    let mut out = Vec::new();
+    let mut chars = s.char_indices().peekable();
+    while let Some((start, c)) = chars.next() {
+        let k = class(c);
+        let mut end = start + c.len_utf8();
+        if k != 2 {
+            while let Some(&(at, d)) = chars.peek() {
+                if class(d) != k {
+                    break;
+                }
+                end = at + d.len_utf8();
+                chars.next();
+            }
+        }
+        out.push(start..end);
+    }
+    out
+}
+
+/// Above this many token comparisons a pair is not diffed word by word: the
+/// table grows with the product of the two lines' lengths.
+const WORD_DIFF_MAX_CELLS: usize = 250_000;
+
+/// The changed byte ranges of `old` and `new`, from a word-level longest
+/// common subsequence. `None` when there is nothing useful to mark: either
+/// line is empty, the pair is too long to diff, or the lines share so little
+/// that the whole line is the change.
+pub(crate) fn word_changes(
+    old: &str,
+    new: &str,
+) -> Option<(Vec<std::ops::Range<usize>>, Vec<std::ops::Range<usize>>)> {
+    let (a, b) = (word_tokens(old), word_tokens(new));
+    let (n, m) = (a.len(), b.len());
+    if n == 0 || m == 0 || n.saturating_mul(m) > WORD_DIFF_MAX_CELLS {
+        return None;
+    }
+    let same = |i: usize, j: usize| old[a[i].clone()] == new[b[j].clone()];
+    // lcs[i][j]: common tokens of a[i..] and b[j..].
+    let w = m + 1;
+    let mut lcs = vec![0u32; (n + 1) * w];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            lcs[i * w + j] = if same(i, j) {
+                lcs[(i + 1) * w + j + 1] + 1
+            } else {
+                lcs[(i + 1) * w + j].max(lcs[i * w + j + 1])
+            };
+        }
+    }
+    let (mut keep_a, mut keep_b) = (vec![false; n], vec![false; m]);
+    let (mut i, mut j) = (0, 0);
+    while i < n && j < m {
+        if same(i, j) {
+            keep_a[i] = true;
+            keep_b[j] = true;
+            i += 1;
+            j += 1;
+        } else if lcs[(i + 1) * w + j] >= lcs[i * w + j + 1] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+
+    // How much visible text the two lines share. Below a third, the line was
+    // rewritten rather than edited, and the row's own tint already says so.
+    let visible = |s: &str, toks: &[std::ops::Range<usize>], keep: &[bool], kept: bool| {
+        toks.iter()
+            .zip(keep)
+            .filter(|(_, k)| **k == kept)
+            .map(|(r, _)| s[r.clone()].chars().filter(|c| !c.is_whitespace()).count())
+            .sum::<usize>()
+    };
+    let shared = visible(old, &a, &keep_a, true);
+    let longest = (shared + visible(old, &a, &keep_a, false))
+        .max(shared + visible(new, &b, &keep_b, false));
+    if longest == 0 || shared * 3 < longest {
+        return None;
+    }
+
+    let ranges = |s: &str, toks: &[std::ops::Range<usize>], keep: &[bool]| {
+        let mut out: Vec<std::ops::Range<usize>> = Vec::new();
+        for (r, kept) in toks.iter().zip(keep) {
+            if *kept {
+                continue;
+            }
+            match out.last_mut() {
+                // Contiguous, or separated only by unchanged whitespace: one
+                // mark for "these words changed" rather than a mark per word.
+                Some(last) if s[last.end..r.start].chars().all(char::is_whitespace) => {
+                    last.end = r.end
+                }
+                _ => out.push(r.clone()),
+            }
+        }
+        out
+    };
+    Some((ranges(old, &a, &keep_a), ranges(new, &b, &keep_b)))
 }
 
 /// Dock width at or above which the diff surface splits into two columns.
@@ -1157,6 +1307,87 @@ diff --git a/y.rs b/y.rs\n@@ -1,1 +1,2 @@\n other\n+new\n",
                 .filter(|p| p.as_path() == std::path::Path::new("/a"))
                 .count(),
             1
+        );
+    }
+}
+
+#[cfg(test)]
+mod word_change_tests {
+    use super::{DiffLineKind, readable_diff_lines, word_changes};
+
+    fn marked<'a>(s: &'a str, ranges: &[std::ops::Range<usize>]) -> Vec<&'a str> {
+        ranges.iter().map(|r| &s[r.clone()]).collect()
+    }
+
+    #[test]
+    fn marks_only_the_changed_word() {
+        let old = "pub(crate) const ALL: [SettingsSection; 7] = [";
+        let new = "pub(crate) const ALL: [SettingsSection; 8] = [";
+        let (o, n) = word_changes(old, new).expect("an edited line");
+        assert_eq!(marked(old, &o), ["7"]);
+        assert_eq!(marked(new, &n), ["8"]);
+    }
+
+    #[test]
+    fn adjacent_changed_words_become_one_mark() {
+        let old = "SettingsSection::Diff => \"Diff\",";
+        let new = "SettingsSection::Diff => \"Review\",";
+        let (o, n) = word_changes(old, new).expect("an edited line");
+        assert_eq!(marked(old, &o), ["Diff"]);
+        assert_eq!(marked(new, &n), ["Review"]);
+
+        let old = "let x = foo(a);";
+        let new = "let x = bar baz(a);";
+        let (_, n) = word_changes(old, new).expect("an edited line");
+        assert_eq!(marked(new, &n), ["bar baz"], "joined across the space");
+    }
+
+    #[test]
+    fn a_rewritten_line_is_not_marked() {
+        assert_eq!(
+            word_changes("fn render(&self) {", "// totally different text here"),
+            None
+        );
+    }
+
+    #[test]
+    fn empty_lines_and_multibyte_text_are_safe() {
+        assert_eq!(word_changes("", "x"), None);
+        let old = "label: \"Settings › Diff\"";
+        let new = "label: \"Settings › Review\"";
+        let (o, n) = word_changes(old, new).expect("an edited line");
+        assert_eq!(marked(old, &o), ["Diff"]);
+        assert_eq!(marked(new, &n), ["Review"]);
+    }
+
+    #[test]
+    fn parsed_rows_carry_emphasis_for_paired_lines_only() {
+        let diff = "\
+diff --git a/f.rs b/f.rs
+--- a/f.rs
++++ b/f.rs
+@@ -1,3 +1,4 @@
+ keep
+-let n = 7;
++let n = 8;
++brand new line
+";
+        let rows = readable_diff_lines(diff);
+        let removed = rows
+            .iter()
+            .find(|r| r.kind == DiffLineKind::Removed)
+            .unwrap();
+        assert_eq!(marked(&removed.text, &removed.emphasis), ["7"]);
+        let added: Vec<_> = rows
+            .iter()
+            .filter(|r| r.kind == DiffLineKind::Added)
+            .collect();
+        assert_eq!(marked(&added[0].text, &added[0].emphasis), ["8"]);
+        assert!(added[1].emphasis.is_empty(), "an unpaired insertion");
+        assert!(
+            rows.iter()
+                .filter(|r| r.kind == DiffLineKind::Context)
+                .all(|r| r.emphasis.is_empty())
         );
     }
 }

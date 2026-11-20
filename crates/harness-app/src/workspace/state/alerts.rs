@@ -191,6 +191,19 @@ impl HarnessWorkspace {
             .unwrap_or(0)
     }
 
+    /// The state of the agent in tab `tab_id` under `root`, when it has
+    /// reported one. Per tab, so two agents in the same task or project each
+    /// show their own state. Resolved the same way as the selected tab's.
+    pub(crate) fn agent_tab_state(
+        &self,
+        root: &Path,
+        tab_id: u64,
+        kind: &AgentKind,
+    ) -> Option<AgentState> {
+        let target = self.agent_selection_target(AgentTarget::new(root, Some(tab_id)), kind);
+        self.conductor.state(&target)
+    }
+
     /// The conductor record for the selected tab. A legacy untagged record is
     /// used only when this tab is the only one of its kind: otherwise a tab
     /// that has not reported yet would dismiss a sibling's wait.

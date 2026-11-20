@@ -156,6 +156,25 @@ impl HarnessWorkspace {
             // selected line is one of the two edit-intent triggers, and gpui
             // routes key events along the focus path only.
             .track_focus(&self.diff_surface_focus)
+            // ↑/↓ step through the changed files. Only while the surface
+            // itself has focus: a comment editor or input inside it gets its
+            // arrow keys first, and they must keep moving its cursor.
+            .when(two_pane, |d| {
+                d.on_key_down(cx.listener(|ws, ev: &gpui::KeyDownEvent, window, cx| {
+                    let k = &ev.keystroke;
+                    if k.modifiers.modified() || !ws.diff_surface_focus.is_focused(window) {
+                        return;
+                    }
+                    let down = match k.key.as_str() {
+                        "down" => true,
+                        "up" => false,
+                        _ => return,
+                    };
+                    if ws.step_diff_file(down, cx) {
+                        cx.stop_propagation();
+                    }
+                }))
+            })
             .child(self.render_diff_header(hx, &r, adds, dels, body_w, cx));
         if show_review_bar && review_count > 0 {
             panel = panel.child(self.render_review_bar(hx, review_count, cx));

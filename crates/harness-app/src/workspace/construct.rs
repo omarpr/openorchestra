@@ -183,7 +183,7 @@ impl HarnessWorkspace {
             clearing_review: false,
             settings_open: false,
             settings_focus: ui::ModalFocus::new(cx),
-            settings_section: SettingsSection::Appearance,
+            settings_section: SettingsSection::General,
             review_model_catalogs: Default::default(),
             // Probed once at startup; the screen opens below if this machine is
             // missing something that blocks, or if it has never been shown.
@@ -256,6 +256,7 @@ impl HarnessWorkspace {
             focus_handle: cx.focus_handle(),
             editor_host_focus: cx.focus_handle(),
             diff_surface_focus: cx.focus_handle(),
+            diff_files_scroll: gpui::ScrollHandle::new(),
             resource: None,
             resource_history: crate::resource_monitor::History::new(RESOURCE_HISTORY),
             ports_sample: None,

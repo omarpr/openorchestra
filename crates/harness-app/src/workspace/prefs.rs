@@ -91,6 +91,11 @@ pub(crate) struct Prefs {
     /// enabled, default command.
     #[serde(default)]
     pub(crate) agents: std::collections::BTreeMap<String, AgentPref>,
+    /// The user's agent order from Settings › Agents (drag to reorder), as
+    /// `AgentKind::as_str()` keys. Empty = the built-in order. Keys missing
+    /// from it (a new built-in, a new custom agent) follow the saved ones.
+    #[serde(default)]
+    pub(crate) agent_order: Vec<String>,
     /// Last agent chosen when starting agents for a new multi-member task.
     /// Used as the default in the start-agents picker when still enabled.
     #[serde(default)]
@@ -100,7 +105,7 @@ pub(crate) struct Prefs {
     pub(crate) font_size: Option<f32>,
     /// Keep the conductor on screen all the time, conducting while agents
     /// work and narrating what they're doing. On by default — including for
-    /// prefs files written before it existed; Settings › Extras turns it off.
+    /// prefs files written before it existed; Settings › General turns it off.
     #[serde(default = "default_true")]
     pub(crate) conductor_always_on: bool,
     /// Where he stands: distance from the window's right and bottom edges.
@@ -189,6 +194,7 @@ impl Default for Prefs {
             font_ui: None,
             font_mono: None,
             agents: Default::default(),
+            agent_order: Vec::new(),
             last_task_agent: None,
             font_size: None,
             conductor_always_on: true,
