@@ -41,13 +41,17 @@
 //!   the window of a real gesture on the same page still counts, and so
 //!   does any `LinkActivated` navigation right after typing Space or Return
 //!   into the page.
-//! - Downloads go out only from the main frame (and, for `<a download>`, only
-//!   on a click, as above), and only http(s); `blob:`/`data:` downloads
-//!   report "not supported" through `on_notice` (not a load failure: the
-//!   page stays). A response the server marks as a download carries no
-//!   navigation type and isn't gated by the gesture: the navigation that
-//!   fetched it already passed the policy (a script may load an http(s)
-//!   page), and the default browser fetches the file again itself.
+//! - Downloads go out only from the main frame, and only http(s);
+//!   `blob:`/`data:` downloads report "not supported" through `on_notice`
+//!   (not a load failure: the page stays). `<a download>` goes only on a
+//!   click, as above. A response the server marks as a download carries no
+//!   navigation type, so it is judged by the main-frame navigation that
+//!   fetched it, the last one the policy let load: it goes only if that
+//!   one followed a real gesture on the page within [`GESTURE_WINDOW`] (a
+//!   link, a form's button, a script answering the click) or the app
+//!   started it (the address bar, a restore, a routed link: no source
+//!   frame). A script's own navigation to an attachment is ignored. The
+//!   default browser fetches the file again itself.
 //! - `link_routing::open_external` also rate-limits to one open per second.
 //! - New windows (each a tab here) need a user gesture:
 //!   `javaScriptCanOpenWindowsAutomatically` is off (macOS defaults it on),
@@ -320,7 +324,8 @@ pub(crate) struct NavOrigin {
     /// The user clicked a link ([`user_clicked`]: `LinkActivated` right
     /// after a real gesture on the page), as opposed to a script
     /// (`location = …`, `a.click()` with no gesture), a form, a reload or
-    /// our own `load`.
+    /// our own `load`. For a download response, [`response_origin`]: the
+    /// user started the navigation that fetched it.
     pub user_initiated: bool,
     /// The frame that started it (`sourceFrame`) is the main frame.
     pub from_main_frame: bool,
@@ -374,10 +379,9 @@ pub(crate) fn decide_new_window(url: &str, origin: NavOrigin) -> NavDecision {
 }
 
 /// Where a download goes. Only the main frame's downloads are handed out, and
-/// only those the user clicked for (a response has no navigation type, so the
-/// response path passes `user_initiated: true`; its navigation already passed
-/// [`decide_navigation`]). The default browser fetches the file again, so
-/// only http(s) can go (`External`). Page-generated downloads (`blob:`,
+/// only those the user asked for: a clicked `<a download>`, or a response
+/// whose navigation the user started ([`response_origin`]). The default
+/// browser fetches the file again, so only http(s) can go (`External`). Page-generated downloads (`blob:`,
 /// `data:`, e.g. "export JSON") exist only inside the page: `Unsupported`.
 pub(crate) fn decide_download(url: &str, origin: NavOrigin) -> NavDecision {
     if !origin.from_main_frame {
@@ -391,6 +395,27 @@ pub(crate) fn decide_download(url: &str, origin: NavOrigin) -> NavDecision {
         NavDecision::Ignore
     } else {
         NavDecision::External
+    }
+}
+
+/// Whether a main-frame navigation counts as the user's when its response
+/// turns out to be a download: the app started it (`app_initiated`: no
+/// source frame, as for the address bar, a restore or a routed link), or it
+/// came within [`GESTURE_WINDOW`] of a real gesture on the page, whatever
+/// its type (a link, a form's submit button, a script answering the click).
+/// A script on its own (a timer, page load) never counts.
+pub(crate) fn user_started(app_initiated: bool, last_gesture: Option<Instant>, now: Instant) -> bool {
+    app_initiated || user_clicked(true, last_gesture, now)
+}
+
+/// The origin [`decide_download`] gets for a response WebKit marks as a
+/// download. A response has no navigation type; `started` is
+/// [`user_started`] for the last main-frame navigation the policy let load
+/// (false when there was none), the one that fetched it.
+pub(crate) fn response_origin(for_main_frame: bool, started: bool) -> NavOrigin {
+    NavOrigin {
+        user_initiated: for_main_frame && started,
+        from_main_frame: for_main_frame,
     }
 }
 
@@ -503,7 +528,8 @@ mod mac {
     use super::{
         APP_CHORDS, DOWNLOAD_UNSUPPORTED, KeyRoute, NavDecision, NavOrigin, NativeEvents,
         decide_download, decide_navigation, decide_new_window, event_chords, flip_y,
-        is_benign_failure, is_download, route_key, safari_app_name, user_clicked,
+        is_benign_failure, is_download, response_origin, route_key, safari_app_name, user_clicked,
+        user_started,
     };
     use crate::shortcuts::{Chord, PageEdit, is_app_shortcut, page_edit};
 
@@ -557,6 +583,9 @@ mod mac {
         gesture: Rc<Cell<Option<Instant>>>,
         /// The view's navigation number (see [`NativeWebView::navigation`]).
         navigation: Rc<Cell<u64>>,
+        /// [`user_started`] for the last main-frame navigation the policy
+        /// let load: what a download response it fetches is judged by.
+        main_user_started: Cell<bool>,
     }
 
     define_class!(
@@ -634,6 +663,18 @@ mod mac {
                 } else {
                     decide_navigation(&url, to_main_frame, origin)
                 };
+                // A main-frame load (not a new window, which becomes a tab
+                // of its own): remember who started it for its response.
+                if decision == NavDecision::Load
+                    && unsafe { action.targetFrame() }.is_some_and(|f| unsafe { f.isMainFrame() })
+                {
+                    let app_initiated = unsafe { action.sourceFrame() }.is_none();
+                    self.ivars().main_user_started.set(user_started(
+                        app_initiated,
+                        self.ivars().gesture.get(),
+                        Instant::now(),
+                    ));
+                }
                 let policy = match decision {
                     NavDecision::Load => WKNavigationActionPolicy::Allow,
                     _ => WKNavigationActionPolicy::Cancel,
@@ -659,12 +700,12 @@ mod mac {
                     // browser does downloads, so no download delegate here.
                     handler.call((WKNavigationResponsePolicy::Cancel,));
                     let url = url_string(response.URL());
-                    // A response carries no navigation type; the navigation
-                    // that fetched it already passed decide_navigation.
-                    let origin = NavOrigin {
-                        user_initiated: true,
-                        from_main_frame: unsafe { navigation.isForMainFrame() },
-                    };
+                    // A response carries no navigation type: judge it by the
+                    // main-frame navigation that fetched it.
+                    let origin = response_origin(
+                        unsafe { navigation.isForMainFrame() },
+                        self.ivars().main_user_started.get(),
+                    );
                     self.act_on(decide_download(&url, origin), &url);
                 } else {
                     handler.call((WKNavigationResponsePolicy::Allow,));
@@ -733,7 +774,12 @@ mod mac {
             navigation: Rc<Cell<u64>>,
             mtm: MainThreadMarker,
         ) -> Retained<Self> {
-            let this = Self::alloc(mtm).set_ivars(Ivars { events, gesture, navigation });
+            let this = Self::alloc(mtm).set_ivars(Ivars {
+                events,
+                gesture,
+                navigation,
+                main_user_started: Cell::new(false),
+            });
             unsafe { msg_send![super(this), init] }
         }
 
@@ -1462,6 +1508,27 @@ mod tests {
         assert_eq!(decide_download("data:application/json,{}", CLICK), NavDecision::Unsupported);
         assert_eq!(decide_download("file:///etc/hosts", CLICK), NavDecision::Unsupported);
         assert_eq!(decide_download("", CLICK), NavDecision::Unsupported);
+    }
+
+    #[test]
+    fn a_download_response_goes_only_if_the_user_started_its_navigation() {
+        let t0 = Instant::now();
+        let url = "https://example.com/report.csv";
+        // The address bar, a restore or a routed link: no source frame.
+        assert!(user_started(true, None, t0));
+        // A link, a form's button, or a script answering the click.
+        assert!(user_started(false, Some(t0), t0 + Duration::from_millis(300)));
+        // A script on its own: no gesture, or one long before.
+        assert!(!user_started(false, None, t0));
+        assert!(!user_started(false, Some(t0), t0 + GESTURE_WINDOW + Duration::from_millis(1)));
+
+        let started = response_origin(true, true);
+        assert_eq!(decide_download(url, started), NavDecision::External);
+        // A script's `location = "/report.csv"` with no gesture.
+        assert_eq!(decide_download(url, response_origin(true, false)), NavDecision::Ignore);
+        // A subframe's attachment, even after a click.
+        assert_eq!(decide_download(url, response_origin(false, true)), NavDecision::Ignore);
+        assert!(!response_origin(false, true).user_initiated);
     }
 
     #[test]
