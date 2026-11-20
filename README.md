@@ -82,9 +82,33 @@ View or rebind shortcuts in **Settings → Shortcuts** (`⌘,`).
 
 Join the [Slack community](https://join.slack.com/t/openorchestra-group/shared_invite/zt-4h5n9li83-bbPit9xyTUvizQt7wh9bgQ),
 report bugs or request features in [GitHub Issues](https://github.com/omarpr/openorchestra/issues),
-or follow the [security reporting policy](SECURITY.md). Thanks to
-[omarpr](https://github.com/omarpr), [joeswiggin](https://github.com/joeswiggin),
-[jakesorce](https://github.com/jakesorce), and all
-[contributors](https://github.com/omarpr/openorchestra/graphs/contributors).
+or follow the [security reporting policy](SECURITY.md).
+
+## Contributors
+
+<table>
+  <tr>
+    <td align="center">
+      <a href="https://github.com/omarpr">
+        <img src="https://avatars.githubusercontent.com/u/4412916?v=4" width="88" height="88" alt="omarpr"><br>
+        <sub><b>omarpr</b></sub>
+      </a>
+    </td>
+    <td align="center">
+      <a href="https://github.com/joeswiggin">
+        <img src="https://avatars.githubusercontent.com/u/4819705?v=4" width="88" height="88" alt="joeswiggin"><br>
+        <sub><b>joeswiggin</b></sub>
+      </a>
+    </td>
+    <td align="center">
+      <a href="https://github.com/jakesorce">
+        <img src="https://avatars.githubusercontent.com/u/801470?v=4" width="88" height="88" alt="jakesorce"><br>
+        <sub><b>jakesorce</b></sub>
+      </a>
+    </td>
+  </tr>
+</table>
+
+See all [contributors](https://github.com/omarpr/openorchestra/graphs/contributors).
 
 [Changelog](CHANGELOG.md) · [Code of Conduct](CODE_OF_CONDUCT.md) · [GPL-3.0-or-later](LICENSE)
