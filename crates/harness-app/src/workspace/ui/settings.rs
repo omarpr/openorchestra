@@ -1226,28 +1226,26 @@ impl HarnessWorkspace {
             // The default-agent star, in a fixed slot so every row's lines up.
             // Filled = the effective default (inert); outlined = click to make
             // this agent the default; a disabled agent can't be, so no star.
+            // Filled and outlined share one id, so the keyboard stays on the
+            // star when activating it turns outlined into filled.
             let star = match agent_star(&self.prefs, &kind) {
-                AgentStar::Filled => div()
-                    .id(gpui::SharedString::from(format!("agent-default-{key}")))
-                    .flex_none()
-                    .w(px(20.0))
-                    .py_0p5()
-                    .text_center()
-                    .text_sm()
-                    .text_color(hx.accent)
-                    .tooltip(tip("Default for new tasks"))
-                    .child("★")
-                    .into_any_element(),
-                AgentStar::Outlined => {
+                AgentStar::Hidden => div().flex_none().w(px(20.0)).into_any_element(),
+                state => {
+                    let filled = state == AgentStar::Filled;
                     let star_key = key.clone();
-                    // Built by hand rather than `icon_button`: its tooltip is
-                    // the accessible label, which here names the agent.
                     let accent = hx.accent;
                     let hover_bg = hx.surface_hover;
+                    // Built by hand rather than `icon_button`: its tooltip is
+                    // the accessible label, which here names the agent.
                     focus
-                        .scroll_button(
+                        .scroll_choice(
                             format!("agent-star-{key}"),
-                            format!("Make {display_name} the default for new tasks"),
+                            if filled {
+                                format!("{display_name} is the default for new tasks")
+                            } else {
+                                format!("Make {display_name} the default for new tasks")
+                            },
+                            filled,
                             hx,
                             cx,
                         )
@@ -1257,20 +1255,27 @@ impl HarnessWorkspace {
                         .rounded_md()
                         .text_center()
                         .text_sm()
-                        .text_color(hx.tx2)
-                        .cursor_pointer()
-                        .hover(move |d| d.bg(hover_bg).text_color(accent))
+                        .text_color(if filled { accent } else { hx.tx2 })
                         .tooltip(tip("Default for new tasks"))
-                        .child("☆")
-                    .on_click(cx.listener(move |ws, _, _, cx| {
-                        cx.stop_propagation();
-                        ws.prefs.default_agent = Some(star_key.clone());
-                        save_prefs_to(&ws.prefs_path, &ws.prefs);
-                        cx.notify();
-                    }))
-                    .into_any_element()
+                        .child(if filled { "★" } else { "☆" })
+                        .when(!filled, |d| {
+                            d.cursor_pointer()
+                                .hover(move |d| d.bg(hover_bg).text_color(accent))
+                        })
+                        .on_click(cx.listener(move |ws, _, _, cx| {
+                            cx.stop_propagation();
+                            // The filled star is already the default: nothing
+                            // to change (and nothing to save).
+                            if agent_star(&ws.prefs, &AgentKind::from(star_key.as_str()))
+                                == AgentStar::Outlined
+                            {
+                                ws.prefs.default_agent = Some(star_key.clone());
+                                save_prefs_to(&ws.prefs_path, &ws.prefs);
+                                cx.notify();
+                            }
+                        }))
+                        .into_any_element()
                 }
-                AgentStar::Hidden => div().flex_none().w(px(20.0)).into_any_element(),
             };
 
             // Fixed-width slots, filled or not, so every row's switch lines up.

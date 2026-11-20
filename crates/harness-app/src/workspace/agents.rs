@@ -208,8 +208,9 @@ pub(crate) struct AgentPref {
 #[cfg(test)]
 mod agent_prefs_tests {
     use super::{
-        AgentKind, AgentPref, Prefs, agent_catalog, agent_display, agent_order_after_move, default_enabled_agent,
-        enabled_agents, valid_agent_slug, AgentStar, agent_star,
+        AgentKind, AgentPref, AgentStar, Prefs, agent_catalog, agent_display,
+        agent_order_after_move, agent_star, default_enabled_agent, enabled_agents,
+        valid_agent_slug,
     };
 
     fn with_custom(slug: &str, command: &str) -> Prefs {
