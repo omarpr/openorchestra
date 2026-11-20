@@ -2281,6 +2281,29 @@ mod tests {
     }
 
     #[test]
+    fn a_download_is_the_app_s_only_while_its_navigation_is_the_latest() {
+        let (a, c) = (0xa0, 0xc0);
+        // The address bar loads A, which redirects to an attachment: WebKit
+        // starts and redirects it under the same WKNavigation.
+        let mut navs = webview::Navigations::default();
+        assert!(!navs.began());
+        navs.begin(Some(a));
+        assert!(navs.began());
+        assert!(!navs.started(Some(a)));
+        assert!(navs.began(), "a redirect keeps it the app's");
+        // A page's own navigation C (a script, a link) is not the app's,
+        // even straight after an app load.
+        assert!(navs.started(Some(c)));
+        assert!(!navs.began());
+        // One WebKit gave no WKNavigation for can't be told apart: not the
+        // app's, so it needs a gesture like a page's.
+        navs.begin(None);
+        assert!(!navs.began());
+        assert!(navs.started(None));
+        assert!(!navs.began());
+    }
+
+    #[test]
     fn a_new_window_request_outlives_its_view_s_channel() {
         let (tx, rx) = mpsc::unbounded();
         let (new_tx, mut new_rx) = mpsc::unbounded();

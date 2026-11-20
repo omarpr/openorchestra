@@ -56,14 +56,18 @@
 //!   main frame started that one within [`GESTURE_WINDOW`] of a real
 //!   gesture on the page (a link, a form's button, a script answering the
 //!   click) or the app started it (the address bar, a restore, a routed
-//!   link). An iframe's `target=_top` link never counts, click or not
-//!   ([`user_started`]), as subframe downloads never go. "The app
-//!   started it" is read as a nil `sourceFrame`, on the assumption, not yet
-//!   observed in the app, that WebKit reports `loadRequest` that way and
-//!   never a page's own navigation; if a page's navigation could arrive
-//!   with no source frame, its attachment would go out. A script's own
-//!   navigation to an attachment is otherwise ignored. The default browser
-//!   fetches the file again itself.
+//!   link, Reload, Back, Forward). An iframe's `target=_top` link never
+//!   counts, click or not ([`user_started`]), as subframe downloads never
+//!   go. "The app started it" is the view's own record, not WebKit's
+//!   `sourceFrame`: the response belongs to the latest navigation, and
+//!   that is one the app began (`loadRequest` and the like return its
+//!   `WKNavigation`) until WebKit starts another ([`Navigations::began`]).
+//!   A probe on macOS 27 (SDK 27.2) showed `loadRequest` reported with the
+//!   main frame as its `sourceFrame`, like a page's own navigation, and a
+//!   server redirect asking for policy again under the same
+//!   `WKNavigation`, which the record keeps. A script's own navigation to
+//!   an attachment is otherwise ignored. The default browser fetches the
+//!   file again itself.
 //! - `link_routing::open_external` also rate-limits to one open per second.
 //! - New windows (each a tab here) need a user gesture:
 //!   `javaScriptCanOpenWindowsAutomatically` is off (macOS defaults it on),
@@ -773,26 +777,24 @@ pub(crate) fn decide_download(url: &str, origin: NavOrigin) -> NavDecision {
 /// download rule cares.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SourceFrame {
-    /// No source frame: assumed to mean the app (the address bar, a restore
-    /// or a routed link; see the module docs).
-    App,
-    /// The page's main frame.
+    /// The page's main frame; also what WebKit reports for the app's own
+    /// `loadRequest`, which [`Navigations::began`] tells apart. A nil
+    /// source frame counts as this too: a gesture is needed.
     Main,
     /// An iframe, even one whose link targets `_top`.
     Sub,
 }
 
-/// Whether a main-frame navigation counts as the user's when its response
-/// turns out to be a download: the app started it ([`SourceFrame::App`]),
-/// or the main frame did within [`GESTURE_WINDOW`] of a real gesture on the
-/// page, whatever its type (a link, a form's submit button, a script
+/// Whether a main-frame navigation the page started counts as the user's
+/// when its response turns out to be a download (one the app started
+/// always does: [`Navigations::began`]): the main frame started it within
+/// [`GESTURE_WINDOW`] of a real gesture on the page, whatever its type (a link, a form's submit button, a script
 /// answering the click). A script on its own (a timer, page load) never
 /// counts, and neither does an iframe: a click in one still stamps the
 /// page's gesture, and its `target=_top` link loads the main frame, but
 /// [`decide_download`] keeps subframe downloads in.
 pub(crate) fn user_started(source: SourceFrame, last_gesture: Option<Instant>, now: Instant) -> bool {
     match source {
-        SourceFrame::App => true,
         SourceFrame::Main => user_clicked(true, last_gesture, now),
         SourceFrame::Sub => false,
     }
@@ -856,6 +858,8 @@ pub(crate) struct Navigations {
     /// The latest navigation and its number; `None` after the pane began
     /// one WebKit gave no `WKNavigation` for (nothing is current yet).
     latest: Option<(Option<usize>, u64)>,
+    /// The latest navigation is one the pane began ([`Self::began`]).
+    pane_began: bool,
 }
 
 impl Navigations {
@@ -869,6 +873,15 @@ impl Navigations {
     pub(crate) fn begin(&mut self, id: Option<usize>) {
         self.number = self.number.wrapping_add(1);
         self.latest = id.map(|id| (Some(id), self.number));
+        self.pane_began = id.is_some();
+    }
+
+    /// Whether the latest navigation is one the pane began (the app's
+    /// `load`, `reload`, `back`, `forward`), not the page: a download its
+    /// response turns out to be was asked for. It stays so through a
+    /// server redirect, which keeps the `WKNavigation`.
+    pub(crate) fn began(&self) -> bool {
+        self.pane_began
     }
 
     /// WebKit started (or committed) a main-frame navigation. A new one,
@@ -880,6 +893,7 @@ impl Navigations {
         }
         self.number = self.number.wrapping_add(1);
         self.latest = Some((id, self.number));
+        self.pane_began = false;
         true
     }
 
@@ -1645,10 +1659,12 @@ mod mac {
                 if decision == NavDecision::Load
                     && unsafe { action.targetFrame() }.is_some_and(|f| unsafe { f.isMainFrame() })
                 {
+                    // The app's own loads are told apart by the view's
+                    // record at response time, not here (WebKit reports
+                    // them from the main frame too).
                     let source = match unsafe { action.sourceFrame() } {
-                        None => SourceFrame::App,
-                        Some(f) if unsafe { f.isMainFrame() } => SourceFrame::Main,
-                        Some(_) => SourceFrame::Sub,
+                        Some(f) if !unsafe { f.isMainFrame() } => SourceFrame::Sub,
+                        _ => SourceFrame::Main,
                     };
                     self.ivars().main_user_started.set(user_started(
                         source,
@@ -1682,11 +1698,12 @@ mod mac {
                     handler.call((WKNavigationResponsePolicy::Cancel,));
                     let url = url_string(response.URL());
                     // A response carries no navigation type: judge it by the
-                    // main-frame navigation that fetched it.
-                    let origin = response_origin(
-                        unsafe { navigation.isForMainFrame() },
-                        self.ivars().main_user_started.get(),
-                    );
+                    // main-frame navigation that fetched it, the latest
+                    // (WebKit started it before asking): the app's, or one
+                    // the user started on the page.
+                    let started = self.ivars().navigation.borrow().numbers.began()
+                        || self.ivars().main_user_started.get();
+                    let origin = response_origin(unsafe { navigation.isForMainFrame() }, started);
                     self.act_on(decide_download(&url, origin), &url);
                 } else {
                     handler.call((WKNavigationResponsePolicy::Allow,));
@@ -3394,8 +3411,6 @@ mod tests {
     fn a_download_response_goes_only_if_the_user_started_its_navigation() {
         let t0 = Instant::now();
         let url = "https://example.com/report.csv";
-        // The address bar, a restore or a routed link: no source frame.
-        assert!(user_started(SourceFrame::App, None, t0));
         // A link, a form's button, or a script answering the click.
         assert!(user_started(SourceFrame::Main, Some(t0), t0 + Duration::from_millis(300)));
         // A script on its own: no gesture, or one long before.
@@ -3422,9 +3437,8 @@ mod tests {
         };
         // Clicked in an iframe, right after a real gesture on the page.
         assert_eq!(response_for(SourceFrame::Sub), NavDecision::Ignore);
-        // The same click in the main frame, and an app load, still go.
+        // The same click in the main frame still goes.
         assert_eq!(response_for(SourceFrame::Main), NavDecision::External);
-        assert_eq!(response_for(SourceFrame::App), NavDecision::External);
     }
 
     #[test]
