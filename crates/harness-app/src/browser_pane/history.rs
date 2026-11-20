@@ -497,14 +497,16 @@ impl BrowserHistory {
     }
 
     /// A visit to `url` in `project` now, unless it is already the
-    /// project's latest page ([`History::is_latest`]).
-    pub(crate) fn record(&mut self, project: &str, url: &str, cx: &mut Context<Self>) {
+    /// project's latest page ([`History::is_latest`]: a reload, a page
+    /// coming back) and wasn't `asked` for: an address the user entered or
+    /// the app opened is a visit even when it is the latest page.
+    pub(crate) fn record(&mut self, project: &str, url: &str, asked: bool, cx: &mut Context<Self>) {
         self.ensure_loaded(project, cx);
         let now = unix_now();
         if self
             .projects
             .get_mut(project)
-            .is_some_and(|h| !h.is_latest(url) && h.record(url, now))
+            .is_some_and(|h| (asked || !h.is_latest(url)) && h.record(url, now))
         {
             self.changed(project, cx);
         }

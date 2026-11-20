@@ -680,6 +680,18 @@ fn take_load(next: &mut PageLoad) -> PageLoad {
     std::mem::replace(next, PageLoad::Reshown)
 }
 
+/// Whether a new document committing `committed` is the page the user or
+/// the app asked for (`load`, [`take_load`]; `attempted`, the address that
+/// load was for), so a visit even if it is already the latest page: the
+/// same address entered again on another day. A reload, a page's own
+/// navigation, or a redirect elsewhere isn't.
+fn asked_for(load: PageLoad, attempted: Option<&str>, committed: &str) -> bool {
+    matches!(load, PageLoad::Typed | PageLoad::Opened)
+        && attempted.is_some_and(|a| {
+            history::recordable(committed).is_some_and(|c| history::recordable(a) == Some(c))
+        })
+}
+
 /// The page a view made to load `url` for `load` brings back, whose first
 /// commit isn't a visit ([`reshow_commit`]): `None` for a page the user or
 /// the app just asked for.
@@ -949,13 +961,14 @@ impl BrowserPane {
 
     /// The page committed `url`: a visit to record, unless it is already
     /// the project's latest page (a reload, or this tab's view coming back
-    /// on a tab switch, which loads the page again).
-    fn record_visit(&mut self, url: &str, cx: &mut Context<Self>) {
+    /// on a tab switch, which loads the page again) and wasn't `asked` for
+    /// ([`asked_for`]).
+    fn record_visit(&mut self, url: &str, asked: bool, cx: &mut Context<Self>) {
         let Some(project) = &self.project else {
             return;
         };
         let key = project.key.clone();
-        self.history.update(cx, |h, cx| h.record(&key, url, cx));
+        self.history.update(cx, |h, cx| h.record(&key, url, asked, cx));
     }
 
     /// `title` names the history entry of `url`.
@@ -1210,11 +1223,10 @@ impl BrowserPane {
                 self.sync_address(window, cx);
             }
             PageEvent::Committed(url, same_document) => {
-                if !same_document {
-                    take_load(&mut self.next_load);
-                }
+                let asked = !same_document
+                    && asked_for(take_load(&mut self.next_load), self.attempted.as_deref(), &url);
                 if !reshow_commit(self.reshow.take().as_deref(), &url) {
-                    self.record_visit(&url, cx);
+                    self.record_visit(&url, asked, cx);
                 }
                 if let Some(title) = commit_title(same_document, self.title.as_deref()) {
                     let title = title.to_string();
@@ -2448,6 +2460,20 @@ mod tests {
             reshow_page(PageLoad::Restored, url).as_deref(),
             "http://localhost:8765/login"
         ));
+    }
+
+    #[test]
+    fn an_address_asked_for_again_is_a_visit_even_when_latest() {
+        let url = "http://localhost:3000/a";
+        // Entered again (or opened from Ports again): a visit.
+        assert!(asked_for(PageLoad::Typed, Some(url), url));
+        assert!(asked_for(PageLoad::Opened, Some("HTTP://LOCALHOST:3000/a"), url));
+        // A reload, a restore, a page's own navigation: not asked for.
+        assert!(!asked_for(PageLoad::Reshown, Some(url), url));
+        assert!(!asked_for(PageLoad::Restored, Some(url), url));
+        // Asked for /a, which redirected to /login: that is a page's own.
+        assert!(!asked_for(PageLoad::Typed, Some(url), "http://localhost:3000/login"));
+        assert!(!asked_for(PageLoad::Typed, None, url));
     }
 
     #[test]
