@@ -204,6 +204,12 @@ impl HarnessWorkspace {
         if crate::preflight::blocked(&self.preflight) {
             return;
         }
+        // New Task draws above Settings: opening it now would move the
+        // keyboard to a dialog the user can't see, away from the form they
+        // can. New Task keeps it; Settings can be opened once it closes.
+        if self.new_task.is_some() {
+            return;
+        }
         self.settings_open = true;
         self.settings_section = section;
         self.settings_focus.reset_scroll();
