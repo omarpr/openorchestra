@@ -776,6 +776,9 @@ pub(crate) struct BrowserPane {
     inspector_watch: InspectorWatch,
     /// Opens and refreshes the suggestions as the user types.
     _address_edits: gpui::Subscription,
+    /// Redraws when the history changes: a blank tab's Recent list fills in
+    /// once the project's file has been read.
+    _history_changed: gpui::Subscription,
     /// Where a toolbar button's tooltip is drawn this frame, set by its
     /// prepaint ([`PageTooltip`]) and cut from the page by the page slot's
     /// paint, which clears it for the next frame.
@@ -858,6 +861,7 @@ impl BrowserPane {
                 }
             },
         );
+        let history_changed = cx.observe(&history, |_, _, cx| cx.notify());
         let (new_window_tx, mut new_window_rx) = mpsc::unbounded::<String>();
         let new_windows = cx.spawn_in(window, async move |this, cx| {
             let mut last_opened = None;
@@ -905,6 +909,7 @@ impl BrowserPane {
             inspector_open: false,
             inspector_watch: InspectorWatch::Closed,
             _address_edits: address_edits,
+            _history_changed: history_changed,
             tooltip_hole: Rc::new(Cell::new(None)),
         }
     }
@@ -918,7 +923,7 @@ impl BrowserPane {
             return;
         }
         if let Some(p) = &project {
-            self.history.update(cx, |h, _| h.ensure_loaded(&p.key));
+            self.history.update(cx, |h, cx| h.ensure_loaded(&p.key, cx));
         }
         self.project = project;
     }

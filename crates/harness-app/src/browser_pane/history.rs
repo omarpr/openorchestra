@@ -13,7 +13,10 @@
 //! [`BrowserHistory`] entity keeps every loaded project in memory, records
 //! at once, and writes the changed projects [`SAVE_DELAY`] after the first
 //! unsaved change; quit flushes ([`BrowserHistory::flush`]). Older builds
-//! never look in that folder.
+//! never look in that folder. A project's file is read on the history
+//! thread ([`Job`]), never the UI thread; visits recorded before it arrives
+//! are merged into what it held ([`History::merged`]), and the project isn't
+//! written until then, so a write can't replace the file with only those.
 //!
 //! **Two app instances** (Dev and release share `~/.openorchestra`) each
 //! keep their own copy in memory and write whole files: the last writer
@@ -24,6 +27,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use futures::channel::oneshot;
 use gpui::{Context, Task};
 use serde::{Deserialize, Serialize};
 
@@ -132,6 +136,27 @@ impl History {
         self.entries.insert(0, entry);
         self.entries.truncate(MAX_ENTRIES);
         true
+    }
+
+    /// What was on disk (`self`) with `newer`, the visits recorded while it
+    /// was being read, on top: those entries first, newest first, each
+    /// with the disk entry for its URL folded in (visits added up, the
+    /// newer title unless it has none), then the rest of the disk's.
+    pub(crate) fn merged(mut self, newer: History) -> History {
+        let mut entries = Vec::with_capacity(newer.entries.len() + self.entries.len());
+        for mut entry in newer.entries {
+            if let Some(i) = self.entries.iter().position(|e| e.url == entry.url) {
+                let old = self.entries.remove(i);
+                entry.visits = entry.visits.saturating_add(old.visits);
+                if entry.title.is_empty() {
+                    entry.title = old.title;
+                }
+            }
+            entries.push(entry);
+        }
+        entries.append(&mut self.entries);
+        entries.truncate(MAX_ENTRIES);
+        History { entries }
     }
 
     /// The `n` newest entries, for the blank tab's Recent list.
@@ -315,31 +340,110 @@ fn remove_all(dir: &Path) -> std::io::Result<()> {
 pub(crate) struct BrowserHistory {
     /// `~/.openorchestra/browser-history`; a temp folder in tests.
     dir: PathBuf,
-    /// Loaded projects, by key.
+    /// Every project asked for, by key. One still `loading` holds only the
+    /// visits recorded since.
     projects: HashMap<String, History>,
+    /// Projects whose file the history thread is still reading.
+    loading: HashSet<String>,
     /// Projects changed since their last write.
     dirty: HashSet<String>,
     /// The pending write. Started by the first unsaved change and never
     /// restarted by later ones, so a page animating its title can't hold
     /// the write off forever.
     save: Option<Task<()>>,
+    /// Bumped by [`Self::clear`]: a read started before it is dropped.
+    generation: u64,
+    /// The history thread ([`run_jobs`]).
+    jobs: std::sync::mpsc::Sender<Job>,
+}
+
+/// File work for the history thread, done one at a time in the order sent.
+enum Job {
+    /// Read a project's file ([`load`]).
+    Load {
+        project: String,
+        reply: oneshot::Sender<History>,
+    },
+}
+
+/// The history thread: does each [`Job`] in turn until the history is
+/// dropped.
+fn run_jobs(dir: PathBuf, jobs: std::sync::mpsc::Receiver<Job>) {
+    for job in jobs {
+        match job {
+            Job::Load { project, reply } => {
+                let _ = reply.send(load(&dir, &project));
+            }
+        }
+    }
 }
 
 impl BrowserHistory {
     pub(crate) fn new(dir: PathBuf) -> Self {
+        let (jobs, rx) = std::sync::mpsc::channel();
+        let thread_dir = dir.clone();
+        if let Err(e) = std::thread::Builder::new()
+            .name("browser-history".into())
+            .spawn(move || run_jobs(thread_dir, rx))
+        {
+            // Every read then finds nothing: history works for this run,
+            // in memory only.
+            log::warn!("browser history: could not start its thread: {e}");
+        }
         Self {
             dir,
             projects: HashMap::new(),
+            loading: HashSet::new(),
             dirty: HashSet::new(),
             save: None,
+            generation: 0,
+            jobs,
         }
     }
 
-    /// Load `project` from disk if it isn't yet.
-    pub(crate) fn ensure_loaded(&mut self, project: &str) {
-        if !self.projects.contains_key(project) {
-            let history = load(&self.dir, project);
-            self.projects.insert(project.to_string(), history);
+    /// Start reading `project`'s file if nobody has asked for it yet. It
+    /// starts empty and fills in (and notifies) when the read lands.
+    /// Never notifies itself: tabs call it while rendering.
+    pub(crate) fn ensure_loaded(&mut self, project: &str, cx: &mut Context<Self>) {
+        if self.projects.contains_key(project) {
+            return;
+        }
+        self.projects.insert(project.to_string(), History::default());
+        self.loading.insert(project.to_string());
+        let (reply, read) = oneshot::channel();
+        let job = Job::Load {
+            project: project.to_string(),
+            reply,
+        };
+        if self.jobs.send(job).is_err() {
+            // No history thread: nothing on disk is ever read.
+            self.loading.remove(project);
+            return;
+        }
+        let (project, generation) = (project.to_string(), self.generation);
+        cx.spawn(async move |this, cx| {
+            let from_disk = read.await.unwrap_or_default();
+            let _ = this.update(cx, |this, cx| this.loaded(project, from_disk, generation, cx));
+        })
+        .detach();
+    }
+
+    /// `project`'s file arrived: what was recorded meanwhile goes on top
+    /// of it, and that needs writing.
+    fn loaded(&mut self, project: String, from_disk: History, generation: u64, cx: &mut Context<Self>) {
+        if generation != self.generation || !self.loading.remove(&project) {
+            return;
+        }
+        let Some(history) = self.projects.get_mut(&project) else {
+            return;
+        };
+        let recorded = std::mem::take(history);
+        let changed = !recorded.entries.is_empty();
+        *history = from_disk.merged(recorded);
+        if changed {
+            self.changed(&project, cx);
+        } else {
+            cx.notify();
         }
     }
 
@@ -351,7 +455,7 @@ impl BrowserHistory {
     /// A visit to `url` in `project` now, unless it is already the
     /// project's latest page ([`History::is_latest`]).
     pub(crate) fn record(&mut self, project: &str, url: &str, cx: &mut Context<Self>) {
-        self.ensure_loaded(project);
+        self.ensure_loaded(project, cx);
         let now = unix_now();
         if self
             .projects
@@ -393,11 +497,15 @@ impl BrowserHistory {
     /// Write every changed project now (quit, or the pending write firing).
     /// One that can't be written (a full disk) stays changed, so the next
     /// write, started by the next change or quit, tries it again; nothing
-    /// retries on a timer, so a disk that stays full costs no spinning.
+    /// retries on a timer, so a disk that stays full costs no spinning. One
+    /// still loading waits for its file: written now, it would lose it.
     pub(crate) fn flush(&mut self) {
         self.save = None;
-        let (dir, projects) = (&self.dir, &self.projects);
+        let (dir, projects, loading) = (&self.dir, &self.projects, &self.loading);
         self.dirty.retain(|project| {
+            if loading.contains(project) {
+                return true;
+            }
             let Some(history) = projects.get(project) else {
                 return false;
             };
@@ -417,6 +525,8 @@ impl BrowserHistory {
         self.save = None;
         self.dirty.clear();
         self.projects.clear();
+        self.loading.clear();
+        self.generation = self.generation.wrapping_add(1);
         cx.notify();
         remove_all(&self.dir)
     }
@@ -734,6 +844,52 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn visits_recorded_while_loading_go_on_top_of_the_file() {
+        let disk = History {
+            entries: vec![
+                titled("http://localhost:3000/b", "B", 20, 3),
+                titled("http://localhost:3000/a", "A", 10, 2),
+            ],
+        };
+        let newer = History {
+            entries: vec![
+                titled("http://localhost:3000/c", "", 40, 1),
+                titled("http://localhost:3000/a", "", 30, 1),
+            ],
+        };
+        let merged = disk.merged(newer);
+        assert_eq!(
+            merged.entries,
+            [
+                titled("http://localhost:3000/c", "", 40, 1),
+                // Its disk visits added, its title kept from disk.
+                titled("http://localhost:3000/a", "A", 30, 3),
+                titled("http://localhost:3000/b", "B", 20, 3),
+            ]
+        );
+        // Nothing recorded meanwhile: the file as it was.
+        let disk = History {
+            entries: vec![titled("http://localhost:3000/a", "A", 10, 2)],
+        };
+        assert_eq!(disk.clone().merged(History::default()), disk);
+    }
+
+    #[test]
+    fn a_project_still_loading_is_not_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("browser-history");
+        let mut history = BrowserHistory::new(dir.clone());
+        let mut h = History::default();
+        h.record("http://localhost:8765/", 5);
+        history.projects.insert("/repo/a".into(), h);
+        history.loading.insert("/repo/a".into());
+        history.dirty.insert("/repo/a".into());
+        history.flush();
+        assert!(!dir.join(file_name("/repo/a")).exists());
+        assert!(history.dirty.contains("/repo/a"), "written once it loads");
     }
 
     #[test]
