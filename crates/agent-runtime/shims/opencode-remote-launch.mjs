@@ -23,15 +23,25 @@ function configuredPlugins() {
   }
 }
 
+function installed(name) {
+  const plugin = path.join(shims, name);
+  return fs.existsSync(path.join(plugin, "tui.js")) ? plugin : undefined;
+}
+
 function configure() {
-  const plugin = path.join(shims, "opencode-remote");
-  if (!process.env.HARNESS_REMOTE_SESSION || !fs.existsSync(path.join(plugin, "tui.js"))) return;
-  const inline = JSON.parse(process.env[cliConfig] || "{}");
+  const env = process.env;
+  // Status runs in every app tab; the transcript sync only in tmux-backed ones.
+  const status = env.HARNESS_AGENT_TAB_ID || env.HARNESS_AGENT_WORKTREE || env.HARNESS_REMOTE_SESSION
+    ? installed("opencode-status") : undefined;
+  const remote = env.HARNESS_REMOTE_SESSION ? installed("opencode-remote") : undefined;
+  const ours = [status, remote].filter(Boolean);
+  if (!ours.length) return;
+  const inline = JSON.parse(env[cliConfig] || "{}");
   // Inline arrays replace global arrays, so preserve the effective plugin list before appending ours.
   const plugins = inline.plugins ?? configuredPlugins();
   if (!Array.isArray(plugins)) return;
-  process.env[cliConfig] = JSON.stringify({ ...inline, plugins: [...plugins.filter((entry) => entry !== plugin), plugin] });
-  process.env.HARNESS_OPENCODE_REMOTE_DIR = path.resolve(shims, "../remote/opencode");
+  env[cliConfig] = JSON.stringify({ ...inline, plugins: [...plugins.filter((entry) => !ours.includes(entry)), ...ours] });
+  if (remote) env.HARNESS_OPENCODE_REMOTE_DIR = path.resolve(shims, "../remote/opencode");
 }
 
 try {

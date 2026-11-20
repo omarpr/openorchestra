@@ -84,7 +84,9 @@ pub enum SignalKind {
     /// Writes the shared `.harness/status.json` (pi, and Claude Code via a hook
     /// shim). Consumed by [`StatusFileSource`], not by the adapter itself.
     StatusFile,
-    /// Server-sent events from the agent's local HTTP server (OpenCode).
+    /// Server-sent events from the agent's local HTTP server. No built-in
+    /// adapter declares it now; OpenCode 1.x's SSE survives only as that
+    /// adapter's fallback stream.
     Sse,
     /// A `notify` program the agent invokes (Codex).
     Notify,
@@ -496,6 +498,7 @@ impl AgentRuntime for TerminalOnlyRuntime {
     }
 }
 
-/// Re-export of the OpenCode event classifier, so the mapping table in §4.5
-/// can be asserted directly without exposing the whole module.
+/// Re-export of the OpenCode 1.x event classifier (the SSE fallback), so the
+/// mapping table in §4.5 can be asserted directly without exposing the whole
+/// module.
 pub use opencode::classify as opencode_classify;

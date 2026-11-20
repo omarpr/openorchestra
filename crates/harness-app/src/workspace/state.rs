@@ -321,7 +321,7 @@ impl HarnessWorkspace {
         if is_coordinator && let Some(source) = &mut self.status_source {
             let _ = source.watch(&r.path, kind.clone());
         }
-        // Adapters that stream their own signals (OpenCode's SSE) publish
+        // Adapters that stream their own signals (OpenCode 1.x's SSE) publish
         // straight onto the shared bus; file-based ones are served by
         // StatusFileSource.
         if let Some(rx) = runtime.subscribe() {

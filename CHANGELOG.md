@@ -70,6 +70,9 @@ Unreleased is empty.
 
 ### Fixed
 
+- OpenCode tabs show when the agent is running or waiting again (OpenCode 2
+  moved its server; the app now reads status from inside each OpenCode
+  session).
 - Tab and Shift-Tab cycle through controls in Settings, New Task, and New
   Worktree with a visible focus indicator. Settings scrolls the focused
   control into view. macOS accessibility exposes Settings navigation, agent

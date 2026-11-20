@@ -165,10 +165,12 @@ fn opencode_event_classification_is_conservative() {
 fn opencode_streams_normalized_signals_from_a_live_server() {
     let port = serve_once(EVENTS, true);
     let wt = tempfile::tempdir().unwrap();
+    // An explicit endpoint streams whatever the installed CLI: this is the
+    // OpenCode 1.x fallback. OpenCode 2 reports through the status file.
     let rt = OpenCodeRuntime::with_endpoint(wt.path(), "127.0.0.1", port);
 
     assert_eq!(rt.kind(), AgentKind::OpenCode);
-    assert_eq!(rt.signal_kind(), SignalKind::Sse);
+    assert_eq!(rt.signal_kind(), SignalKind::StatusFile);
     // permission.updated is a real blocked-on-you event, so this adapter may
     // raise an OS notification.
     assert_eq!(rt.fidelity(), WaitFidelity::Exact);
@@ -193,12 +195,12 @@ fn opencode_streams_normalized_signals_from_a_live_server() {
 }
 
 #[test]
-fn opencode_needs_no_config_injection() {
-    // Its server comes up alongside the TUI, so the plain "run the CLI" path
-    // already enables the enhancement.
+fn opencode_writes_nothing_without_a_state_dir() {
+    // Its plugins live in the state dir; nothing goes into the worktree.
     let wt = tempfile::tempdir().unwrap();
     let rt = OpenCodeRuntime::new(wt.path());
     assert!(rt.on_spawn(wt.path()).is_ok());
+    assert_eq!(std::fs::read_dir(wt.path()).unwrap().count(), 0);
 }
 
 #[test]
@@ -230,8 +232,307 @@ fn concurrent_opencode_launches_install_complete_shims() {
         std::fs::read_to_string(shims.join("opencode-remote-launch.mjs")).unwrap(),
         include_str!("../shims/opencode-remote-launch.mjs"),
     );
-    assert_eq!(std::fs::read_dir(shims).unwrap().count(), 2);
+    let status = shims.join("opencode-status");
+    let package: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(status.join("package.json")).unwrap())
+            .unwrap();
+    assert_eq!(package["exports"]["./tui"], "./tui.js");
+    assert_eq!(
+        std::fs::read_to_string(status.join("tui.js")).unwrap(),
+        include_str!("../shims/opencode-status-tui.js"),
+    );
+    assert_eq!(
+        std::fs::read_to_string(status.join("status.mjs")).unwrap(),
+        include_str!("../shims/opencode-status.mjs"),
+    );
+    // The status plugin imports the hooks' shared helper from `..`.
+    assert_eq!(
+        std::fs::read_to_string(shims.join("remote-tab.mjs")).unwrap(),
+        include_str!("../shims/remote-tab.mjs"),
+    );
+    assert_eq!(std::fs::read_dir(shims).unwrap().count(), 4);
     assert_eq!(std::fs::read_dir(plugin).unwrap().count(), 2);
+    assert_eq!(std::fs::read_dir(status).unwrap().count(), 3);
+}
+
+#[test]
+fn opencode_reports_through_the_status_file() {
+    let state = tempfile::tempdir().unwrap();
+    let wt = tempfile::tempdir().unwrap();
+    let rt = agent_runtime::runtime_for(&AgentKind::OpenCode, wt.path(), state.path());
+    assert_eq!(rt.signal_kind(), SignalKind::StatusFile);
+    assert_eq!(rt.fidelity(), WaitFidelity::Exact);
+    // The status plugin writes .harness/, which must stay out of git.
+    assert!(rt.ignored_paths().contains(&".harness/"));
+}
+
+#[test]
+fn opencode_launches_through_the_plugin_launcher() {
+    let state = tempfile::tempdir().unwrap();
+    let wt = tempfile::tempdir().unwrap();
+    let rt = OpenCodeRuntime::new(wt.path()).with_state_dir(state.path());
+    let command = agent_runtime::AgentCommand {
+        program: "/usr/local/bin/opencode".into(),
+        args: vec!["--continue".into()],
+        env: vec![("HARNESS_AGENT_TAB_ID".into(), "7".into())],
+        label: "opencode".into(),
+    };
+    // Not installed yet: the CLI runs as is.
+    assert_eq!(rt.prepare_launch(command.clone()), command);
+
+    rt.on_spawn(wt.path()).unwrap();
+    let launched = rt.prepare_launch(command.clone());
+    let Some(node) = launched.program.file_name() else {
+        panic!("no program");
+    };
+    if node != "node" {
+        eprintln!("node not installed — skipping launcher wiring check");
+        return;
+    }
+    let launcher = state.path().join("shims/opencode-remote-launch.mjs");
+    assert_eq!(
+        launched.args,
+        [
+            launcher.to_str().unwrap(),
+            "/usr/local/bin/opencode",
+            "--continue"
+        ]
+    );
+    assert_eq!(launched.env, command.env);
+}
+
+/// Run `opencode-remote-launch.mjs` from an installed state dir with `env`,
+/// exec'ing node to print the env OpenCode would see. `None` without node.
+fn opencode_launch_env(env: &[(&str, &str)]) -> Option<serde_json::Value> {
+    let state = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    OpenCodeRuntime::new(state.path())
+        .with_state_dir(state.path())
+        .on_spawn(state.path())
+        .unwrap();
+    let node = which_node()?;
+    let mut cmd = std::process::Command::new(&node);
+    cmd.arg(state.path().join("shims/opencode-remote-launch.mjs"))
+        .arg(&node)
+        .args([
+            "-e",
+            "process.stdout.write(JSON.stringify({config: process.env.OPENCODE_CLI_CONFIG_CONTENT ?? null, remote: process.env.HARNESS_OPENCODE_REMOTE_DIR ?? null}))",
+        ])
+        .env("XDG_CONFIG_HOME", config.path())
+        .env_remove("OPENCODE_CLI_CONFIG_CONTENT")
+        .env_remove("HARNESS_OPENCODE_REMOTE_DIR")
+        .env_remove("HARNESS_AGENT_TAB_ID")
+        .env_remove("HARNESS_AGENT_WORKTREE")
+        .env_remove("HARNESS_REMOTE_SESSION");
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "launcher failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    // Make paths comparable across temp dirs (macOS's /var is /private/var).
+    let real = std::fs::canonicalize(state.path()).unwrap();
+    let anonymize = |text: &str| {
+        [real.as_path(), state.path()]
+            .iter()
+            .fold(text.to_string(), |text, dir| {
+                text.replace(dir.to_str().unwrap(), "$STATE")
+            })
+    };
+    if let Some(config) = value["config"].as_str() {
+        value["config"] = serde_json::from_str(&anonymize(config)).unwrap();
+    }
+    if let Some(remote) = value["remote"].as_str() {
+        value["remote"] = anonymize(remote).into();
+    }
+    Some(value)
+}
+
+fn which_node() -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|dir| dir.join("node"))
+            .find(|p| p.is_file())
+    })
+}
+
+#[test]
+fn opencode_launcher_injects_the_status_plugin_in_every_app_tab() {
+    // A plain (non-tmux) tab: status only, no transcript sync.
+    let Some(plain) = opencode_launch_env(&[("HARNESS_AGENT_TAB_ID", "7")]) else {
+        eprintln!("node not installed — skipping launcher check");
+        return;
+    };
+    assert_eq!(
+        plain["config"],
+        serde_json::json!({ "plugins": ["$STATE/shims/opencode-status"] })
+    );
+    assert!(plain["remote"].is_null());
+
+    // A tmux-backed tab gets both, status first.
+    let tmux = opencode_launch_env(&[
+        ("HARNESS_AGENT_TAB_ID", "7"),
+        ("HARNESS_REMOTE_SESSION", "harness_wt_7"),
+    ])
+    .unwrap();
+    assert_eq!(
+        tmux["config"],
+        serde_json::json!({ "plugins": ["$STATE/shims/opencode-status", "$STATE/shims/opencode-remote"] })
+    );
+    assert_eq!(tmux["remote"], "$STATE/remote/opencode");
+
+    // Outside the app nothing changes.
+    let outside = opencode_launch_env(&[]).unwrap();
+    assert!(outside["config"].is_null());
+}
+
+/// Drive `opencode-status.mjs` with a fake TUI context. `script` runs with
+/// `core` (the module), `writes` (states written, in order) and `fake`
+/// (mutable store + router) in scope, and its result is printed as JSON.
+/// `None` without node.
+fn opencode_status_script(script: &str) -> Option<serde_json::Value> {
+    let core = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("shims/opencode-status.mjs");
+    let prelude = format!(
+        r#"
+const core = await import({core:?});
+const fake = {{
+  route: {{ type: "home" }},
+  status: {{}}, permission: {{}}, form: {{}}, parent: {{}},
+  listeners: [],
+  emit(name) {{ for (const cb of this.listeners) cb({{ name, details: {{}} }}); }},
+}};
+const root = (id) => (fake.parent[id] ? root(fake.parent[id]) : id);
+const data = {{
+  listen(cb) {{ fake.listeners.push(cb); return () => {{ fake.listeners = fake.listeners.filter((x) => x !== cb); }}; }},
+  session: {{
+    status: (id) => fake.status[id] ?? "idle",
+    permission: {{ list: (id) => fake.permission[id] }},
+    form: {{ list: (id) => fake.form[id] }},
+    root,
+    family: (r) => [r, ...Object.keys(fake.parent).filter((id) => root(id) === r && id !== r)],
+  }},
+}};
+const context = {{ data, ui: {{ router: {{ current: () => fake.route }} }} }};
+const writes = [];
+const result = await (async () => {{ {script} }})();
+process.stdout.write(JSON.stringify(result));
+process.exit(0);
+"#,
+        core = format!("file://{}", core.display()),
+    );
+    let node = which_node()?;
+    let out = std::process::Command::new(node)
+        .args(["--input-type=module", "-e", &prelude])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "node stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    Some(serde_json::from_slice(&out.stdout).unwrap())
+}
+
+#[test]
+fn opencode_status_maps_the_session_store_to_three_states() {
+    // A session's own store entries, mapped the way classify maps 1.x events.
+    let Some(states) = opencode_status_script(
+        r#"
+const at = (ids) => core.sessionState(data, ids);
+const out = [at(["s"])];                       // nothing yet
+fake.status.s = "running"; out.push(at(["s"]));        // execution.started
+fake.permission.s = [{ id: "p1" }]; out.push(at(["s"])); // permission.asked
+fake.permission.s = []; out.push(at(["s"]));            // permission.replied
+fake.form.s = [{ id: "f1" }]; out.push(at(["s"]));      // form.created (a question)
+fake.form.s = []; fake.status.s = "idle"; out.push(at(["s"])); // execution.succeeded
+fake.status.s = { type: "busy" }; out.push(at(["s"]));  // 1.x-shaped status
+return out;
+"#,
+    ) else {
+        eprintln!("node not installed — skipping opencode status check");
+        return;
+    };
+    assert_eq!(
+        states,
+        serde_json::json!(["idle", "running", "waiting", "running", "waiting", "idle", "running"])
+    );
+}
+
+#[test]
+fn opencode_status_reports_only_its_own_sessions() {
+    let Some(writes) = opencode_status_script(
+        r#"
+const env = { HARNESS_AGENT_TAB_ID: "7" };
+const stop = core.startStatusReporter(context, { write: (s) => writes.push(s), env, interval: 60000 });
+// Another tab's session on the shared service runs and asks permission.
+fake.status.other = "running"; fake.permission.other = [{ id: "x" }];
+fake.emit("permission.asked");
+// This TUI opens its session and starts a turn.
+fake.route = { type: "session", sessionID: "mine" };
+fake.status.mine = "running"; fake.emit("session.execution.started");
+// Streaming deltas are not state events: no extra read, no extra write.
+fake.emit("message.part.delta");
+// A subagent of this session asks permission.
+fake.parent.child = "mine"; fake.permission.child = [{ id: "p" }];
+fake.emit("permission.asked");
+fake.permission.child = []; fake.emit("permission.replied");
+// The diff viewer navigates away mid-turn: still ours.
+fake.route = { type: "plugin", id: "opencode.diffs", name: "diffs" };
+fake.emit("session.status");
+fake.status.mine = "idle"; fake.emit("session.execution.succeeded");
+fake.status.mine = "running"; fake.emit("session.execution.started");
+stop();  // quitting mid-turn
+const outside = core.startStatusReporter(context, { write: () => writes.push("outside"), env: {} });
+return { writes, outside: outside === undefined };
+"#,
+    ) else {
+        eprintln!("node not installed — skipping opencode status check");
+        return;
+    };
+    assert_eq!(
+        writes["writes"],
+        serde_json::json!(["idle", "running", "waiting", "running", "idle", "running", "idle"])
+    );
+    assert_eq!(writes["outside"], true, "no reporter outside the app");
+}
+
+#[test]
+fn opencode_status_writes_the_shared_per_tab_status_file() {
+    let wt = tempfile::tempdir().unwrap();
+    let helper = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("shims/remote-tab.mjs");
+    let script = format!(
+        r#"
+process.env.HARNESS_AGENT_TAB_ID = "7";
+process.env.HARNESS_AGENT_WORKTREE = {wt:?};
+delete process.env.HARNESS_REMOTE_SESSION;
+delete process.env.TMUX_PANE;
+const write = core.statusWriter(() => import({helper:?}), {wt:?});
+write("running");
+write("waiting");
+await new Promise((resolve) => setTimeout(resolve, 50));
+return null;
+"#,
+        wt = wt.path().to_str().unwrap(),
+        helper = format!("file://{}", helper.display()),
+    );
+    if opencode_status_script(&script).is_none() {
+        eprintln!("node not installed — skipping opencode status write check");
+        return;
+    }
+    for file in ["status.json", "status-tab-7.json"] {
+        let text = std::fs::read_to_string(wt.path().join(".harness").join(file)).unwrap();
+        let status: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            status["state"], "waiting",
+            "{file}: writes keep their order"
+        );
+        assert_eq!(status["agent"], "opencode");
+        assert_eq!(status["tabId"], 7);
+    }
 }
 
 // ---- Claude Code adapter ---------------------------------------------------
@@ -270,8 +571,11 @@ fn adapters_declare_what_they_write_into_the_worktree() {
     let codex = CodexRuntime::new(state.path());
     assert!(codex.ignored_paths().contains(&".codex/"));
 
-    // OpenCode and Kimi write nothing, and must not claim otherwise.
-    assert!(OpenCodeRuntime::new(wt.path()).ignored_paths().is_empty());
+    // OpenCode's status plugin writes the shared status file.
+    assert!(OpenCodeRuntime::new(wt.path())
+        .ignored_paths()
+        .contains(&".harness/"));
+    // Kimi writes nothing, and must not claim otherwise.
     assert!(KimiRuntime.ignored_paths().is_empty());
 
     let grok = GrokRuntime::new(state.path());
@@ -785,6 +1089,9 @@ fn shims_are_syntactically_valid_javascript() {
         GrokRuntime::new(state.path()).shim_path(),
         CodexRuntime::new(state.path()).shim_path(),
         agent_runtime::harness_status_shim_path(state.path()),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("shims/opencode-status.mjs"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("shims/opencode-status-tui.js"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("shims/opencode-remote-launch.mjs"),
     ] {
         if !shim.exists() {
             agent_runtime::materialize_harness_status_shim(state.path()).unwrap();

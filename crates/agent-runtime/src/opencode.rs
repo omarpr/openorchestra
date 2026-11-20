@@ -1,27 +1,59 @@
-//! The OpenCode adapter (§4.5, roadmap A2) — the reference *peer*.
+//! The OpenCode adapter (§4.5, roadmap A2).
 //!
-//! OpenCode is the cleanest non-pi signal surface: its CLI runs a local HTTP
-//! server alongside the TUI, and `GET /event` is a server-sent-event stream of
-//! everything happening in the session. So unlike pi (a file) or Claude Code (a
-//! hook shim), this adapter translates **in process** and emits `AgentSignal`
-//! on its own channel — which is what makes it the proof that the non-file
-//! path works end to end.
+//! **OpenCode 2 reports from inside the session.** OpenCode 2 (verified on
+//! v2.3.2) runs one shared background service per Mac on a random port
+//! (`opencode service status`) and streams every session on the Mac from it.
+//! Nothing listens on the old fixed port 4096, so the SSE pump this adapter
+//! used to run never connected. Instead the launcher
+//! (`opencode-remote-launch.mjs`) appends a TUI plugin,
+//! `shims/opencode-status/`, to OpenCode's inline CLI config
+//! (`OPENCODE_CLI_CONFIG_CONTENT`, key `plugins`). The plugin runs in the
+//! tab's own TUI process, with the tab's env, and writes the shared status
+//! file through `remote-tab.mjs` — `.harness/status.json` plus
+//! `status-tab-<HARNESS_AGENT_TAB_ID>.json`, `"agent": "opencode"` — exactly
+//! like the Claude Code / Codex / Grok hooks. So [`SignalKind::StatusFile`]:
+//! the app's `StatusFileSource` picks it up with per-tab attribution.
 //!
-//! Event mapping (§4.5):
+//! The OpenCode 2 TUI plugin API this relies on, read from the v2.3.2 binary
+//! (its bundled `@opencode/plugin/tui` and built-in `opencode.notifications`
+//! plugin) since the 2.x API ships no typings on disk:
 //!
-//! | OpenCode event | → |
+//! - `Plugin.define({ id, setup(context) })` — `define` is the identity; a
+//!   function returned from `setup` runs on unload.
+//! - `context.ui.router.current()` → `{ type: "session", sessionID }` (or
+//!   `home` / `plugin`).
+//! - `context.data.listen(cb)` — called with `{ name, details }` for every
+//!   event, after the TUI's own store has applied it.
+//! - `context.data.session.status(id)` → `"running"` / `"idle"`;
+//!   `.permission.list(id)` and `.form.list(id)` → pending requests;
+//!   `.root(id)` / `.family(root)` → the subagent tree.
+//!
+//! Event → state mapping (§4.5). OpenCode 2 renamed the 1.x events; the
+//! plugin reads the store those events maintain, which gives this table:
+//!
+//! | OpenCode 2 event (1.x name) | → |
 //! |---|---|
-//! | `permission.updated` | `Waiting` / `PermissionPrompt` |
-//! | `session.idle` | `Idle` / `TurnComplete` |
-//! | `message.part.updated`, `session.updated`, … | `Running` |
+//! | `permission.asked` (`permission.updated`), `form.created` | `Waiting` / `PermissionPrompt` |
+//! | `permission.replied`, `form.replied` / `form.cancelled` | back to `Running` (or `Idle`) |
+//! | `session.execution.started` | `Running` |
+//! | `session.execution.succeeded` / `failed` / `interrupted` (`session.idle` / `session.error`) | `Idle` / `TurnComplete` |
 //!
-//! Fidelity is **Exact**: `permission.updated` is a real, out-of-band "I am
-//! blocked on you" event, so this adapter may raise an OS notification (R11).
+//! Streaming progress (`message.*`, `session.updated`) is not mapped: it also
+//! arrives after a turn ends and would pin the tab on running.
 //!
-//! *Caveat carried from the v3.1 research:* the event names were confirmed from
-//! the SDK's `event.subscribe` shape rather than enumerated in the docs, so
-//! [`classify`] is written to degrade — an unrecognized event means "the agent
-//! is doing something", never a false `Waiting`.
+//! The plugin reports only its own sessions — those its TUI has shown since
+//! launch, plus their subagents — never the rest of the shared service.
+//!
+//! Fidelity is **Exact**: a pending permission is a real, out-of-band "I am
+//! blocked on you", so this adapter may raise an OS notification (R11).
+//!
+//! **OpenCode 1.x** cannot load that plugin: its TUI plugin API is a
+//! different shape (`(api, options, meta) => Promise<void>` in
+//! `@opencode-ai/plugin` 1.x), and `@opencode/plugin/tui` does not exist
+//! there. For 1.x only, [`AgentRuntime::subscribe`] keeps the old fallback:
+//! the per-session server's SSE `/event` on port 4096, mapped by
+//! [`classify`]. That stream carries no tab id. The installed CLI's
+//! `--version` decides, off the UI thread; OpenCode 2 gets no stream.
 
 use std::fs;
 use std::io::Write;
@@ -49,27 +81,38 @@ const LAUNCHER: &str = include_str!("../shims/opencode-remote-launch.mjs");
 const TUI_PLUGIN: &str = include_str!("../shims/opencode-remote-tui.js");
 const TUI_PACKAGE: &str = r#"{"name":"openorchestra-remote","private":true,"type":"module","exports":{"./tui":"./tui.js"}}"#;
 
+const STATUS_PLUGIN: &str = include_str!("../shims/opencode-status-tui.js");
+const STATUS_CORE: &str = include_str!("../shims/opencode-status.mjs");
+const STATUS_PACKAGE: &str = r#"{"name":"openorchestra-status","private":true,"type":"module","exports":{"./tui":"./tui.js"}}"#;
+
 pub struct OpenCodeRuntime {
     worktree_root: PathBuf,
     host: String,
     port: u16,
     state_dir: Option<PathBuf>,
+    /// Stream SSE only when the installed CLI is 1.x. Off for an explicit
+    /// endpoint, whose caller already knows a server is there.
+    legacy_only: bool,
     /// Set on drop so the subscription thread stops reconnecting.
     stopped: Arc<AtomicBool>,
 }
 
 impl OpenCodeRuntime {
     pub fn new(worktree_root: impl Into<PathBuf>) -> Self {
-        OpenCodeRuntime::with_endpoint(worktree_root, "127.0.0.1", DEFAULT_PORT)
+        let mut runtime = OpenCodeRuntime::with_endpoint(worktree_root, "127.0.0.1", DEFAULT_PORT);
+        runtime.legacy_only = true;
+        runtime
     }
 
-    /// Point at a specific endpoint (tests, or a user-configured port).
+    /// Stream SSE from a specific endpoint, whatever the installed CLI
+    /// (tests, or a user-configured OpenCode 1.x port).
     pub fn with_endpoint(worktree_root: impl Into<PathBuf>, host: &str, port: u16) -> Self {
         OpenCodeRuntime {
             worktree_root: worktree_root.into(),
             host: host.to_string(),
             port,
             state_dir: None,
+            legacy_only: false,
             stopped: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -92,22 +135,35 @@ impl AgentRuntime for OpenCodeRuntime {
     }
 
     fn fidelity(&self) -> WaitFidelity {
-        // `permission.updated` is a real blocked-on-you event.
+        // A pending permission is a real blocked-on-you state.
         WaitFidelity::Exact
     }
 
     fn signal_kind(&self) -> SignalKind {
-        SignalKind::Sse
+        // The status plugin writes the shared status file. (OpenCode 1.x
+        // falls back to `subscribe`'s SSE stream.)
+        SignalKind::StatusFile
+    }
+
+    fn ignored_paths(&self) -> &'static [&'static str] {
+        &[".harness/"]
     }
 
     fn on_spawn(&self, _worktree_root: &Path) -> std::io::Result<()> {
         if let Some(dir) = &self.state_dir {
             let shims = dir.join("shims");
             let plugin = shims.join("opencode-remote");
+            let status = shims.join("opencode-status");
             fs::create_dir_all(&plugin)?;
+            fs::create_dir_all(&status)?;
+            // The status plugin writes through the hooks' shared helper.
+            crate::install_remote_tab_helper(dir)?;
             for (dir, name, content) in [
                 (&plugin, "package.json", TUI_PACKAGE),
                 (&plugin, "tui.js", TUI_PLUGIN),
+                (&status, "package.json", STATUS_PACKAGE),
+                (&status, "tui.js", STATUS_PLUGIN),
+                (&status, "status.mjs", STATUS_CORE),
                 (&shims, "opencode-remote-launch.mjs", LAUNCHER),
             ] {
                 let file = dir.join(name);
@@ -150,7 +206,13 @@ impl AgentRuntime for OpenCodeRuntime {
         command
     }
 
+    /// OpenCode 1.x only: its per-session server's SSE stream. OpenCode 2
+    /// reports through the status file, so this thread ends at once there.
     fn subscribe(&self) -> Option<Receiver<AgentSignal>> {
+        let probe = match self.legacy_only {
+            true => Some(resolve_on_path(PROGRAM)?),
+            false => None,
+        };
         let (tx, rx) = unbounded();
         let host = self.host.clone();
         let port = self.port;
@@ -159,10 +221,38 @@ impl AgentRuntime for OpenCodeRuntime {
 
         std::thread::Builder::new()
             .name("opencode-events".into())
-            .spawn(move || pump(&host, port, &root, &tx, &stopped))
+            .spawn(move || {
+                if probe.is_some_and(|program| !legacy_server(&cli_version(&program))) {
+                    return; // OpenCode 2: dropping `tx` ends the stream.
+                }
+                pump(&host, port, &root, &tx, &stopped)
+            })
             .ok()?;
         Some(rx)
     }
+}
+
+/// `opencode --version`, or empty when it cannot be run.
+fn cli_version(program: &Path) -> String {
+    std::process::Command::new(program)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// Whether `--version` output names OpenCode 1.x or older, the generation
+/// that served `/event` per session. Unknown output is not legacy: a stream
+/// that never connects is worth nothing.
+fn legacy_server(version: &str) -> bool {
+    let major = version.split_whitespace().find_map(|word| {
+        let word = word.trim_start_matches('v');
+        let (major, _) = word.split_once('.')?;
+        major.parse::<u64>().ok()
+    });
+    major.is_some_and(|major| major < 2)
 }
 
 /// Connect, translate events, and reconnect while anyone is listening.
@@ -215,7 +305,8 @@ fn pump(
     }
 }
 
-/// Map an OpenCode event to a normalized state.
+/// Map an OpenCode 1.x event to a normalized state (the SSE fallback; the
+/// OpenCode 2 plugin's `opencode-status.mjs` keeps the same semantics).
 ///
 /// The event *type* may arrive either as the SSE `event:` field or as a `type`
 /// property inside the JSON payload, depending on how the server frames it, so
@@ -239,5 +330,20 @@ pub fn classify(event_name: &Option<String>, data: &str) -> Option<(AgentState, 
             Some((AgentState::Running, WaitReason::None))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::legacy_server;
+
+    #[test]
+    fn only_opencode_1_gets_the_sse_fallback() {
+        assert!(!legacy_server("opencode v2.3.2\n"));
+        assert!(!legacy_server("2.0.0"));
+        assert!(legacy_server("1.0.150\n"));
+        assert!(legacy_server("opencode v0.15.8"));
+        assert!(!legacy_server(""));
+        assert!(!legacy_server("opencode dev"));
     }
 }
