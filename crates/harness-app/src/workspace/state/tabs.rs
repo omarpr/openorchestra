@@ -717,6 +717,8 @@ impl HarnessWorkspace {
                         },
                     );
                 }
+                // Task 6 wires Browser restore once `TabContent::Browser` exists.
+                K::Browser { .. } => {}
                 K::Shell => self.restore_terminal_tab(key, id, None, &title, &live, window, cx),
                 K::Agent(a) => {
                     self.restore_terminal_tab(key, id, Some(a), &title, &live, window, cx)

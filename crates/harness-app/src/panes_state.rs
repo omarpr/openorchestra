@@ -75,6 +75,13 @@ pub enum TabRecordKind {
     Chat,
     Diff,
     ReviewOverview(Option<Arc<crate::review_overview::StoredReviewOverview>>),
+    /// Persisted only in `browser-tabs.json`, never in `panes.json` or
+    /// `review-tabs.json`. See [`SIDECARS`].
+    Browser {
+        url: String,
+        #[serde(default)]
+        title: Option<String>,
+    },
 }
 
 /// Rewrite legacy `task:{id}` pane keys to `task:{id}:member:{home_worktree_id}`.
@@ -94,59 +101,80 @@ pub fn migrate_task_pane_keys(state: &mut PanesState, home_by_task: &[(String, S
     moved
 }
 
-/// Review overview tabs live beside `panes.json`. An installed build and a dev
-/// build share `panes.json`; a tab kind the older build cannot deserialize
-/// makes `load` return an empty state, and that build's next save then drops
-/// the other instance's tabs and the tab-id counter.
+/// Tab kinds an older build cannot deserialize live in sidecar files beside
+/// `panes.json`. An installed build and a dev build share `panes.json`; a tab
+/// kind the older build cannot deserialize makes `load` return an empty state,
+/// and that build's next save then drops the other instance's tabs and the
+/// tab-id counter. Each kind belongs to exactly one sidecar, because the
+/// release build also reads `review-tabs.json` and would drop its review tabs
+/// on meeting a kind it does not know.
+struct Sidecar {
+    file: &'static str,
+    claims: fn(&TabRecordKind) -> bool,
+}
+
 const REVIEW_TABS_FILE: &str = "review-tabs.json";
+const BROWSER_TABS_FILE: &str = "browser-tabs.json";
 
-fn review_tabs_path(panes_path: &Path) -> std::path::PathBuf {
-    panes_path.with_file_name(REVIEW_TABS_FILE)
-}
+const SIDECARS: [Sidecar; 2] = [
+    Sidecar {
+        file: REVIEW_TABS_FILE,
+        claims: |kind| matches!(kind, TabRecordKind::ReviewOverview(_)),
+    },
+    Sidecar {
+        file: BROWSER_TABS_FILE,
+        claims: |kind| matches!(kind, TabRecordKind::Browser { .. }),
+    },
+];
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct ReviewTabsFile {
+struct SidecarFile {
     #[serde(default)]
-    worktrees: BTreeMap<String, ReviewWorktreeTabs>,
+    worktrees: BTreeMap<String, SidecarWorktreeTabs>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct ReviewWorktreeTabs {
-    /// Set when the active tab is a review overview. Absent when a legacy tab
-    /// is active, so a reload does not override that choice.
+struct SidecarWorktreeTabs {
+    /// Set when the active tab belongs to this sidecar. Absent when a legacy
+    /// tab (or another sidecar's tab) is active, so a reload does not override
+    /// that choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     active: Option<u64>,
-    tabs: Vec<PlacedReviewTab>,
+    tabs: Vec<PlacedTab>,
 }
 
+/// A sidecar tab and its position in the worktree's full tab list.
 #[derive(Debug, Serialize, Deserialize)]
-struct PlacedReviewTab {
+struct PlacedTab {
     index: usize,
     record: TabRecord,
 }
 
-fn legacy_and_reviews(state: &PanesState) -> (BTreeMap<String, WorktreePanes>, ReviewTabsFile) {
+fn split_sidecars(state: &PanesState) -> (BTreeMap<String, WorktreePanes>, [SidecarFile; 2]) {
     let mut legacy = BTreeMap::new();
-    let mut reviews = ReviewTabsFile::default();
+    let mut files: [SidecarFile; 2] = Default::default();
     for (key, wp) in &state.worktrees {
         let mut tabs = Vec::new();
-        let mut placed = Vec::new();
+        let mut placed: [Vec<PlacedTab>; 2] = Default::default();
         for (index, tab) in wp.tabs.iter().enumerate() {
-            if matches!(tab.kind, TabRecordKind::ReviewOverview(_)) {
-                placed.push(PlacedReviewTab {
+            match SIDECARS.iter().position(|s| (s.claims)(&tab.kind)) {
+                Some(owner) => placed[owner].push(PlacedTab {
                     index,
                     record: tab.clone(),
-                });
-            } else {
-                tabs.push(tab.clone());
+                }),
+                None => tabs.push(tab.clone()),
             }
         }
-        let review_active = wp
-            .active
-            .filter(|id| placed.iter().any(|tab| tab.record.id == *id));
-        // An active id the older build's tab list does not contain is how a
-        // later save of that build loses track of which tab was open.
-        let active = if review_active.is_some() {
+        // The sidecar owning the active tab records it. The shared file gets
+        // a tab it actually holds: an active id the older build's tab list
+        // does not contain is how a later save of that build loses track of
+        // which tab was open.
+        let owner = wp.active.and_then(|id| {
+            placed
+                .iter()
+                .position(|p| p.iter().any(|t| t.record.id == id))
+        });
+        let active = if owner.is_some() {
             tabs.first().map(|tab| tab.id)
         } else {
             wp.active.filter(|id| tabs.iter().any(|tab| tab.id == *id))
@@ -159,41 +187,55 @@ fn legacy_and_reviews(state: &PanesState) -> (BTreeMap<String, WorktreePanes>, R
                 agent: wp.agent.clone(),
             },
         );
-        if !placed.is_empty() {
-            reviews.worktrees.insert(
-                key.clone(),
-                ReviewWorktreeTabs {
-                    active: review_active,
-                    tabs: placed,
-                },
-            );
+        for (i, tabs) in placed.into_iter().enumerate() {
+            if !tabs.is_empty() {
+                files[i].worktrees.insert(
+                    key.clone(),
+                    SidecarWorktreeTabs {
+                        active: if owner == Some(i) { wp.active } else { None },
+                        tabs,
+                    },
+                );
+            }
         }
     }
-    (legacy, reviews)
+    (legacy, files)
 }
 
-fn splice_review_tabs(state: &mut PanesState, path: &Path) {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return;
-    };
-    let Ok(file) = serde_json::from_str::<ReviewTabsFile>(&text) else {
-        return;
-    };
-    for (key, review) in file.worktrees {
-        let wp = state.worktrees.entry(key).or_default();
-        let mut placed = review.tabs;
-        placed.sort_by_key(|tab| tab.index);
-        for tab in placed {
+/// Put every sidecar tab back at its recorded position. All sidecars are read
+/// first and their tabs inserted in ascending index order, so the original
+/// order comes back whichever file a tab came from.
+fn splice_sidecars(state: &mut PanesState, dir: &Path) {
+    let mut placed: BTreeMap<String, Vec<PlacedTab>> = BTreeMap::new();
+    let mut active: BTreeMap<String, u64> = BTreeMap::new();
+    for sidecar in &SIDECARS {
+        let Ok(text) = std::fs::read_to_string(dir.join(sidecar.file)) else {
+            continue;
+        };
+        let Ok(file) = serde_json::from_str::<SidecarFile>(&text) else {
+            continue;
+        };
+        for (key, tabs) in file.worktrees {
+            if let Some(id) = tabs.active {
+                active.insert(key.clone(), id);
+            }
+            placed.entry(key).or_default().extend(tabs.tabs);
+        }
+    }
+    for (key, mut tabs) in placed {
+        let wp = state.worktrees.entry(key.clone()).or_default();
+        tabs.sort_by_key(|tab| tab.index);
+        for tab in tabs {
             if wp.tabs.iter().any(|existing| existing.id == tab.record.id) {
                 continue;
             }
             let at = tab.index.min(wp.tabs.len());
             wp.tabs.insert(at, tab.record);
         }
-        if let Some(active) = review.active
-            && wp.tabs.iter().any(|tab| tab.id == active)
+        if let Some(id) = active.get(&key)
+            && wp.tabs.iter().any(|tab| tab.id == *id)
         {
-            wp.active = Some(active);
+            wp.active = Some(*id);
         }
     }
 }
@@ -203,19 +245,20 @@ pub fn load(path: &Path) -> PanesState {
         Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
         Err(_) => PanesState::default(),
     };
-    splice_review_tabs(&mut state, &review_tabs_path(path));
+    splice_sidecars(&mut state, path.parent().unwrap_or_else(|| Path::new("")));
     state
 }
 
 /// Merge with the file on disk (see [`PanesState::merge_from`]), then write.
 ///
-/// Review overview tabs are not part of the shared file. See [`REVIEW_TABS_FILE`].
+/// Review overview and browser tabs are not part of the shared file. See
+/// [`Sidecar`].
 pub fn save(path: &Path, state: &mut PanesState) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     state.merge_from(load(path));
-    let (worktrees, reviews) = legacy_and_reviews(state);
+    let (worktrees, files) = split_sidecars(state);
     let legacy = PanesState {
         next_tab_id: state.next_tab_id,
         worktrees,
@@ -229,21 +272,24 @@ pub fn save(path: &Path, state: &mut PanesState) {
         }
         Err(e) => log::warn!("could not serialize panes state: {e}"),
     }
-    let review_path = review_tabs_path(path);
-    if reviews.worktrees.is_empty() {
-        let _ = std::fs::remove_file(&review_path);
-        return;
-    }
-    match serde_json::to_string_pretty(&reviews) {
-        Ok(json) => {
-            if let Err(e) = crate::state_files::write_private(&review_path, json.as_bytes()) {
-                log::warn!(
-                    "could not write review tabs to {}: {e}",
-                    review_path.display()
-                );
-            }
+    for (sidecar, file) in SIDECARS.iter().zip(&files) {
+        let sidecar_path = path.with_file_name(sidecar.file);
+        if file.worktrees.is_empty() {
+            let _ = std::fs::remove_file(&sidecar_path);
+            continue;
         }
-        Err(e) => log::warn!("could not serialize review tabs: {e}"),
+        match serde_json::to_string_pretty(file) {
+            Ok(json) => {
+                if let Err(e) = crate::state_files::write_private(&sidecar_path, json.as_bytes()) {
+                    log::warn!(
+                        "could not write {} to {}: {e}",
+                        sidecar.file,
+                        sidecar_path.display()
+                    );
+                }
+            }
+            Err(e) => log::warn!("could not serialize {}: {e}", sidecar.file),
+        }
     }
 }
 
@@ -455,6 +501,139 @@ mod tests {
             restored.tabs[1].kind,
             TabRecordKind::ReviewOverview(_)
         ));
+    }
+
+    fn shell(id: u64) -> TabRecord {
+        TabRecord {
+            id,
+            kind: TabRecordKind::Shell,
+            title: "shell".into(),
+        }
+    }
+
+    fn browser(id: u64) -> TabRecord {
+        TabRecord {
+            id,
+            kind: TabRecordKind::Browser {
+                url: format!("https://example.com/{id}"),
+                title: Some(format!("Page {id}")),
+            },
+            title: "Browser".into(),
+        }
+    }
+
+    fn review(id: u64) -> TabRecord {
+        TabRecord {
+            id,
+            kind: TabRecordKind::ReviewOverview(None),
+            title: "Review Overview".into(),
+        }
+    }
+
+    fn one_worktree(active: Option<u64>, tabs: Vec<TabRecord>) -> PanesState {
+        let mut state = PanesState {
+            next_tab_id: 20,
+            ..Default::default()
+        };
+        state.worktrees.insert(
+            "main:project".into(),
+            WorktreePanes {
+                active,
+                tabs,
+                agent: None,
+            },
+        );
+        state
+    }
+
+    #[test]
+    fn browser_tabs_stay_out_of_panes_and_review_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("panes.json");
+        let mut state = one_worktree(Some(3), vec![shell(1), review(2), browser(3)]);
+        save(&path, &mut state);
+
+        let panes = std::fs::read_to_string(&path).unwrap();
+        assert!(!panes.contains("Browser"), "{panes}");
+        assert!(!panes.contains("ReviewOverview"), "{panes}");
+        let reviews = std::fs::read_to_string(dir.path().join("review-tabs.json")).unwrap();
+        assert!(!reviews.contains("Browser"), "{reviews}");
+        assert!(reviews.contains("ReviewOverview"), "{reviews}");
+        let browsers = std::fs::read_to_string(dir.path().join("browser-tabs.json")).unwrap();
+        assert!(browsers.contains("https://example.com/3"), "{browsers}");
+        assert!(!browsers.contains("ReviewOverview"), "{browsers}");
+        // The shared file's active id names a tab it actually holds.
+        let legacy: PanesState = serde_json::from_str(&panes).unwrap();
+        assert_eq!(legacy.worktrees["main:project"].active, Some(1));
+    }
+
+    #[test]
+    fn browser_tabs_restore_in_place_and_keep_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("panes.json");
+        let mut state = one_worktree(Some(2), vec![shell(1), browser(2), shell(3)]);
+        save(&path, &mut state);
+        let back = load(&path);
+        assert_eq!(back, state);
+        let wp = &back.worktrees["main:project"];
+        assert_eq!(wp.active, Some(2));
+        assert!(matches!(
+            &wp.tabs[1].kind,
+            TabRecordKind::Browser { title: Some(t), .. } if t == "Page 2"
+        ));
+    }
+
+    #[test]
+    fn interleaved_review_and_browser_tabs_restore_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("panes.json");
+        let mut state = one_worktree(
+            Some(5),
+            vec![shell(1), browser(2), review(3), shell(4), browser(5)],
+        );
+        save(&path, &mut state);
+        assert_eq!(load(&path), state);
+
+        // Only one sidecar claims the active tab.
+        let reviews = std::fs::read_to_string(dir.path().join("review-tabs.json")).unwrap();
+        assert!(!reviews.contains("\"active\""), "{reviews}");
+    }
+
+    #[test]
+    fn an_older_build_save_keeps_browser_tabs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("panes.json");
+        let mut state = one_worktree(Some(2), vec![shell(1), browser(2)]);
+        save(&path, &mut state);
+
+        // An older build rewrites panes.json with only what it understands.
+        let older = PanesState {
+            next_tab_id: 25,
+            ..one_worktree(Some(1), vec![shell(1)])
+        };
+        std::fs::write(&path, serde_json::to_string_pretty(&older).unwrap()).unwrap();
+
+        let back = load(&path);
+        assert_eq!(back.next_tab_id, 25);
+        let wp = &back.worktrees["main:project"];
+        assert_eq!(wp.tabs, vec![shell(1), browser(2)]);
+        assert_eq!(wp.active, Some(2));
+    }
+
+    #[test]
+    fn no_browser_tabs_removes_the_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("panes.json");
+        let browser_path = dir.path().join("browser-tabs.json");
+        let mut state = one_worktree(Some(2), vec![shell(1), browser(2)]);
+        save(&path, &mut state);
+        assert!(browser_path.exists());
+
+        let wp = state.worktrees.get_mut("main:project").unwrap();
+        wp.tabs.pop();
+        wp.active = Some(1);
+        save(&path, &mut state);
+        assert!(!browser_path.exists());
     }
 
     #[test]
