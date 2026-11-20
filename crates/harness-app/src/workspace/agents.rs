@@ -74,23 +74,18 @@ pub(crate) fn agent_icon(kind: &AgentKind, size: f32) -> AnyElement {
 /// reorder). The single source the settings list, the ＋ menu and the
 /// new-task default all read, so they can never drift.
 ///
-/// With no saved order: OpenCode first (it is the out-of-the-box default,
-/// and the top of the list is the default), the other built-ins in their
-/// usual order, then custom agents by key. Agents the saved order does not
-/// name — a built-in added in a later release, a newly added custom agent —
-/// follow the ordered ones in that same base order.
+/// With no saved order: every agent, built-in and custom together, sorted
+/// alphabetically by display name (case-insensitive, ties by key). Agents the
+/// saved order does not name — a built-in added in a later release, a newly
+/// added custom agent — follow the ordered ones in that same base order.
 pub(crate) fn agent_catalog(prefs: &Prefs) -> Vec<AgentKind> {
-    let mut base: Vec<AgentKind> = vec![AgentKind::OpenCode];
-    base.extend(
-        AgentKind::known()
-            .into_iter()
-            .filter(|k| *k != AgentKind::OpenCode),
-    );
+    let mut base: Vec<AgentKind> = AgentKind::known().to_vec();
     for (key, pref) in &prefs.agents {
         if pref.custom {
             base.push(AgentKind::Other(key.clone()));
         }
     }
+    base.sort_by_cached_key(|k| (agent_display(k).to_lowercase(), k.as_str().to_string()));
     let mut out: Vec<AgentKind> = Vec::with_capacity(base.len());
     for key in &prefs.agent_order {
         if let Some(kind) = base.iter().find(|k| k.as_str() == key.as_str())
@@ -126,8 +121,8 @@ pub(crate) fn enabled_agents(prefs: &Prefs) -> Vec<AgentKind> {
 }
 
 /// Default agent for a new task: last used (if still enabled), else the
-/// first enabled agent in the user's order. Out of the box that is OpenCode
-/// (D12), because the catalog lists it first until the user reorders.
+/// first enabled agent in the user's order. Out of the box that is Claude
+/// Code, the first of the alphabetical catalog until the user reorders.
 pub(crate) fn default_enabled_agent(prefs: &Prefs) -> Option<AgentKind> {
     let enabled = enabled_agents(prefs);
     if let Some(key) = prefs.last_task_agent.as_deref() {
@@ -182,7 +177,7 @@ pub(crate) struct AgentPref {
 #[cfg(test)]
 mod agent_prefs_tests {
     use super::{
-        AgentKind, AgentPref, Prefs, agent_catalog, agent_order_after_move, default_enabled_agent,
+        AgentKind, AgentPref, Prefs, agent_catalog, agent_display, agent_order_after_move, default_enabled_agent,
         enabled_agents, valid_agent_slug,
     };
 
@@ -242,66 +237,78 @@ mod agent_prefs_tests {
     }
 
     #[test]
-    fn the_catalog_is_the_built_ins_then_the_custom_agents() {
-        let prefs = with_custom("cursor-agent", "cursor-agent");
-        let catalog = agent_catalog(&prefs);
-        let built_ins = AgentKind::known();
-        assert_eq!(
-            catalog[0],
-            AgentKind::OpenCode,
-            "OpenCode, the out-of-the-box default, leads"
+    fn the_base_order_is_alphabetical_by_display_name() {
+        let mut prefs = with_custom("cursor-agent", "cursor-agent");
+        prefs.agents.insert(
+            "Zed".into(),
+            AgentPref {
+                custom: true,
+                ..Default::default()
+            },
         );
-        let rest: Vec<AgentKind> = built_ins
-            .iter()
-            .filter(|k| **k != AgentKind::OpenCode)
-            .cloned()
-            .collect();
+        let names: Vec<String> = agent_catalog(&prefs).iter().map(agent_display).collect();
         assert_eq!(
-            &catalog[1..built_ins.len()],
-            &rest[..],
-            "the other built-ins follow, in order"
-        );
-        assert_eq!(
-            catalog.last(),
-            Some(&AgentKind::Other("cursor-agent".to_string())),
-            "the custom agent is appended",
+            names,
+            [
+                "Claude Code",
+                "Codex",
+                "cursor-agent",
+                "Grok",
+                "Kimi",
+                "OpenCode",
+                "pi",
+                "Zed"
+            ],
+            "built-ins and custom agents together, case-insensitive"
         );
     }
 
     #[test]
-    fn a_saved_order_leads_and_unnamed_agents_follow() {
-        let mut prefs = with_custom("cursor-agent", "cursor-agent");
-        // A partial, stale order: an agent that no longer exists, a
-        // duplicate, and no mention of most built-ins.
-        prefs.agent_order = vec![
-            "cursor-agent".into(),
-            "gone-agent".into(),
-            "codex".into(),
-            "cursor-agent".into(),
-        ];
-        let catalog = agent_catalog(&prefs);
-        assert_eq!(catalog[0], AgentKind::Other("cursor-agent".into()));
-        assert_eq!(catalog[1], AgentKind::Codex);
-        assert_eq!(catalog[2], AgentKind::OpenCode, "then the base order");
+    fn built_ins_alone_sort_alphabetically() {
+        let names: Vec<String> = agent_catalog(&Prefs::default())
+            .iter()
+            .map(agent_display)
+            .collect();
         assert_eq!(
-            catalog.len(),
-            AgentKind::known().len() + 1,
-            "nothing dropped, nothing duplicated, the stale key ignored"
+            names,
+            ["Claude Code", "Codex", "Grok", "Kimi", "OpenCode", "pi"]
+        );
+    }
+
+    #[test]
+    fn a_saved_partial_order_leads_then_the_alphabetical_remainder() {
+        let mut prefs = with_custom("cursor-agent", "cursor-agent");
+        prefs.agent_order = vec!["pi".into(), "kimi".into()];
+        let keys: Vec<String> = agent_catalog(&prefs)
+            .iter()
+            .map(|k| k.as_str().to_string())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "pi",
+                "kimi",
+                "claude-code",
+                "codex",
+                "cursor-agent",
+                "grok",
+                "opencode"
+            ]
         );
     }
 
     #[test]
     fn moving_an_agent_saves_the_full_order() {
         let prefs = Prefs::default();
-        let order = agent_order_after_move(&prefs, "claude-code", "opencode");
-        assert_eq!(order[0], "claude-code", "dropped onto the top row");
-        assert_eq!(order[1], "opencode");
+        let order = agent_order_after_move(&prefs, "pi", "claude-code");
+        assert_eq!(order[0], "pi", "dropped onto the top row");
+        assert_eq!(order[1], "claude-code");
         assert_eq!(order.len(), AgentKind::known().len());
         let mut prefs = prefs;
         prefs.agent_order = order;
         assert_eq!(
             default_enabled_agent(&prefs),
-            Some(AgentKind::ClaudeCode),
+            Some(AgentKind::Pi),
             "the top of the list is the default"
         );
     }
@@ -335,11 +342,24 @@ mod agent_prefs_tests {
     }
 
     #[test]
-    fn out_of_the_box_the_default_is_opencode() {
+    fn out_of_the_box_the_default_is_claude_code() {
         assert_eq!(
             default_enabled_agent(&Prefs::default()),
-            Some(AgentKind::OpenCode)
+            Some(AgentKind::ClaudeCode)
         );
+    }
+
+    #[test]
+    fn the_default_is_the_first_enabled_in_the_alphabetical_order() {
+        let mut prefs = Prefs::default();
+        prefs.agents.insert(
+            "claude-code".into(),
+            AgentPref {
+                disabled: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(default_enabled_agent(&prefs), Some(AgentKind::Codex));
     }
 
     #[test]
@@ -411,10 +431,10 @@ mod agent_prefs_tests {
     }
 
     #[test]
-    fn default_task_agent_skips_disabled_opencode() {
+    fn default_task_agent_skips_a_disabled_top_agent() {
         let mut prefs = Prefs::default();
         prefs.agents.insert(
-            "opencode".to_string(),
+            "claude-code".to_string(),
             AgentPref {
                 disabled: true,
                 command: None,
@@ -423,8 +443,8 @@ mod agent_prefs_tests {
             },
         );
         let kind = default_enabled_agent(&prefs).expect("other built-ins remain");
-        assert_ne!(kind, AgentKind::OpenCode);
-        assert!(!enabled_agents(&prefs).contains(&AgentKind::OpenCode));
+        assert_ne!(kind, AgentKind::ClaudeCode);
+        assert!(!enabled_agents(&prefs).contains(&AgentKind::ClaudeCode));
     }
 
     #[test]

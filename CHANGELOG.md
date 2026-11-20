@@ -54,8 +54,9 @@ Unreleased is empty.
 - A new **General** settings pane, where Settings now opens, holds Terminals
   on quit and the always-on conductor. "Show gitignored files" moved to
   **Editor**, and the Diff pane is now called **Review**.
-- With no saved order, OpenCode now appears first in the **+** menu, since
-  it's the out-of-the-box default.
+- With no saved order, agents are listed alphabetically in Settings, the **+**
+  menu and the new-task picker, and the top one (Claude Code out of the box)
+  is the default for new tasks.
 - The **+** menu lists Shell and Editor first, then your agents under their
   own **Agents** heading in Settings order, and every item's label now lines
   up. Terminal is now Shell.
