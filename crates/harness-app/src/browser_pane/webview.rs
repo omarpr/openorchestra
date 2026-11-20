@@ -59,7 +59,8 @@
 //!   `[NSApp sendEvent:]` as the same `NSEvent`; the probe saw the monitor
 //!   get it a second time. The monitor recognizes it and sends the editing
 //!   action (`copy:`, `paste:`, `cut:`, `selectAll:`, `undo:`, `redo:`) to
-//!   the page, or offers any other chord to the main menu. The editing keys go
+//!   the page, or offers any other chord to the main menu, then (untaken)
+//!   back to AppKit's usual path, so ⌘` still cycles windows. The editing keys go
 //!   as actions, not through the menu, because gpui's Undo/Redo menu items
 //!   are gpui actions the page can't receive.
 //!
@@ -108,6 +109,36 @@ pub(crate) fn chord_key(chars: &str, key_code: u16) -> Option<String> {
         _ => None,
     };
     named.or_else(|| us_key(key_code)).map(str::to_string)
+}
+
+/// The ways the ⌘-chord being pressed can be written. The catalog writes ⇧
+/// with a non-letter as the base key plus shift (`cmd-shift-]`); gpui reads
+/// such a keypress as the shifted character without shift (`cmd-}`), and
+/// that is how a chord rebound by pressing it is stored. Both, so either
+/// matches; letters keep shift in both, so they get one. `chars` is what the
+/// key types with ⌘ alone, `shifted` with ⌘⇧. The first is the catalog form.
+pub(crate) fn event_chords(
+    chars: &str,
+    shifted: &str,
+    key_code: u16,
+    cmd: bool,
+    shift: bool,
+    alt: bool,
+    ctrl: bool,
+) -> Vec<Chord> {
+    let mut out = Vec::new();
+    if let Some(key) = chord_key(chars, key_code) {
+        out.push(Chord::new(&key, cmd, shift, alt, ctrl));
+    }
+    let mut it = shifted.chars();
+    if shift
+        && let (Some(c), None) = (it.next(), it.next())
+        && c.is_ascii_graphic()
+        && !c.is_ascii_alphabetic()
+    {
+        out.push(Chord::new(&c.to_string(), cmd, false, alt, ctrl));
+    }
+    out
 }
 
 /// The US-layout character of a virtual key code (`kVK_ANSI_*`).
@@ -365,9 +396,9 @@ mod mac {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     use super::{
-        APP_CHORDS, DOWNLOAD_UNSUPPORTED, NavDecision, NavOrigin, NativeEvents, chord_key,
-        decide_download, decide_navigation, decide_new_window, flip_y, is_benign_failure,
-        is_download, safari_app_name,
+        APP_CHORDS, DOWNLOAD_UNSUPPORTED, NavDecision, NavOrigin, NativeEvents,
+        decide_download, decide_navigation, decide_new_window, event_chords, flip_y,
+        is_benign_failure, is_download, safari_app_name,
     };
     use crate::shortcuts::{Chord, PageEdit, is_app_shortcut, page_edit};
 
@@ -675,22 +706,19 @@ mod mac {
             return false;
         };
         if take_forwarded(event) {
-            // The page's script left it alone. Finish it the way Safari's
-            // menu would, and never through gpui.
+            // The page's script left it alone. An editing key becomes its
+            // action on the page, never gpui's (its global ⌘C would copy
+            // diff lines). Anything else is offered to the menu, and if the
+            // menu doesn't take it either, AppKit finishes it as usual (⌘`
+            // cycles windows after key equivalents fail).
             let app = NSApplication::sharedApplication(mtm);
-            match event_chord(event).as_ref().and_then(page_edit) {
+            if let Some(edit) = event_chords_of(event).first().and_then(page_edit) {
                 // SAFETY: a standard responder action, sent with no sender
                 // to the key window's first responder (the page).
-                Some(edit) => unsafe {
-                    app.sendAction_to_from(edit_action(edit), None, None);
-                },
-                None => {
-                    if let Some(menu) = app.mainMenu() {
-                        menu.performKeyEquivalent(event);
-                    }
-                }
+                unsafe { app.sendAction_to_from(edit_action(edit), None, None) };
+                return true;
             }
-            return true;
+            return app.mainMenu().is_some_and(|menu| menu.performKeyEquivalent(event));
         }
         if !event.modifierFlags().contains(NSEventModifierFlags::Command) {
             return false;
@@ -698,8 +726,10 @@ mod mac {
         let Some(page) = event.window(mtm).as_deref().and_then(focused_page) else {
             return false;
         };
-        let for_app = event_chord(event)
-            .is_some_and(|c| APP_CHORDS.with(|app| is_app_shortcut(&c, &app.borrow())));
+        let for_app = APP_CHORDS.with(|app| {
+            let app = app.borrow();
+            event_chords_of(event).iter().any(|c| is_app_shortcut(c, &app))
+        });
         if for_app {
             return false;
         }
@@ -733,20 +763,24 @@ mod mac {
         })
     }
 
-    fn event_chord(event: &NSEvent) -> Option<Chord> {
+    /// [`event_chords`] for a key event.
+    fn event_chords_of(event: &NSEvent) -> Vec<Chord> {
         let flags = event.modifierFlags();
-        let chars = event
-            .charactersByApplyingModifiers(NSEventModifierFlags::Command)
-            .map(|s| s.to_string())
-            .unwrap_or_default();
-        let key = chord_key(&chars, event.keyCode())?;
-        Some(Chord::new(
-            &key,
+        let typed = |mods: NSEventModifierFlags| {
+            event
+                .charactersByApplyingModifiers(mods)
+                .map(|s| s.to_string())
+                .unwrap_or_default()
+        };
+        event_chords(
+            &typed(NSEventModifierFlags::Command),
+            &typed(NSEventModifierFlags::Command | NSEventModifierFlags::Shift),
+            event.keyCode(),
             flags.contains(NSEventModifierFlags::Command),
             flags.contains(NSEventModifierFlags::Shift),
             flags.contains(NSEventModifierFlags::Option),
             flags.contains(NSEventModifierFlags::Control),
-        ))
+        )
     }
 
     fn edit_action(edit: PageEdit) -> Sel {
@@ -1173,6 +1207,28 @@ mod tests {
         assert_eq!(chord_key("", 13).as_deref(), Some("w"));
         // Neither: unknown, so not an app shortcut.
         assert_eq!(chord_key("é", 200), None);
+    }
+
+    #[test]
+    fn shifted_punctuation_matches_both_ways_a_chord_is_written() {
+        use crate::shortcuts::{Chord, is_app_shortcut};
+        // ⌘⇧] on a US layout: "]" with ⌘ alone, "}" with ⌘⇧.
+        let pressed = event_chords("]", "}", 30, true, true, false, false);
+        // The catalog writes it `cmd-shift-]`; a chord rebound by pressing
+        // it is stored the way gpui reads keys, `cmd-}`.
+        for stored in ["cmd-shift-]", "cmd-}"] {
+            let app = [Chord::parse(stored).unwrap()];
+            assert!(pressed.iter().any(|c| is_app_shortcut(c, &app)), "{stored}");
+        }
+        // ⌘⇧7 rebound by pressing it is stored as `cmd-&`.
+        let app = [Chord::parse("cmd-&").unwrap()];
+        let pressed = event_chords("7", "&", 26, true, true, false, false);
+        assert!(pressed.iter().any(|c| is_app_shortcut(c, &app)));
+        // Letters keep shift in both namings: one chord, ⌘⇧Z is still redo.
+        let pressed = event_chords("z", "Z", 6, true, true, false, false);
+        assert_eq!(pressed, [Chord::new("z", true, true, false, false)]);
+        // No shift, one chord.
+        assert_eq!(event_chords("t", "T", 17, true, false, false, false).len(), 1);
     }
 
     #[test]
