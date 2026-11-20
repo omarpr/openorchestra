@@ -144,6 +144,7 @@ impl ModalFocus {
         control.child(
             gpui::canvas(
                 move |bounds, window, _| {
+                    let shared = revealed.clone();
                     let mut revealed = revealed.borrow_mut();
                     if !focus.is_focused(window) {
                         if revealed.as_ref() == Some(&focus) {
@@ -164,7 +165,14 @@ impl ModalFocus {
                     };
                     if dy != px(0.0) {
                         let scroll = scroll.clone();
+                        let focus = focus.clone();
                         window.on_next_frame(move |window, _| {
+                            // A section change in between (`reset_scroll`)
+                            // cleared the reveal and the offset; the new
+                            // section starts at the top.
+                            if !reveal_still_pending(shared.borrow().as_ref(), &focus) {
+                                return;
+                            }
                             let mut offset = scroll.offset();
                             offset.y += dy;
                             scroll.set_offset(offset);
@@ -178,6 +186,12 @@ impl ModalFocus {
             .inset_0(),
         )
     }
+}
+
+/// Whether a scroll queued to reveal `focus` still applies: the control
+/// still holds the reveal (`reset_scroll`, on a section change, clears it).
+fn reveal_still_pending<T: PartialEq>(revealed: Option<&T>, focus: &T) -> bool {
+    revealed == Some(focus)
 }
 
 fn modal_control(
@@ -210,5 +224,19 @@ fn toggled(on: bool) -> gpui::Toggled {
         gpui::Toggled::True
     } else {
         gpui::Toggled::False
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reveal_still_pending;
+
+    #[test]
+    fn a_queued_reveal_applies_only_while_its_control_holds_it() {
+        assert!(reveal_still_pending(Some(&1), &1));
+        // `reset_scroll` (a section change) cleared it before the frame.
+        assert!(!reveal_still_pending(None, &1));
+        // Another control took the reveal meanwhile.
+        assert!(!reveal_still_pending(Some(&2), &1));
     }
 }
