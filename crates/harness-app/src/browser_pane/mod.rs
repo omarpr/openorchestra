@@ -345,6 +345,16 @@ pub(crate) struct RunningServer {
     pub url: String,
 }
 
+/// The title a commit gives its history entry, from the title the pane
+/// holds. Only within the same document (`pushState`, a fragment), where it
+/// is the page's own and may have changed before the URL did; a new
+/// document's title still in hand can be the previous page's, and its own
+/// title event names it. The caller records it against the committed URL,
+/// not the pane's, which may lag.
+fn commit_title(same_document: bool, title: Option<&str>) -> Option<&str> {
+    title.filter(|_| same_document)
+}
+
 /// How many recent pages a blank tab lists.
 const RECENT_ON_BLANK: usize = 8;
 
@@ -584,15 +594,14 @@ impl BrowserPane {
         self.history.update(cx, |h, cx| h.record(&key, url, cx));
     }
 
-    /// The page's title arrived: it names the page's history entry.
-    fn record_title(&mut self, cx: &mut Context<Self>) {
-        let (Some(project), Some(url), Some(title)) = (&self.project, &self.url, &self.title)
-        else {
+    /// `title` names the history entry of `url`.
+    fn record_title(&mut self, url: &str, title: &str, cx: &mut Context<Self>) {
+        let Some(project) = &self.project else {
             return;
         };
-        let (key, url, title) = (project.key.clone(), url.clone(), title.clone());
+        let key = project.key.clone();
         self.history
-            .update(cx, |h, cx| h.set_title(&key, &url, &title, cx));
+            .update(cx, |h, cx| h.set_title(&key, url, title, cx));
     }
 
     /// The user typed in the address bar: show the history pages matching
@@ -799,7 +808,9 @@ impl BrowserPane {
                 let title = Some(title).filter(|t| !t.trim().is_empty());
                 if title != self.title {
                     self.title = title;
-                    self.record_title(cx);
+                    if let (Some(url), Some(title)) = (self.url.clone(), self.title.clone()) {
+                        self.record_title(&url, &title, cx);
+                    }
                     cx.emit(BrowserEvent::TitleChanged);
                 }
             }
@@ -812,12 +823,10 @@ impl BrowserPane {
             }
             PageEvent::Committed(url, same_document) => {
                 self.record_visit(&url, cx);
-                // Within the same document the title is the page's own (and
-                // may have changed before the URL did). A new document's
-                // title still in hand can be the previous page's; its own
-                // title event names it.
-                if same_document {
-                    self.record_title(cx);
+                if let Some(title) = commit_title(same_document, self.title.as_deref()) {
+                    let title = title.to_string();
+                    // The committed URL, never `self.url`, which may lag.
+                    self.record_title(&url, &title, cx);
                 }
             }
             PageEvent::Loading(loading) => self.loading = loading,
@@ -1706,6 +1715,13 @@ mod tests {
         assert_eq!(move_highlight(Some(0), 3, false), None);
         assert_eq!(move_highlight(None, 0, true), None);
         assert_eq!(move_highlight(None, 0, false), None);
+    }
+
+    #[test]
+    fn only_a_same_document_commit_titles_its_entry() {
+        assert_eq!(commit_title(true, Some("Docs")), Some("Docs"));
+        assert_eq!(commit_title(false, Some("Previous page")), None);
+        assert_eq!(commit_title(true, None), None);
     }
 
     #[test]

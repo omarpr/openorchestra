@@ -782,11 +782,14 @@ mod mac {
                         if !url.is_empty() {
                             // Nothing loading: a same-page change, which
                             // commits nothing but is where the page now is.
-                            if !unsafe { view.isLoading() } {
-                                let committed = url.clone();
+                            // Posted after `on_url`, so the pane already
+                            // has the new URL when it hears of the commit.
+                            let same_page = !unsafe { view.isLoading() };
+                            let committed = url.clone();
+                            self.post(move |e| (e.on_url)(url));
+                            if same_page {
                                 self.post(move |e| (e.on_commit)(committed, true));
                             }
-                            self.post(move |e| (e.on_url)(url));
                         }
                     }
                     "loading" => {
