@@ -630,18 +630,18 @@ process.env.HARNESS_AGENT_WORKTREE = {wt:?};
 delete process.env.HARNESS_REMOTE_SESSION;
 delete process.env.TMUX_PANE;
 const write = core.statusWriter(() => import({helper:?}), {wt:?});
-write("running");
-write("waiting");
-await new Promise((resolve) => setTimeout(resolve, 50));
-return null;
+// Both sent before the helper has loaded; each resolves once it landed.
+const written = [write("running"), write("waiting")];
+return await Promise.all(written);
 "#,
         wt = wt.path().to_str().unwrap(),
         helper = format!("file://{}", helper.display()),
     );
-    if opencode_status_script(&script).is_none() {
+    let Some(written) = opencode_status_script(&script) else {
         eprintln!("node not installed — skipping opencode status write check");
         return;
-    }
+    };
+    assert_eq!(written, serde_json::json!([true, true]), "both writes landed");
     for file in ["status.json", "status-tab-7.json"] {
         let text = std::fs::read_to_string(wt.path().join(".harness").join(file)).unwrap();
         let status: serde_json::Value = serde_json::from_str(&text).unwrap();
