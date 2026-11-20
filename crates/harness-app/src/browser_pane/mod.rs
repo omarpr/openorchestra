@@ -27,7 +27,8 @@
 //! follows gpui layout every frame without feeding back into it.
 //!
 //! The pane talks to the workspace through [`BrowserEvent`]s: a changed URL
-//! or title (relabel the tab, save), and a page's request for a new window.
+//! (relabel the tab, save), a changed title (relabel only; the next save
+//! carries it), and a page's request for a new window.
 
 mod webview;
 
@@ -232,11 +233,23 @@ pub(crate) fn page_label(url: Option<&str>, title: Option<&str>) -> String {
 }
 
 /// What the pane tells the workspace.
+#[derive(Debug)]
 pub(crate) enum BrowserEvent {
-    /// The URL or title changed: relabel the tab and save.
-    Changed,
+    /// The URL changed: relabel the tab and save.
+    UrlChanged,
+    /// Only the title changed: relabel the tab. No save of its own: a page
+    /// can animate its title forever, and the next save (a URL change, an
+    /// open, close or quit) reads the current title anyway.
+    TitleChanged,
     /// The page asked for a new window (`target=_blank`, `window.open`).
     NewWindow(String),
+}
+
+impl BrowserEvent {
+    /// Whether the workspace saves its tabs for this event.
+    pub(crate) fn saves(&self) -> bool {
+        matches!(self, BrowserEvent::UrlChanged)
+    }
 }
 
 impl EventEmitter<BrowserEvent> for BrowserPane {}
@@ -469,7 +482,7 @@ impl BrowserPane {
         self.attempted = Some(url.clone());
         if self.url.as_deref() != Some(url.as_str()) {
             self.url = Some(url.clone());
-            cx.emit(BrowserEvent::Changed);
+            cx.emit(BrowserEvent::UrlChanged);
         }
         if let Some(native) = &self.native {
             native.view.load(&url);
@@ -572,13 +585,13 @@ impl BrowserPane {
                 let title = Some(title).filter(|t| !t.trim().is_empty());
                 if title != self.title {
                     self.title = title;
-                    cx.emit(BrowserEvent::Changed);
+                    cx.emit(BrowserEvent::TitleChanged);
                 }
             }
             PageEvent::Url(url) => {
                 if self.url.as_deref() != Some(url.as_str()) {
                     self.url = Some(url);
-                    cx.emit(BrowserEvent::Changed);
+                    cx.emit(BrowserEvent::UrlChanged);
                 }
                 self.sync_address(window, cx);
             }
@@ -1212,6 +1225,16 @@ mod tests {
         // The request then waits for gpui's focus on the page's side of
         // the tab, which activation just put there.
         assert_eq!(page_refocus(true, true, false), Refocus::Take);
+    }
+
+    #[test]
+    fn only_url_changes_save() {
+        assert!(BrowserEvent::UrlChanged.saves());
+        // An animated title would otherwise save, or keep pushing a
+        // pending save back, forever.
+        assert!(!BrowserEvent::TitleChanged.saves());
+        // The new tab's own open saves.
+        assert!(!BrowserEvent::NewWindow("http://localhost:3000/".into()).saves());
     }
 
     #[test]

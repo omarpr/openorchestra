@@ -550,9 +550,10 @@ impl HarnessWorkspace {
     }
 
     /// A browser pane for a tab in pane `key`, wired to the workspace: a
-    /// changed URL or title relabels the tab at once and saves a moment
-    /// later ([`Self::schedule_browser_save`]), and a page's new window opens
-    /// as another browser tab in the same pane. The subscription ends when
+    /// changed URL or title relabels the tab at once, a changed URL also
+    /// saves a moment later ([`Self::schedule_browser_save`]; a title rides
+    /// along with the next save), and a page's new window opens as another
+    /// browser tab in the same pane. The subscription ends when
     /// the pane is released.
     fn new_browser_pane(
         &mut self,
@@ -567,7 +568,7 @@ impl HarnessWorkspace {
         let key = key.to_string();
         cx.subscribe_in(&page, window, move |ws, page, event: &BrowserEvent, window, cx| {
             match event {
-                BrowserEvent::Changed => {
+                BrowserEvent::UrlChanged | BrowserEvent::TitleChanged => {
                     let label = page.read(cx).label();
                     if let Some(tab) = ws.panes.get_mut(&key).and_then(|p| {
                         p.tabs
@@ -576,7 +577,9 @@ impl HarnessWorkspace {
                     }) {
                         tab.title = label;
                     }
-                    ws.schedule_browser_save(cx);
+                    if event.saves() {
+                        ws.schedule_browser_save(cx);
+                    }
                     cx.notify();
                 }
                 BrowserEvent::NewWindow(url) => {
@@ -597,10 +600,12 @@ impl HarnessWorkspace {
         page
     }
 
-    /// Save the tabs [`BROWSER_SAVE_DELAY`] after the last browser change.
-    /// A navigation brings several title/URL changes (more for single-page
-    /// apps and animated titles), and each full save rewrites and syncs
-    /// three files on the UI thread, which WebKit's input shares. Replacing
+    /// Save the tabs [`BROWSER_SAVE_DELAY`] after the last browser URL
+    /// change. A navigation brings several (redirects, a single-page app's
+    /// `pushState`), and each full save rewrites and syncs three files on
+    /// the UI thread, which WebKit's input shares. Title changes don't
+    /// schedule one (an animated title would never stop), so a title is
+    /// saved with the next save of any kind. Replacing
     /// the task cancels the previous one, so a burst ends in one save; any
     /// other save (open, close, move, quit, an eviction) clears it, having
     /// written the same state.
@@ -1153,7 +1158,7 @@ impl HarnessWorkspace {
     }
 }
 
-/// How long after a browser tab's last URL/title change its save runs.
+/// How long after a browser tab's last URL change its save runs.
 const BROWSER_SAVE_DELAY: Duration = Duration::from_secs(1);
 
 /// The browser tab among `tabs` showing `url`, compared as parsed URLs (so

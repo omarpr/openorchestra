@@ -778,7 +778,7 @@ pub struct HarnessWorkspace {
     /// The window is minimized or the app hidden: no browser tab keeps its
     /// native view (see `sync_browser_views`).
     browser_window_hidden: bool,
-    /// The pending save after browser title/URL changes
+    /// The pending save after browser URL changes
     /// (`schedule_browser_save`); dropping it cancels it.
     browser_save: Option<gpui::Task<()>>,
     /// zed context menus alive right now (`ui::ContextMenu`: the Files and
