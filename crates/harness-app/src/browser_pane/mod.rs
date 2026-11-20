@@ -81,6 +81,8 @@ pub(crate) enum Address {
 ///   `https://` otherwise, Tailscale `.ts.net` names included.
 /// - `http`/`https` load; `file:`, `javascript:` and the page-internal
 ///   `about:`, `data:`, `blob:` are refused; any other scheme goes out.
+/// - The unspecified address (`0.0.0.0`, `[::]`) loads through loopback,
+///   since WebKit refuses it ([`link_routing::loopback_for_unspecified`]).
 pub(crate) fn normalize_address(input: &str) -> Option<Address> {
     let input = input.trim();
     if input.is_empty() || input.chars().any(char::is_whitespace) {
@@ -92,7 +94,7 @@ pub(crate) fn normalize_address(input: &str) -> Option<Address> {
             "http" | "https" => parsed
                 .host_str()
                 .is_some_and(|h| !h.is_empty())
-                .then(|| Address::Web(parsed.into())),
+                .then(|| Address::Web(link_routing::loopback_for_unspecified(parsed.as_str()))),
             "file" | "javascript" | "about" | "data" | "blob" => None,
             _ => Some(Address::External(parsed.into())),
         };
@@ -104,7 +106,9 @@ pub(crate) fn normalize_address(input: &str) -> Option<Address> {
     };
     let parsed = url::Url::parse(&format!("{scheme}://{input}")).ok()?;
     parsed.host_str()?;
-    Some(Address::Web(parsed.into()))
+    Some(Address::Web(link_routing::loopback_for_unspecified(
+        parsed.as_str(),
+    )))
 }
 
 /// `host:port`, optionally followed by a path, query or fragment:
@@ -1506,11 +1510,16 @@ mod tests {
         // Tailscale names serve https.
         assert_eq!(normalize_address("mac.tail1.ts.net"), web("https://mac.tail1.ts.net/"));
         assert_eq!(normalize_address("HTTP://LOCALHOST:3000"), web("http://localhost:3000/"));
-        // What dev servers bound to every interface print.
-        assert_eq!(normalize_address("0.0.0.0:3000"), web("http://0.0.0.0:3000/"));
-        assert_eq!(normalize_address("0.0.0.0"), web("http://0.0.0.0/"));
-        assert_eq!(normalize_address("[::]:5173"), web("http://[::]:5173/"));
-        assert_eq!(normalize_address("[::]"), web("http://[::]/"));
+        // What dev servers bound to every interface print: WebKit refuses
+        // all-zero hosts, so they load through loopback.
+        assert_eq!(normalize_address("0.0.0.0:3000"), web("http://127.0.0.1:3000/"));
+        assert_eq!(normalize_address("0.0.0.0"), web("http://127.0.0.1/"));
+        assert_eq!(normalize_address("[::]:5173"), web("http://[::1]:5173/"));
+        assert_eq!(normalize_address("[::]"), web("http://[::1]/"));
+        assert_eq!(
+            normalize_address("http://0.0.0.0:3000/a?b#c"),
+            web("http://127.0.0.1:3000/a?b#c")
+        );
         assert_eq!(normalize_address("[fd7a:115c:a1e0::1]"), web("http://[fd7a:115c:a1e0::1]/"));
         assert_eq!(normalize_address("[::ffff:127.0.0.1]"), web("http://[::ffff:7f00:1]/"));
         assert_eq!(normalize_address("localhost."), web("http://localhost./"));

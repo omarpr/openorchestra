@@ -502,7 +502,12 @@ impl HarnessWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<u64> {
-        let url = url.filter(|u| !u.is_empty());
+        // Every way into a tab (a routed link, Ports' Open, a page's new
+        // window) comes through here; WebKit refuses `0.0.0.0` and `[::]`,
+        // so those load through loopback, and reuse matches what loads.
+        let url = url
+            .filter(|u| !u.is_empty())
+            .map(|u| crate::link_routing::loopback_for_unspecified(&u));
         let records: Vec<_> = self
             .panes
             .get(key)?
@@ -820,8 +825,9 @@ impl HarnessWorkspace {
     ///
     /// `save_panes` records only live panes, so a browser change still
     /// waiting for its debounced save ([`Self::schedule_browser_save`]) is
-    /// saved first: otherwise the evicted pane's new URL and title would be
-    /// lost, and reselecting the worktree would restore the old page.
+    /// saved first: otherwise the evicted pane's new URL would be lost (its
+    /// title rides along with that save), and reselecting the worktree
+    /// would restore the old page.
     pub(crate) fn evict_stale_panes(&mut self, keep: &str, cx: &App) {
         while self.panes.len() > MAX_LIVE_PANES {
             let Some(victim) = pane_to_evict(&self.panes, keep, &self.pending_agent_launches)

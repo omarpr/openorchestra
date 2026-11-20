@@ -66,6 +66,35 @@ pub fn is_local_url(url: &str) -> bool {
 }
 
 /// [`is_local_url`]'s IPv4 ranges.
+/// The address to load for `url` in a browser tab: an http(s) URL on the
+/// unspecified address, which dev servers bound to every interface print
+/// (`0.0.0.0`, `[::]`), goes to loopback instead (`127.0.0.1`, `[::1]`),
+/// keeping its scheme, port, path, query and fragment. WebKit refuses
+/// all-zero hosts outright (WebKit bug 275224, since Safari 18), so the
+/// page would fail where the server answers fine on loopback. Anything
+/// else comes back as given. [`is_local_url`] still counts those hosts as
+/// local, so their links route here first.
+pub fn loopback_for_unspecified(url: &str) -> String {
+    let Ok(mut parsed) = Url::parse(url) else {
+        return url.to_string();
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return url.to_string();
+    }
+    let loopback = match parsed.host() {
+        Some(Host::Ipv4(ip)) if ip.is_unspecified() => "127.0.0.1",
+        Some(Host::Ipv6(ip)) if ip.to_ipv4_mapped().is_some_and(|v4| v4.is_unspecified()) => {
+            "127.0.0.1"
+        }
+        Some(Host::Ipv6(ip)) if ip.is_unspecified() => "[::1]",
+        _ => return url.to_string(),
+    };
+    match parsed.set_host(Some(loopback)) {
+        Ok(()) => parsed.into(),
+        Err(_) => url.to_string(),
+    }
+}
+
 fn is_local_v4(ip: std::net::Ipv4Addr) -> bool {
     let [a, b, ..] = ip.octets();
     ip.is_unspecified()
@@ -208,6 +237,38 @@ mod tests {
             "http://[::ffff:192.168.1.5]/",
         ] {
             assert!(is_local_url(u), "{u}");
+        }
+    }
+
+    #[test]
+    fn unspecified_hosts_load_through_loopback() {
+        for (given, loads) in [
+            ("http://0.0.0.0:3000", "http://127.0.0.1:3000/"),
+            ("http://0.0.0.0", "http://127.0.0.1/"),
+            (
+                "https://0.0.0.0:8443/a/b?c=1#d",
+                "https://127.0.0.1:8443/a/b?c=1#d",
+            ),
+            ("http://[::]:5173/x?y#z", "http://[::1]:5173/x?y#z"),
+            ("http://[::]", "http://[::1]/"),
+            ("http://[::ffff:0.0.0.0]:3000/", "http://127.0.0.1:3000/"),
+        ] {
+            assert_eq!(loopback_for_unspecified(given), loads, "{given}");
+            // Still routed into a tab.
+            assert!(is_local_url(given), "{given}");
+        }
+        // Everything else is left exactly as given.
+        for u in [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000/",
+            "http://[::1]:5173",
+            "http://192.168.1.10:3000",
+            "https://example.com/0.0.0.0",
+            "http://0.0.0.0.example.com/",
+            "mailto:a@0.0.0.0",
+            "not a url",
+        ] {
+            assert_eq!(loopback_for_unspecified(u), u, "{u}");
         }
     }
 

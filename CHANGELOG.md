@@ -24,6 +24,8 @@ Unreleased is empty.
 - Links to local addresses (localhost, your network, Tailscale) and ports
   opened from the current project or task open in a browser tab. Other links
   still use your default browser. Change it in **Settings › General**.
+  A server printed as `0.0.0.0` or `[::]` opens through loopback, which
+  WebKit can reach.
 - Drag agents by their grip in **Settings › Agents** to reorder them. The
   order is used in the **+** menu and the new-task picker. New tasks start
   with your last-used agent, or the top of the list if you haven't used one;
