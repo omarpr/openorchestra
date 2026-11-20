@@ -13,6 +13,7 @@
 ## Global Constraints
 
 - Work in a **git worktree branched from `master` after the other session's agent-reorder work is committed** (`Prefs::agent_order`, `agent_catalog` honoring it). Don't start while `master` has those files uncommitted.
+  - *As built:* the work was done on the user's branch `feat/settings-polish-review-ux` (based on 5dc141c, which holds the agent-order work), in the main checkout, not on a branch from `master`.
 - Build and test from `crates/harness-app` (`cd crates/harness-app && cargo test`). Root `cargo` skips this crate and reports a false green.
 - **Never run `cargo fmt`** in `harness-app`: it rewrites ~65 unrelated files.
 - Each user-visible commit adds a line under `## Unreleased` in `CHANGELOG.md`, in Added / Changed / Fixed.
@@ -21,6 +22,7 @@
 - The DMG must not grow: WebKit is the system framework, no bundled engine.
 - Routed hosts (exact): `localhost`, `*.localhost`, `127.0.0.0/8`, `::1`, `*.local`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `*.ts.net`, `100.64.0.0/10`; scheme `http` or `https` only.
 - Kind colors: Shell `#e5c07b`, Editor/file `#56b6c2`, Diff `#e06c9f`, Browser `#61afef`.
+  - *As built (rulings R2/R3):* Shell keeps the `❯_` glyph in `#3ec7d6` (cyan) and Editor/file tabs keep the Zed mark in `#3d8bfd`; Diff `#e06c9f` and Browser `#61afef` as above.
 - Tab labels: Shell, Editor, Diff, `Browser · <title>`; agents Claude, Codex, OpenCode, Kimi, Pi, Grok; custom agents keep their slug. The ＋ menu keeps full names ("Claude Code").
 - Settings copy, verbatim. Title: **Open links in a browser tab**. Hint: "Links to local addresses (localhost, your network, Tailscale) and ports you open from this project or task open in a browser tab. Other links always use your default browser. Turn off to send everything to your default browser."
 

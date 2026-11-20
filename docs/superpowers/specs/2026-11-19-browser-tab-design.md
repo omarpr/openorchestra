@@ -1,6 +1,6 @@
 # Browser tab, link routing, and the new-tab menu — design
 
-Date: 2026-11-19. Status: draft, awaiting approval. Link scope (local addresses only) decided 2026-11-19.
+Date: 2026-11-19. Status: approved 2026-11-19; implemented with the post-review decisions below. Link scope (local addresses only) decided 2026-11-19.
 
 ## Why
 
@@ -289,3 +289,97 @@ cx.open_url(url)` (`terminal_view.rs:1333`). Nothing hands us the URL first.
 - Exact zed `IconName`s and color nudges.
 - The channel/drain mechanics between `open_url` and the workspace.
 - Sequencing into commits; CHANGELOG wording.
+
+## Decisions after review
+
+What was built differs from the sections above as follows. One line each:
+what changed against this spec, and why.
+
+### Rulings during the build (R1–R11)
+
+- **R1:** Names follow the spec: "Shell" in the menu and on the tab; tabs
+  use short agent names (Claude, Codex, OpenCode, Kimi, Pi, Grok); the menu
+  keeps full names. The user asked for this in the design session.
+- **R2:** Editor and file tabs keep the Zed mark (`IconName::AiZed`) in
+  `EDITOR_MARK` `#3d8bfd`, not §5's cyan Code icon: a newer, deliberate
+  brand-mark choice already on the base branch.
+- **R3:** Shell keeps the `❯_` glyph in `TERMINAL_MARK` `#3ec7d6` (cyan),
+  not §5's yellow, which existed only to avoid the Editor's cyan; R2
+  removes that clash.
+- **R4:** New kinds use §5's colors: Diff `⑂` in `#e06c9f`, Browser in
+  `#61afef` (`IconName::ToolWeb`; this zed rev has no Globe). pi chat uses
+  the Pi logo (`agent_icon(Pi)`), in the menu and, after the final review,
+  on its tab too.
+- **R5:** The base branch's "AGENTS" heading (uppercase small label over a
+  rule) stays; the entry model calls it `Separator("Agents")`.
+- **R6:** Subagents ran no GUI, manual or universal-build checks; the
+  controller runs one consolidated visual check and one universal build
+  at the end (Task 9).
+- **R7:** The controller checked visually, after Task 6, that the page
+  draws above gpui and takes clicks before the keyboard work built on it.
+- **R8 (security, fail-safe):** §3's "non-http(s) navigations → OS" is
+  narrowed. `file:`, `javascript:` and unknown schemes are ignored; app
+  schemes leave only for a link click in the main frame; downloads only
+  from the main frame; `open_external` is rate-limited to one per second
+  and passes the normalized URL; `blob:`/`data:` downloads report "not
+  supported". Cost: "open in app" redirects not started by a click don't
+  launch (Open in default browser is the way out).
+- **R9:** A user's own action (the Open in default browser button, an app
+  address typed in the bar) uses the unthrottled `open_external_now`; the
+  rate limit stays for page-originated opens. Unsupported downloads show
+  a transient notice, not the full-page error.
+- **R10:** Saves after browser changes are coalesced into one save ~1 s
+  after the last change (fsync'd three-file saves on the UI thread
+  otherwise); open, close, move and quit still save at once. Narrowed by
+  the final review: only URL changes schedule it (below).
+- **R11:** Failure toasts count as an overlay while showing (they must be
+  seen); info toasts, tooltips, drag previews and the conductor stay under
+  the page (hiding it whenever the conductor speaks would blank it).
+
+### CodeRabbit review (PR #28)
+
+- **Page-internal URLs:** `about:`, `data:` and `blob:` are never handed to
+  the system, so "Open in default browser" can't launch a page's own
+  content (8a65cae).
+- **Real gestures:** a link counts as clicked only within 1 s of a real
+  mouse or Return/Space gesture on that page, since WebKit reports a
+  script's `a.click()` as a link activation too (62fbab5).
+- **Stale failures:** a load failure carries its navigation number, so one
+  from an earlier navigation can't replace the new page with an error
+  (10a85fb).
+- **Address bar:** leaving it puts the page's current URL back, after a
+  redirect or `pushState` it missed while focused (0944354).
+- **New windows:** a page's `target=_blank`/`window.open` always opens a
+  new tab, even onto a URL already open; §1's focus-the-existing-tab rule
+  is for app opens only (b06a9ab). The request survives its view being
+  dropped by a tab switch (2c745cb).
+- **Eviction:** a pending debounced save runs before a pane is evicted, so
+  its latest URL and title aren't lost (a941e88).
+- **Routed links:** when the workspace is gone, every queued routed link
+  opens in the default browser, not just the current one (d23d77c).
+- **Maximized tools panel:** an open into the selected worktree (Ports'
+  Open, a routed link) restores the center so the page shows (a6c7976).
+- **Toasts:** failure toasts are marked by their producer, not by matching
+  words, so an info toast can't hide the page (d962639).
+
+### Final whole-branch review
+
+- **Popups:** `javaScriptCanOpenWindowsAutomatically` is off (macOS
+  defaults it on), and a page opens at most one tab per second; §3's
+  `window.open` → new tab now needs a user gesture.
+- **zed context menus:** the Files/Git panels' menus can flip over the
+  center column, so a live `ui::ContextMenu` counts as an overlay.
+- **Routed hosts:** also `0.0.0.0` and `[::]` (what dev servers print when
+  bound to every interface), Tailscale's IPv6 range `fd7a:115c:a1e0::/48`,
+  names ending in the root dot (`localhost.`) and IPv4-mapped IPv6
+  addresses; the address bar's http default follows.
+- **Keyboard on activation:** activating a tab with a page (a click,
+  ⌘1..9, an open, the restored active tab) gives the page the keyboard
+  with no click; a blank tab still focuses its address bar.
+- **Download responses:** a server-marked download leaves only if the app
+  started the navigation that fetched it, or it followed a real gesture on
+  the page within 1 s; a script's own navigation to an attachment is
+  ignored.
+- **Saves:** a title-only change relabels the tab but saves nothing (an
+  animated title would save forever); the title rides along with the
+  next save.
