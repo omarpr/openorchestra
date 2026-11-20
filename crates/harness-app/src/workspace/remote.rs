@@ -453,7 +453,7 @@ pub(crate) fn build_snapshot(
     }
     let mut agents = Vec::new();
     for src in sources {
-        for (tab_id, title, kind) in &src.tabs {
+        for (tab_id, _, kind) in &src.tabs {
             let Some(mark) = file.mark_for(&src.key, *tab_id) else {
                 continue;
             };
@@ -471,7 +471,7 @@ pub(crate) fn build_snapshot(
             };
             agents.push(AgentInfo {
                 id: mark.id.clone(),
-                title: title.clone(),
+                title: terminal_label(kind.as_deref().map(AgentKind::from).as_ref()),
                 agent_kind: kind.clone(),
                 project: src.project.clone(),
                 worktree: src.worktree.clone(),
@@ -1496,11 +1496,11 @@ mod tests {
         let sources = [source(
             "main:proj",
             "/r/proj",
-            &[(7, "claude", Some("claude")), (8, "❯_ shell", None)],
+            &[(7, "claude", Some("claude-code")), (8, "❯_ shell", None)],
         )];
         let at = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         let signals = HashMap::from([(
-            (PathBuf::from("/r/proj"), "claude".into()),
+            (PathBuf::from("/r/proj"), "claude-code".into()),
             (AgentState::Waiting, at, Some("Bash".into())),
         )]);
 
@@ -1509,8 +1509,8 @@ mod tests {
         assert_eq!(snap.agents.len(), 1);
         let a = &snap.agents[0];
         assert_eq!(a.id, "r_abc");
-        assert_eq!(a.title, "claude");
-        assert_eq!(a.agent_kind.as_deref(), Some("claude"));
+        assert_eq!(a.title, "Claude");
+        assert_eq!(a.agent_kind.as_deref(), Some("claude-code"));
         assert_eq!(a.project, "proj");
         assert_eq!(a.worktree, "wt");
         assert_eq!(a.session, crate::tmux::session_name("main:proj", 7));
