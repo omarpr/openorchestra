@@ -46,10 +46,12 @@
 //!   (not a load failure: the page stays). `<a download>` goes only on a
 //!   click, as above. A response the server marks as a download carries no
 //!   navigation type, so it is judged by the main-frame navigation that
-//!   fetched it, the last one the policy let load: it goes only if that
-//!   one followed a real gesture on the page within [`GESTURE_WINDOW`] (a
-//!   link, a form's button, a script answering the click) or the app
-//!   started it (the address bar, a restore, a routed link). "The app
+//!   fetched it, the last one the policy let load: it goes only if the
+//!   main frame started that one within [`GESTURE_WINDOW`] of a real
+//!   gesture on the page (a link, a form's button, a script answering the
+//!   click) or the app started it (the address bar, a restore, a routed
+//!   link). An iframe's `target=_top` link never counts, click or not
+//!   ([`user_started`]), as subframe downloads never go. "The app
 //!   started it" is read as a nil `sourceFrame`, on the assumption, not yet
 //!   observed in the app, that WebKit reports `loadRequest` that way and
 //!   never a page's own navigation; if a page's navigation could arrive
@@ -700,15 +702,33 @@ pub(crate) fn decide_download(url: &str, origin: NavOrigin) -> NavDecision {
     }
 }
 
+/// The frame that started a navigation (`sourceFrame`), as far as the
+/// download rule cares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SourceFrame {
+    /// No source frame: assumed to mean the app (the address bar, a restore
+    /// or a routed link; see the module docs).
+    App,
+    /// The page's main frame.
+    Main,
+    /// An iframe, even one whose link targets `_top`.
+    Sub,
+}
+
 /// Whether a main-frame navigation counts as the user's when its response
-/// turns out to be a download: the app started it (`app_initiated`: no
-/// source frame, assumed to mean the address bar, a restore or a routed
-/// link; see the module docs), or it
-/// came within [`GESTURE_WINDOW`] of a real gesture on the page, whatever
-/// its type (a link, a form's submit button, a script answering the click).
-/// A script on its own (a timer, page load) never counts.
-pub(crate) fn user_started(app_initiated: bool, last_gesture: Option<Instant>, now: Instant) -> bool {
-    app_initiated || user_clicked(true, last_gesture, now)
+/// turns out to be a download: the app started it ([`SourceFrame::App`]),
+/// or the main frame did within [`GESTURE_WINDOW`] of a real gesture on the
+/// page, whatever its type (a link, a form's submit button, a script
+/// answering the click). A script on its own (a timer, page load) never
+/// counts, and neither does an iframe: a click in one still stamps the
+/// page's gesture, and its `target=_top` link loads the main frame, but
+/// [`decide_download`] keeps subframe downloads in.
+pub(crate) fn user_started(source: SourceFrame, last_gesture: Option<Instant>, now: Instant) -> bool {
+    match source {
+        SourceFrame::App => true,
+        SourceFrame::Main => user_clicked(true, last_gesture, now),
+        SourceFrame::Sub => false,
+    }
 }
 
 /// The origin [`decide_download`] gets for a response WebKit marks as a
@@ -937,10 +957,11 @@ mod mac {
 
     use super::{
         APP_CHORDS, DOWNLOAD_UNSUPPORTED, DockSide, Hole, InspectorMove, InspectorPlace, KeyRoute,
-        MonitorTarget, NavDecision, NavOrigin, NativeEvents, PageMask, PageSizer, decide_download,
-        decide_navigation, decide_new_window, dock_side, event_chords, flip_y, holes_in_page, in_any_hole,
-        is_benign_failure, is_download, mask_changed, monitor_target, page_mask, page_sizer, place_of,
-        response_origin, route_key, safari_app_name, user_clicked, user_started,
+        MonitorTarget, NavDecision, NavOrigin, NativeEvents, PageMask, PageSizer, SourceFrame,
+        decide_download, decide_navigation, decide_new_window, dock_side, event_chords, flip_y,
+        holes_in_page, in_any_hole, is_benign_failure, is_download, mask_changed, monitor_target,
+        page_mask, page_sizer, place_of, response_origin, route_key, safari_app_name, user_clicked,
+        user_started,
     };
     use crate::shortcuts::{Chord, PageEdit, is_app_shortcut, page_edit};
 
@@ -1216,9 +1237,13 @@ mod mac {
                 if decision == NavDecision::Load
                     && unsafe { action.targetFrame() }.is_some_and(|f| unsafe { f.isMainFrame() })
                 {
-                    let app_initiated = unsafe { action.sourceFrame() }.is_none();
+                    let source = match unsafe { action.sourceFrame() } {
+                        None => SourceFrame::App,
+                        Some(f) if unsafe { f.isMainFrame() } => SourceFrame::Main,
+                        Some(_) => SourceFrame::Sub,
+                    };
                     self.ivars().main_user_started.set(user_started(
-                        app_initiated,
+                        source,
                         self.ivars().gesture.get(),
                         Instant::now(),
                     ));
@@ -2669,12 +2694,12 @@ mod tests {
         let t0 = Instant::now();
         let url = "https://example.com/report.csv";
         // The address bar, a restore or a routed link: no source frame.
-        assert!(user_started(true, None, t0));
+        assert!(user_started(SourceFrame::App, None, t0));
         // A link, a form's button, or a script answering the click.
-        assert!(user_started(false, Some(t0), t0 + Duration::from_millis(300)));
+        assert!(user_started(SourceFrame::Main, Some(t0), t0 + Duration::from_millis(300)));
         // A script on its own: no gesture, or one long before.
-        assert!(!user_started(false, None, t0));
-        assert!(!user_started(false, Some(t0), t0 + GESTURE_WINDOW + Duration::from_millis(1)));
+        assert!(!user_started(SourceFrame::Main, None, t0));
+        assert!(!user_started(SourceFrame::Main, Some(t0), t0 + GESTURE_WINDOW + Duration::from_millis(1)));
 
         let started = response_origin(true, true);
         assert_eq!(decide_download(url, started), NavDecision::External);
@@ -2683,6 +2708,22 @@ mod tests {
         // A subframe's attachment, even after a click.
         assert_eq!(decide_download(url, response_origin(false, true)), NavDecision::Ignore);
         assert!(!response_origin(false, true).user_initiated);
+    }
+
+    #[test]
+    fn an_iframes_top_link_cannot_start_a_download() {
+        let t0 = Instant::now();
+        let url = "https://example.com/report.csv";
+        let response_for = |source| {
+            let started = user_started(source, Some(t0), t0 + Duration::from_millis(100));
+            // Its response arrives for the main frame (`target=_top`).
+            decide_download(url, response_origin(true, started))
+        };
+        // Clicked in an iframe, right after a real gesture on the page.
+        assert_eq!(response_for(SourceFrame::Sub), NavDecision::Ignore);
+        // The same click in the main frame, and an app load, still go.
+        assert_eq!(response_for(SourceFrame::Main), NavDecision::External);
+        assert_eq!(response_for(SourceFrame::App), NavDecision::External);
     }
 
     #[test]
