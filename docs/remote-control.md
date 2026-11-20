@@ -22,6 +22,12 @@ device or add the web app to your Home Screen again. Then get a new pairing
 code from the Mac and pair again: the device keeps its pairing per address,
 so the new address starts unpaired.
 
+The certificate covers only the names and addresses the Mac had when it was
+created. If the device can't open the new address, **Settings → Remote** says
+the Mac's name or address changed since its certificate was made. Click
+**Create a new certificate** there, then add each device again with **Add a
+device**.
+
 ## Share and use tabs
 
 Right-click an agent or shell tab on the Mac and select **Allow remote control**.
