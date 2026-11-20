@@ -237,8 +237,10 @@ mod tests {
 
     #[test]
     fn menu_puts_kinds_then_agents_in_settings_order_then_pi_chat() {
-        let mut prefs = Prefs::default();
-        prefs.agent_order = vec!["claude-code".into(), "codex".into()];
+        let mut prefs = Prefs {
+            agent_order: vec!["claude-code".into(), "codex".into()],
+            ..Default::default()
+        };
         for k in ["pi", "opencode", "kimi"] {
             prefs.agents.entry(k.into()).or_default().disabled = true;
         }

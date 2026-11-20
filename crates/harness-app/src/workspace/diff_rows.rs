@@ -229,14 +229,14 @@ fn word_tokens(s: &str) -> Vec<std::ops::Range<usize>> {
 /// table grows with the product of the two lines' lengths.
 const WORD_DIFF_MAX_CELLS: usize = 250_000;
 
+/// The changed byte ranges within one side of a line pair.
+type ChangedRanges = Vec<std::ops::Range<usize>>;
+
 /// The changed byte ranges of `old` and `new`, from a word-level longest
 /// common subsequence. `None` when there is nothing useful to mark: either
 /// line is empty, the pair is too long to diff, or the lines share so little
 /// that the whole line is the change.
-pub(crate) fn word_changes(
-    old: &str,
-    new: &str,
-) -> Option<(Vec<std::ops::Range<usize>>, Vec<std::ops::Range<usize>>)> {
+pub(crate) fn word_changes(old: &str, new: &str) -> Option<(ChangedRanges, ChangedRanges)> {
     let (a, b) = (word_tokens(old), word_tokens(new));
     let (n, m) = (a.len(), b.len());
     if n == 0 || m == 0 || n.saturating_mul(m) > WORD_DIFF_MAX_CELLS {
