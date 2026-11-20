@@ -123,6 +123,18 @@ fn icon_button(
 }
 
 impl HarnessWorkspace {
+    /// Put the keyboard on the Agents section's tab in the Settings rail,
+    /// a control that survives any change to the agent list. Called before
+    /// removing the focused control (a removed agent's ×, or Reset going
+    /// inert): gpui would otherwise route the next key from the window
+    /// root, outside the Settings card, and Tab would leave Settings.
+    fn focus_agents_section(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let tab = self
+            .settings_focus
+            .control_focus(SettingsSection::Agents.focus_id(), cx);
+        window.focus(&tab, cx);
+    }
+
     /// zed's modal layer (file finder, pickers) rendered as OUR window-root
     /// child — the third window-root duty this embed adopts (after action
     /// wiring and key context). At the root rather than inside the editor
@@ -766,8 +778,12 @@ impl HarnessWorkspace {
                     .text_color(hx.tx1)
                     .cursor_pointer()
                     .hover(|d| d.bg(hx.surface_hover).text_color(hx.tx0))
-                    .on_click(cx.listener(|ws, _, _, cx| {
+                    .on_click(cx.listener(|ws, _, window, cx| {
                         cx.stop_propagation();
+                        // The button goes inert once nothing is left to
+                        // reset; the keyboard moves first, or Tab would no
+                        // longer reach Settings.
+                        ws.focus_agents_section(window, cx);
                         // Drop built-in overrides and the custom order; keep
                         // the user's custom agents, which have no "default"
                         // to reset to.
@@ -1244,8 +1260,10 @@ impl HarnessWorkspace {
                     hx.red,
                     cx,
                 )
-                .on_click(cx.listener(move |ws, _, _, cx| {
+                .on_click(cx.listener(move |ws, _, window, cx| {
                     cx.stop_propagation();
+                    // This row, and its focused × with it, is about to go.
+                    ws.focus_agents_section(window, cx);
                     ws.prefs.agents.remove(&remove_key);
                     ws.prefs.agent_order.retain(|k| *k != remove_key);
                     save_prefs_to(&ws.prefs_path, &ws.prefs);
