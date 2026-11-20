@@ -55,10 +55,28 @@ pub(crate) struct History {
 /// `file:` …) or a URL `url::Url` can't parse. The result is `url::Url`'s
 /// serialization (lower-case scheme and host, no default port), which is
 /// what entries are deduplicated by; the path is left as the page has it.
+///
+/// Secrets never reach the history file or the lists that show it
+/// (ruling R16): `user:password@` is dropped, and so is a fragment that
+/// carries a token (`access_token`, `id_token`, `token=`, any case), as an
+/// OAuth redirect's does. Other fragments stay: hash routers need them.
 pub(crate) fn recordable(url: &str) -> Option<String> {
-    let parsed = url::Url::parse(url).ok()?;
-    (matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some_and(|h| !h.is_empty()))
-        .then(|| parsed.into())
+    let mut parsed = url::Url::parse(url).ok()?;
+    if !(matches!(parsed.scheme(), "http" | "https")
+        && parsed.host_str().is_some_and(|h| !h.is_empty()))
+    {
+        return None;
+    }
+    // Can't fail for an http(s) URL with a host.
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    if parsed.fragment().is_some_and(|f| {
+        let f = f.to_ascii_lowercase();
+        ["access_token", "id_token", "token="].iter().any(|t| f.contains(t))
+    }) {
+        parsed.set_fragment(None);
+    }
+    Some(parsed.into())
 }
 
 impl History {
@@ -403,6 +421,44 @@ mod tests {
             "",
         ] {
             assert_eq!(recordable(url), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn credentials_never_reach_history() {
+        assert_eq!(
+            recordable("http://user:secret@localhost:8765/admin"),
+            Some("http://localhost:8765/admin".into())
+        );
+        assert_eq!(
+            recordable("https://user@example.com/"),
+            Some("https://example.com/".into())
+        );
+        let mut h = History::default();
+        h.record("http://user:secret@localhost:8765/", 1);
+        assert!(!h.entries[0].url.contains("secret"));
+        assert!(h.is_latest("http://localhost:8765/"));
+    }
+
+    #[test]
+    fn token_fragments_are_dropped_and_router_fragments_kept() {
+        for (given, kept) in [
+            (
+                "https://app.example.com/cb#access_token=abc&token_type=bearer",
+                "https://app.example.com/cb",
+            ),
+            (
+                "https://app.example.com/cb#id_token=eyJ&state=1",
+                "https://app.example.com/cb",
+            ),
+            ("http://localhost:3000/#/login?token=xyz", "http://localhost:3000/"),
+            ("http://localhost:3000/#ID_TOKEN=x", "http://localhost:3000/"),
+            // Hash routers and anchors keep theirs.
+            ("http://localhost:3000/#/settings", "http://localhost:3000/#/settings"),
+            ("https://docs.rs/url#examples", "https://docs.rs/url#examples"),
+            ("http://localhost:3000/#/tokens", "http://localhost:3000/#/tokens"),
+        ] {
+            assert_eq!(recordable(given).as_deref(), Some(kept), "{given}");
         }
     }
 
