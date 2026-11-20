@@ -467,6 +467,43 @@ return out;
 }
 
 #[test]
+fn opencode_status_ignores_a_prompt_left_over_from_an_interrupted_turn() {
+    // OpenCode drops a pending request on interrupt without a replied event,
+    // so the TUI store keeps it. The next turn must not read as waiting.
+    let Some(states) = opencode_status_script(
+        r#"
+const tracker = core.requestTracker();
+const at = () => core.sessionState(data, ["s"], tracker);
+const out = [];
+fake.status.s = "running"; out.push(at());
+fake.permission.s = [{ id: "p1" }]; out.push(at());       // asked mid-turn
+fake.status.s = "idle"; out.push(at());                   // interrupted; p1 stays listed
+fake.status.s = "running"; out.push(at());                // next turn
+fake.permission.s = [{ id: "p1" }, { id: "p2" }]; out.push(at()); // a real prompt
+fake.permission.s = [{ id: "p1" }]; out.push(at());       // p2 replied
+fake.permission.s = []; fake.status.s = "idle"; out.push(at());
+// A store that starts out listing a request before the status syncs
+// (TUI opened mid-turn) still waits once the status says running.
+fake.permission.t = [{ id: "q" }];
+const fresh = core.requestTracker();
+out.push(core.sessionState(data, ["t"], fresh));
+fake.status.t = "running"; out.push(core.sessionState(data, ["t"], fresh));
+return out;
+"#,
+    ) else {
+        eprintln!("node not installed — skipping opencode status check");
+        return;
+    };
+    assert_eq!(
+        states,
+        serde_json::json!([
+            "running", "waiting", "idle", "running", "waiting", "running", "idle", "idle",
+            "waiting"
+        ])
+    );
+}
+
+#[test]
 fn opencode_status_reports_only_its_own_sessions() {
     let Some(writes) = opencode_status_script(
         r#"

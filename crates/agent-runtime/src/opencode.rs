@@ -38,6 +38,10 @@
 //! | `session.execution.started` | `Running` |
 //! | `session.execution.succeeded` / `failed` / `interrupted` (`session.idle` / `session.error`) | `Idle` / `TurnComplete` |
 //!
+//! A request still listed when its session stops running is ignored from
+//! then on: OpenCode drops it on interrupt without a `replied` event, and
+//! the store would otherwise show it as waiting through the next turn.
+//!
 //! Streaming progress (`message.*`, `session.updated`) is not mapped: it also
 //! arrives after a turn ends and would pin the tab on running.
 //!

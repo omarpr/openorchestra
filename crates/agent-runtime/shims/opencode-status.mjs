@@ -19,7 +19,9 @@
 //
 // Reading the store rather than replaying events survives two permissions
 // pending at once, a missed event, and a TUI that opens a session already
-// mid-turn.
+// mid-turn. One store gap is patched here: a request still listed when its
+// session stops running is left over from an interrupt (`requestTracker`)
+// and never counts again.
 //
 // Own sessions only: the service streams every session on the Mac. A tab
 // reports the sessions its own TUI has shown since launch, plus their
@@ -58,9 +60,51 @@ function attempt(read, fallback) {
 	}
 }
 
-function count(read) {
-	const items = attempt(read, []);
-	return Array.isArray(items) ? items.length : 0;
+function items(read) {
+	const list = attempt(read, []);
+	return Array.isArray(list) ? list : [];
+}
+
+function isRunning(data, id) {
+	const status = attempt(() => data.session.status(id), "idle");
+	return RUNNING.has(typeof status === "string" ? status : status?.type);
+}
+
+function requests(data, id) {
+	return [...items(() => data.session.permission.list(id)), ...items(() => data.session.form.list(id))];
+}
+
+/**
+ * Remembers which pending requests outlived their turn.
+ *
+ * OpenCode 2.3.2's server drops a pending permission or question when a
+ * turn is interrupted without publishing `permission.replied` or
+ * `form.cancelled`, and the TUI store only removes one on those events. The
+ * leftover would read as waiting through the session's next turn. So when
+ * a session stops running, every request it still lists is stale and never
+ * counts again; requests asked during a later turn do.
+ *
+ * Exported for the test harness.
+ */
+export function requestTracker() {
+	const running = new Map();
+	const stale = new Map();
+	return {
+		/** The session's live (not stale) request count, updating the books. */
+		live(data, id) {
+			const now = isRunning(data, id);
+			const listed = requests(data, id);
+			const ids = new Set(listed.map((request) => request?.id).filter((key) => key !== undefined));
+			let old = stale.get(id) ?? new Set();
+			// Forget stale ids the store has dropped since.
+			old = new Set([...old].filter((key) => ids.has(key)));
+			if (running.get(id) && !now) for (const key of ids) old.add(key);
+			running.set(id, now);
+			if (old.size) stale.set(id, old);
+			else stale.delete(id);
+			return listed.filter((request) => !old.has(request?.id)).length;
+		},
+	};
 }
 
 /**
@@ -81,22 +125,21 @@ export function ownSessions(data, shown) {
 }
 
 /**
- * Map the store's view of `ids` to running | waiting | idle.
+ * Map the store's view of `ids` to running | waiting | idle. `tracker`
+ * (from `requestTracker`) discounts requests left over from an interrupted
+ * turn; without it every listed request counts.
  *
  * Exported for the test harness.
  */
-export function sessionState(data, ids) {
+export function sessionState(data, ids, tracker) {
 	let running = false;
 	let pending = false;
 	for (const id of ids) {
-		if (count(() => data.session.permission.list(id)) > 0) pending = true;
-		if (count(() => data.session.form.list(id)) > 0) pending = true;
-		const status = attempt(() => data.session.status(id), "idle");
-		if (RUNNING.has(typeof status === "string" ? status : status?.type)) running = true;
+		const live = tracker ? tracker.live(data, id) : requests(data, id).length;
+		if (live > 0) pending = true;
+		if (isRunning(data, id)) running = true;
 	}
-	// A prompt only blocks a turn in progress. The store does not drop a
-	// pending request when a turn ends (an interrupt with a prompt open), and
-	// a stale one must not pin the tab on waiting: a false waiting notifies.
+	// A prompt only blocks a turn in progress; a false waiting notifies.
 	if (!running) return "idle";
 	return pending ? "waiting" : "running";
 }
@@ -144,13 +187,14 @@ export function statusWriter(load, cwd) {
 export function startStatusReporter(context, { write, env = process.env, interval = 1000 } = {}) {
 	if (!env.HARNESS_AGENT_TAB_ID && !env.HARNESS_AGENT_WORKTREE && !env.HARNESS_REMOTE_SESSION) return undefined;
 	const shown = new Set();
+	const tracker = requestTracker();
 	let last;
 
 	function update() {
 		try {
 			const route = context.ui.router.current();
 			if (route?.type === "session" && typeof route.sessionID === "string") shown.add(route.sessionID);
-			const state = sessionState(context.data, ownSessions(context.data, shown));
+			const state = sessionState(context.data, ownSessions(context.data, shown), tracker);
 			if (state === last) return;
 			last = state;
 			write(state);
