@@ -793,6 +793,7 @@ impl HarnessWorkspace {
             // default — clicking it would undo nothing. Custom agents are the
             // user's own additions, not defaults, so reset never touches them.
             let agents_dirty = !self.prefs.agent_order.is_empty()
+                || self.prefs.default_agent.is_some()
                 || self
                     .prefs
                     .agents
@@ -829,6 +830,7 @@ impl HarnessWorkspace {
                         // to reset to.
                         ws.prefs.agents.retain(|_, a| a.custom);
                         ws.prefs.agent_order.clear();
+                        ws.prefs.default_agent = None;
                         save_prefs_to(&ws.prefs_path, &ws.prefs);
                         cx.notify();
                     }));
@@ -1080,7 +1082,6 @@ impl HarnessWorkspace {
     /// which should turn into a drag. The whole row (with a custom agent's
     /// status controls) is the drop target, so the pair moves together.
     fn render_agent_list(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> gpui::Div {
-        let default_agent = default_enabled_agent(&self.prefs);
         let focus = &self.settings_focus;
         let mut agents = div().flex().flex_col().gap_0p5().pb_1();
         for kind in agent_catalog(&self.prefs) {
@@ -1091,7 +1092,6 @@ impl HarnessWorkspace {
             // set — defined once per agent in agent-runtime, not here.
             let default_cmd = agent_runtime::default_command_display(&kind);
             let editing = matches!(self.edit_kind(), Some(EditKind::AgentCmd(k)) if *k == key);
-            let is_default = default_agent.as_ref() == Some(&kind);
             // A built-in with its own command; customs have no default to
             // restore.
             let overridden = !is_custom && pref.command.is_some();
@@ -1156,21 +1156,6 @@ impl HarnessWorkspace {
                                 .text_color(if on { hx.tx0 } else { hx.tx2 })
                                 .child(display_name.clone()),
                         )
-                        // A star after the name marks the default at a glance,
-                        // without a word competing with the name for width.
-                        .when(is_default, |d| {
-                            d.child(
-                                div()
-                                    .id(gpui::SharedString::from(format!("agent-default-{key}")))
-                                    .flex_none()
-                                    .text_sm()
-                                    .text_color(hx.amber)
-                                    .tooltip(tip(
-                                        "Default for new tasks: the last agent you used, or the first enabled agent in this list.",
-                                    ))
-                                    .child("★"),
-                            )
-                        }),
                 )
                 .when(is_custom, |d| d.tooltip(tip(display_name.clone())))
                 // The one thing worth knowing about Codex status, where it is
@@ -1237,6 +1222,56 @@ impl HarnessWorkspace {
                         }))
                         .into_any_element()
                 };
+
+            // The default-agent star, in a fixed slot so every row's lines up.
+            // Filled = the effective default (inert); outlined = click to make
+            // this agent the default; a disabled agent can't be, so no star.
+            let star = match agent_star(&self.prefs, &kind) {
+                AgentStar::Filled => div()
+                    .id(gpui::SharedString::from(format!("agent-default-{key}")))
+                    .flex_none()
+                    .w(px(20.0))
+                    .py_0p5()
+                    .text_center()
+                    .text_sm()
+                    .text_color(hx.accent)
+                    .tooltip(tip("Default for new tasks"))
+                    .child("★")
+                    .into_any_element(),
+                AgentStar::Outlined => {
+                    let star_key = key.clone();
+                    // Built by hand rather than `icon_button`: its tooltip is
+                    // the accessible label, which here names the agent.
+                    let accent = hx.accent;
+                    let hover_bg = hx.surface_hover;
+                    focus
+                        .scroll_button(
+                            format!("agent-star-{key}"),
+                            format!("Make {display_name} the default for new tasks"),
+                            hx,
+                            cx,
+                        )
+                        .flex_none()
+                        .w(px(20.0))
+                        .py_0p5()
+                        .rounded_md()
+                        .text_center()
+                        .text_sm()
+                        .text_color(hx.tx2)
+                        .cursor_pointer()
+                        .hover(move |d| d.bg(hover_bg).text_color(accent))
+                        .tooltip(tip("Default for new tasks"))
+                        .child("☆")
+                    .on_click(cx.listener(move |ws, _, _, cx| {
+                        cx.stop_propagation();
+                        ws.prefs.default_agent = Some(star_key.clone());
+                        save_prefs_to(&ws.prefs_path, &ws.prefs);
+                        cx.notify();
+                    }))
+                    .into_any_element()
+                }
+                AgentStar::Hidden => div().flex_none().w(px(20.0)).into_any_element(),
+            };
 
             // Fixed-width slots, filled or not, so every row's switch lines up.
             let restore = if overridden {
@@ -1309,6 +1344,9 @@ impl HarnessWorkspace {
                     ws.focus_section_tab(SettingsSection::Agents, window, cx);
                     ws.prefs.agents.remove(&remove_key);
                     ws.prefs.agent_order.retain(|k| *k != remove_key);
+                    if ws.prefs.default_agent.as_deref() == Some(remove_key.as_str()) {
+                        ws.prefs.default_agent = None;
+                    }
                     save_prefs_to(&ws.prefs_path, &ws.prefs);
                     cx.notify();
                 }))
@@ -1325,6 +1363,7 @@ impl HarnessWorkspace {
                 .child(grip)
                 .child(name)
                 .child(command)
+                .child(star)
                 .child(restore)
                 .child(switch_el)
                 .child(remove);

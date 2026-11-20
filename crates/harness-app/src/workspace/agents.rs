@@ -120,18 +120,49 @@ pub(crate) fn enabled_agents(prefs: &Prefs) -> Vec<AgentKind> {
         .collect()
 }
 
-/// Default agent for a new task: last used (if still enabled), else the
-/// first enabled agent in the user's order. Out of the box that is Claude
-/// Code, the first of the alphabetical catalog until the user reorders.
+/// Default agent for a new task, first match wins: the agent starred in
+/// Settings (`prefs.default_agent`) if it exists and is enabled; else the last
+/// used agent if still enabled; else the first enabled agent in the user's
+/// order (Claude Code out of the box, the top of the alphabetical catalog).
 pub(crate) fn default_enabled_agent(prefs: &Prefs) -> Option<AgentKind> {
     let enabled = enabled_agents(prefs);
-    if let Some(key) = prefs.last_task_agent.as_deref() {
+    for key in [
+        prefs.default_agent.as_deref(),
+        prefs.last_task_agent.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
         let kind = AgentKind::from(key);
-        if enabled.iter().any(|k| k == &kind) {
+        if enabled.contains(&kind) {
             return Some(kind);
         }
     }
     enabled.into_iter().next()
+}
+
+/// How an agent's star in Settings › Agents looks and behaves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentStar {
+    /// The effective default: a filled star, nothing to click.
+    Filled,
+    /// An enabled agent that is not the default: click to make it so.
+    Outlined,
+    /// A disabled agent can't be the default, so it has no star.
+    Hidden,
+}
+
+/// The star state for `kind`'s row. Exactly one enabled agent is `Filled`:
+/// the effective default, which may be the last-used or first agent rather
+/// than an explicit star.
+pub(crate) fn agent_star(prefs: &Prefs, kind: &AgentKind) -> AgentStar {
+    if !enabled_agents(prefs).contains(kind) {
+        AgentStar::Hidden
+    } else if default_enabled_agent(prefs).as_ref() == Some(kind) {
+        AgentStar::Filled
+    } else {
+        AgentStar::Outlined
+    }
 }
 
 /// Whether `slug` is a usable key for a new custom agent: non-empty, only
@@ -178,7 +209,7 @@ pub(crate) struct AgentPref {
 mod agent_prefs_tests {
     use super::{
         AgentKind, AgentPref, Prefs, agent_catalog, agent_display, agent_order_after_move, default_enabled_agent,
-        enabled_agents, valid_agent_slug,
+        enabled_agents, valid_agent_slug, AgentStar, agent_star,
     };
 
     fn with_custom(slug: &str, command: &str) -> Prefs {
@@ -468,5 +499,78 @@ mod agent_prefs_tests {
             Some(AgentKind::ClaudeCode),
             "disabled last-used falls through"
         );
+    }
+
+    #[test]
+    fn a_starred_agent_beats_the_last_used_one() {
+        let mut prefs = Prefs {
+            default_agent: Some("kimi".into()),
+            last_task_agent: Some("codex".into()),
+            ..Default::default()
+        };
+        assert_eq!(default_enabled_agent(&prefs), Some(AgentKind::Kimi));
+        prefs.default_agent = None;
+        assert_eq!(
+            default_enabled_agent(&prefs),
+            Some(AgentKind::Codex),
+            "no star: last used"
+        );
+        prefs.last_task_agent = None;
+        assert_eq!(
+            default_enabled_agent(&prefs),
+            Some(AgentKind::ClaudeCode),
+            "neither: first in catalog order"
+        );
+    }
+
+    #[test]
+    fn a_star_on_a_disabled_or_missing_agent_falls_back() {
+        let mut prefs = Prefs {
+            default_agent: Some("kimi".into()),
+            last_task_agent: Some("codex".into()),
+            ..Default::default()
+        };
+        prefs.agents.insert(
+            "kimi".into(),
+            AgentPref {
+                disabled: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            default_enabled_agent(&prefs),
+            Some(AgentKind::Codex),
+            "disabled star falls to last used"
+        );
+        prefs.default_agent = Some("removed-custom".into());
+        assert_eq!(
+            default_enabled_agent(&prefs),
+            Some(AgentKind::Codex),
+            "a star on an agent that no longer exists falls back"
+        );
+        prefs.last_task_agent = None;
+        assert_eq!(default_enabled_agent(&prefs), Some(AgentKind::ClaudeCode));
+    }
+
+    #[test]
+    fn the_star_state_is_filled_outlined_or_hidden() {
+        let mut prefs = Prefs {
+            default_agent: Some("kimi".into()),
+            ..Default::default()
+        };
+        prefs.agents.insert(
+            "pi".into(),
+            AgentPref {
+                disabled: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(agent_star(&prefs, &AgentKind::Kimi), AgentStar::Filled);
+        assert_eq!(agent_star(&prefs, &AgentKind::Codex), AgentStar::Outlined);
+        assert_eq!(agent_star(&prefs, &AgentKind::Pi), AgentStar::Hidden);
+        // Only one agent is filled, even with no explicit star.
+        let plain = Prefs::default();
+        assert_eq!(agent_star(&plain, &AgentKind::ClaudeCode), AgentStar::Filled);
+        assert_eq!(agent_star(&plain, &AgentKind::Kimi), AgentStar::Outlined);
     }
 }

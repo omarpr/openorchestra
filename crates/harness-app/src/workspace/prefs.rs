@@ -96,6 +96,12 @@ pub(crate) struct Prefs {
     /// from it (a new built-in, a new custom agent) follow the saved ones.
     #[serde(default)]
     pub(crate) agent_order: Vec<String>,
+    /// The agent the user starred in Settings › Agents (an
+    /// `AgentKind::as_str()` key). Wins over the last-used agent while it
+    /// names an agent that exists and is enabled; `None` = no star. Older
+    /// prefs files load it as `None`, and older builds ignore the key.
+    #[serde(default)]
+    pub(crate) default_agent: Option<String>,
     /// Last agent chosen when starting agents for a new multi-member task.
     /// Used as the default in the start-agents picker when still enabled.
     #[serde(default)]
@@ -204,6 +210,7 @@ impl Default for Prefs {
             font_mono: None,
             agents: Default::default(),
             agent_order: Vec::new(),
+            default_agent: None,
             last_task_agent: None,
             font_size: None,
             conductor_always_on: true,

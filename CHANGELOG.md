@@ -33,8 +33,9 @@ Unreleased is empty.
   WebKit can reach.
 - Drag agents by their grip in **Settings › Agents** to reorder them. The
   order is used in the **+** menu and the new-task picker. New tasks start
-  with your last-used agent, or the top of the list if you haven't used one;
-  a ★ after its name marks which one that is.
+  with your starred agent, else your last-used agent, else the top of the
+  list; the filled ★ on a row marks which one that is.
+- Star an agent in **Settings › Agents** to make it the default for new tasks.
 - Agent tabs show a spinner while that agent is running. With several agents
   in one task or project, each tab shows its own.
 - In the Review panel, ↑ and ↓ move between changed files once you've
