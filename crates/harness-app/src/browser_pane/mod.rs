@@ -18,9 +18,10 @@
 //! into a channel the pane owns, drained by a task that lives as long as the
 //! pane ([`BrowserPane::new`]), which opens at most one tab per second for
 //! it ([`new_window_allowed`]). Within one view, a
-//! load failure carries the number of the navigation it belongs to, so one
-//! still queued when the user starts another navigation is dropped
-//! ([`failure_is_current`]).
+//! load failure carries the number of the navigation that produced it
+//! (`webview::Navigations`, matched by its `WKNavigation`), so one from an
+//! earlier navigation, or still queued when the user or the page starts
+//! another, is dropped ([`failure_is_current`]).
 //!
 //! **Placement.** The tab body is a `canvas` whose prepaint reads the pane
 //! (no update, no notify) and hands its bounds to `set_frame`, so the page
@@ -474,8 +475,8 @@ enum PageEvent {
     /// `true` for a change within the same document.
     Committed(String, bool),
     Loading(bool),
-    /// The failing URL (when WebKit names it), the reason, and the view's
-    /// navigation number at the time ([`failure_is_current`]).
+    /// The failing URL (when WebKit names it), the reason, and the number
+    /// of the navigation that failed ([`failure_is_current`]).
     Failed(Option<String>, String, u64),
     Notice(String),
     /// The user clicked into the page.
@@ -496,8 +497,8 @@ fn new_window_allowed(last: Option<Instant>, now: Instant) -> bool {
 
 /// Whether a failure tagged with navigation `tagged` belongs to the view's
 /// `current` navigation. One from an earlier navigation, still queued when
-/// the user loaded another address (or reloaded, or went back), must not
-/// replace the new page with its error.
+/// the user loaded another address (or reloaded, or went back) or the page
+/// navigated on its own, must not replace the new page with its error.
 fn failure_is_current(tagged: u64, current: u64) -> bool {
     tagged == current
 }
@@ -1966,6 +1967,56 @@ mod tests {
         assert!(!failure_is_current(2, 3));
         // The counter wraps rather than overflowing.
         assert!(!failure_is_current(u64::MAX, 0));
+    }
+
+    #[test]
+    fn a_failure_shows_only_while_its_navigation_is_the_latest() {
+        let (a, b, c) = (0xa0, 0xb0, 0xc0);
+        let shown = |navs: &webview::Navigations, tag: Option<u64>| {
+            tag.is_some_and(|tag| failure_is_current(tag, navs.current()))
+        };
+
+        // The user loads B while A is loading; A fails late.
+        let mut navs = webview::Navigations::default();
+        navs.begin(Some(a));
+        navs.begin(Some(b));
+        assert!(!shown(&navs, navs.failure(Some(a))));
+        // WebKit reports B starting (again) and committing: still B's.
+        assert!(!navs.started(Some(b)));
+        let b_failed = navs.failure(Some(b));
+        assert!(shown(&navs, b_failed));
+
+        // A fails after B started, B having given no WKNavigation to the
+        // pane (or started before the pane's call returned).
+        let mut navs = webview::Navigations::default();
+        navs.begin(Some(a));
+        navs.begin(None);
+        assert!(!shown(&navs, navs.failure(Some(a))));
+        assert!(navs.started(Some(b)));
+        assert!(!shown(&navs, navs.failure(Some(a))));
+        assert!(shown(&navs, navs.failure(Some(b))));
+
+        // A page-initiated C (a link, a script) supersedes A: A's failure
+        // reported after C started is dropped at once, and one queued
+        // before C started is dropped when it arrives.
+        let mut navs = webview::Navigations::default();
+        navs.begin(Some(a));
+        let queued = navs.failure(Some(a));
+        assert!(shown(&navs, queued));
+        assert!(navs.started(Some(c)));
+        assert!(!shown(&navs, queued));
+        assert!(!shown(&navs, navs.failure(Some(a))));
+        assert!(shown(&navs, navs.failure(Some(c))));
+
+        // Nil navigations: a nil start is a new, unknown one, and a nil
+        // failure belongs to it only.
+        let mut navs = webview::Navigations::default();
+        navs.begin(Some(a));
+        assert!(!shown(&navs, navs.failure(None)));
+        assert!(navs.started(None));
+        assert!(shown(&navs, navs.failure(None)));
+        assert!(!shown(&navs, navs.failure(Some(a))));
+        assert!(navs.started(None));
     }
 
     #[test]

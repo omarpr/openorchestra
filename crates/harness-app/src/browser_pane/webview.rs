@@ -556,10 +556,12 @@ pub(crate) struct NativeEvents {
     /// view's own URL has already fallen back to the last committed page by
     /// then), and WebKit's message, e.g. "Could not connect to the server.".
     /// Cancellations, including our own policy cancels, are not failures.
-    /// The last argument is the view's navigation number when WebKit
-    /// reported it ([`NativeWebView::navigation`]), read before the
-    /// main-queue hop, so a failure that lands after the next
-    /// `load`/`reload`/`back`/`forward` can be told apart.
+    /// The last argument is the number of the navigation that failed
+    /// ([`Navigations`]): a failure of a navigation that is no longer the
+    /// latest isn't reported at all, and the pane drops one whose number
+    /// stopped being current ([`NativeWebView::navigation`]) while it was
+    /// queued (a later `load`/`reload`/`back`/`forward`, or a page's own
+    /// navigation).
     pub on_failed: Box<dyn Fn(Option<String>, String, u64)>,
     /// Something the user should hear about that is not a load failure; the
     /// page stays as it is. Today only [`DOWNLOAD_UNSUPPORTED`].
@@ -766,6 +768,65 @@ pub(crate) fn is_benign_failure(domain: &str, code: isize) -> bool {
     )
 }
 
+/// Which main-frame navigation is the view's latest, so a load failure can
+/// be matched to the navigation that produced it rather than to whatever
+/// is loading when WebKit reports it. Navigations are known by their
+/// `WKNavigation`'s address (the view holds the latest one, so no other
+/// object can take its address meanwhile); `None` is a nil navigation.
+///
+/// Each navigation gets a number: the pane's own (`load`, `reload`,
+/// `back`, `forward`: [`Self::begin`]) and each new one WebKit starts or
+/// commits, page-initiated ones included ([`Self::started`]). A failure is
+/// tagged with its navigation's number only if that navigation is still
+/// the latest ([`Self::failure`]); the pane shows it only if the number is
+/// still current when the event arrives (`failure_is_current` in
+/// `mod.rs`), so one queued before a later navigation began is dropped.
+///
+/// Nil (assumed, not observed: WebKit documents the parameter as
+/// nullable): a nil start is a new navigation of unknown identity, and a
+/// nil failure belongs only to such a navigation.
+#[derive(Debug, Default)]
+pub(crate) struct Navigations {
+    number: u64,
+    /// The latest navigation and its number; `None` after the pane began
+    /// one WebKit gave no `WKNavigation` for (nothing is current yet).
+    latest: Option<(Option<usize>, u64)>,
+}
+
+impl Navigations {
+    /// The number of the latest navigation.
+    pub(crate) fn current(&self) -> u64 {
+        self.number
+    }
+
+    /// The pane started a navigation; `id` is the `WKNavigation` WebKit
+    /// returned for it, if any. Anything earlier stops being current.
+    pub(crate) fn begin(&mut self, id: Option<usize>) {
+        self.number = self.number.wrapping_add(1);
+        self.latest = id.map(|id| (Some(id), self.number));
+    }
+
+    /// WebKit started (or committed) a main-frame navigation. A new one,
+    /// including a page's own, becomes the latest; the latest reported
+    /// again changes nothing. Returns whether it was new.
+    pub(crate) fn started(&mut self, id: Option<usize>) -> bool {
+        if id.is_some() && self.latest.is_some_and(|(latest, _)| latest == id) {
+            return false;
+        }
+        self.number = self.number.wrapping_add(1);
+        self.latest = Some((id, self.number));
+        true
+    }
+
+    /// The number to tag a failure of navigation `id` with, or `None` when
+    /// it isn't the latest navigation (a later one has begun): drop it.
+    pub(crate) fn failure(&self, id: Option<usize>) -> Option<u64> {
+        self.latest
+            .filter(|&(latest, _)| latest == id)
+            .map(|(_, number)| number)
+    }
+}
+
 /// gpui's top-left `y` for a rect of `height` → the bottom-left `y` an
 /// unflipped NSView of `parent_height` uses.
 pub(crate) fn flip_y(bounds_y: f32, height: f32, parent_height: f32) -> f32 {
@@ -957,7 +1018,7 @@ mod mac {
 
     use super::{
         APP_CHORDS, DOWNLOAD_UNSUPPORTED, DockSide, Hole, InspectorMove, InspectorPlace, KeyRoute,
-        MonitorTarget, NavDecision, NavOrigin, NativeEvents, PageMask, PageSizer, SourceFrame,
+        MonitorTarget, NavDecision, NavOrigin, Navigations, NativeEvents, PageMask, PageSizer, SourceFrame,
         decide_download, decide_navigation, decide_new_window, dock_side, event_chords, flip_y,
         holes_in_page, in_any_hole, is_benign_failure, is_download, mask_changed, monitor_target,
         page_mask, page_sizer, place_of, response_origin, route_key, safari_app_name, user_clicked,
@@ -1127,6 +1188,33 @@ mod mac {
         }
     }
 
+    /// [`Navigations`], holding the latest `WKNavigation` so no other object
+    /// can take its address while it is recorded.
+    #[derive(Default)]
+    struct NavState {
+        numbers: Navigations,
+        held: Option<Retained<WKNavigation>>,
+    }
+
+    impl NavState {
+        /// The pane started a navigation (`nav`: what WebKit returned).
+        fn begin(&mut self, nav: Option<Retained<WKNavigation>>) {
+            self.numbers.begin(nav.as_deref().map(nav_id));
+            self.held = nav;
+        }
+
+        /// WebKit started or committed a main-frame navigation.
+        fn started(&mut self, nav: Option<&WKNavigation>) {
+            if self.numbers.started(nav.map(nav_id)) {
+                self.held = nav.map(|n| n.retain());
+            }
+        }
+    }
+
+    fn nav_id(nav: &WKNavigation) -> usize {
+        ptr::from_ref(nav) as usize
+    }
+
     fn url_string(url: Option<Retained<NSURL>>) -> String {
         url.and_then(|u| u.absoluteString())
             .map(|s| s.to_string())
@@ -1141,8 +1229,8 @@ mod mac {
         /// The page's last real gesture, stamped by the key monitor; shared
         /// with its `PageEntry`.
         gesture: Rc<Cell<Option<Instant>>>,
-        /// The view's navigation number (see [`NativeWebView::navigation`]).
-        navigation: Rc<Cell<u64>>,
+        /// The view's navigations (see [`NativeWebView::navigation`]).
+        navigation: Rc<RefCell<NavState>>,
         /// [`user_started`] for the last main-frame navigation the policy
         /// let load: what a download response it fetches is judged by.
         main_user_started: Cell<bool>,
@@ -1285,8 +1373,19 @@ mod mac {
                 }
             }
 
+            #[unsafe(method(webView:didStartProvisionalNavigation:))]
+            fn did_start(&self, _web_view: &WKWebView, navigation: Option<&WKNavigation>) {
+                // Page-initiated navigations too: the pane's own count
+                // never sees those.
+                self.ivars().navigation.borrow_mut().started(navigation);
+            }
+
             #[unsafe(method(webView:didCommitNavigation:))]
-            fn did_commit(&self, web_view: &WKWebView, _navigation: Option<&WKNavigation>) {
+            fn did_commit(&self, web_view: &WKWebView, navigation: Option<&WKNavigation>) {
+                // Normally the one that started; a nil here says nothing.
+                if navigation.is_some() {
+                    self.ivars().navigation.borrow_mut().started(navigation);
+                }
                 let url = url_string(unsafe { web_view.URL() });
                 if !url.is_empty() {
                     self.post(move |e| (e.on_commit)(url, false));
@@ -1297,25 +1396,25 @@ mod mac {
             fn did_fail_provisional(
                 &self,
                 _web_view: &WKWebView,
-                _navigation: Option<&WKNavigation>,
+                navigation: Option<&WKNavigation>,
                 error: &NSError,
             ) {
-                self.failed(error);
+                self.failed(navigation, error);
             }
 
             #[unsafe(method(webView:didFailNavigation:withError:))]
             fn did_fail(
                 &self,
                 _web_view: &WKWebView,
-                _navigation: Option<&WKNavigation>,
+                navigation: Option<&WKNavigation>,
                 error: &NSError,
             ) {
-                self.failed(error);
+                self.failed(navigation, error);
             }
 
             #[unsafe(method(webViewWebContentProcessDidTerminate:))]
             fn content_process_terminated(&self, _web_view: &WKWebView) {
-                let navigation = self.ivars().navigation.get();
+                let navigation = self.ivars().navigation.borrow().numbers.current();
                 self.post(move |e| {
                     (e.on_failed)(None, "The page stopped unexpectedly.".to_string(), navigation)
                 });
@@ -1352,7 +1451,7 @@ mod mac {
         fn new(
             events: Weak<NativeEvents>,
             gesture: Rc<Cell<Option<Instant>>>,
-            navigation: Rc<Cell<u64>>,
+            navigation: Rc<RefCell<NavState>>,
             mtm: MainThreadMarker,
         ) -> Retained<Self> {
             let this = Self::alloc(mtm).set_ivars(Ivars {
@@ -1385,10 +1484,19 @@ mod mac {
             }
         }
 
-        fn failed(&self, error: &NSError) {
+        /// A load failure of `navigation`, reported only while that is the
+        /// view's latest navigation ([`Navigations::failure`]).
+        fn failed(&self, navigation: Option<&WKNavigation>, error: &NSError) {
             if is_benign_failure(&error.domain().to_string(), error.code()) {
                 return;
             }
+            // Its own number, not the latest's: by the time the post runs,
+            // the pane or the page may have started another navigation.
+            let tag = self.ivars().navigation.borrow().numbers.failure(navigation.map(nav_id));
+            let Some(navigation) = tag else {
+                log::debug!("browser: dropping a load failure of an earlier navigation");
+                return;
+            };
             let message = error.localizedDescription().to_string();
             // NSURLErrorFailingURLStringErrorKey's value. WebKit sets it on
             // its load errors; without it the pane falls back to what it
@@ -1399,9 +1507,6 @@ mod mac {
                 .and_then(|v| v.downcast::<NSString>().ok())
                 .map(|s| s.to_string())
                 .filter(|s| !s.is_empty());
-            // Read now: by the time the post runs, the pane may have started
-            // another navigation.
-            let navigation = self.ivars().navigation.get();
             self.post(move |e| (e.on_failed)(url, message, navigation));
         }
     }
@@ -1988,9 +2093,9 @@ mod mac {
         /// gpui's focus is on this page's side of its tab (not its address
         /// bar); shared with the monitor through `PAGES`.
         pane_focused: Rc<Cell<bool>>,
-        /// Bumped by every navigation the pane starts; shared with the
-        /// delegate, which tags failures with it.
-        navigation: Rc<Cell<u64>>,
+        /// Which navigation is the latest ([`Navigations`]); shared with
+        /// the delegate, which tags failures with it.
+        navigation: Rc<RefCell<NavState>>,
     }
 
     impl NativeWebView {
@@ -2061,7 +2166,7 @@ mod mac {
 
             let events = Rc::new(events);
             let gesture = Rc::new(Cell::new(None));
-            let navigation = Rc::new(Cell::new(0));
+            let navigation = Rc::new(RefCell::new(NavState::default()));
             let delegate =
                 Delegate::new(Rc::downgrade(&events), gesture.clone(), navigation.clone(), mtm);
             unsafe {
@@ -2185,26 +2290,30 @@ mod mac {
             page_has_focus
         }
 
-        /// The number of the navigation the pane last started here
-        /// (`load`, `reload`, `back`, `forward` each bump it). `on_failed`
-        /// carries the number current when WebKit reported the failure.
+        /// The number of the latest navigation here: one the pane started
+        /// (`load`, `reload`, `back`, `forward`) or WebKit did (a page's
+        /// own included). `on_failed` carries the number of the navigation
+        /// that failed ([`Navigations`]).
         pub(crate) fn navigation(&self) -> u64 {
-            self.navigation.get()
+            self.navigation.borrow().numbers.current()
         }
 
-        fn begin_navigation(&self) {
-            self.navigation.set(self.navigation.get().wrapping_add(1));
+        /// `nav`: the `WKNavigation` WebKit returned, if any.
+        fn begin_navigation(&self, nav: Option<Retained<WKNavigation>>) {
+            self.navigation.borrow_mut().begin(nav);
         }
 
         /// Loads an absolute URL. One NSURL can't parse is reported through
         /// `on_failed`.
         pub(crate) fn load(&self, url: &str) {
-            self.begin_navigation();
             match NSURL::URLWithString(&NSString::from_str(url)) {
-                Some(ns_url) => unsafe {
-                    self.view.loadRequest(&NSURLRequest::requestWithURL(&ns_url));
-                },
+                Some(ns_url) => {
+                    let request = NSURLRequest::requestWithURL(&ns_url);
+                    let nav = unsafe { self.view.loadRequest(&request) };
+                    self.begin_navigation(nav);
+                }
                 None => {
+                    self.begin_navigation(None);
                     let url = url.to_string();
                     let navigation = self.navigation();
                     self.delegate.post(move |e| {
@@ -2215,18 +2324,18 @@ mod mac {
         }
 
         pub(crate) fn back(&self) {
-            self.begin_navigation();
-            unsafe { self.view.goBack() };
+            let nav = unsafe { self.view.goBack() };
+            self.begin_navigation(nav);
         }
 
         pub(crate) fn forward(&self) {
-            self.begin_navigation();
-            unsafe { self.view.goForward() };
+            let nav = unsafe { self.view.goForward() };
+            self.begin_navigation(nav);
         }
 
         pub(crate) fn reload(&self) {
-            self.begin_navigation();
-            unsafe { self.view.reload() };
+            let nav = unsafe { self.view.reload() };
+            self.begin_navigation(nav);
         }
 
         pub(crate) fn stop(&self) {
