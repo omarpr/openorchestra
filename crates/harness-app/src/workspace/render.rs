@@ -21,9 +21,19 @@ impl Render for HarnessWorkspace {
         let scale = self.prefs.font_size.unwrap_or(13.0) / 13.0;
         window.set_rem_size(px(16.0 * scale));
 
+        // A menu whose tab closed (or whose worktree is no longer selected)
+        // has nothing to show: drop it rather than float an empty box.
+        // Before the sync below, which hides the page while it is open.
+        if let Some((tab_id, _)) = self.tab_context_menu
+            && self.tab_context_item(tab_id).is_none()
+        {
+            self.tab_context_menu = None;
+        }
+
         // Catch-all for every other way the visible tab changes (opening,
-        // restoring, closing, file-tab sync, tools maximized): the native
-        // page view must match what this frame draws.
+        // restoring, closing, file-tab sync, tools maximized, an overlay
+        // opening or closing): the native page view must match what this
+        // frame draws.
         self.sync_browser_views(window, cx);
 
         let hx = theme(cx).clone();
@@ -382,13 +392,6 @@ impl Render for HarnessWorkspace {
                 });
         }
 
-        // A menu whose tab closed (or whose worktree is no longer selected)
-        // has nothing to show: drop it rather than float an empty box.
-        if let Some((tab_id, _)) = self.tab_context_menu
-            && self.tab_context_item(tab_id).is_none()
-        {
-            self.tab_context_menu = None;
-        }
         if let Some((tab_id, x)) = self.tab_context_menu {
             root = root
                 .child(

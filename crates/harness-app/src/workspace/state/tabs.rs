@@ -608,13 +608,47 @@ impl HarnessWorkspace {
         }
     }
 
+    /// Something gpui draws over the window is open: a menu, popover,
+    /// dialog or screen. The native page sits above everything gpui draws,
+    /// so while this is true it hides (see `BrowserPane::set_overlay_open`).
+    /// Mirrors what `render` draws as an overlay; a new overlay belongs here.
+    ///
+    /// Not counted, on purpose: the toast, the conductor and tooltips. They
+    /// float over the window without taking it over, and hiding the page for
+    /// each would blank it constantly; where they overlap the page they are
+    /// under it. Native `window.prompt` sheets (NSAlert) are their own
+    /// window, above the page, and need nothing.
+    pub(crate) fn overlay_open(&self, cx: &App) -> bool {
+        self.tab_menu.is_some()
+            || self.tab_context_menu.is_some()
+            || self.comment_draft.is_some()
+            || self.settings_open
+            || self.preflight_open
+            || self.menu.is_some()
+            || self.project_menu.is_some()
+            || self.reorder_panel.is_some()
+            || self.diff_base_menu.is_some()
+            || self.ports_sort_menu.is_some()
+            || self.edit_prompt.is_some()
+            || self.new_task.is_some()
+            || self.start_specialists.is_some()
+            || self.close_prompt.is_some()
+            || self.confirm_removal.is_some()
+            // Drawn once its loss check is in (`render_end_confirm`).
+            || self.end_confirm.as_ref().is_some_and(|c| c.losses.is_some())
+            || self.hook_trust.is_some()
+            || self.zed_modal_open(cx)
+    }
+
     /// The one place that decides which browser tab has a native view: the
     /// one [`Self::shown_browser`] names, and no other, in any pane. Every
-    /// other browser tab drops its view (it reloads when shown again).
+    /// other browser tab drops its view (it reloads when shown again). The
+    /// shown one also hides while [`Self::overlay_open`].
     /// Idempotent; called on tab and worktree switches, on close, and at the
     /// top of every render as the catch-all.
     pub(crate) fn sync_browser_views(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let shown = self.shown_browser();
+        let overlay = self.overlay_open(cx);
         let pages: Vec<Entity<crate::browser_pane::BrowserPane>> = self
             .panes
             .values()
@@ -632,7 +666,12 @@ impl HarnessWorkspace {
             page.update(cx, |page, cx| page.set_shown(false, window, cx));
         }
         for page in show {
-            page.update(cx, |page, cx| page.set_shown(true, window, cx));
+            // Overlay first, so a view created under an open menu starts
+            // hidden rather than flashing up for a frame.
+            page.update(cx, |page, cx| {
+                page.set_overlay_open(overlay);
+                page.set_shown(true, window, cx);
+            });
         }
     }
 

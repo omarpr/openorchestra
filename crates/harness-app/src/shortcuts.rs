@@ -199,6 +199,92 @@ pub fn bindings_with(
     out
 }
 
+/// One keystroke as the page/app split compares them: the key and the four
+/// modifiers a chord is written with (fn is ignored; macOS sets it on arrows).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Chord {
+    pub key: String,
+    pub cmd: bool,
+    pub shift: bool,
+    pub alt: bool,
+    pub ctrl: bool,
+}
+
+impl Chord {
+    pub fn new(key: &str, cmd: bool, shift: bool, alt: bool, ctrl: bool) -> Self {
+        Chord {
+            key: key.to_string(),
+            cmd,
+            shift,
+            alt,
+            ctrl,
+        }
+    }
+
+    /// A catalog chord (`cmd-shift-]`). For a sequence (`cmd-k cmd-t`) only
+    /// its first keystroke, which is what a page would otherwise receive.
+    pub fn parse(keys: &str) -> Option<Self> {
+        let first = keys.split_whitespace().next()?;
+        let k = gpui::Keystroke::parse_with_os(first, host_os()).ok()?;
+        Some(Chord::new(
+            &k.key,
+            k.modifiers.platform,
+            k.modifiers.shift,
+            k.modifiers.alt,
+            k.modifiers.control,
+        ))
+    }
+}
+
+/// The editing keys a focused web page keeps, and the AppKit action each
+/// becomes when the page's own script leaves it alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageEdit {
+    Copy,
+    Paste,
+    Cut,
+    SelectAll,
+    Undo,
+    Redo,
+}
+
+/// ⌘C/⌘V/⌘X/⌘A/⌘Z/⌘⇧Z: the page's, whatever the catalog binds them to
+/// (the global ⌘C copies diff lines; over a page it must copy page text).
+pub fn page_edit(chord: &Chord) -> Option<PageEdit> {
+    if !chord.cmd || chord.alt || chord.ctrl {
+        return None;
+    }
+    match (chord.key.as_str(), chord.shift) {
+        ("c", false) => Some(PageEdit::Copy),
+        ("v", false) => Some(PageEdit::Paste),
+        ("x", false) => Some(PageEdit::Cut),
+        ("a", false) => Some(PageEdit::SelectAll),
+        ("z", false) => Some(PageEdit::Undo),
+        ("z", true) => Some(PageEdit::Redo),
+        _ => None,
+    }
+}
+
+/// The chords the app keeps while a web page has keyboard focus: every
+/// Global-scope ⌘-chord in `entries` (pass [`entries_with`], so rebindings
+/// count), minus the page's editing keys. Other scopes (editor, IDE, find
+/// bar, inputs) are never in a browser tab's focus path, and a chord with
+/// no ⌘ (the global `enter`) is typing, which the page always gets.
+pub fn app_chords(entries: &[Entry]) -> Vec<Chord> {
+    entries
+        .iter()
+        .filter(|e| e.scope == Scope::Global)
+        .filter_map(|e| Chord::parse(&e.keys))
+        .filter(|c| c.cmd && page_edit(c).is_none())
+        .collect()
+}
+
+/// Whether a ⌘-chord pressed over a focused page goes to the app (`true`)
+/// or stays with the page. `app` comes from [`app_chords`].
+pub fn is_app_shortcut(chord: &Chord, app: &[Chord]) -> bool {
+    page_edit(chord).is_none() && app.contains(chord)
+}
+
 /// The default catalog. Order within a scope is display order.
 pub fn entries() -> Vec<Entry> {
     use editor::actions as ed;
@@ -688,6 +774,69 @@ mod tests {
             .find(|e| e.what == "Undo" && e.scope == Scope::Editor)
             .unwrap();
         assert_eq!(undo.keys, "cmd-z", "unrelated entries keep their defaults");
+    }
+
+    fn chord(keys: &str) -> Chord {
+        Chord::parse(keys).unwrap_or_else(|| panic!("{keys} parses"))
+    }
+
+    #[test]
+    fn a_focused_page_keeps_editing_keys_and_the_app_keeps_its_chords() {
+        let app = app_chords(&entries());
+        for keys in [
+            "cmd-t", "cmd-e", "cmd-w", "cmd-shift-c", "cmd-,", "cmd-q", "cmd-n",
+            "cmd-alt-down", "cmd-alt-up", "cmd-shift-a", "cmd-shift-]", "cmd-shift-[",
+            "cmd-1", "cmd-5", "cmd-8", "cmd-9", "cmd-b", "cmd-shift-b", "cmd-p",
+            "cmd-shift-f", "cmd-shift-e", "cmd-shift-g", "cmd-shift-r",
+        ] {
+            assert!(is_app_shortcut(&chord(keys), &app), "{keys} must reach the app");
+        }
+        for keys in ["cmd-c", "cmd-v", "cmd-x", "cmd-a", "cmd-z", "cmd-shift-z"] {
+            assert!(!is_app_shortcut(&chord(keys), &app), "{keys} must stay with the page");
+            assert!(page_edit(&chord(keys)).is_some(), "{keys} is a page edit");
+        }
+        // Not global (editor, IDE or find-bar scoped), or no ⌘ at all.
+        for keys in ["cmd-s", "cmd-f", "cmd-g", "cmd-j", "cmd-left", "cmd-k", "enter", "escape"] {
+            assert!(!is_app_shortcut(&chord(keys), &app), "{keys} must stay with the page");
+        }
+        assert_eq!(page_edit(&chord("cmd-c")), Some(PageEdit::Copy));
+        assert_eq!(page_edit(&chord("cmd-shift-z")), Some(PageEdit::Redo));
+        assert_eq!(page_edit(&chord("cmd-t")), None);
+    }
+
+    /// Drift guard: every global ⌘-chord in the catalog reaches the app over
+    /// a page, except the editing keys, which the page owns.
+    #[test]
+    fn every_global_command_chord_is_an_app_shortcut() {
+        let all = entries();
+        let app = app_chords(&all);
+        for e in all.iter().filter(|e| e.scope == Scope::Global) {
+            let c = chord(&e.keys);
+            let expected = c.cmd && page_edit(&c).is_none();
+            assert_eq!(is_app_shortcut(&c, &app), expected, "{} ({})", e.keys, e.what);
+        }
+    }
+
+    #[test]
+    fn app_shortcuts_follow_rebindings() {
+        let mut ov = std::collections::BTreeMap::new();
+        ov.insert(key_id(Scope::Global, "New terminal tab"), "cmd-y".to_string());
+        // A chord rebound onto an editing key still leaves it to the page.
+        ov.insert(key_id(Scope::Global, "New task"), "cmd-v".to_string());
+        let app = app_chords(&entries_with(&ov));
+        assert!(is_app_shortcut(&chord("cmd-y"), &app));
+        assert!(!is_app_shortcut(&chord("cmd-t"), &app));
+        assert!(!is_app_shortcut(&chord("cmd-v"), &app));
+        assert!(!is_app_shortcut(&chord("cmd-n"), &app));
+    }
+
+    #[test]
+    fn chords_compare_modifiers_and_key_only() {
+        assert_eq!(chord("cmd-shift-]"), Chord::new("]", true, true, false, false));
+        assert_eq!(chord("cmd-alt-down"), Chord::new("down", true, false, true, false));
+        assert_ne!(chord("cmd-t"), chord("cmd-shift-t"));
+        // Only the first keystroke of a sequence counts.
+        assert_eq!(chord("cmd-k cmd-t"), chord("cmd-k"));
     }
 
     #[test]

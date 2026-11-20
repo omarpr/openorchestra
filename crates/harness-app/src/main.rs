@@ -411,6 +411,9 @@ pub fn apply_zed_settings(
 pub fn install_keymap(overrides: &std::collections::BTreeMap<String, String>, cx: &mut gpui::App) {
     let bindings = shortcuts::bindings_with(overrides, cx);
     cx.bind_keys(bindings);
+    // The same chords, for the browser tab: these reach the app while a web
+    // page has the keyboard; other ⌘-keys stay with the page.
+    browser_pane::set_app_shortcuts(shortcuts::app_chords(&shortcuts::entries_with(overrides)));
     cx.bind_keys([
         KeyBinding::new("ctrl-q", Quit, None),
         KeyBinding::new("escape", menu::Cancel, Some("HarnessModal")),

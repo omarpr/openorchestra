@@ -35,8 +35,94 @@
 //!   on a click), and only http(s); `blob:`/`data:` downloads report
 //!   "not supported" through `on_notice` (not a load failure: the page stays).
 //! - `link_routing::open_external` also rate-limits to one open per second.
+//!
+//! **⌘-chords over a focused page: one app-wide local `NSEvent` monitor**
+//! (Task 7), not a `performKeyEquivalent:` override. The dispatch order was
+//! measured, not assumed: a Swift probe of this exact hierarchy (a parent
+//! view whose `performKeyEquivalent:` never calls super, as gpui's doesn't,
+//! with a `WKWebView` subview as first responder) shows AppKit offers a
+//! ⌘-chord to a local monitor, then to gpui's view, then to the main menu,
+//! and only then to the page as `keyDown:`. The page's own
+//! `performKeyEquivalent:` never runs, so an override on it (or on a
+//! container under gpui's view) would never be called. App chords therefore
+//! already reached gpui; what broke was the other direction, gpui eating the
+//! page's keys. The global ⌘C (copy diff lines) swallowed page copy, and with
+//! gpui's focus left in the address bar (click it, then click the page)
+//! ⌘V/⌘A/⌘← edited the address bar instead of the page.
+//!
+//! While a page holds first responder, the monitor:
+//! - lets a chord from `shortcuts::app_chords` (Global scope, with ⌘, the
+//!   user's rebindings applied; see [`set_app_shortcuts`]) through to gpui;
+//! - hands any other ⌘-chord to the page's `performKeyEquivalent:`, so the
+//!   page's script sees the `keydown` first, as in Safari, and gpui never
+//!   sees it. WebKit sends a chord the page leaves alone back through
+//!   `[NSApp sendEvent:]` as the same `NSEvent`; the probe saw the monitor
+//!   get it a second time. The monitor recognizes it and sends the editing
+//!   action (`copy:`, `paste:`, `cut:`, `selectAll:`, `undo:`, `redo:`) to
+//!   the page, or offers any other chord to the main menu. The editing keys go
+//!   as actions, not through the menu, because gpui's Undo/Redo menu items
+//!   are gpui actions the page can't receive.
+//!
+//! The monitor exists for the life of the app, so dropping a view from
+//! inside it (⌘W closing the tab) can't pull it out from under itself.
+
+use std::cell::RefCell;
 
 use crate::link_routing;
+use crate::shortcuts::Chord;
+
+thread_local! {
+    /// What `shortcuts::app_chords` gave for the installed keymap.
+    static APP_CHORDS: RefCell<Vec<Chord>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The ⌘-chords that reach the app while a page has the keyboard. Called
+/// whenever the keymap is (re)installed, so rebindings apply over pages too.
+pub(crate) fn set_app_shortcuts(chords: Vec<Chord>) {
+    APP_CHORDS.with(|c| *c.borrow_mut() = chords);
+}
+
+/// The catalog's name (`t`, `]`, `down`) for the key of a ⌘-chord. `chars`
+/// is what the key types with ⌘ alone (`charactersByApplyingModifiers:`),
+/// which is the layout's command keys (QWERTY for Dvorak-QWERTY⌘) and leaves
+/// out shift (`]`, not `}`). When that isn't ASCII (a Cyrillic or Greek
+/// layout), the key's US position names it, as gpui does for such layouts.
+/// `None` for a key neither can name: never an app shortcut.
+pub(crate) fn chord_key(chars: &str, key_code: u16) -> Option<String> {
+    let mut it = chars.chars();
+    let named = match (it.next(), it.next()) {
+        (Some(c), None) => match c {
+            '\u{f700}' => Some("up"),
+            '\u{f701}' => Some("down"),
+            '\u{f702}' => Some("left"),
+            '\u{f703}' => Some("right"),
+            '\u{f728}' => Some("delete"),
+            '\r' | '\u{3}' => Some("enter"),
+            '\t' | '\u{19}' => Some("tab"),
+            '\u{1b}' => Some("escape"),
+            '\u{7f}' => Some("backspace"),
+            ' ' => Some("space"),
+            c if c.is_ascii_graphic() => return Some(c.to_ascii_lowercase().to_string()),
+            _ => None,
+        },
+        _ => None,
+    };
+    named.or_else(|| us_key(key_code)).map(str::to_string)
+}
+
+/// The US-layout character of a virtual key code (`kVK_ANSI_*`).
+fn us_key(key_code: u16) -> Option<&'static str> {
+    const KEYS: [(u16, &str); 47] = [
+        (0, "a"), (1, "s"), (2, "d"), (3, "f"), (4, "h"), (5, "g"), (6, "z"), (7, "x"),
+        (8, "c"), (9, "v"), (11, "b"), (12, "q"), (13, "w"), (14, "e"), (15, "r"),
+        (16, "y"), (17, "t"), (18, "1"), (19, "2"), (20, "3"), (21, "4"), (22, "6"),
+        (23, "5"), (24, "="), (25, "9"), (26, "7"), (27, "-"), (28, "8"), (29, "0"),
+        (30, "]"), (31, "o"), (32, "u"), (33, "["), (34, "i"), (35, "p"), (37, "l"),
+        (38, "j"), (39, "'"), (40, "k"), (41, ";"), (42, "\\"), (43, ","), (44, "/"),
+        (45, "n"), (46, "m"), (47, "."), (50, "`"),
+    ];
+    KEYS.iter().find(|(code, _)| *code == key_code).map(|(_, key)| *key)
+}
 
 /// Callbacks from the page, owned by the [`NativeWebView`] that runs them.
 ///
@@ -247,17 +333,25 @@ pub(crate) use mac::{NativeWebView, window_is_minimized_or_hidden};
 
 #[cfg(target_os = "macos")]
 mod mac {
+    use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
     use std::ffi::c_void;
+    use std::ptr::{self, NonNull};
     use std::rc::{Rc, Weak};
 
     use anyhow::{Context as _, anyhow, bail};
-    use block2::DynBlock;
+    use block2::{DynBlock, RcBlock};
     use dispatch2::{DispatchQueue, MainThreadBound};
     use gpui::{Bounds, Pixels, Window};
     use objc2::rc::Retained;
-    use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
-    use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
-    use objc2_app_kit::{NSApplication, NSAutoresizingMaskOptions, NSView};
+    use objc2::runtime::{AnyObject, NSObject, ProtocolObject, Sel};
+    use objc2::{
+        DefinedClass, MainThreadMarker, MainThreadOnly, Message as _, define_class, msg_send, sel,
+    };
+    use objc2_app_kit::{
+        NSApplication, NSAutoresizingMaskOptions, NSEvent, NSEventMask, NSEventModifierFlags,
+        NSView, NSWindow,
+    };
     use objc2_foundation::{
         NSBundle, NSDictionary, NSError, NSHTTPURLResponse, NSKeyValueChangeKey,
         NSKeyValueObservingOptions, NSObjectNSKeyValueObserverRegistration, NSObjectProtocol,
@@ -271,10 +365,11 @@ mod mac {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     use super::{
-        DOWNLOAD_UNSUPPORTED, NavDecision, NavOrigin, NativeEvents, decide_download,
-        decide_navigation, decide_new_window, flip_y, is_benign_failure, is_download,
-        safari_app_name,
+        APP_CHORDS, DOWNLOAD_UNSUPPORTED, NavDecision, NavOrigin, NativeEvents, chord_key,
+        decide_download, decide_navigation, decide_new_window, flip_y, is_benign_failure,
+        is_download, safari_app_name,
     };
+    use crate::shortcuts::{Chord, PageEdit, is_app_shortcut, page_edit};
 
     /// The WKWebView properties we observe. All are documented KVO-compliant.
     const KVO_KEYS: [&str; 3] = ["title", "URL", "loading"];
@@ -533,6 +628,150 @@ mod mac {
         }
     }
 
+    thread_local! {
+        static KEY_MONITOR: Cell<bool> = const { Cell::new(false) };
+        /// The ⌘-chords lately handed to a page, newest last, retained so a
+        /// pointer can't be reused by another event. WebKit sends back the
+        /// ones the page leaves alone as these same objects.
+        static FORWARDED: RefCell<VecDeque<Retained<NSEvent>>> =
+            const { RefCell::new(VecDeque::new()) };
+    }
+
+    /// More than a page could have in flight at once (one per keypress,
+    /// each settled within a web-process round trip).
+    const FORWARDED_CAP: usize = 8;
+
+    /// Installs the key monitor (see the module docs) once per process.
+    fn install_key_monitor() {
+        if KEY_MONITOR.replace(true) {
+            return;
+        }
+        let handler = RcBlock::new(|event: NonNull<NSEvent>| -> *mut NSEvent {
+            // SAFETY: AppKit hands the handler a live event for the call.
+            if route_page_key(unsafe { event.as_ref() }) {
+                ptr::null_mut()
+            } else {
+                event.as_ptr()
+            }
+        });
+        // SAFETY: the block has the handler signature AppKit documents.
+        let monitor = unsafe {
+            NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &handler)
+        };
+        match monitor {
+            // Never removed: one monitor serves every web view in every
+            // window, for the life of the app.
+            Some(monitor) => std::mem::forget(monitor),
+            None => {
+                log::warn!("browser: no key monitor; ⌘-keys over a page go to the app");
+                KEY_MONITOR.set(false);
+            }
+        }
+    }
+
+    /// The monitor's call for one keyDown: `true` consumes it.
+    fn route_page_key(event: &NSEvent) -> bool {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return false;
+        };
+        if take_forwarded(event) {
+            // The page's script left it alone. Finish it the way Safari's
+            // menu would, and never through gpui.
+            let app = NSApplication::sharedApplication(mtm);
+            match event_chord(event).as_ref().and_then(page_edit) {
+                // SAFETY: a standard responder action, sent with no sender
+                // to the key window's first responder (the page).
+                Some(edit) => unsafe {
+                    app.sendAction_to_from(edit_action(edit), None, None);
+                },
+                None => {
+                    if let Some(menu) = app.mainMenu() {
+                        menu.performKeyEquivalent(event);
+                    }
+                }
+            }
+            return true;
+        }
+        if !event.modifierFlags().contains(NSEventModifierFlags::Command) {
+            return false;
+        }
+        let Some(page) = event.window(mtm).as_deref().and_then(focused_page) else {
+            return false;
+        };
+        let for_app = event_chord(event)
+            .is_some_and(|c| APP_CHORDS.with(|app| is_app_shortcut(&c, &app.borrow())));
+        if for_app {
+            return false;
+        }
+        FORWARDED.with(|f| {
+            let mut f = f.borrow_mut();
+            if f.len() == FORWARDED_CAP {
+                f.pop_front();
+            }
+            f.push_back(event.retain());
+        });
+        // WebKit takes it only as the window's first responder; otherwise
+        // it goes on as before.
+        let taken = page.performKeyEquivalent(event);
+        if !taken {
+            take_forwarded(event);
+        }
+        taken
+    }
+
+    /// Whether `event` is one we handed to a page, forgetting it if so.
+    fn take_forwarded(event: &NSEvent) -> bool {
+        FORWARDED.with(|f| {
+            let mut f = f.borrow_mut();
+            match f.iter().position(|e| ptr::eq(&**e, event)) {
+                Some(i) => {
+                    f.remove(i);
+                    true
+                }
+                None => false,
+            }
+        })
+    }
+
+    fn event_chord(event: &NSEvent) -> Option<Chord> {
+        let flags = event.modifierFlags();
+        let chars = event
+            .charactersByApplyingModifiers(NSEventModifierFlags::Command)
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let key = chord_key(&chars, event.keyCode())?;
+        Some(Chord::new(
+            &key,
+            flags.contains(NSEventModifierFlags::Command),
+            flags.contains(NSEventModifierFlags::Shift),
+            flags.contains(NSEventModifierFlags::Option),
+            flags.contains(NSEventModifierFlags::Control),
+        ))
+    }
+
+    fn edit_action(edit: PageEdit) -> Sel {
+        match edit {
+            PageEdit::Copy => sel!(copy:),
+            PageEdit::Paste => sel!(paste:),
+            PageEdit::Cut => sel!(cut:),
+            PageEdit::SelectAll => sel!(selectAll:),
+            PageEdit::Undo => sel!(undo:),
+            PageEdit::Redo => sel!(redo:),
+        }
+    }
+
+    /// The web view holding `window`'s keyboard focus (itself or a view
+    /// inside it), if any.
+    fn focused_page(window: &NSWindow) -> Option<Retained<WKWebView>> {
+        let mut view = window.firstResponder()?.downcast::<NSView>().ok()?;
+        loop {
+            match view.downcast::<WKWebView>() {
+                Ok(page) => return Some(page),
+                Err(other) => view = unsafe { other.superview() }?,
+            }
+        }
+    }
+
     /// A `WKWebView` living on top of the gpui window's view. Main thread
     /// only (it is neither `Send` nor `Sync`).
     pub(crate) struct NativeWebView {
@@ -548,6 +787,7 @@ mod mac {
         /// `set_visible(true)` to show it.
         pub(crate) fn new(window: &Window, url: &str, events: NativeEvents) -> anyhow::Result<Self> {
             let mtm = MainThreadMarker::new().context("web view created off the main thread")?;
+            install_key_monitor();
             // Window has an inherent `window_handle()` (gpui's own handle
             // type); this is the raw-window-handle one.
             let handle = HasWindowHandle::window_handle(window)
@@ -633,7 +873,37 @@ mod mac {
         }
 
         pub(crate) fn set_visible(&self, visible: bool) {
-            self.view.setHidden(!visible);
+            if visible {
+                self.view.setHidden(false);
+            } else {
+                self.hide();
+            }
+        }
+
+        /// Hides the page, first handing the keyboard back to gpui's view if
+        /// the page had it (left to AppKit, it goes to whatever the next key
+        /// view is). Returns whether it had it, so it can be given back.
+        pub(crate) fn hide(&self) -> bool {
+            let had_focus = self.release_focus();
+            self.view.setHidden(true);
+            had_focus
+        }
+
+        /// If the page (or anything in it) has the keyboard, give it to
+        /// gpui's view, or gpui gets no keys until the user clicks.
+        fn release_focus(&self) -> bool {
+            let Some(window) = self.view.window() else {
+                return false;
+            };
+            let page_has_focus = window
+                .firstResponder()
+                .and_then(|r| r.downcast::<NSView>().ok())
+                .is_some_and(|v| v.isDescendantOf(&self.view));
+            if page_has_focus {
+                let parent = unsafe { self.view.superview() };
+                window.makeFirstResponder(parent.as_deref().map(|p| &**p));
+            }
+            page_has_focus
         }
 
         /// Loads an absolute URL. One NSURL can't parse is reported through
@@ -727,19 +997,9 @@ mod mac {
                 self.view.setUIDelegate(None);
                 self.view.stopLoading();
             }
-            // The view goes away on every tab switch. If it (or anything in
-            // it) has the keyboard, hand it back to gpui's view first, or
-            // gpui stops getting keys until the user clicks.
-            if let Some(window) = self.view.window() {
-                let page_has_focus = window
-                    .firstResponder()
-                    .and_then(|r| r.downcast::<NSView>().ok())
-                    .is_some_and(|v| v.isDescendantOf(&self.view));
-                if page_has_focus {
-                    let parent = unsafe { self.view.superview() };
-                    window.makeFirstResponder(parent.as_deref().map(|p| &**p));
-                }
-            }
+            // The view goes away on every tab switch; the keyboard goes back
+            // to gpui's view first.
+            self.release_focus();
             self.view.removeFromSuperview();
         }
     }
@@ -893,6 +1153,26 @@ mod tests {
         assert_eq!(safari_app_name(None), fallback);
         assert_eq!(safari_app_name(Some("")), fallback);
         assert_eq!(safari_app_name(Some("beta 3")), fallback);
+    }
+
+    #[test]
+    fn key_events_name_keys_the_way_the_catalog_does() {
+        // US layout, ⌘ applied: the character on the key.
+        assert_eq!(chord_key("t", 17).as_deref(), Some("t"));
+        assert_eq!(chord_key("T", 17).as_deref(), Some("t"));
+        assert_eq!(chord_key("]", 30).as_deref(), Some("]"));
+        assert_eq!(chord_key(",", 43).as_deref(), Some(","));
+        assert_eq!(chord_key("1", 18).as_deref(), Some("1"));
+        assert_eq!(chord_key("\u{f701}", 125).as_deref(), Some("down"));
+        assert_eq!(chord_key("\u{f700}", 126).as_deref(), Some("up"));
+        assert_eq!(chord_key("\u{f702}", 123).as_deref(), Some("left"));
+        assert_eq!(chord_key("\r", 36).as_deref(), Some("enter"));
+        // A layout with no ASCII on the key (Russian ⌘е): the US key.
+        assert_eq!(chord_key("е", 17).as_deref(), Some("t"));
+        assert_eq!(chord_key("х", 33).as_deref(), Some("["));
+        assert_eq!(chord_key("", 13).as_deref(), Some("w"));
+        // Neither: unknown, so not an app shortcut.
+        assert_eq!(chord_key("é", 200), None);
     }
 
     #[test]

@@ -130,15 +130,7 @@ impl HarnessWorkspace {
     /// content area, which sits visibly right of the window's center the
     /// title bar establishes. zed centers modals over the window; so do we.
     pub(crate) fn render_zed_modal(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let r = self.resolve()?;
-        // The Editor tab's own workspace when that tab is showing, else the
-        // service workspace behind the tools panel. Since zed v1.2x a
-        // Workspace no longer draws its own modal layer, so ⌘P's finder only
-        // appears if we draw it.
-        let ws = match self.active_ide_workspace() {
-            Some(ide) => ide,
-            None => self.service_workspaces.get(&r.key)?.clone(),
-        };
+        let ws = self.zed_modal_host()?;
         let view: gpui::AnyView = ws
             .read(cx)
             .active_modal::<file_finder::FileFinder>(cx)?
@@ -179,6 +171,27 @@ impl HarnessWorkspace {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// Whose modal layer `render_zed_modal` draws: the Editor tab's own
+    /// workspace when that tab is showing, else the service workspace behind
+    /// the tools panel. Since zed v1.2x a Workspace no longer draws its own
+    /// modal layer, so ⌘P's finder only appears if we draw it.
+    fn zed_modal_host(&self) -> Option<Entity<::workspace::Workspace>> {
+        let r = self.resolve()?;
+        match self.active_ide_workspace() {
+            Some(ide) => Some(ide),
+            None => self.service_workspaces.get(&r.key).cloned(),
+        }
+    }
+
+    /// The ⌘P file finder is open (drawn by `render_zed_modal`).
+    pub(crate) fn zed_modal_open(&self, cx: &App) -> bool {
+        self.zed_modal_host().is_some_and(|ws| {
+            ws.read(cx)
+                .active_modal::<file_finder::FileFinder>(cx)
+                .is_some()
+        })
     }
 
     /// The settings screen: an overlay, not a tab — settings are a glance,

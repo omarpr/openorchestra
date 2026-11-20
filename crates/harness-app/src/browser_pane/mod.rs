@@ -38,7 +38,7 @@ use crate::link_routing;
 use crate::theme::{HarnessTheme, theme, tint};
 use crate::workspace::{browser_label, tip};
 
-pub(crate) use webview::window_is_minimized_or_hidden;
+pub(crate) use webview::{set_app_shortcuts, window_is_minimized_or_hidden};
 use webview::{NativeEvents, NativeWebView};
 
 /// What the address bar makes of what was typed.
@@ -135,6 +135,24 @@ fn wants_http(input: &str) -> bool {
             .unwrap_or(false)
 }
 
+/// Whether the native page is on screen. It sits above everything gpui
+/// draws, so it shows only when nothing else should be there:
+/// - `tab_active`: the workspace shows this tab (`set_shown`: the selected
+///   worktree's active tab, the center drawn, the window up);
+/// - `pane_visible`: the tab body is the page's slot (it has a page, not the
+///   blank-tab prompt);
+/// - `overlay_open`: no gpui menu, popover or dialog is open over the window
+///   (`HarnessWorkspace::overlay_open`), which would otherwise draw under it;
+/// - `load_failed`: the error view isn't drawn in its place.
+pub(crate) fn web_view_visible(
+    tab_active: bool,
+    pane_visible: bool,
+    overlay_open: bool,
+    load_failed: bool,
+) -> bool {
+    tab_active && pane_visible && !overlay_open && !load_failed
+}
+
 /// The tab's name for a page: its title, else its host, else "Browser".
 pub(crate) fn page_label(url: Option<&str>, title: Option<&str>) -> String {
     let host = url
@@ -199,6 +217,8 @@ pub(crate) struct BrowserPane {
     _notice_timer: Option<Task<()>>,
     /// The workspace wants this tab on screen (see `set_shown`).
     shown: bool,
+    /// A gpui overlay is open over the window (see `set_overlay_open`).
+    overlay_open: bool,
     native: Option<Native>,
     address: Entity<Editor>,
     focus_handle: FocusHandle,
@@ -235,6 +255,7 @@ impl BrowserPane {
             notice: None,
             _notice_timer: None,
             shown: false,
+            overlay_open: false,
             native: None,
             address,
             focus_handle: cx.focus_handle(),
@@ -298,6 +319,32 @@ impl BrowserPane {
             // ended in an error) must not grab the keyboard on a later visit.
             self.focus_page.set(false);
         }
+    }
+
+    /// Whether a gpui menu, popover or dialog is open over the window. The
+    /// page hides meanwhile rather than being dropped (dropping it reloads
+    /// it, losing its state on every ＋ menu); the tab body shows the theme
+    /// background in its place. A page holding the keyboard hands it to
+    /// gpui while hidden, so the overlay's own inputs and Esc work, and gets
+    /// it back after (if gpui's focus is still in this tab). Idempotent, and
+    /// it never notifies: the workspace calls it while rendering.
+    pub(crate) fn set_overlay_open(&mut self, open: bool) {
+        if self.overlay_open == open {
+            return;
+        }
+        self.overlay_open = open;
+        if open
+            && let Some(native) = &self.native
+            && native.view.hide()
+        {
+            self.focus_page.set(true);
+        }
+    }
+
+    /// [`web_view_visible`] for this pane; `slot` is whether the tab body is
+    /// the page's slot this frame.
+    fn page_visible(&self, slot: bool) -> bool {
+        web_view_visible(self.shown, slot, self.overlay_open, self.failure.is_some())
     }
 
     /// Create the native view if the tab is shown and has a page. Loading it
@@ -601,7 +648,8 @@ impl BrowserPane {
         // The page's slot. Prepaint reads the pane (never updates it or
         // notifies, so placing the view can't trigger another frame) and
         // moves the native view onto these bounds. It is shown only after
-        // its first frame lands, so it never flashes at a zero rect.
+        // its first frame lands, so it never flashes at a zero rect, and
+        // only while `web_view_visible` says so.
         let pane = cx.entity();
         div()
             .flex_1()
@@ -611,12 +659,21 @@ impl BrowserPane {
                 canvas(
                     move |bounds, window, cx| {
                         let pane = pane.read(cx);
-                        if let Some(native) = &pane.native {
-                            native.view.set_frame(bounds, window);
-                            native.view.set_visible(true);
-                            if pane.focus_page.take() {
-                                native.view.focus();
-                            }
+                        let Some(native) = &pane.native else {
+                            return;
+                        };
+                        if !pane.page_visible(true) {
+                            native.view.set_visible(false);
+                            return;
+                        }
+                        native.view.set_frame(bounds, window);
+                        native.view.set_visible(true);
+                        // Only while gpui's focus is still in this tab: an
+                        // overlay may have closed by moving it elsewhere (a
+                        // tab rename), and the page must not take the keys.
+                        if pane.focus_page.take() && pane.focus_handle.contains_focused(window, cx)
+                        {
+                            native.view.focus();
                         }
                     },
                     |_, _, _, _| {},
@@ -725,9 +782,10 @@ impl Render for BrowserPane {
         // A blank tab that just got its first address, or a retry after the
         // view could not be created.
         self.ensure_native(window, cx);
-        // The error and the blank page are gpui-drawn; nothing native may
-        // sit over them. The page's own slot re-shows it in prepaint.
-        if (self.failure.is_some() || self.url.is_none())
+        // The error, the blank page and overlays are gpui-drawn; nothing
+        // native may sit over them. The page's own slot re-shows it in
+        // prepaint.
+        if !self.page_visible(self.url.is_some())
             && let Some(native) = &self.native
         {
             native.view.set_visible(false);
@@ -812,6 +870,21 @@ mod tests {
             assert!(!applies_without_view(&ev));
         }
         assert!(applies_without_view(&PageEvent::NewWindow("http://localhost/".into())));
+    }
+
+    #[test]
+    fn web_view_hidden_unless_active_visible_and_unobstructed() {
+        for bits in 0..16u8 {
+            let (tab_active, pane_visible, overlay_open, load_failed) =
+                (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0);
+            assert_eq!(
+                web_view_visible(tab_active, pane_visible, overlay_open, load_failed),
+                tab_active && pane_visible && !overlay_open && !load_failed,
+                "tab_active={tab_active} pane_visible={pane_visible} \
+                 overlay_open={overlay_open} load_failed={load_failed}"
+            );
+        }
+        assert!(web_view_visible(true, true, false, false));
     }
 
     #[test]
