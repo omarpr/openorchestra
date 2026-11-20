@@ -47,7 +47,7 @@ impl HarnessWorkspace {
                 Some(ws)
             }
             Err(e) => {
-                self.set_note(format!("could not open project: {e}"));
+                self.set_error_note(format!("could not open project: {e}"));
                 cx.notify();
                 None
             }
@@ -76,7 +76,7 @@ impl HarnessWorkspace {
         let script = match ensure_hook_script(layer, phase, &repo_root, &self.data_dir, repo) {
             Ok(p) => p,
             Err(e) => {
-                self.set_note(format!("hooks: {e}"));
+                self.set_error_note(format!("hooks: {e}"));
                 cx.notify();
                 return;
             }
@@ -126,7 +126,7 @@ impl HarnessWorkspace {
                 self.open_project_hooks(repo, HookScriptPhase::Setup, HookLayer::Repo, window, cx);
             }
             Err(e) => {
-                self.set_note(format!("clear local hooks: {e}"));
+                self.set_error_note(format!("clear local hooks: {e}"));
                 cx.notify();
             }
         }

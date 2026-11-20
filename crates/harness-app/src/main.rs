@@ -16,6 +16,7 @@
 #![cfg_attr(debug_assertions, allow(linker_messages))]
 
 mod app_assets;
+mod browser_pane;
 mod chat_pane;
 mod conductor;
 mod curated_languages;
@@ -24,6 +25,7 @@ mod diff_review;
 mod diff_watch;
 mod git_watch;
 mod harness_zed_theme;
+mod link_routing;
 mod login_env;
 mod markdown_preview;
 mod markdown_preview_button;
@@ -67,6 +69,8 @@ actions!(
         CopyDiffSelection,
         /// Open the settings screen (⌘,).
         OpenSettings,
+        FocusNextModalControl,
+        FocusPreviousModalControl,
         /// Open the tool-requirements screen on demand.
         FirstTimeChecks,
         /// Show the version and project link (app menu).
@@ -152,7 +156,14 @@ fn main() {
     // through the app's AssetSource at paint time, and gpui's default source
     // is empty: without this the file tree renders as bare text with
     // invisible, unclickable disclosure arrows.
-    gpui_platform::application()
+    //
+    // The real platform goes in a wrapper that sends local and dev links
+    // (⌘-clicked in a terminal, or opened anywhere in the app) to a browser
+    // tab instead of the default browser; see link_routing/platform.rs.
+    let platform = std::rc::Rc::new(link_routing::LinkRoutingPlatform::new(
+        gpui_platform::current_platform(false),
+    ));
+    gpui::Application::with_platform(platform)
         .with_assets(app_assets::AppAssets)
         .run(move |cx: &mut App| {
             // Fonts ship inside the same asset tree but are NOT auto-loaded;
@@ -407,7 +418,20 @@ pub fn apply_zed_settings(
 pub fn install_keymap(overrides: &std::collections::BTreeMap<String, String>, cx: &mut gpui::App) {
     let bindings = shortcuts::bindings_with(overrides, cx);
     cx.bind_keys(bindings);
-    cx.bind_keys([KeyBinding::new("ctrl-q", Quit, None)]);
+    // The same chords, for the browser tab: these reach the app while a web
+    // page has the keyboard; other ⌘-keys stay with the page.
+    browser_pane::set_app_shortcuts(shortcuts::app_chords(&shortcuts::entries_with(overrides)));
+    cx.bind_keys([
+        KeyBinding::new("ctrl-q", Quit, None),
+        KeyBinding::new("escape", menu::Cancel, Some("HarnessModal")),
+    ]);
+    // Match at the editor node too, so form navigation wins over editor indentation.
+    for context in ["HarnessModal", "HarnessModal > Editor"] {
+        cx.bind_keys([
+            KeyBinding::new("tab", FocusNextModalControl, Some(context)),
+            KeyBinding::new("shift-tab", FocusPreviousModalControl, Some(context)),
+        ]);
+    }
 }
 
 fn run_with_harness_workspace(
@@ -619,6 +643,7 @@ mod tests {
         PlatformWindow, Priority, RunnableVariant, Task, ThermalState, WindowAppearance,
         WindowParams,
     };
+    use std::cell::RefCell;
     use std::path::Path;
     use std::rc::Rc;
     use std::sync::{
@@ -662,6 +687,8 @@ mod tests {
         dispatcher: Arc<dyn PlatformDispatcher>,
         text_system: Arc<dyn PlatformTextSystem>,
         quit_called: Arc<AtomicBool>,
+        /// Every URL handed to the OS through `open_url`.
+        opened: Rc<RefCell<Vec<String>>>,
     }
 
     impl StubPlatform {
@@ -670,6 +697,7 @@ mod tests {
                 dispatcher: Arc::new(StubDispatcher),
                 text_system: Arc::new(NoopTextSystem::new()),
                 quit_called: Arc::new(AtomicBool::new(false)),
+                opened: Rc::new(RefCell::new(Vec::new())),
             }
         }
     }
@@ -721,7 +749,9 @@ mod tests {
         fn window_appearance(&self) -> WindowAppearance {
             WindowAppearance::Dark
         }
-        fn open_url(&self, _url: &str) {}
+        fn open_url(&self, url: &str) {
+            self.opened.borrow_mut().push(url.to_string());
+        }
         fn on_open_urls(&self, _callback: Box<dyn FnMut(Vec<String>)>) {}
         fn register_url_scheme(&self, _url: &str) -> Task<gpui::Result<()>> {
             Task::ready(Ok(()))
@@ -889,5 +919,95 @@ mod tests {
             quit_called.load(Ordering::SeqCst),
             "Quit must still execute via global listener when no window is active"
         );
+    }
+
+    /// A routing wrapper over a recording stub, with the setting pinned to
+    /// `enabled` (the process-wide flag is left to its own test), plus the
+    /// stub's record of what reached the OS.
+    fn routing_platform(
+        enabled: fn() -> bool,
+    ) -> (link_routing::LinkRoutingPlatform, Rc<RefCell<Vec<String>>>) {
+        let stub = StubPlatform::new();
+        let opened = stub.opened.clone();
+        (
+            link_routing::LinkRoutingPlatform::with_setting(Rc::new(stub), enabled),
+            opened,
+        )
+    }
+
+    #[test]
+    fn routed_urls_go_to_the_channel_not_the_os() {
+        let (platform, opened) = routing_platform(|| true);
+        let mut routed = link_routing::take_routed_receiver().expect("receiver");
+        platform.open_url("http://localhost:3000");
+        assert_eq!(
+            routed.try_recv().ok().as_deref(),
+            Some("http://localhost:3000")
+        );
+        assert!(opened.borrow().is_empty(), "{:?}", opened.borrow());
+        // Taken once: a second workspace can't steal the drain.
+        assert!(link_routing::take_routed_receiver().is_none());
+    }
+
+    #[test]
+    fn public_urls_and_disabled_routing_go_to_the_os() {
+        let (platform, opened) = routing_platform(|| true);
+        let mut routed = link_routing::take_routed_receiver().expect("receiver");
+        platform.open_url("https://github.com/omarpr/openorchestra");
+        platform.open_url("mailto:a@localhost");
+        assert_eq!(
+            *opened.borrow(),
+            ["https://github.com/omarpr/openorchestra", "mailto:a@localhost"]
+        );
+        assert!(routed.try_recv().is_err(), "nothing routed");
+
+        let (platform, opened) = routing_platform(|| false);
+        let mut routed = link_routing::take_routed_receiver().expect("receiver");
+        platform.open_url("http://localhost:3000");
+        assert_eq!(*opened.borrow(), ["http://localhost:3000"]);
+        assert!(routed.try_recv().is_err(), "nothing routed");
+    }
+
+    #[test]
+    fn a_routed_url_with_no_drain_still_opens() {
+        let (platform, opened) = routing_platform(|| true);
+        drop(link_routing::take_routed_receiver());
+        platform.open_url("http://localhost:3000");
+        assert_eq!(*opened.borrow(), ["http://localhost:3000"]);
+    }
+
+    #[test]
+    fn open_external_bypasses_routing() {
+        let (_platform, opened) = routing_platform(|| true);
+        let mut routed = link_routing::take_routed_receiver().expect("receiver");
+        link_routing::open_external_now("HTTP://LOCALHOST:3000/a b");
+        // The only test that uses the rate-limited variant (its limiter is
+        // process-wide).
+        link_routing::open_external("http://127.0.0.1:8080");
+        // Guards still apply on the way out.
+        link_routing::open_external_now("file:///Applications/Calculator.app");
+        link_routing::open_external_now("javascript:alert(1)");
+        link_routing::open_external_now("data:text/html,hi");
+        assert_eq!(
+            *opened.borrow(),
+            ["http://localhost:3000/a%20b", "http://127.0.0.1:8080/"]
+        );
+        assert!(routed.try_recv().is_err(), "nothing routed");
+    }
+
+    #[test]
+    fn app_open_url_goes_through_the_wrapper() {
+        let (platform, opened) = routing_platform(|| true);
+        let mut routed = link_routing::take_routed_receiver().expect("receiver");
+        let handle = gpui::Application::with_platform(Rc::new(platform)).run_embedded(|_| {});
+        handle.update(|cx| {
+            cx.open_url("http://localhost:5173");
+            cx.open_url("https://github.com");
+        });
+        assert_eq!(
+            routed.try_recv().ok().as_deref(),
+            Some("http://localhost:5173")
+        );
+        assert_eq!(*opened.borrow(), ["https://github.com"]);
     }
 }

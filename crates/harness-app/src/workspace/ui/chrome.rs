@@ -295,7 +295,7 @@ impl HarnessWorkspace {
                     MouseButton::Left,
                     cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
                 )
-                .on_click(cx.listener(move |ws, _, _, cx| {
+                .on_click(cx.listener(move |ws, _, window, cx| {
                     cx.stop_propagation();
                     let key = ws.resolve().map(|r| r.key).unwrap_or_default();
                     let marked = ws.remote_is_marked(&key, tab_id);
@@ -305,7 +305,7 @@ impl HarnessWorkspace {
                         if mark {
                             ws.remote_toggle_mark(&key, tab_id, cx);
                         }
-                        ws.remote_open_settings(cx);
+                        ws.open_settings(SettingsSection::Remote, window, cx);
                         ws.set_note(
                             "Turn on Remote control to reach this tab from your devices"
                                 .to_string(),

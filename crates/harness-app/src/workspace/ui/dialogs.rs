@@ -398,7 +398,7 @@ impl HarnessWorkspace {
                     .child(dialog_button(hx, "trust-skip", "Don't run", Tone::Primary).on_click(cx.listener(
                         |ws, _, _, cx| {
                             ws.hook_trust = None;
-                            ws.set_note("setup skipped: hooks not approved".into());
+                            ws.set_error_note("setup skipped: hooks not approved".into());
                             cx.notify();
                         },
                     )))
@@ -411,7 +411,7 @@ impl HarnessWorkspace {
             card,
             |ws, _, cx| {
                 ws.hook_trust = None;
-                ws.set_note("setup skipped: hooks not approved".into());
+                ws.set_error_note("setup skipped: hooks not approved".into());
                 cx.notify();
             },
             cx,

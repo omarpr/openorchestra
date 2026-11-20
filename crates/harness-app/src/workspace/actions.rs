@@ -35,6 +35,9 @@ impl HarnessWorkspace {
         }
         self.recompute_diff(cx);
         self.focus_active_pane(window, cx);
+        // Worktree switch: the previous worktree's page goes, this one's
+        // active browser tab (if any) comes up.
+        self.sync_browser_views(window, cx);
         // The hosted zed workspaces set the window title themselves (folder —
         // file), and only when *their* active item changes. Switching to
         // another worktree changed neither, so the title kept naming the
@@ -173,7 +176,7 @@ impl HarnessWorkspace {
     }
 
     /// The tracked git root for a repo group, by its display name.
-    fn repo_root_for_name(&self, name: &str) -> Option<PathBuf> {
+    pub(crate) fn repo_root_for_name(&self, name: &str) -> Option<PathBuf> {
         self.data
             .repos
             .iter()
@@ -267,7 +270,7 @@ impl HarnessWorkspace {
             Ok(Some(store)) => self.task_store = store,
             Ok(None) => return,
             Err(e) => {
-                self.set_note(format!("couldn't save the task order: {e}"));
+                self.set_error_note(format!("couldn't save the task order: {e}"));
                 cx.notify();
                 return;
             }
@@ -523,12 +526,23 @@ impl HarnessWorkspace {
                 // Preserve custom-ness: or_default yields custom:false, which
                 // would drop a custom agent from the catalog after an edit.
                 let is_custom_key = AgentKind::known().iter().all(|k| k.as_str() != kind);
+                let default_cmd =
+                    agent_runtime::default_command_display(&AgentKind::from(kind.as_str()));
                 let entry = self.prefs.agents.entry(kind).or_default();
                 if is_custom_key {
                     entry.custom = true;
                 }
-                entry.command = if cmd.is_empty() { None } else { Some(cmd) };
+                // The field is prefilled with the default, so saving it as-is
+                // (or emptying it) means "the default": no override, and no
+                // restore button for a command that was never changed.
+                let is_default = !is_custom_key && cmd == default_cmd;
+                entry.command = if cmd.is_empty() || is_default {
+                    None
+                } else {
+                    Some(cmd)
+                };
                 save_prefs_to(&self.prefs_path, &self.prefs);
+                self.settings_focus.focus(window, cx);
                 cx.notify();
             }
             EditKind::NewAgent => {
@@ -548,12 +562,13 @@ impl HarnessWorkspace {
                     );
                     save_prefs_to(&self.prefs_path, &self.prefs);
                 } else {
-                    self.set_note(if slug.is_empty() {
+                    self.set_error_note(if slug.is_empty() {
                         "agent name can't be empty".to_string()
                     } else {
                         format!("'{slug}' is not a valid new agent name")
                     });
                 }
+                self.settings_focus.focus(window, cx);
                 cx.notify();
             }
             EditKind::RemotePort => {
@@ -561,6 +576,7 @@ impl HarnessWorkspace {
                     Ok(port) => self.remote_set_port(port, cx),
                     Err(e) => self.remote.ui.port_error = Some(e),
                 }
+                self.settings_focus.focus(window, cx);
                 cx.notify();
             }
         }

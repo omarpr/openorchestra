@@ -106,6 +106,7 @@ impl HarnessWorkspace {
                     }
                 }
                 TabContent::Chat(c) => c.clone().into_any_element(),
+                TabContent::Browser(page) => page.clone().into_any_element(),
                 TabContent::Diff => self.render_diff_surface(hx, None, true, cx),
                 TabContent::ReviewOverview(overview) => {
                     self.render_review_overview(overview, hx, cx)
@@ -340,6 +341,41 @@ impl HarnessWorkspace {
             )
     }
 
+    /// What a tab shows: its kind's icon and its name ([`tab_label`]:
+    /// "Shell", "Claude", "Editor"), taken from what the tab *is* rather
+    /// than from its stored title. The stored title is whatever the tab was
+    /// created with ("claude", "❯_ shell") and is kept as is in saved panes.
+    fn tab_face(&self, hx: &HarnessTheme, tab: &Tab, active: bool) -> (AnyElement, String) {
+        match (&tab.content, &tab.agent) {
+            (TabContent::Terminal(_), Some(kind)) => (agent_icon(kind, 15.0), tab_label(tab)),
+            // Includes an agent tab restored after its session died: it
+            // comes back as a plain shell, and is named for what it is now.
+            (TabContent::Terminal(_), None) => {
+                (kind_icon(hx, LookKind::Shell, 14.0), tab_label(tab))
+            }
+            (TabContent::Editor(_), _) => (kind_icon(hx, LookKind::Editor, 14.0), tab_label(tab)),
+            (TabContent::Diff, _) => (kind_icon(hx, LookKind::Diff, 14.0), tab_label(tab)),
+            // The ＋ menu's pi chat row wears the same mark.
+            (TabContent::Chat(_), _) => (agent_icon(&AgentKind::Pi, 15.0), tab_label(tab)),
+            (TabContent::Browser(_), _) => {
+                (kind_icon(hx, LookKind::Browser, 14.0), tab_label(tab))
+            }
+            // A file tab is a view into zed, so it wears the Editor's mark,
+            // with the file's own name.
+            (TabContent::File { .. }, _) => {
+                (kind_icon(hx, LookKind::Editor, 14.0), tab_label(tab))
+            }
+            (TabContent::ReviewOverview(_), _) => {
+                let icon = svg()
+                    .path(::ui::IconName::ListTodo.path())
+                    .size(px(14.0))
+                    .text_color(if active { hx.accent } else { hx.tx2 })
+                    .into_any_element();
+                (icon, tab_label(tab))
+            }
+        }
+    }
+
     /// One tab button, with a close affordance.
     pub(crate) fn render_tab(
         &self,
@@ -350,29 +386,40 @@ impl HarnessWorkspace {
     ) -> impl IntoElement {
         let id = tab.id;
         let close_id = tab.id;
-        let key = self.resolve().map(|r| r.key).unwrap_or_default();
+        let resolved = self.resolve();
+        // This tab's own agent is working: the sidebar's RUNNING spinner,
+        // on the same clock, so with several agents in one task or project
+        // you can see which of them is busy.
+        let running = match (&tab.agent, &resolved) {
+            (Some(kind), Some(r)) => {
+                self.agent_tab_state(&r.path, tab.id, kind) == Some(AgentState::Running)
+            }
+            _ => false,
+        };
+        let running = tab_running(running, overview_running(tab));
+        let spin_t = self.anim_secs();
+        let key = resolved.map(|r| r.key).unwrap_or_default();
         let remote_on = self.remote_is_marked(&key, tab.id);
         let remote_dot_alpha = self.remote_dot_opacity();
         let remote_menu = Self::remote_tab_kind(tab).is_some();
         let drag_key = key.clone();
         let drop_key = key;
         let onto = tab.id;
-        let ghost_label = tab.title.clone();
+        let (icon, label) = self.tab_face(hx, tab, active);
+        let ghost_label = label.clone();
         let ghost_theme = hx.clone();
         let hover_bg = hx.surface_hover;
         let group = gpui::SharedString::from(format!("tab-{}", tab.id));
-        let overview = match &tab.content {
-            TabContent::ReviewOverview(overview) => Some(overview),
-            _ => None,
-        };
         div()
             .id(("tab", tab.id as usize))
             .group(group.clone())
             .flex()
             .items_center()
-            .gap_1()
+            // Same icon slot and gap as the ＋ menu's rows, so a tab reads as
+            // the item it was opened from.
+            .gap_2()
             .h(px(26.0))
-            .pl_3()
+            .pl_1()
             .pr_1p5()
             .rounded_md()
             // Every tab carries the 1px border, transparent unless active. Only
@@ -399,28 +446,11 @@ impl HarnessWorkspace {
                 matches!(&tab.content, TabContent::File { preview: true, .. }),
                 |d| d.italic(),
             )
-            .when_some(tab.agent.clone(), |d, kind| {
-                d.child(div().mr_1().size(px(14.0)).child(agent_icon(&kind, 13.0)))
-            })
-            .when_some(overview, |d, overview| {
-                if matches!(overview.status, OverviewStatus::Running(_)) {
-                    d.child(super::review_overview::review_spinner(
-                        ::ui::IconSize::Small,
-                    ))
-                } else {
-                    d.child(
-                        svg()
-                            .path(::ui::IconName::ListTodo.path())
-                            .size(px(14.0))
-                            .text_color(if active { hx.accent } else { hx.tx2 }),
-                    )
-                }
-            })
-            // A file tab is a view into zed (the service workspace), so it
-            // wears the Editor tab's `{ }` mark: same glyph, same spacing as
-            // the "{ } editor" title, never italic even on a preview tab.
-            .when(matches!(tab.content, TabContent::File { .. }), |d| {
-                d.child(div().flex_none().mr_1().not_italic().child("{ }"))
+            .child(tab_icon_slot(icon))
+            // After the icon: the mark says which agent, the spinner that it
+            // is working.
+            .when(running, |d| {
+                d.child(tab_running_spinner(hx, tab.id, spin_t))
             })
             .when(remote_menu, |d| {
                 d.on_mouse_down(
@@ -455,7 +485,7 @@ impl HarnessWorkspace {
                 if dragged.key != drop_key {
                     return;
                 }
-                ws.move_tab(&drop_key, dragged.id, onto);
+                ws.move_tab(&drop_key, dragged.id, onto, cx);
                 cx.notify();
             }))
             .when(remote_on, |d| {
@@ -464,14 +494,13 @@ impl HarnessWorkspace {
                         .id(("tab-remote", tab.id as usize))
                         .flex_none()
                         .size(px(6.0))
-                        .mr_1()
                         .rounded_full()
                         .bg(hx.accent)
                         .opacity(remote_dot_alpha)
                         .tooltip(tip("Remote control on")),
                 )
             })
-            .child(tab.title.clone())
+            .child(label)
             .child(
                 div()
                     .id(("tab-close", tab.id as usize))
@@ -771,67 +800,128 @@ impl HarnessWorkspace {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
-            )
-            .child(self.tab_menu_item(hx, "❯_  Terminal", "⌘T", TabKind::Shell, cx))
-            .child(self.tab_menu_item(hx, "{ }  Editor", "⌘E", TabKind::Editor, cx));
-        // Only in Tab mode: in Dock mode the dock IS the surface, and a tab
-        // showing the same review is the duplicate the setting exists to avoid.
-        if self.prefs.diff_location == DiffLocation::Tab {
-            menu = menu.child(self.tab_menu_item(hx, "⑂  Diff", "", TabKind::Diff, cx));
-        }
-        // Every enabled agent, on any selection (D8 revised: main included) —
-        // a worktree's recorded default merely decides which signal the
-        // status pill trusts first.
-        {
-            for kind in agent_catalog(&self.prefs) {
-                let disabled = self
-                    .prefs
-                    .agents
-                    .get(kind.as_str())
-                    .is_some_and(|p| p.disabled);
-                if disabled {
-                    continue;
-                }
-                menu = menu.child(self.tab_menu_item_agent(hx, &kind, cx));
-            }
-        }
-        // The chat tab is pi's RPC surface specifically — approvals as UI,
-        // session capture for training (§4.4) — so it appears only for
-        // worktrees and only while pi is enabled.
+            );
         let pi_enabled = !self
             .prefs
             .agents
             .get(AgentKind::Pi.as_str())
             .is_some_and(|p| p.disabled);
-        if agent.is_some() && pi_enabled {
-            menu = menu.child(self.tab_menu_item(hx, "π  pi chat", "⌘⇧C", TabKind::Chat, cx));
+        let entries = tab_menu_entries(
+            &self.prefs,
+            self.prefs.diff_location == DiffLocation::Tab,
+            // The chat tab is pi's RPC surface specifically — approvals as UI,
+            // session capture for training (§4.4) — so it appears only for
+            // worktrees and only while pi is enabled.
+            agent.is_some() && pi_enabled,
+        );
+        // Every enabled agent shows on any selection (D8 revised: main
+        // included) — a worktree's recorded default merely decides which
+        // signal the status pill trusts first.
+        for entry in entries {
+            menu = match entry {
+                MenuEntry::Kind(TabKind::Shell) => menu.child(self.tab_menu_row(
+                    hx,
+                    "tabmenu-Shell".to_string(),
+                    kind_icon(hx, LookKind::Shell, 14.0),
+                    "Shell".to_string(),
+                    "⌘T",
+                    TabKind::Shell,
+                    cx,
+                )),
+                MenuEntry::Kind(TabKind::Editor) => menu.child(self.tab_menu_row(
+                    hx,
+                    "tabmenu-Editor".to_string(),
+                    kind_icon(hx, LookKind::Editor, 14.0),
+                    "Editor".to_string(),
+                    "⌘E",
+                    TabKind::Editor,
+                    cx,
+                )),
+                // Only in Tab mode: in Dock mode the dock IS the surface, and
+                // a tab showing the same review is the duplicate the setting
+                // exists to avoid.
+                MenuEntry::Kind(TabKind::Diff) => menu.child(self.tab_menu_row(
+                    hx,
+                    "tabmenu-Diff".to_string(),
+                    kind_icon(hx, LookKind::Diff, 14.0),
+                    "Diff".to_string(),
+                    "",
+                    TabKind::Diff,
+                    cx,
+                )),
+                MenuEntry::Kind(TabKind::Browser) => menu.child(self.tab_menu_row(
+                    hx,
+                    "tabmenu-Browser".to_string(),
+                    kind_icon(hx, LookKind::Browser, 14.0),
+                    "Browser".to_string(),
+                    "",
+                    TabKind::Browser,
+                    cx,
+                )),
+                // Not menu entries; `tab_menu_entries` never yields them.
+                MenuEntry::Kind(_) => menu,
+                MenuEntry::Separator(label) => menu
+                    .child(div().mx_1().my_0p5().h(px(1.0)).bg(hx.border))
+                    .child(
+                        div()
+                            .px_2()
+                            .pt_0p5()
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(hx.tx2)
+                            .child(label.to_uppercase()),
+                    ),
+                MenuEntry::Agent(kind) => menu.child(self.tab_menu_item_agent(hx, &kind, cx)),
+                MenuEntry::PiChat => menu.child(self.tab_menu_row(
+                    hx,
+                    "tabmenu-pi-chat".to_string(),
+                    agent_icon(&AgentKind::Pi, 15.0),
+                    "pi chat".to_string(),
+                    "⌘⇧C",
+                    TabKind::Chat,
+                    cx,
+                )),
+            };
         }
         menu
     }
 
-    pub(crate) fn tab_menu_item(
+    /// One row of the ＋ menu: a fixed-width icon slot, the label, and the
+    /// shortcut on the right. Every row shares this shape, so text glyphs
+    /// (`❯_`, `{ }`) and agent logos — different widths — still start their
+    /// labels at the same x.
+    #[allow(clippy::too_many_arguments)]
+    fn tab_menu_row(
         &self,
         hx: &HarnessTheme,
-        label: &str,
+        id: String,
+        icon: AnyElement,
+        label: String,
         shortcut: &str,
         kind: TabKind,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> gpui::Stateful<gpui::Div> {
         div()
-            .id(gpui::SharedString::from(format!("tabmenu-{label}")))
+            .id(gpui::SharedString::from(id))
             .flex()
             .items_center()
-            .justify_between()
             .gap_2()
             .px_2()
             .py_1()
             .rounded_md()
-            .text_xs()
+            .text_sm()
             .text_color(hx.tx1)
             .cursor_pointer()
             .hover(|d| d.bg(hx.surface_hover).text_color(hx.tx0))
-            .child(div().font_family(hx.font_mono).child(label.to_string()))
-            .child(div().text_color(hx.tx2).child(shortcut.to_string()))
+            .child(tab_icon_slot(icon))
+            .child(div().flex_1().min_w_0().truncate().child(label))
+            .child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(hx.tx2)
+                    .child(shortcut.to_string()),
+            )
             .on_click(cx.listener(move |ws, _, window, cx| {
                 cx.stop_propagation();
                 ws.tab_menu = None;
@@ -839,41 +929,35 @@ impl HarnessWorkspace {
             }))
     }
 
-    /// A tab-menu item with the agent's brand mark.
+    /// A ＋ menu row with the agent's brand mark.
     pub(crate) fn tab_menu_item_agent(
         &self,
         hx: &HarnessTheme,
         agent: &AgentKind,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let label = agent_display(agent);
-        let id = format!("tabmenu-agent-{}", agent.as_str());
-        let kind = TabKind::Agent(agent.clone());
-        div()
-            .id(gpui::SharedString::from(id))
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .text_xs()
-            .text_color(hx.tx1)
-            .cursor_pointer()
-            .hover(|d| d.bg(hx.surface_hover).text_color(hx.tx0))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(div().size(px(16.0)).child(agent_icon(agent, 15.0)))
-                    .child(div().font_family(hx.font_mono).child(label)),
-            )
-            .on_click(cx.listener(move |ws, _, window, cx| {
-                cx.stop_propagation();
-                ws.tab_menu = None;
-                ws.open_tab(kind.clone(), window, cx);
-            }))
+        self.tab_menu_row(
+            hx,
+            format!("tabmenu-agent-{}", agent.as_str()),
+            agent_icon(agent, 15.0),
+            agent_display(agent),
+            "",
+            TabKind::Agent(agent.clone()),
+            cx,
+        )
     }
 }
+
+/// The fixed-width slot an item's icon sits in, in the ＋ menu and on tabs.
+/// Text glyphs (`❯_`, `{ }`) and agent logos are different widths; centred in
+/// one slot, the labels after them all start at the same x.
+fn tab_icon_slot(icon: AnyElement) -> gpui::Div {
+    div()
+        .flex_none()
+        .w(px(24.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(icon)
+}
+

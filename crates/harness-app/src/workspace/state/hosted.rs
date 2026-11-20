@@ -281,7 +281,7 @@ impl HarnessWorkspace {
                     "could not open project for {}: {e}",
                     r.editor_path.display()
                 );
-                self.set_note(format!("could not open project: {e}"));
+                self.set_error_note(format!("could not open project: {e}"));
                 cx.notify();
                 None
             }
@@ -638,7 +638,7 @@ impl HarnessWorkspace {
             }
             // Moving the diff back to the dock should also show it there.
             self.prefs.diff_open = true;
-            self.save_panes();
+            self.save_panes(cx);
         }
         self.save_prefs(cx);
         self.focus_active_pane(window, cx);

@@ -240,7 +240,8 @@ impl HarnessWorkspace {
                 .await;
             view.update(cx, |ws, cx| {
                 ws.pushing = false;
-                ws.set_note(match result {
+                let failed = result.is_err();
+                ws.set_note_as(match result {
                     // git says what it did on stderr; its own words beat ours,
                     // and "Everything up-to-date" is worth seeing verbatim.
                     Ok(out) => {
@@ -252,7 +253,7 @@ impl HarnessWorkspace {
                         }
                     }
                     Err(e) => format!("push failed: {e}"),
-                });
+                }, failed);
                 // Whatever happened, the counts on screen are now stale.
                 ws.refresh_push_state(cx);
                 ws.refresh_status_live(cx);

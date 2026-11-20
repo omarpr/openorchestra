@@ -91,6 +91,17 @@ pub(crate) struct Prefs {
     /// enabled, default command.
     #[serde(default)]
     pub(crate) agents: std::collections::BTreeMap<String, AgentPref>,
+    /// The user's agent order from Settings › Agents (drag to reorder), as
+    /// `AgentKind::as_str()` keys. Empty = the built-in order. Keys missing
+    /// from it (a new built-in, a new custom agent) follow the saved ones.
+    #[serde(default)]
+    pub(crate) agent_order: Vec<String>,
+    /// The agent the user starred in Settings › Agents (an
+    /// `AgentKind::as_str()` key). Wins over the last-used agent while it
+    /// names an agent that exists and is enabled; `None` = no star. Older
+    /// prefs files load it as `None`, and older builds ignore the key.
+    #[serde(default)]
+    pub(crate) default_agent: Option<String>,
     /// Last agent chosen when starting agents for a new multi-member task.
     /// Used as the default in the start-agents picker when still enabled.
     #[serde(default)]
@@ -100,7 +111,7 @@ pub(crate) struct Prefs {
     pub(crate) font_size: Option<f32>,
     /// Keep the conductor on screen all the time, conducting while agents
     /// work and narrating what they're doing. On by default — including for
-    /// prefs files written before it existed; Settings › Extras turns it off.
+    /// prefs files written before it existed; Settings › General turns it off.
     #[serde(default = "default_true")]
     pub(crate) conductor_always_on: bool,
     /// Where he stands: distance from the window's right and bottom edges.
@@ -165,6 +176,15 @@ pub(crate) struct Prefs {
     /// `Some(false)` = always leave them running (detached).
     #[serde(default)]
     pub(crate) close_terminals_on_exit: Option<bool>,
+    /// Open local/dev links in an in-app browser tab instead of the system browser.
+    #[serde(default = "default_true")]
+    pub(crate) links_in_browser_tab: bool,
+    /// Where browser tabs open their Web Inspector: docked at the bottom,
+    /// left or right of the page, or in its own window; the user's last
+    /// move from the inspector's toolbar. Absent in older prefs → bottom;
+    /// older builds ignore it.
+    #[serde(default, deserialize_with = "crate::browser_pane::InspectorPlacement::deserialize_lenient")]
+    pub(crate) inspector_placement: crate::browser_pane::InspectorPlacement,
 }
 
 pub(crate) fn default_true() -> bool {
@@ -189,6 +209,8 @@ impl Default for Prefs {
             font_ui: None,
             font_mono: None,
             agents: Default::default(),
+            agent_order: Vec::new(),
+            default_agent: None,
             last_task_agent: None,
             font_size: None,
             conductor_always_on: true,
@@ -209,6 +231,8 @@ impl Default for Prefs {
             sidebar_open: true,
             diff_open: true,
             close_terminals_on_exit: None,
+            links_in_browser_tab: true,
+            inspector_placement: Default::default(),
         }
     }
 }
@@ -478,5 +502,55 @@ mod collapsed_prefs_tests {
             "the rest of the Mac starts folded away"
         );
         assert!(!PortsTask.collapsed_by_default());
+    }
+}
+
+#[cfg(test)]
+mod links_pref_tests {
+    use super::Prefs;
+    use crate::browser_pane::InspectorPlacement;
+
+    #[test]
+    fn the_inspector_placement_is_remembered_and_old_files_get_bottom() {
+        assert_eq!(Prefs::default().inspector_placement, InspectorPlacement::Bottom);
+        // A prefs.json written before the setting existed.
+        let mut old = serde_json::to_value(Prefs::default()).unwrap();
+        old.as_object_mut().unwrap().remove("inspector_placement");
+        let p: Prefs = serde_json::from_value(old).unwrap();
+        assert_eq!(p.inspector_placement, InspectorPlacement::Bottom);
+        // Each placement round-trips under its lowercase name.
+        for (placement, name) in [
+            (InspectorPlacement::Bottom, "bottom"),
+            (InspectorPlacement::Left, "left"),
+            (InspectorPlacement::Right, "right"),
+            (InspectorPlacement::Window, "window"),
+        ] {
+            let prefs = Prefs {
+                inspector_placement: placement,
+                ..Prefs::default()
+            };
+            let json = serde_json::to_value(&prefs).unwrap();
+            assert_eq!(json["inspector_placement"], name);
+            let back: Prefs = serde_json::from_value(json).unwrap();
+            assert_eq!(back.inspector_placement, placement);
+        }
+        // One this build doesn't know (a newer build's) is bottom, and the
+        // rest of the file still loads.
+        let mut newer = serde_json::to_value(Prefs::default()).unwrap();
+        newer["inspector_placement"] = serde_json::json!("floating");
+        newer["sidebar_width"] = serde_json::json!(300.0);
+        let p: Prefs = serde_json::from_value(newer).unwrap();
+        assert_eq!(p.inspector_placement, InspectorPlacement::Bottom);
+        assert_eq!(p.sidebar_width, 300.0);
+    }
+
+    #[test]
+    fn prefs_default_routes_links_and_old_files_get_the_default() {
+        assert!(Prefs::default().links_in_browser_tab);
+        // A prefs.json written before the setting existed.
+        let mut old = serde_json::to_value(Prefs::default()).unwrap();
+        old.as_object_mut().unwrap().remove("links_in_browser_tab");
+        let p: Prefs = serde_json::from_value(old).unwrap();
+        assert!(p.links_in_browser_tab);
     }
 }

@@ -147,7 +147,8 @@ impl HarnessWorkspace {
     /// quit, `false` when we've instead opened the keep-or-close prompt and are
     /// waiting on the user.
     pub(crate) fn request_quit(&mut self, cx: &mut Context<Self>) -> bool {
-        self.save_panes();
+        self.save_panes(cx);
+        self.browser_history.update(cx, |h, _| h.flush());
         let sessions = self.live_harness_sessions();
         // Nothing of ours is running — no reason to ask.
         if sessions.is_empty() {
@@ -185,17 +186,38 @@ impl HarnessWorkspace {
     }
 
     pub(crate) fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_open {
+            self.close_settings(window, cx);
+        } else {
+            self.open_settings(self.settings_section, window, cx);
+        }
+    }
+
+    pub(crate) fn open_settings(
+        &mut self,
+        section: SettingsSection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Refuse while a required tool is missing: Settings sits behind
         // the blocking screen, so opening it would only mean a menu
         // item that visibly does nothing.
         if crate::preflight::blocked(&self.preflight) {
             return;
         }
-        self.settings_open = !self.settings_open;
-        if !self.settings_open {
-            self.remote_close_setup();
-            self.focus_active_pane(window, cx);
-        } else if self.settings_section == SettingsSection::Diff {
+        // New Task draws above Settings: opening it now would move the
+        // keyboard to a dialog the user can't see, away from the form they
+        // can. New Task keeps it; Settings can be opened once it closes.
+        if self.new_task.is_some() {
+            return;
+        }
+        self.settings_open = true;
+        self.remote_setup_refocus.set(false);
+        self.settings_section = section;
+        self.settings_focus.reset_scroll();
+        let focus = self.settings_focus.control_focus(section.focus_id(), cx);
+        window.focus(&focus, cx);
+        if section == SettingsSection::Diff {
             self.ensure_review_model_catalog(cx);
         }
         cx.notify();
@@ -203,9 +225,24 @@ impl HarnessWorkspace {
 
     pub(crate) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_open = false;
+        self.leave_settings_control();
         self.remote_close_setup();
-        self.focus_active_pane(window, cx);
+        if let Some(dialog) = &self.new_task {
+            window.focus(&dialog.name.focus_handle(cx), cx);
+        } else {
+            self.focus_active_pane(window, cx);
+        }
         cx.notify();
+    }
+
+    pub(crate) fn leave_settings_control(&mut self) {
+        self.rebinding = None;
+        if matches!(
+            self.edit_kind(),
+            Some(EditKind::AgentCmd(_) | EditKind::NewAgent | EditKind::RemotePort)
+        ) {
+            self.edit = None;
+        }
     }
 
     /// Resolve the quit prompt. `keep` leaves the tmux sessions running
@@ -247,48 +284,45 @@ impl HarnessWorkspace {
         crate::install_menus(cx);
     }
 
-    /// One captured chord while a shortcut row is armed.
-    pub(crate) fn rebind_key(
+    /// A keystroke while a shortcut row may be armed, from the keystroke
+    /// interceptor (`construct.rs`). gpui dispatches keymap actions before
+    /// any key-down listener, capture phase included, so a listener on the
+    /// armed chip ran too late: ⌘W closed the tab instead of being recorded.
+    /// Interceptors run before the keymap; stopping propagation here keeps
+    /// the action from running. Only while the armed chip has gpui's focus
+    /// in this window, as the chip's own listener was.
+    pub(crate) fn capture_rebind_keystroke(
         &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
+        keystroke: &gpui::Keystroke,
+        window: &Window,
         cx: &mut Context<Self>,
     ) {
         let Some(id) = self.rebinding.clone() else {
             return;
         };
-        let ks = &event.keystroke;
-        if ks.key == "escape" && !ks.modifiers.modified() {
-            self.rebinding = None;
-            cx.notify();
-            cx.stop_propagation();
+        if !self.settings_open
+            || !self
+                .settings_focus
+                .control_focus(format!("sc-{id}").into(), cx)
+                .is_focused(window)
+        {
             return;
         }
-        // A bare modifier press is the chord being formed, not the chord.
-        if ["shift", "ctrl", "alt", "cmd", "platform", "function"].contains(&ks.key.as_str()) {
-            cx.stop_propagation();
-            return;
-        }
-        let mut chord = String::new();
-        if ks.modifiers.control {
-            chord.push_str("ctrl-");
-        }
-        if ks.modifiers.alt {
-            chord.push_str("alt-");
-        }
-        if ks.modifiers.shift {
-            chord.push_str("shift-");
-        }
-        if ks.modifiers.platform {
-            chord.push_str("cmd-");
-        }
-        chord.push_str(&ks.key);
-        self.prefs.shortcuts.insert(id, chord);
-        save_prefs_to(&self.prefs_path, &self.prefs);
-        self.rebinding = None;
-        self.apply_shortcuts(cx);
-        cx.notify();
         cx.stop_propagation();
+        match rebind_capture(keystroke) {
+            RebindCapture::Cancel => {
+                self.rebinding = None;
+                cx.notify();
+            }
+            RebindCapture::Forming => {}
+            RebindCapture::Chord(chord) => {
+                self.prefs.shortcuts.insert(id, chord);
+                save_prefs_to(&self.prefs_path, &self.prefs);
+                self.rebinding = None;
+                self.apply_shortcuts(cx);
+                cx.notify();
+            }
+        }
     }
 
     /// Apply a zed theme by registry name (`None` = the harness pair).
@@ -375,5 +409,68 @@ impl HarnessWorkspace {
             &theme_name,
             self.prefs.show_ignored_files,
         );
+    }
+}
+
+/// What an armed shortcut row makes of one keystroke.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RebindCapture {
+    /// Escape alone: stop listening, keep the old chord.
+    Cancel,
+    /// A bare modifier: the chord is still being formed.
+    Forming,
+    /// The new chord, in keymap form (`ctrl-alt-shift-cmd-key`).
+    Chord(String),
+}
+
+pub(crate) fn rebind_capture(ks: &gpui::Keystroke) -> RebindCapture {
+    if ks.key == "escape" && !ks.modifiers.modified() {
+        return RebindCapture::Cancel;
+    }
+    // gpui also reports a lone modifier's release as a keystroke named
+    // `shift`, `control`, `alt`, `platform` or `function`.
+    if ["shift", "ctrl", "control", "alt", "cmd", "platform", "function"].contains(&ks.key.as_str()) {
+        return RebindCapture::Forming;
+    }
+    let mut chord = String::new();
+    if ks.modifiers.control {
+        chord.push_str("ctrl-");
+    }
+    if ks.modifiers.alt {
+        chord.push_str("alt-");
+    }
+    if ks.modifiers.shift {
+        chord.push_str("shift-");
+    }
+    if ks.modifiers.platform {
+        chord.push_str("cmd-");
+    }
+    chord.push_str(&ks.key);
+    RebindCapture::Chord(chord)
+}
+
+#[cfg(test)]
+mod rebind_tests {
+    use super::{RebindCapture, rebind_capture};
+
+    fn ks(s: &'static str) -> gpui::Keystroke {
+        gpui::Keystroke::parse(s).expect("keystroke")
+    }
+
+    #[test]
+    fn an_armed_row_records_app_chords_and_cancels_on_escape() {
+        // ⌘W is recorded, not run (the interceptor stops it first).
+        assert_eq!(rebind_capture(&ks("cmd-w")), RebindCapture::Chord("cmd-w".into()));
+        assert_eq!(
+            rebind_capture(&ks("ctrl-alt-shift-cmd-k")),
+            RebindCapture::Chord("ctrl-alt-shift-cmd-k".into())
+        );
+        assert_eq!(rebind_capture(&ks("escape")), RebindCapture::Cancel);
+        // ⌘Escape is a chord like any other.
+        assert_eq!(rebind_capture(&ks("cmd-escape")), RebindCapture::Chord("cmd-escape".into()));
+        for modifier in ["shift", "control", "alt", "platform", "function"] {
+            let k = gpui::Keystroke { key: modifier.into(), ..Default::default() };
+            assert_eq!(rebind_capture(&k), RebindCapture::Forming, "{modifier}");
+        }
     }
 }

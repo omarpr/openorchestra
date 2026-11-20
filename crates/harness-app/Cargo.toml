@@ -24,9 +24,13 @@ license = "GPL-3.0-or-later"
 
 [dependencies]
 crossbeam-channel = "0.5"
+# The browser tab's web view callbacks → gpui bridge (an unbounded channel the
+# pane awaits). Already in the lockfile through gpui; was dev-only.
+futures = "0.3"
 # Live diff-watcher (diff_watch.rs). The [patch.crates-io] below redirects this
 # to zed's notify fork, the same one status-watch resolves.
 notify = "8"
+url = "2.5"
 gpui = { git = "https://github.com/zed-industries/zed.git", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 # Platform entry point (Application constructor) — new split at v1.11.x; the
 # features mirror what zed's own gpui examples enable.
@@ -191,6 +195,10 @@ libc = "0.2"
 # Per-process CPU/RSS sampling for the sidebar resource band. 0.37.2 is already
 # resolved in this lockfile via the zed cone, so pinning here adds no new copy.
 sysinfo = "0.37"
+# Only to name `Platform::update_jump_list`'s argument type in the link
+# routing wrapper (link_routing/platform.rs); gpui doesn't re-export it.
+# 1.16.1 is already resolved in this lockfile through gpui.
+smallvec = "1"
 # Shell-quoting for paths dropped onto a terminal pane. Same version zed's own
 # `terminal_view` pins, so a dropped path is quoted here exactly as zed would
 # quote it — the format users already expect from every other terminal.
@@ -208,9 +216,6 @@ tempfile = "3"
 # root Cargo.toml at the pinned rev). calloop and the rest follow the
 # revs zed itself pins at v1.28.1. windows-capture (via zed-scap) only
 # compiles on Windows, so it is untested here — replicated for lock fidelity.
-[dev-dependencies]
-futures = "0.3"
-
 [patch.crates-io]
 # Mirrors zed's own [patch.crates-io] at the pinned rev (v1.28.1). Entries for
 # crates outside our cone (cpal, crash-context) are left out, and zed's
@@ -242,6 +247,64 @@ objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-user-notifications = "0.3"
 block2 = "0.6"
+# The browser tab's WKWebView (browser_pane/webview.rs). Same objc2 0.6 family
+# as above; objc2-app-kit 0.3.2 and dispatch2 0.3.1 are already in the lockfile
+# via gpui_macos, so this adds exactly one crate (objc2-web-kit). Chosen over
+# wry: see the header of webview.rs.
+objc2-web-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "objc2-app-kit",
+    "objc2-core-foundation",
+    "WKFrameInfo",
+    "WKNavigation",
+    "WKNavigationAction",
+    "WKNavigationDelegate",
+    "WKNavigationResponse",
+    "WKPreferences",
+    "WKUIDelegate",
+    "WKWebView",
+    "WKWebViewConfiguration",
+    "WKWebsiteDataStore",
+    "WKWindowFeatures",
+] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSApplication",
+    # The browser tab's key monitor (webview.rs): ⌘-chords over a page.
+    "block2",
+    "NSEvent",
+    "NSMenu",
+    "NSResponder",
+    "NSView",
+    "NSWindow",
+    # The browser page's container layer (its punch-through mask).
+    "objc2-quartz-core",
+] }
+# The browser page's punch-through mask (webview.rs): a CAShapeLayer on the
+# page's container. Both are already in the lockfile via gpui_macos.
+objc2-quartz-core = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2-core-graphics",
+    "CALayer",
+    "CAShapeLayer",
+    "CATransaction",
+] }
+# The conductor's outline in that mask: his frame's inverted alpha as a
+# CGImage (gray + alpha, from a copied CFData). Also already in the lockfile.
+objc2-core-graphics = { version = "0.3", default-features = false, features = [
+    "std",
+    "CGPath",
+    "CGImage",
+    "CGColorSpace",
+    "CGDataProvider",
+] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFData"] }
+# Posts web view callbacks back onto the main queue (see NativeEvents).
+dispatch2 = { version = "0.3", default-features = false, features = ["std", "objc2"] }
+# gpui's Window hands out its NSView through HasWindowHandle.
+raw-window-handle = "0.6"
 
 # zed's own dev profile carries these same four overrides, and they are
 # load-bearing, not a speed nicety: zed's `with_parser` attaches a

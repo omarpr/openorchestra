@@ -467,7 +467,8 @@ impl HarnessWorkspace {
             EndKind::Archive => "archived",
             EndKind::Delete => "deleted",
         };
-        self.set_note(if errors.is_empty() {
+        let failed = !errors.is_empty();
+        self.set_note_as(if errors.is_empty() {
             format!("{past} ‘{}’", plan.title)
         } else if all_done {
             format!("{past} ‘{}’ ({})", plan.title, errors.join("; "))
@@ -478,7 +479,7 @@ impl HarnessWorkspace {
                 plan.title,
                 errors.join("; ")
             )
-        });
+        }, failed);
         self.refresh(window, cx);
     }
 
@@ -492,7 +493,7 @@ impl HarnessWorkspace {
         self.hook_trust = None;
         for root in &roots {
             if let Err(e) = HookTrust::trust(&self.data_dir, root) {
-                self.set_note(format!("could not trust hooks in {}: {e}", root.display()));
+                self.set_error_note(format!("could not trust hooks in {}: {e}", root.display()));
                 cx.notify();
                 return;
             }

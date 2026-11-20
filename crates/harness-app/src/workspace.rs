@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, App, AppContext, Context, Entity, EntityId, FocusHandle, Focusable, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
     PathPromptOptions, Pixels, Render, Rgba, Styled, Window, div, prelude::*, px, rgb, rgba, svg,
 };
 
@@ -51,6 +51,7 @@ const SWATCHES: [u32; 8] = [
 /// Notifications somewhere to exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsSection {
+    General,
     Appearance,
     Editor,
     Diff,
@@ -61,7 +62,8 @@ pub(crate) enum SettingsSection {
 }
 
 impl SettingsSection {
-    pub(crate) const ALL: [SettingsSection; 7] = [
+    pub(crate) const ALL: [SettingsSection; 8] = [
+        SettingsSection::General,
         SettingsSection::Appearance,
         SettingsSection::Editor,
         SettingsSection::Diff,
@@ -73,14 +75,21 @@ impl SettingsSection {
 
     pub(crate) fn label(self) -> &'static str {
         match self {
+            SettingsSection::General => "General",
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Editor => "Editor",
-            SettingsSection::Diff => "Diff",
+            // The pane holds Review location, diff layout and Review
+            // Overview: named for the panel it configures.
+            SettingsSection::Diff => "Review",
             SettingsSection::Agents => "Agents",
             SettingsSection::Notifications => "Notifications",
             SettingsSection::Remote => "Remote",
             SettingsSection::Shortcuts => "Shortcuts",
         }
+    }
+
+    fn focus_id(self) -> gpui::ElementId {
+        format!("settings-nav-{}", self.label()).into()
     }
 }
 
@@ -138,6 +147,9 @@ enum TabContent {
     /// second copy that could disagree with the dock's.
     Diff,
     ReviewOverview(OverviewTab),
+    /// An in-app web page. The pane owns the URL and title; the tab's
+    /// `title` mirrors its label (`BrowserPane::label`) for the strip.
+    Browser(Entity<crate::browser_pane::BrowserPane>),
 }
 
 #[derive(Default)]
@@ -164,7 +176,7 @@ enum OverviewStatus {
 }
 
 /// What to open, before the entity exists.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TabKind {
     /// A plain `$SHELL`. What a worktree opens with.
     Shell,
@@ -177,6 +189,8 @@ pub(crate) enum TabKind {
     ReviewOverview,
     /// The full editor (IDE) tab — one per worktree.
     Editor,
+    /// An in-app web page tab, e.g. a dev server preview.
+    Browser,
 }
 
 /// The tab being dragged, and the pane set it came from.
@@ -283,6 +297,11 @@ pub(crate) enum ReorderList {
     Tasks,
 }
 
+/// An agent row being dragged in Settings › Agents: its catalog key.
+pub(crate) struct DraggedAgentRow {
+    key: String,
+}
+
 /// A row being dragged in a reorder panel: its list, and the project name or
 /// task id that identifies it.
 pub(crate) struct DraggedReorderRow {
@@ -322,10 +341,18 @@ pub(crate) struct Tab {
 impl Tab {
     /// Classify this tab for persistence (`panes_state`). `TabContent` holds
     /// live entities that can't be matched by kind ergonomically at the call
-    /// site, so `save_panes` goes through this instead.
-    fn kind_tag(&self) -> Option<crate::panes_state::TabRecordKind> {
+    /// site, so `save_panes` goes through this instead. `cx` reads a browser
+    /// tab's URL and title from its pane.
+    fn kind_tag(&self, cx: &App) -> Option<crate::panes_state::TabRecordKind> {
         use crate::panes_state::TabRecordKind as K;
         Some(match &self.content {
+            TabContent::Browser(pane) => {
+                let pane = pane.read(cx);
+                K::Browser {
+                    url: pane.url().unwrap_or_default().to_string(),
+                    title: pane.title().map(str::to_string),
+                }
+            }
             TabContent::File { .. } => return None,
             TabContent::ReviewOverview(overview) => K::ReviewOverview(overview.last_report.clone()),
             TabContent::Chat(_) => K::Chat,
@@ -335,6 +362,15 @@ impl Tab {
                 Some(a) => K::Agent(a.clone()),
                 None => K::Shell,
             },
+        })
+    }
+
+    /// This tab as `save_panes` records it; `None` for tabs never saved.
+    fn record(&self, cx: &App) -> Option<crate::panes_state::TabRecord> {
+        Some(crate::panes_state::TabRecord {
+            id: self.id,
+            kind: self.kind_tag(cx)?,
+            title: self.title.clone(),
         })
     }
 }
@@ -383,16 +419,17 @@ struct ActiveEdit {
 
 /// Centered "New task" dialog: name, brief, optional branch, project members.
 struct NewTaskDialog {
+    focus: ui::ModalFocus,
     name: Entity<Editor>,
+    name_required: bool,
     /// Multi-line initial prompt injected into agent context on launch.
     brief: Entity<Editor>,
     branch: Entity<Editor>,
     /// Last auto-branch string pushed into the branch field's placeholder, so
     /// we only call `set_placeholder_text` when the name's slug changes.
     auto_branch_shown: String,
-    /// Keeps the dialog view refreshing while the name is typed so the
-    /// branch placeholder can track `feat/{slug}`.
-    _name_sub: gpui::Subscription,
+    /// Refreshes the form's accessible values and auto-branch placeholder.
+    _field_subs: [gpui::Subscription; 3],
     /// `Some(repo)` when opened from a PROJECTS row's `+`: the dialog is a
     /// "New worktree" form for that one project — no member picker, no Home,
     /// worktree wording. Under the hood it is still a one-member task, so the
@@ -523,6 +560,18 @@ impl PaneSet {
         self.tabs.iter().find(|t| t.id == self.active)
     }
 
+    /// Put `tab` just after the active tab (at the end when none is
+    /// active) and make it active.
+    fn insert_after_active(&mut self, tab: Tab) {
+        let at = self
+            .tabs
+            .iter()
+            .position(|t| t.id == self.active)
+            .map_or(self.tabs.len(), |i| i + 1);
+        self.active = tab.id;
+        self.tabs.insert(at, tab);
+    }
+
     fn remove_tab_at(&mut self, index: usize) {
         if self.tabs.remove(index).id == self.active {
             self.active = self
@@ -632,6 +681,12 @@ pub struct HarnessWorkspace {
     clearing_review: bool,
     /// The settings screen (⌘, or the gear). Transient, never persisted.
     settings_open: bool,
+    settings_focus: ui::ModalFocus,
+    /// Tab order inside the "Add a device" dialog over Settings.
+    remote_setup_focus: ui::ModalFocus,
+    /// The dialog closed itself (a device paired) with no window at hand:
+    /// the next Settings render hands the keyboard back to the Remote tab.
+    remote_setup_refocus: std::cell::Cell<bool>,
     /// Which Settings pane is showing. Not persisted: reopening Settings should
     /// land where the page starts, not where you happened to leave it.
     settings_section: SettingsSection,
@@ -664,8 +719,6 @@ pub struct HarnessWorkspace {
     titlebar_should_move: bool,
     /// A shortcut row waiting for its new chord (`shortcuts::key_id`).
     rebinding: Option<String>,
-    /// Focus target while capturing a chord.
-    rebind_focus: FocusHandle,
     /// Rendered-markdown preview of the selected `.md` file, when the user has
     /// switched to it. Rebuilt on selection, since it snapshots file contents.
     md_preview: Option<(String, Entity<crate::markdown_preview::MarkdownPreview>)>,
@@ -722,6 +775,18 @@ pub struct HarnessWorkspace {
     tab_context_menu: Option<(u64, Pixels)>,
     /// Open diff-base menu, anchored under its button in the diff header.
     diff_base_menu: Option<gpui::Point<Pixels>>,
+    /// The window is minimized or the app hidden: no browser tab keeps its
+    /// native view (see `sync_browser_views`).
+    browser_window_hidden: bool,
+    /// The pending save after browser URL changes
+    /// (`schedule_browser_save`); dropping it cancels it.
+    browser_save: Option<gpui::Task<()>>,
+    /// Every project's browsing history, shared with the browser tabs
+    /// (`~/.openorchestra/browser-history`).
+    browser_history: Entity<crate::browser_pane::BrowserHistory>,
+    /// A blank browser tab was on screen at the last `sync_browser_views`:
+    /// it lists the task's servers, so Ports samples meanwhile.
+    blank_browser_shown: bool,
     /// The quit confirmation is open (keep vs. close terminals). Present only
     /// while the user is deciding; carries the "remember my choice" checkbox.
     close_prompt: Option<ClosePrompt>,
@@ -738,6 +803,9 @@ pub struct HarnessWorkspace {
     /// as a toast until [`NOTE_TTL`] after `note_at`. Set it with `set_note`.
     note: String,
     note_at: Option<std::time::Instant>,
+    /// The toast reports a failure (`set_error_note`): drawn in red, and it
+    /// hides a browser page while it shows ([`render::toast_hides_page`]).
+    note_failed: bool,
     forge_status: HashMap<PathBuf, HashMap<String, BranchStatus>>,
     agent_status: HashMap<PathBuf, AgentState>,
     /// oo-remote: marks cache, phone server lifecycle, keep-awake.
@@ -808,6 +876,9 @@ pub struct HarnessWorkspace {
     /// focus path. Without it a Diff tab would take focus nowhere and swallow
     /// nothing, which reads as the trigger simply not working.
     diff_surface_focus: FocusHandle,
+    /// Scroll state of the changed-files list, so ↑/↓ can keep the selected
+    /// file in view.
+    diff_files_scroll: gpui::ScrollHandle,
     /// Latest resource sample driving the sidebar band; `None` until the first
     /// tick lands (and while CPU has no delta yet).
     resource: Option<crate::resource_monitor::Snapshot>,
@@ -884,6 +955,8 @@ mod coordinator;
 pub(crate) mod lifecycle;
 pub(crate) mod remote;
 mod state;
+mod tab_look;
+pub(crate) use tab_look::*;
 mod ui;
 
 /// One matching line in the Files → Search panel.
@@ -933,26 +1006,31 @@ struct TextTooltip {
 
 impl Render for TextTooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let hx = theme(cx);
-        // Cap width so longer help (new-task info) wraps instead of spanning
-        // the whole window; short tips stay compact because content shrinks.
-        div()
-            .bg(hx.surface2)
-            .border_1()
-            .border_color(hx.border2)
-            .rounded_md()
-            .px_1p5()
-            .py_0p5()
-            .max_w(px(280.0))
-            .text_xs()
-            .text_color(hx.tx0)
-            .child(self.text.clone())
+        tip_label(self.text.clone(), cx)
     }
+}
+
+/// A [`tip`]'s look: `text` on a small rounded (`rounded_md`) panel.
+pub(crate) fn tip_label(text: gpui::SharedString, cx: &App) -> gpui::Div {
+    let hx = theme(cx);
+    // Cap width so longer help (new-task info) wraps instead of spanning
+    // the whole window; short tips stay compact because content shrinks.
+    div()
+        .bg(hx.surface2)
+        .border_1()
+        .border_color(hx.border2)
+        .rounded_md()
+        .px_1p5()
+        .py_0p5()
+        .max_w(px(280.0))
+        .text_xs()
+        .text_color(hx.tx0)
+        .child(text)
 }
 
 /// Build the closure `.tooltip()` wants: it hands back a fresh tooltip view
 /// each time the pointer settles on the element it is attached to.
-fn tip(
+pub(crate) fn tip(
     text: impl Into<gpui::SharedString>,
 ) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
     let text = text.into();

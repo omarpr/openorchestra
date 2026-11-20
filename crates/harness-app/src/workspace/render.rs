@@ -21,26 +21,20 @@ impl Render for HarnessWorkspace {
         let scale = self.prefs.font_size.unwrap_or(13.0) / 13.0;
         window.set_rem_size(px(16.0 * scale));
 
-        // Keep the agent-command field focused while the Settings overlay edits
-        // it. That field floats over the hosted zed editor, which holds window
-        // focus when Settings is opened from the menu (⌘,) — so `begin_edit`
-        // lands the caret but the editor behind keeps the keystrokes and the
-        // field looks dead. The sidebar's rename uses this same input and never
-        // sees this, because interacting with the sidebar already moved focus
-        // off the editor. Re-assert only for this exact case, and only once
-        // focus has actually escaped, so it converges instead of thrashing.
-        if self.settings_open
-            && matches!(
-                self.edit_kind(),
-                Some(EditKind::AgentCmd(_) | EditKind::RemotePort)
-            )
-            && let Some(editor) = self.edit_editor()
+        // A menu whose tab closed (or whose worktree is no longer selected)
+        // has nothing to show: drop it rather than float an empty box.
+        // Before the sync below, which hides the page while it is open.
+        if let Some((tab_id, _)) = self.tab_context_menu
+            && self.tab_context_item(tab_id).is_none()
         {
-            let handle = editor.focus_handle(cx);
-            if !handle.is_focused(window) {
-                window.focus(&handle, cx);
-            }
+            self.tab_context_menu = None;
         }
+
+        // Catch-all for every other way the visible tab changes (opening,
+        // restoring, closing, file-tab sync, tools maximized, an overlay
+        // opening or closing): the native page view must match what this
+        // frame draws.
+        self.sync_browser_views(window, cx);
 
         let hx = theme(cx).clone();
         self.ensure_conductor(&hx, cx);
@@ -398,13 +392,6 @@ impl Render for HarnessWorkspace {
                 });
         }
 
-        // A menu whose tab closed (or whose worktree is no longer selected)
-        // has nothing to show: drop it rather than float an empty box.
-        if let Some((tab_id, _)) = self.tab_context_menu
-            && self.tab_context_item(tab_id).is_none()
-        {
-            self.tab_context_menu = None;
-        }
         if let Some((tab_id, x)) = self.tab_context_menu {
             root = root
                 .child(
@@ -461,7 +448,7 @@ impl Render for HarnessWorkspace {
 
         if self.new_task.is_some() {
             self.sync_new_task_branch_placeholder(window, cx);
-            root = root.child(self.render_new_task_dialog(&hx, cx));
+            root = root.child(self.render_new_task_dialog(&hx, window, cx));
         }
 
         if self.start_specialists.is_some() {
@@ -511,6 +498,8 @@ impl HarnessWorkspace {
         let animating = |ws: &Self| {
             ws.agent_status.values().any(|s| matches!(s, AgentState::Running | AgentState::Waiting))
                 || !ws.ending.is_empty()
+                // A Review Overview tab spins while its review generates.
+                || ws.panes.values().any(|pane| pane.tabs.iter().any(overview_running))
                 || (ws.prefs.sidebar_open
                     && !ws.section_collapsed(SidebarSection::Projects)
                     && ws.data.repos.iter().any(|repo| {
@@ -808,28 +797,37 @@ pub(crate) fn ci_summary(checks: &[forge::CheckRun]) -> Option<CheckStatus> {
 /// How long a status toast stays up.
 pub(crate) const NOTE_TTL: Duration = Duration::from_secs(6);
 
-/// Whether a status message reports something going wrong.
-fn is_failure(note: &str) -> bool {
-    let n = note.to_ascii_lowercase();
-    [
-        "fail",
-        "error",
-        "could not",
-        "couldn't",
-        "cannot",
-        "can't",
-        "not trusted",
-        "skipped",
-    ]
-    .iter()
-    .any(|w| n.contains(w))
+/// Whether the toast hides the browser page (ruling R11): a failure is
+/// something the user has to see, so while one shows it counts as an
+/// overlay. Info toasts stay under the page where they overlap it.
+/// `failed` is the severity its producer gave (`set_error_note`), never read
+/// from the text: a device named "Error Phone" pairing is still good news.
+pub(crate) fn toast_hides_page(note: &str, failed: bool, showing: bool) -> bool {
+    showing && !note.is_empty() && failed
 }
 
 impl HarnessWorkspace {
+    /// A failure toast is on screen (see [`toast_hides_page`]).
+    pub(crate) fn failure_toast_showing(&self) -> bool {
+        toast_hides_page(&self.note, self.note_failed, self.note_at.is_some())
+    }
+
     /// Show a status message as a toast. Replaces the old always-on bottom
     /// bar, which kept the last message on screen forever.
     pub(crate) fn set_note(&mut self, note: String) {
+        self.set_note_as(note, false);
+    }
+
+    /// [`Self::set_note`] for something that went wrong: red, and it hides
+    /// a browser page while it shows.
+    pub(crate) fn set_error_note(&mut self, note: String) {
+        self.set_note_as(note, true);
+    }
+
+    /// A toast whose severity the caller decides at run time.
+    pub(crate) fn set_note_as(&mut self, note: String, failed: bool) {
         self.note = note;
+        self.note_failed = failed;
         self.note_at = (!self.note.is_empty()).then(std::time::Instant::now);
     }
 
@@ -838,6 +836,7 @@ impl HarnessWorkspace {
         if self.note_at.is_some_and(|t| t.elapsed() >= NOTE_TTL) {
             self.note.clear();
             self.note_at = None;
+            self.note_failed = false;
             return true;
         }
         false
@@ -849,7 +848,7 @@ impl HarnessWorkspace {
         if self.note.is_empty() {
             return None;
         }
-        let failed = is_failure(&self.note);
+        let failed = self.note_failed;
         Some(
             div()
                 .absolute()
@@ -881,6 +880,7 @@ impl HarnessWorkspace {
                         .on_click(cx.listener(|ws, _, _, cx| {
                             ws.note.clear();
                             ws.note_at = None;
+                            ws.note_failed = false;
                             cx.notify();
                         }))
                         .child(self.note.clone()),
@@ -892,7 +892,21 @@ impl HarnessWorkspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{CheckStatus, ci_summary, is_failure};
+    use super::{CheckStatus, ci_summary, toast_hides_page};
+
+    #[test]
+    fn only_a_showing_failure_toast_hides_the_page() {
+        assert!(toast_hides_page("push failed: rejected", true, true));
+        assert!(toast_hides_page("Couldn't archive ‘x’", true, true));
+        // An info toast stays under the page (ruling R11).
+        assert!(!toast_hides_page("archived ‘x’", false, true));
+        // Severity comes from the producer, not the words: good news that
+        // names an "Error Phone" stays under the page.
+        assert!(!toast_hides_page("Paired ‘Error Phone’", false, true));
+        // Expired or dismissed.
+        assert!(!toast_hides_page("push failed: rejected", true, false));
+        assert!(!toast_hides_page("", true, true));
+    }
 
     #[test]
     fn ci_remains_running_after_some_checks_pass() {
@@ -910,14 +924,5 @@ mod tests {
         );
         test.status = CheckStatus::Pass;
         assert_eq!(ci_summary(&[build, test]), Some(CheckStatus::Pass));
-    }
-
-    #[test]
-    fn failures_are_told_apart_from_progress() {
-        assert!(is_failure("push failed: rejected"));
-        assert!(is_failure("could not trust hooks in /x"));
-        assert!(is_failure("setup skipped: hooks not approved"));
-        assert!(!is_failure("archived ‘login’"));
-        assert!(!is_failure("running setup… (see shell)"));
     }
 }

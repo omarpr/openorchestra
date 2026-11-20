@@ -20,11 +20,14 @@ impl HarnessWorkspace {
         let mut clis = div().flex().flex_wrap().gap_1p5();
         for option in ReviewCli::ALL {
             clis = clis.child(
-                div()
-                    .id(gpui::SharedString::from(format!(
-                        "review-overview-cli-{}",
-                        option.label()
-                    )))
+                self.settings_focus
+                    .scroll_choice(
+                        format!("review-overview-cli-{}", option.label()),
+                        option.label(),
+                        cli == option,
+                        hx,
+                        cx,
+                    )
                     .child(chip(option.label().to_string(), cli == option, hx))
                     .on_click(cx.listener(move |ws, _, _, cx| {
                         ws.prefs.review_overview.cli = option;
@@ -95,6 +98,7 @@ impl HarnessWorkspace {
         .style(::ui::DropdownStyle::Outlined)
         .disabled(loading)
         .full_width(true)
+        .tab_index(0)
         .aria_label("Review overview model");
         let notice = match catalog {
             Some(ModelCatalog::Failed(error)) => Some(
@@ -221,11 +225,8 @@ impl HarnessWorkspace {
                     // Chat about this. This label is the next run, so it
                     // follows Settings as soon as the choice changes.
                     .child(self.prefs.review_overview.label())
-                    .on_click(cx.listener(|ws, _, _, cx| {
-                        ws.settings_section = SettingsSection::Diff;
-                        ws.settings_open = true;
-                        ws.ensure_review_model_catalog(cx);
-                        cx.notify();
+                    .on_click(cx.listener(|ws, _, window, cx| {
+                        ws.open_settings(SettingsSection::Diff, window, cx);
                     })),
             )
             .child(

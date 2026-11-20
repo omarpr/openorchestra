@@ -41,21 +41,24 @@ impl HarnessWorkspace {
         let generation = self.diff_gen;
         let key = file.to_string();
         cx.spawn(async move |view, cx| {
-            let text = cx
+            // Parsed off the UI thread too: pairing changed lines and diffing
+            // their words is real work on a large file.
+            let rows = cx
                 .background_spawn(async move {
-                    crate::data::compute_file_diff(
+                    let text = crate::data::compute_file_diff(
                         &GitWorktrees::new(SystemRunner),
                         &worktree,
                         &base,
                         &record,
-                    )
+                    );
+                    readable_diff_lines(&text)
                 })
                 .await;
             let _ = view.update(cx, |ws, cx| {
                 if ws.diff_gen != generation {
                     return;
                 }
-                let rows = std::sync::Arc::new(readable_diff_lines(&text));
+                let rows = std::sync::Arc::new(rows);
                 ws.row_cache.borrow_mut().insert(key, FileRows::Ready(rows));
                 cx.notify();
             });
@@ -290,6 +293,7 @@ impl HarnessWorkspace {
                 // Never truncate silently — a diff that just stops looks like
                 // the change is smaller than it is.
                 return div()
+                    .min_w_full()
                     .h(px(self.diff_row_h()))
                     .px_2()
                     .text_color(hx.amber)
@@ -306,6 +310,7 @@ impl HarnessWorkspace {
                 // here, and the comment editor holds the full text.
                 return div()
                     .flex()
+                    .min_w_full()
                     .h(px(self.diff_row_h()))
                     .items_center()
                     .pl(px(56.0))
@@ -330,6 +335,7 @@ impl HarnessWorkspace {
         if r.kind == DiffLineKind::HunkBreak {
             return div()
                 .flex()
+                .min_w_full()
                 .items_center()
                 .gap_2()
                 .h(px(self.diff_row_h()))
@@ -364,6 +370,7 @@ impl HarnessWorkspace {
         if r.kind == DiffLineKind::FileHeader {
             return div()
                 .flex()
+                .min_w_full()
                 .h(px(self.diff_row_h()))
                 .bg(row_bg)
                 .px_2()
@@ -384,9 +391,13 @@ impl HarnessWorkspace {
                 .is_some_and(|r| self.review.get(&r.key, file, n).is_some())
         });
 
+        // `min_w_full`: each row is laid out on its own, sized to its text,
+        // so without it a line's tint stopped where its text did and the
+        // changed lines read as ragged blocks instead of whole lines.
         div()
             .id(("diffrow", ix))
             .flex()
+            .min_w_full()
             .h(px(self.diff_row_h()))
             .bg(row_bg)
             .cursor_pointer()
@@ -461,7 +472,7 @@ impl HarnessWorkspace {
                     .pr_2()
                     .text_color(fg)
                     .whitespace_nowrap()
-                    .child(r.text.clone()),
+                    .child(diff_line_text(hx, r)),
             )
             .into_any_element()
     }
@@ -646,8 +657,29 @@ impl HarnessWorkspace {
                     .pr_2()
                     .text_color(fg)
                     .whitespace_nowrap()
-                    .child(r.text.clone()),
+                    .child(diff_line_text(hx, r)),
             )
             .into_any_element()
     }
+}
+
+/// A diff line's text, with the words that changed against its paired line
+/// on a stronger tint of the row's own colour, so an edit inside a long line
+/// is visible without comparing the two lines character by character.
+fn diff_line_text(hx: &HarnessTheme, r: &DiffRow) -> AnyElement {
+    let color = match r.kind {
+        DiffLineKind::Added => hx.green,
+        DiffLineKind::Removed => hx.red,
+        _ => return r.text.clone().into_any_element(),
+    };
+    if r.emphasis.is_empty() {
+        return r.text.clone().into_any_element();
+    }
+    let style = gpui::HighlightStyle {
+        background_color: Some(tint(color, 0.38).into()),
+        ..Default::default()
+    };
+    gpui::StyledText::new(r.text.clone())
+        .with_highlights(r.emphasis.iter().map(|range| (range.clone(), style)))
+        .into_any_element()
 }

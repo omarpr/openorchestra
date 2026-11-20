@@ -158,7 +158,7 @@ impl HarnessWorkspace {
                             report,
                         });
                         overview.set_report(saved, cx);
-                        ws.save_panes();
+                        ws.save_panes(cx);
                     }
                     Err(error) => overview.status = OverviewStatus::Failed(error),
                 }
@@ -399,7 +399,7 @@ impl HarnessWorkspace {
         }
         match std::fs::write(&file, md) {
             Ok(()) => self.set_note(format!("saved {}", file.display())),
-            Err(e) => self.set_note(format!("could not save review: {e}")),
+            Err(e) => self.set_error_note(format!("could not save review: {e}")),
         }
         cx.notify();
     }

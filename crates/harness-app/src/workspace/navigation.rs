@@ -20,6 +20,8 @@ impl HarnessWorkspace {
         if leaving_hooks {
             self.exit_hooks_edit(window, cx);
         }
+        // Tab switch: hide the page being left, show the one being entered.
+        self.sync_browser_views(window, cx);
         self.focus_active_pane(window, cx);
         cx.notify();
     }

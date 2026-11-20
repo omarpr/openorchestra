@@ -70,17 +70,46 @@ pub(crate) fn agent_icon(kind: &AgentKind, size: f32) -> AnyElement {
     }
 }
 
-/// Every agent to offer, built-ins first (in sidebar order) then user-added
-/// custom agents by key. The single source both the settings list and the ＋
-/// menu iterate, so the two can never drift.
+/// Every agent to offer, in the user's order (Settings › Agents, drag to
+/// reorder). The single source the settings list, the ＋ menu and the
+/// new-task default all read, so they can never drift.
+///
+/// With no saved order: every agent, built-in and custom together, sorted
+/// alphabetically by display name (case-insensitive, ties by key). Agents the
+/// saved order does not name — a built-in added in a later release, a newly
+/// added custom agent — follow the ordered ones in that same base order.
 pub(crate) fn agent_catalog(prefs: &Prefs) -> Vec<AgentKind> {
-    let mut out: Vec<AgentKind> = AgentKind::known().to_vec();
+    let mut base: Vec<AgentKind> = AgentKind::known().to_vec();
     for (key, pref) in &prefs.agents {
         if pref.custom {
-            out.push(AgentKind::Other(key.clone()));
+            base.push(AgentKind::Other(key.clone()));
+        }
+    }
+    base.sort_by_cached_key(|k| (agent_display(k).to_lowercase(), k.as_str().to_string()));
+    let mut out: Vec<AgentKind> = Vec::with_capacity(base.len());
+    for key in &prefs.agent_order {
+        if let Some(kind) = base.iter().find(|k| k.as_str() == key.as_str())
+            && !out.contains(kind)
+        {
+            out.push(kind.clone());
+        }
+    }
+    for kind in base {
+        if !out.contains(&kind) {
+            out.push(kind);
         }
     }
     out
+}
+
+/// The full agent order after dropping `dragged` onto `onto`'s row: every
+/// catalog key, so the saved order is complete from the first drag on.
+pub(crate) fn agent_order_after_move(prefs: &Prefs, dragged: &str, onto: &str) -> Vec<String> {
+    let keys: Vec<String> = agent_catalog(prefs)
+        .iter()
+        .map(|k| k.as_str().to_string())
+        .collect();
+    reordered(&keys, dragged.to_string(), onto.to_string())
 }
 
 /// Agents the user has not turned off in Settings.
@@ -91,24 +120,60 @@ pub(crate) fn enabled_agents(prefs: &Prefs) -> Vec<AgentKind> {
         .collect()
 }
 
-/// Default agent for a new task: last used (if still enabled), else OpenCode
-/// when enabled (D12), else the first enabled catalog entry.
+/// Default agent for a new task, first match wins: the agent starred in
+/// Settings (`prefs.default_agent`) if it exists and is enabled; else the last
+/// used agent if still enabled; else the first enabled agent in the user's
+/// order (Claude Code out of the box, the top of the alphabetical catalog).
 pub(crate) fn default_enabled_agent(prefs: &Prefs) -> Option<AgentKind> {
     let enabled = enabled_agents(prefs);
-    if enabled.is_empty() {
-        return None;
-    }
-    if let Some(key) = prefs.last_task_agent.as_deref() {
+    for key in [
+        prefs.default_agent.as_deref(),
+        prefs.last_task_agent.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
         let kind = AgentKind::from(key);
-        if enabled.iter().any(|k| k == &kind) {
+        if enabled.contains(&kind) {
             return Some(kind);
         }
     }
-    enabled
-        .iter()
-        .find(|k| matches!(k, AgentKind::OpenCode))
-        .cloned()
-        .or_else(|| enabled.into_iter().next())
+    enabled.into_iter().next()
+}
+
+/// How an agent's star in Settings › Agents looks and behaves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentStar {
+    /// The effective default: a filled star, nothing to click.
+    Filled,
+    /// An enabled agent that is not the default: click to make it so.
+    Outlined,
+    /// A disabled agent can't be the default, so it has no star.
+    Hidden,
+}
+
+/// The star state for `kind`'s row. Exactly one enabled agent is `Filled`:
+/// the effective default, which may be the last-used or first agent rather
+/// than an explicit star.
+pub(crate) fn agent_star(prefs: &Prefs, kind: &AgentKind) -> AgentStar {
+    if !enabled_agents(prefs).contains(kind) {
+        AgentStar::Hidden
+    } else if default_enabled_agent(prefs).as_ref() == Some(kind) {
+        AgentStar::Filled
+    } else {
+        AgentStar::Outlined
+    }
+}
+
+/// What clicking `kind`'s star saves as the default agent: its key, unless
+/// it is already the saved default (nothing to change) or has no star. A
+/// filled star that is the default only by fallback (last used, or first
+/// in the list) saves too, so it stays the default when another agent is
+/// used next.
+pub(crate) fn star_saves(prefs: &Prefs, kind: &AgentKind) -> Option<String> {
+    (agent_star(prefs, kind) != AgentStar::Hidden
+        && prefs.default_agent.as_deref() != Some(kind.as_str()))
+    .then(|| kind.as_str().to_string())
 }
 
 /// Whether `slug` is a usable key for a new custom agent: non-empty, only
@@ -154,7 +219,8 @@ pub(crate) struct AgentPref {
 #[cfg(test)]
 mod agent_prefs_tests {
     use super::{
-        AgentKind, AgentPref, Prefs, agent_catalog, default_enabled_agent, enabled_agents,
+        AgentKind, AgentPref, AgentStar, Prefs, agent_catalog, agent_display,
+        agent_order_after_move, agent_star, default_enabled_agent, enabled_agents, star_saves,
         valid_agent_slug,
     };
 
@@ -214,20 +280,129 @@ mod agent_prefs_tests {
     }
 
     #[test]
-    fn the_catalog_is_the_built_ins_then_the_custom_agents() {
-        let prefs = with_custom("cursor-agent", "cursor-agent");
-        let catalog = agent_catalog(&prefs);
-        let built_ins = AgentKind::known();
+    fn the_base_order_is_alphabetical_by_display_name() {
+        let mut prefs = with_custom("cursor-agent", "cursor-agent");
+        prefs.agents.insert(
+            "Zed".into(),
+            AgentPref {
+                custom: true,
+                ..Default::default()
+            },
+        );
+        let names: Vec<String> = agent_catalog(&prefs).iter().map(agent_display).collect();
         assert_eq!(
-            &catalog[..built_ins.len()],
-            &built_ins[..],
-            "built-ins come first, in order"
+            names,
+            [
+                "Claude Code",
+                "Codex",
+                "cursor-agent",
+                "Grok",
+                "Kimi",
+                "OpenCode",
+                "pi",
+                "Zed"
+            ],
+            "built-ins and custom agents together, case-insensitive"
+        );
+    }
+
+    #[test]
+    fn built_ins_alone_sort_alphabetically() {
+        let names: Vec<String> = agent_catalog(&Prefs::default())
+            .iter()
+            .map(agent_display)
+            .collect();
+        assert_eq!(
+            names,
+            ["Claude Code", "Codex", "Grok", "Kimi", "OpenCode", "pi"]
+        );
+    }
+
+    #[test]
+    fn a_saved_partial_order_leads_then_the_alphabetical_remainder() {
+        let mut prefs = with_custom("cursor-agent", "cursor-agent");
+        prefs.agent_order = vec!["pi".into(), "kimi".into()];
+        let keys: Vec<String> = agent_catalog(&prefs)
+            .iter()
+            .map(|k| k.as_str().to_string())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "pi",
+                "kimi",
+                "claude-code",
+                "codex",
+                "cursor-agent",
+                "grok",
+                "opencode"
+            ]
+        );
+    }
+
+    #[test]
+    fn moving_an_agent_saves_the_full_order() {
+        let prefs = Prefs::default();
+        let order = agent_order_after_move(&prefs, "pi", "claude-code");
+        assert_eq!(order[0], "pi", "dropped onto the top row");
+        assert_eq!(order[1], "claude-code");
+        assert_eq!(order.len(), AgentKind::known().len());
+        let mut prefs = prefs;
+        prefs.agent_order = order;
+        assert_eq!(
+            default_enabled_agent(&prefs),
+            Some(AgentKind::Pi),
+            "the top of the list is the default"
+        );
+    }
+
+    #[test]
+    fn the_default_is_the_first_enabled_agent_in_order() {
+        let mut prefs = Prefs {
+            agent_order: vec!["grok".into(), "pi".into()],
+            ..Default::default()
+        };
+        prefs.agents.insert(
+            "grok".into(),
+            AgentPref {
+                disabled: true,
+                command: None,
+                custom: false,
+                signal: None,
+            },
         );
         assert_eq!(
-            catalog.last(),
-            Some(&AgentKind::Other("cursor-agent".to_string())),
-            "the custom agent is appended",
+            default_enabled_agent(&prefs),
+            Some(AgentKind::Pi),
+            "a disabled agent at the top is skipped"
         );
+        prefs.last_task_agent = Some("codex".into());
+        assert_eq!(
+            default_enabled_agent(&prefs),
+            Some(AgentKind::Codex),
+            "the last-used agent still wins"
+        );
+    }
+
+    #[test]
+    fn out_of_the_box_the_default_is_claude_code() {
+        assert_eq!(
+            default_enabled_agent(&Prefs::default()),
+            Some(AgentKind::ClaudeCode)
+        );
+    }
+
+    #[test]
+    fn the_default_is_the_first_enabled_in_the_alphabetical_order() {
+        let mut prefs = Prefs::default();
+        prefs.agents.insert(
+            "claude-code".into(),
+            AgentPref {
+                disabled: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(default_enabled_agent(&prefs), Some(AgentKind::Codex));
     }
 
     #[test]
@@ -299,10 +474,10 @@ mod agent_prefs_tests {
     }
 
     #[test]
-    fn default_task_agent_skips_disabled_opencode() {
+    fn default_task_agent_skips_a_disabled_top_agent() {
         let mut prefs = Prefs::default();
         prefs.agents.insert(
-            "opencode".to_string(),
+            "claude-code".to_string(),
             AgentPref {
                 disabled: true,
                 command: None,
@@ -311,8 +486,8 @@ mod agent_prefs_tests {
             },
         );
         let kind = default_enabled_agent(&prefs).expect("other built-ins remain");
-        assert_ne!(kind, AgentKind::OpenCode);
-        assert!(!enabled_agents(&prefs).contains(&AgentKind::OpenCode));
+        assert_ne!(kind, AgentKind::ClaudeCode);
+        assert!(!enabled_agents(&prefs).contains(&AgentKind::ClaudeCode));
     }
 
     #[test]
@@ -336,5 +511,106 @@ mod agent_prefs_tests {
             Some(AgentKind::ClaudeCode),
             "disabled last-used falls through"
         );
+    }
+
+    #[test]
+    fn a_starred_agent_beats_the_last_used_one() {
+        let mut prefs = Prefs {
+            default_agent: Some("kimi".into()),
+            last_task_agent: Some("codex".into()),
+            ..Default::default()
+        };
+        assert_eq!(default_enabled_agent(&prefs), Some(AgentKind::Kimi));
+        prefs.default_agent = None;
+        assert_eq!(
+            default_enabled_agent(&prefs),
+            Some(AgentKind::Codex),
+            "no star: last used"
+        );
+        prefs.last_task_agent = None;
+        assert_eq!(
+            default_enabled_agent(&prefs),
+            Some(AgentKind::ClaudeCode),
+            "neither: first in catalog order"
+        );
+    }
+
+    #[test]
+    fn a_star_on_a_disabled_or_missing_agent_falls_back() {
+        let mut prefs = Prefs {
+            default_agent: Some("kimi".into()),
+            last_task_agent: Some("codex".into()),
+            ..Default::default()
+        };
+        prefs.agents.insert(
+            "kimi".into(),
+            AgentPref {
+                disabled: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            default_enabled_agent(&prefs),
+            Some(AgentKind::Codex),
+            "disabled star falls to last used"
+        );
+        prefs.default_agent = Some("removed-custom".into());
+        assert_eq!(
+            default_enabled_agent(&prefs),
+            Some(AgentKind::Codex),
+            "a star on an agent that no longer exists falls back"
+        );
+        prefs.last_task_agent = None;
+        assert_eq!(default_enabled_agent(&prefs), Some(AgentKind::ClaudeCode));
+    }
+
+    #[test]
+    fn the_star_state_is_filled_outlined_or_hidden() {
+        let mut prefs = Prefs {
+            default_agent: Some("kimi".into()),
+            ..Default::default()
+        };
+        prefs.agents.insert(
+            "pi".into(),
+            AgentPref {
+                disabled: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(agent_star(&prefs, &AgentKind::Kimi), AgentStar::Filled);
+        assert_eq!(agent_star(&prefs, &AgentKind::Codex), AgentStar::Outlined);
+        assert_eq!(agent_star(&prefs, &AgentKind::Pi), AgentStar::Hidden);
+        // Only one agent is filled, even with no explicit star.
+        let plain = Prefs::default();
+        assert_eq!(agent_star(&plain, &AgentKind::ClaudeCode), AgentStar::Filled);
+        assert_eq!(agent_star(&plain, &AgentKind::Kimi), AgentStar::Outlined);
+    }
+
+    #[test]
+    fn a_filled_star_by_fallback_can_be_saved_as_the_default() {
+        // Codex is the default only as the last used: its filled star saves it.
+        let prefs = Prefs {
+            last_task_agent: Some("codex".into()),
+            ..Default::default()
+        };
+        assert_eq!(agent_star(&prefs, &AgentKind::Codex), AgentStar::Filled);
+        assert_eq!(star_saves(&prefs, &AgentKind::Codex).as_deref(), Some("codex"));
+        assert_eq!(star_saves(&prefs, &AgentKind::Kimi).as_deref(), Some("kimi"));
+        // Already the saved default: nothing to save.
+        let saved = Prefs {
+            default_agent: Some("codex".into()),
+            ..Default::default()
+        };
+        assert_eq!(star_saves(&saved, &AgentKind::Codex), None);
+        // A disabled agent has no star.
+        let mut off = Prefs::default();
+        off.agents.insert(
+            "pi".into(),
+            AgentPref {
+                disabled: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(star_saves(&off, &AgentKind::Pi), None);
     }
 }

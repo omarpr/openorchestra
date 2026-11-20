@@ -156,7 +156,7 @@ impl ReviewCli {
     fn command(self, cwd: &Path, model: Option<&str>, run: &RunControl) -> Result<Command, String> {
         let program = self.program();
         let path = agent_runtime::resolve_on_path(program)
-            .ok_or_else(|| format!("Could not find `{program}` on PATH. Install it or choose another CLI in Settings → Diff."))?;
+            .ok_or_else(|| format!("Could not find `{program}` on PATH. Install it or choose another CLI in Settings → Review."))?;
         let mut command = Command::new(&path);
         command.current_dir(cwd);
         match self {

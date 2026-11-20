@@ -27,6 +27,7 @@ impl HarnessWorkspace {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let r = &self.remote;
+        let focus = &self.settings_focus;
         let enabled = r.file.enabled;
         let serving = r.serve == RemoteServe::Serving;
         let mut col = div().flex().flex_col();
@@ -35,8 +36,14 @@ impl HarnessWorkspace {
         let mut onoff = div().flex().gap_1p5().pb_1();
         for (label, on) in [("On", true), ("Off", false)] {
             onoff = onoff.child(
-                div()
-                    .id(gpui::SharedString::from(format!("remote-enabled-{label}")))
+                focus
+                    .scroll_choice(
+                        format!("remote-enabled-{label}"),
+                        format!("Remote control: {label}"),
+                        enabled == on,
+                        hx,
+                        cx,
+                    )
                     .child(chip(label.to_string(), enabled == on, hx))
                     .on_click(cx.listener(move |ws, _, _, cx| {
                         cx.stop_propagation();
@@ -171,8 +178,8 @@ impl HarnessWorkspace {
             port_row = port_row.child(div().w(px(90.0)).child(self.render_input(hx, editor, cx)));
         } else {
             port_row = port_row.child(
-                div()
-                    .id("remote-port")
+                focus
+                    .scroll_button("remote-port", "Edit HTTPS port", hx, cx)
                     .w(px(90.0))
                     .px_2()
                     .py_0p5()
@@ -224,9 +231,15 @@ impl HarnessWorkspace {
                 div().flex().pb_1().child(
                     button(hx, "Add a device")
                         .id("remote-add-device")
-                        .on_click(cx.listener(|ws, _, _, cx| {
+                        .on_click(cx.listener(|ws, _, window, cx| {
                             cx.stop_propagation();
                             ws.remote_open_setup(cx);
+                            // The dialog takes the keyboard, or Tab would
+                            // walk the Remote controls it covers.
+                            if ws.remote.ui.setup_open {
+                                ws.remote_setup_focus.reset_scroll();
+                                ws.remote_setup_focus.focus(window, cx);
+                            }
                         })),
                 ),
             );
@@ -302,7 +315,7 @@ impl HarnessWorkspace {
                                         .text_ellipsis()
                                         .whitespace_nowrap()
                                         .text_color(hx.tx0)
-                                        .child(display_title(&row.title, row.kind.is_none())),
+                                        .child(display_title(row.kind.as_deref())),
                                 )
                                 .child(
                                     div()
@@ -457,8 +470,14 @@ impl HarnessWorkspace {
         let mut awake_row = div().flex().gap_1p5().pb_1();
         for (label, on) in [("On", true), ("Off", false)] {
             awake_row = awake_row.child(
-                div()
-                    .id(gpui::SharedString::from(format!("remote-awake-{label}")))
+                focus
+                    .scroll_choice(
+                        format!("remote-awake-{label}"),
+                        format!("Keep this Mac awake: {label}"),
+                        awake == on,
+                        hx,
+                        cx,
+                    )
                     .child(chip(label.to_string(), awake == on, hx))
                     .on_click(cx.listener(move |ws, _, _, cx| {
                         cx.stop_propagation();
@@ -476,17 +495,55 @@ impl HarnessWorkspace {
         ))
     }
 
-    /// "Add a device" as a dialog over Settings: a backdrop click, ✕ or Done
-    /// closes it (and the setup port) and leaves Settings open.
+    /// Put the keyboard on the Remote section's tab in the Settings rail:
+    /// where it goes when "Add a device" closes, since the dialog's own
+    /// controls are gone and the covered "Add a device" button takes no
+    /// focus.
+    pub(crate) fn focus_remote_section(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let tab = self
+            .settings_focus
+            .control_focus(SettingsSection::Remote.focus_id(), cx);
+        window.focus(&tab, cx);
+    }
+
+    /// Close "Add a device" from inside it, keeping the keyboard in Settings.
+    fn close_add_phone_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.remote_close_setup();
+        self.focus_remote_section(window, cx);
+        cx.notify();
+    }
+
+    /// A button in "Add a device": a tab stop in the dialog's own order.
+    fn dialog_button(
+        &self,
+        id: &'static str,
+        label: &str,
+        hx: &HarnessTheme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let focus = self.remote_setup_focus.control_focus(id.into(), cx);
+        let accent = hx.accent;
+        self.remote_setup_focus.reveal_on_focus(
+            button(hx, label)
+                .id(id)
+                .role(gpui::Role::Button)
+                .aria_label(label.to_string())
+                .tab_index(0)
+                .track_focus(&focus)
+                .focus_visible(move |style| style.border_color(accent)),
+            focus,
+        )
+    }
+
+    /// "Add a device" as a dialog over Settings: a backdrop click, ✕, Done
+    /// or Escape closes it (and the setup port) and leaves Settings open.
+    /// It takes the keyboard when it opens, and Tab and Shift-Tab stay in
+    /// it (`ModalFocus::card`) until it closes.
     pub(crate) fn render_add_phone_dialog(
         &self,
         hx: &HarnessTheme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let close = |ws: &mut Self, cx: &mut Context<Self>| {
-            ws.remote_close_setup();
-            cx.notify();
-        };
         let header = div()
             .flex()
             .items_center()
@@ -498,21 +555,21 @@ impl HarnessWorkspace {
                     .text_color(hx.tx0)
                     .child("Add a device"),
             )
-            .child(
-                div()
-                    .id("remote-setup-close")
+            .child({
+                let focus = self.remote_setup_focus.control_focus("remote-setup-close".into(), cx);
+                super::modal_button("remote-setup-close", "Close", hx)
+                    .track_focus(&focus)
                     .px_2()
-                    .rounded_md()
                     .text_sm()
                     .text_color(hx.tx2)
                     .cursor_pointer()
                     .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
                     .child("✕")
-                    .on_click(cx.listener(move |ws, _, _, cx| {
+                    .on_click(cx.listener(move |ws, _, window, cx| {
                         cx.stop_propagation();
-                        close(ws, cx);
-                    })),
-            );
+                        ws.close_add_phone_dialog(window, cx);
+                    }))
+            });
         let card = div()
             .id("remote-setup-card")
             .flex()
@@ -527,8 +584,17 @@ impl HarnessWorkspace {
             .border_1()
             .border_color(hx.border)
             .shadow_lg()
+            .track_scroll(&self.remote_setup_focus.scroll)
             .child(header)
-            .child(self.render_add_phone(hx, cx));
+            .child(self.render_add_phone(hx, cx))
+            .child(self.remote_setup_focus.end());
+        let card = self
+            .remote_setup_focus
+            .card(card, "Add a device")
+            .on_action(cx.listener(|ws, _: &menu::Cancel, window, cx| {
+                cx.stop_propagation();
+                ws.close_add_phone_dialog(window, cx);
+            }));
         div()
             .id("remote-setup-backdrop")
             .occlude()
@@ -541,9 +607,9 @@ impl HarnessWorkspace {
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_scroll(|_, _, cx| cx.stop_propagation())
             // Stop here: the Settings backdrop underneath would close Settings.
-            .on_click(cx.listener(move |ws, _, _, cx| {
+            .on_click(cx.listener(move |ws, _, window, cx| {
                 cx.stop_propagation();
-                close(ws, cx);
+                ws.close_add_phone_dialog(window, cx);
             }))
             .child(card.on_click(|_, _, cx| cx.stop_propagation()))
             .into_any_element()
@@ -648,8 +714,7 @@ impl HarnessWorkspace {
         }
         pair = pair.child(
             div().flex().child(
-                button(hx, "New code")
-                    .id("remote-new-code")
+                self.dialog_button("remote-new-code", "New code", hx, cx)
                     .on_click(cx.listener(|ws, _, _, cx| {
                         cx.stop_propagation();
                         ws.remote_new_code(cx);
@@ -667,31 +732,21 @@ impl HarnessWorkspace {
                 div()
                     .flex()
                     .child(
-                        button(hx, "Done")
-                            .id("remote-setup-done")
-                            .on_click(cx.listener(|ws, _, _, cx| {
+                        self.dialog_button("remote-setup-done", "Done", hx, cx)
+                            .on_click(cx.listener(|ws, _, window, cx| {
                                 cx.stop_propagation();
-                                ws.remote_close_setup();
-                                cx.notify();
+                                ws.close_add_phone_dialog(window, cx);
                             })),
                     ),
             )
     }
 }
 
-/// A tab's title for a list that already shows its icon: a shell's "❯_ "
-/// prefix would repeat it.
-pub(crate) fn display_title(title: &str, shell: bool) -> String {
-    if shell {
-        let t = title
-            .trim_start_matches('\u{276F}')
-            .trim_start_matches('_')
-            .trim_start();
-        if !t.is_empty() {
-            return t.to_string();
-        }
-    }
-    title.to_string()
+/// A tab's name for a list that already shows its icon: the same name its
+/// tab wears ("Shell", "Claude"), not the stored title ("❯_ shell",
+/// "claude"). `kind` is the agent kind's stored string; `None` is a shell.
+pub(crate) fn display_title(kind: Option<&str>) -> String {
+    terminal_label(kind.map(AgentKind::from).as_ref())
 }
 
 /// A plain bordered button (the Settings "Reset …" style).
@@ -924,11 +979,11 @@ mod tests {
     }
 
     #[test]
-    fn shell_titles_drop_the_glyph_the_icon_already_shows() {
-        assert_eq!(display_title("\u{276F}_ shell", true), "shell");
-        assert_eq!(display_title("\u{276F}_ npm run dev", true), "npm run dev");
-        assert_eq!(display_title("\u{276F}_ ", true), "\u{276F}_ ");
-        assert_eq!(display_title("claude", false), "claude");
+    fn phone_rows_use_the_same_names_as_tabs() {
+        assert_eq!(display_title(None), "Shell");
+        assert_eq!(display_title(Some("claude-code")), "Claude");
+        assert_eq!(display_title(Some("opencode")), "OpenCode");
+        assert_eq!(display_title(Some("cursor-agent")), "cursor-agent");
     }
 
     #[test]

@@ -25,7 +25,7 @@ fn project_card() -> gpui::Div {
 
 // Reserve both lines even for a clean checkout and keep the status pill out of row sizing.
 fn project_card_title() -> gpui::Div {
-    div().flex().items_center().gap_2().h(gpui::rems(1.5))
+    div().flex().items_center().gap_2().h(gpui::rems(1.4))
 }
 
 fn project_card_details() -> gpui::Div {
@@ -33,6 +33,9 @@ fn project_card_details() -> gpui::Div {
         .flex()
         .items_center()
         .gap_1()
+        // Air between the status pill above and the badges, on every row
+        // (the title box gave up 0.1rem so the card height is unchanged).
+        .mt(px(4.0))
         .h(gpui::rems(1.1))
         .overflow_hidden()
 }

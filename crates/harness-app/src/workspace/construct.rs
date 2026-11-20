@@ -20,6 +20,8 @@ impl HarnessWorkspace {
         let archived_repos = load_repos(&archived_path);
         let prefs_path = data_dir.join("prefs.json");
         let prefs = load_prefs(&prefs_path);
+        crate::link_routing::set_routing_enabled(prefs.links_in_browser_tab);
+        crate::browser_pane::set_inspector_placement(prefs.inspector_placement);
         let reg_path = data_dir.join("registry.json");
         let panes_path = data_dir.join("panes.json");
         let mut panes_state = crate::panes_state::load(&panes_path);
@@ -182,7 +184,10 @@ impl HarnessWorkspace {
             comment_draft: None,
             clearing_review: false,
             settings_open: false,
-            settings_section: SettingsSection::Appearance,
+            settings_focus: ui::ModalFocus::new(cx),
+            remote_setup_focus: ui::ModalFocus::new(cx),
+            remote_setup_refocus: std::cell::Cell::new(false),
+            settings_section: SettingsSection::General,
             review_model_catalogs: Default::default(),
             // Probed once at startup; the screen opens below if this machine is
             // missing something that blocks, or if it has never been shown.
@@ -199,7 +204,6 @@ impl HarnessWorkspace {
             indicator_ticking: false,
             titlebar_should_move: false,
             rebinding: None,
-            rebind_focus: cx.focus_handle(),
             md_preview: None,
             diff_gen: 0,
             diff_pending: false,
@@ -226,6 +230,12 @@ impl HarnessWorkspace {
             tab_menu: None,
             tab_context_menu: None,
             diff_base_menu: None,
+            browser_window_hidden: false,
+            browser_save: None,
+            blank_browser_shown: false,
+            browser_history: cx.new(|_| {
+                crate::browser_pane::BrowserHistory::new(data_dir.join("browser-history"))
+            }),
             close_prompt: None,
             edit_prompt: None,
             ending: HashMap::new(),
@@ -233,6 +243,7 @@ impl HarnessWorkspace {
             hook_trust: None,
             note: String::new(),
             note_at: None,
+            note_failed: false,
             forge_status: HashMap::new(),
             agent_status: HashMap::new(),
             remote: super::remote::RemoteRuntime::new(&data_dir),
@@ -256,6 +267,7 @@ impl HarnessWorkspace {
             focus_handle: cx.focus_handle(),
             editor_host_focus: cx.focus_handle(),
             diff_surface_focus: cx.focus_handle(),
+            diff_files_scroll: gpui::ScrollHandle::new(),
             resource: None,
             resource_history: crate::resource_monitor::History::new(RESOURCE_HISTORY),
             ports_sample: None,
@@ -331,6 +343,26 @@ impl HarnessWorkspace {
             window.focus(&this.focus_handle, cx);
         }
 
+        // Browser tabs drop their native view while the window is minimized
+        // or the app hidden (memory; the page reloads when shown). gpui
+        // draws no frames for a hidden window, so `render`'s reconcile can't
+        // see this; the visibility observer can.
+        // An armed shortcut row records the next chord, ⌘W included. gpui
+        // runs keymap actions before any key-down listener, so the capture
+        // has to happen in an interceptor, which runs first.
+        let rebind_ws = cx.weak_entity();
+        cx.intercept_keystrokes(move |event, window, cx| {
+            let _ = rebind_ws.update(cx, |ws, cx| {
+                ws.capture_rebind_keystroke(&event.keystroke, window, cx)
+            });
+        })
+        .detach();
+
+        cx.observe_window_visibility(window, |ws, visibility, window, cx| {
+            ws.window_visibility_changed(visibility, window, cx);
+        })
+        .detach();
+
         // Route the window's close button (red X) through the same
         // keep-or-close-terminals prompt as ⌘Q. `request_quit` returns whether
         // the app may close now: `false` holds the window open while the prompt
@@ -371,6 +403,47 @@ impl HarnessWorkspace {
             }
         })
         .detach();
+
+        // Local and dev links the platform wrapper routed (link_routing):
+        // open each in a browser tab of the active worktree, or in the
+        // default browser when no worktree is selected or its pane isn't
+        // live. Taken once, so only
+        // the first workspace drains.
+        if let Some(mut routed) = crate::link_routing::take_routed_receiver() {
+            cx.spawn_in(window, async move |view, cx| {
+                use futures::StreamExt as _;
+                while let Some(url) = routed.next().await {
+                    let opened = view.update_in(cx, |ws, window, cx| {
+                        let opened = ws.open_browser_tab(Some(url.clone()), window, cx).is_some();
+                        // Usually already front (the click came from here).
+                        if opened && !window.is_window_active() {
+                            cx.activate(true);
+                            window.activate_window();
+                        }
+                        opened
+                    });
+                    match opened {
+                        Ok(true) => {}
+                        Ok(false) => crate::link_routing::open_external_now(&url),
+                        // The workspace is gone: this link goes out, and so
+                        // does every one already queued behind it. Closing
+                        // first sends later ones straight to the default
+                        // browser (the platform's fallback for a failed
+                        // send), then the buffer drains and the loop ends.
+                        Err(_) => {
+                            crate::link_routing::open_external_now(&url);
+                            crate::link_routing::open_rest_externally(
+                                &mut routed,
+                                crate::link_routing::open_external_now,
+                            )
+                            .await;
+                            break;
+                        }
+                    }
+                }
+            })
+            .detach();
+        }
 
         cx.spawn(async move |view, cx| {
             loop {
@@ -684,7 +757,9 @@ impl HarnessWorkspace {
         .detach();
 
         // Listening ports for the Ports tool tab. Polls only while that tab is
-        // on screen; `set_tool_tab` takes an immediate sample when it opens.
+        // on screen, or a blank browser tab listing the task's servers is
+        // (`ports_wanted`); `set_tool_tab` takes an immediate sample when it
+        // opens, and `sync_browser_views` when a blank tab shows.
         // The first pass runs without waiting, so a Ports tab restored open
         // at launch fills in at once rather than after a full interval.
         cx.spawn(async move |view, cx| {
@@ -693,7 +768,7 @@ impl HarnessWorkspace {
                 if !std::mem::take(&mut first) {
                     cx.background_executor().timer(Duration::from_secs(3)).await;
                 }
-                let Ok(visible) = view.read_with(cx, |ws, _| ws.ports_visible()) else {
+                let Ok(visible) = view.read_with(cx, |ws, _| ws.ports_wanted()) else {
                     break;
                 };
                 if !visible {
@@ -722,6 +797,15 @@ impl HarnessWorkspace {
                     break;
                 }
             }
+        })
+        .detach();
+
+        // Browsing history waits up to a second to be written; every quit
+        // path writes what's pending (`request_quit` does too, beside the
+        // tab save, for the quits that go through it).
+        cx.on_app_quit(|ws, cx| {
+            ws.browser_history.update(cx, |h, _| h.flush());
+            async {}
         })
         .detach();
 

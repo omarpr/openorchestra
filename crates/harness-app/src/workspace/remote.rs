@@ -313,7 +313,11 @@ pub(crate) fn remote_menu_item(
     match kind {
         TabKind::Shell => Some((label, Some("Gives paired devices this shell"))),
         TabKind::Agent(_) => Some((label, None)),
-        TabKind::Chat | TabKind::Diff | TabKind::Editor | TabKind::ReviewOverview => None,
+        TabKind::Chat
+        | TabKind::Diff
+        | TabKind::Editor
+        | TabKind::Browser
+        | TabKind::ReviewOverview => None,
     }
 }
 
@@ -453,7 +457,7 @@ pub(crate) fn build_snapshot(
     }
     let mut agents = Vec::new();
     for src in sources {
-        for (tab_id, title, kind) in &src.tabs {
+        for (tab_id, _, kind) in &src.tabs {
             let Some(mark) = file.mark_for(&src.key, *tab_id) else {
                 continue;
             };
@@ -471,7 +475,7 @@ pub(crate) fn build_snapshot(
             };
             agents.push(AgentInfo {
                 id: mark.id.clone(),
-                title: title.clone(),
+                title: terminal_label(kind.as_deref().map(AgentKind::from).as_ref()),
                 agent_kind: kind.clone(),
                 project: src.project.clone(),
                 worktree: src.worktree.clone(),
@@ -744,7 +748,7 @@ impl HarnessWorkspace {
             return;
         }
         if let Err(e) = oo_remote::certs::retire_ca(&self.remote.state_dir.join("remote")) {
-            self.set_note(format!("remote: could not replace the certificate: {e}"));
+            self.set_error_note(format!("remote: could not replace the certificate: {e}"));
             return;
         }
         log::info!("remote: new certificate requested; restarting the server");
@@ -776,7 +780,7 @@ impl HarnessWorkspace {
         let status = server.status();
         self.remote.status = Some(status);
         if let Err(e) = result {
-            self.set_note(format!("remote: could not save network setting: {e}"));
+            self.set_error_note(format!("remote: could not save network setting: {e}"));
         }
         cx.notify();
     }
@@ -896,7 +900,7 @@ impl HarnessWorkspace {
     pub(crate) fn remote_set_enabled(&mut self, on: bool, cx: &mut Context<Self>) {
         if let Err(e) = self.remote.store.update(|f| f.enabled = on) {
             log::warn!("remote: saving enabled={on} failed: {e}");
-            self.set_note(format!("remote: could not save setting: {e}"));
+            self.set_error_note(format!("remote: could not save setting: {e}"));
         }
         self.remote.reload();
         // An explicit enable retries a failed start.
@@ -909,21 +913,10 @@ impl HarnessWorkspace {
     pub(crate) fn remote_set_keep_awake(&mut self, on: bool, cx: &mut Context<Self>) {
         if let Err(e) = self.remote.store.update(|f| f.keep_awake = on) {
             log::warn!("remote: saving keep_awake={on} failed: {e}");
-            self.set_note(format!("remote: could not save setting: {e}"));
+            self.set_error_note(format!("remote: could not save setting: {e}"));
         }
         self.remote.reload();
         self.remote.sync_keep_awake();
-        cx.notify();
-    }
-
-    /// Open Settings on the Remote section (unless the blocking preflight
-    /// screen is up, which Settings would sit behind).
-    pub(crate) fn remote_open_settings(&mut self, cx: &mut Context<Self>) {
-        if crate::preflight::blocked(&self.preflight) {
-            return;
-        }
-        self.settings_open = true;
-        self.settings_section = crate::workspace::SettingsSection::Remote;
         cx.notify();
     }
 
@@ -937,7 +930,7 @@ impl HarnessWorkspace {
         };
         if let Err(e) = result {
             log::warn!("remote: toggling mark failed: {e}");
-            self.set_note(format!("remote: could not save mark: {e}"));
+            self.set_error_note(format!("remote: could not save mark: {e}"));
         }
         self.remote.reload();
         self.remote_refresh(cx);
@@ -1040,6 +1033,8 @@ impl HarnessWorkspace {
             return;
         };
         self.remote_close_setup();
+        // The keyboard was in the dialog; no window here to move it.
+        self.remote_setup_refocus.set(true);
         self.set_note(format!("Paired \u{2018}{name}\u{2019}"));
         cx.notify();
     }
@@ -1130,7 +1125,7 @@ impl HarnessWorkspace {
         self.remote.ui.revoke_armed = None;
         if let Err(e) = auth::revoke(&self.remote.store, device_id) {
             log::warn!("remote: revoking {device_id} failed: {e}");
-            self.set_note(format!("remote: could not revoke device: {e}"));
+            self.set_error_note(format!("remote: could not revoke device: {e}"));
         }
         self.remote.reload();
         self.remote_refresh(cx);
@@ -1145,7 +1140,7 @@ impl HarnessWorkspace {
     ) {
         if let Err(e) = auth::set_read_only(&self.remote.store, device_id, read_only) {
             log::warn!("remote: saving read_only for {device_id} failed: {e}");
-            self.set_note(format!("remote: could not save setting: {e}"));
+            self.set_error_note(format!("remote: could not save setting: {e}"));
         }
         self.remote.reload();
         cx.notify();
@@ -1507,11 +1502,11 @@ mod tests {
         let sources = [source(
             "main:proj",
             "/r/proj",
-            &[(7, "claude", Some("claude")), (8, "❯_ shell", None)],
+            &[(7, "claude", Some("claude-code")), (8, "❯_ shell", None)],
         )];
         let at = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         let signals = HashMap::from([(
-            (PathBuf::from("/r/proj"), "claude".into()),
+            (PathBuf::from("/r/proj"), "claude-code".into()),
             (AgentState::Waiting, at, Some("Bash".into())),
         )]);
 
@@ -1520,8 +1515,8 @@ mod tests {
         assert_eq!(snap.agents.len(), 1);
         let a = &snap.agents[0];
         assert_eq!(a.id, "r_abc");
-        assert_eq!(a.title, "claude");
-        assert_eq!(a.agent_kind.as_deref(), Some("claude"));
+        assert_eq!(a.title, "Claude");
+        assert_eq!(a.agent_kind.as_deref(), Some("claude-code"));
         assert_eq!(a.project, "proj");
         assert_eq!(a.worktree, "wt");
         assert_eq!(a.session, crate::tmux::session_name("main:proj", 7));

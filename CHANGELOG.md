@@ -12,6 +12,97 @@ Unreleased is empty.
 
 ## Unreleased
 
+### Added
+
+- **Browser** tabs (＋ → Browser): a WebKit page next to your shells and
+  agents, with back, forward, reload and Open in default browser. A blank
+  browser tab lists the servers running in the task and the project's recent
+  pages, a click away. Each
+  project remembers the pages its browser tabs open, and the address bar
+  suggests them as you type (↑/↓ and Enter to pick one). **Settings ›
+  General › Clear browsing history** forgets them. The conductor stays
+  visible over a browser page, with the page showing right up to his
+  outline, and can be dragged there. Browser tabs have
+  Developer tools (Web Inspector) from the address bar and from right-click
+  → Inspect Element. Developer tools open docked in the tab (bottom by
+  default; dock left/right or in a window from the inspector's toolbar,
+  remembered).
+- Links to local addresses (localhost, your network, Tailscale) and ports
+  opened from the current project or task open in a browser tab. Other links
+  still use your default browser. Change it in **Settings › General**.
+  A server printed as `0.0.0.0` or `[::]` opens through loopback, which
+  WebKit can reach.
+- Drag agents by their grip in **Settings › Agents** to reorder them. The
+  order is used in the **+** menu and the new-task picker. New tasks start
+  with your starred agent, else your last-used agent, else the top of the
+  list; the filled ★ on a row marks which one that is.
+- Star an agent in **Settings › Agents** to make it the default for new tasks.
+- Agent tabs show a spinner while that agent is running. With several agents
+  in one task or project, each tab shows its own.
+- In the Review panel, ↑ and ↓ move between changed files once you've
+  clicked one.
+- In a changed line, the words that changed get a stronger highlight, in
+  both unified and split view.
+
+### Changed
+
+- Sidebar rows leave a little more room between the status pill and the
+  badges (PR, ahead/behind, CI) below it.
+- Review Overview tabs show their icon first and the same running spinner as
+  agent tabs.
+- Settings are tidier. The long explainer above Agents is gone; its useful
+  parts are now tooltips on the command field and the Codex row. A built-in
+  agent with an edited command has a ↺ button that restores the default.
+  On/off settings use switches. A custom agent's status and hook options are
+  now visible choices instead of chips you click to cycle.
+- A new **General** settings pane, where Settings now opens, holds Terminals
+  on quit and the always-on conductor. "Show gitignored files" moved to
+  **Editor**, and the Diff pane is now called **Review**.
+- With no saved order, agents are listed alphabetically in Settings, the **+**
+  menu and the new-task picker, and the top one (Claude Code out of the box)
+  is the default for new tasks.
+- The **+** menu lists Shell and Editor first, then your agents under their
+  own **Agents** heading in Settings order, and every item's label now lines
+  up. Terminal is now Shell.
+- Tabs show a colored icon for every kind and title-case names (Shell,
+  Editor, Diff, Claude, Codex, …) instead of the stored lowercase titles, and
+  the phone UI uses the same names. An agent tab's running spinner sits after
+  its icon. Editor and file tabs show Zed's logo in Zed blue, Shell's `❯_` is
+  cyan and Diff's `⑂` is pink.
+
+### Fixed
+
+- OpenCode tabs show when the agent is running or waiting again (OpenCode 2
+  moved its server; the app now reads status from inside each OpenCode
+  session).
+- OpenCode tabs can be used from your phone when your OpenCode `cli.json`
+  has comments or trailing commas. The app used to skip its plugin for those
+  files.
+- Tab and Shift-Tab cycle through controls in Settings, New Task, and New
+  Worktree with a visible focus indicator. Settings scrolls the focused
+  control into view. macOS accessibility exposes Settings navigation, agent
+  switches, and the task form.
+- New Task and New Worktree show a missing-name error beside Name, focus
+  the field, and clear the error as soon as you enter a name.
+- Settings keeps its navigation and close button in place when changing panes.
+  Agent names match the tab menu and the default marker leaves room for the
+  full name.
+- The tools panel labels Git's count as changed files. Review shows the comment
+  count with its comment actions and in the tab tooltip.
+- The selected file in the Review panel's file list is now clearly
+  highlighted.
+- Added and removed lines in the diff are tinted across the full width
+  instead of stopping where the text ends.
+- The update prompt for Homebrew installs now gives the full cask name,
+  `brew upgrade --cask omarpr/tap/openorchestra`, so the copied command
+  targets the openOrchestra tap.
+- Status messages are shown in red only when something failed. A success
+  message that happens to name something like "Error Phone" stays in the
+  normal color.
+- When you change a keyboard shortcut in **Settings › Shortcuts**, pressing a
+  key combination that already does something, like ⌘W, now records it
+  instead of running it.
+
 ## 1.3.0 - 2026-11-19
 
 ### Added
