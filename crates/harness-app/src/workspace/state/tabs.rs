@@ -525,7 +525,15 @@ impl HarnessWorkspace {
             }
             None => {
                 let id = self.next_tab_id();
-                let page = self.new_browser_pane(key, url, None, window, cx);
+                // Made to load its page now: that load is a visit.
+                let page = self.new_browser_pane(
+                    key,
+                    url,
+                    None,
+                    crate::browser_pane::PageLoad::Opened,
+                    window,
+                    cx,
+                );
                 let title = page.read(cx).label();
                 self.pane_clock = self.pane_clock.wrapping_add(1);
                 // Checked live above; nothing here creates a pane.
@@ -559,12 +567,14 @@ impl HarnessWorkspace {
     /// saves a moment later ([`Self::schedule_browser_save`]; a title rides
     /// along with the next save), and a page's new window opens as another
     /// browser tab in the same pane. The subscription ends when
-    /// the pane is released.
+    /// the pane is released. `load` says whether its first page view is a
+    /// visit to record (`PageLoad`).
     fn new_browser_pane(
         &mut self,
         key: &str,
         url: Option<String>,
         title: Option<String>,
+        load: crate::browser_pane::PageLoad,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<crate::browser_pane::BrowserPane> {
@@ -572,7 +582,7 @@ impl HarnessWorkspace {
         let history = self.browser_history.clone();
         let project = self.browser_project(key);
         let page = cx.new(|cx| {
-            let mut page = BrowserPane::new(url, title, history, window, cx);
+            let mut page = BrowserPane::new(url, title, load, history, window, cx);
             page.set_project(project, cx);
             page
         });
@@ -1097,7 +1107,15 @@ impl HarnessWorkspace {
                     // Saved before `0.0.0.0`/`[::]` loaded through loopback.
                     let url = (!url.is_empty())
                         .then(|| crate::link_routing::loopback_for_unspecified(&url));
-                    let page = self.new_browser_pane(key, url, title, window, cx);
+                    // Last session recorded its visit.
+                    let page = self.new_browser_pane(
+                        key,
+                        url,
+                        title,
+                        crate::browser_pane::PageLoad::Restored,
+                        window,
+                        cx,
+                    );
                     let title = page.read(cx).label();
                     self.attach_tab(
                         key,

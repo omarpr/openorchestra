@@ -37,7 +37,9 @@
 //! **History.** Each pane belongs to a project ([`BrowserProject`], set by
 //! the workspace) and records its committed pages into that project's
 //! history ([`history`]), shared by every browser tab through one
-//! [`BrowserHistory`] entity. Typing in the address bar suggests pages from
+//! [`BrowserHistory`] entity. A tab's first page view is a visit when the
+//! page was typed or opened (Ports, a routed link, a new window), not when
+//! it comes back (a restore, a tab switch): [`PageLoad`]. Typing in the address bar suggests pages from
 //! it: a list gpui draws over the page, so while it is open the page hides
 //! as it does for any other overlay ([`Self::page_visible`]).
 //!
@@ -612,11 +614,42 @@ fn take_title(held: &mut Option<String>, arrived: String) -> (bool, Option<Strin
 /// Whether a native view's first commit (`committed`) is only the page it
 /// was made to bring back (`reshow`: a tab shown again, or restored),
 /// which reloads it; that isn't a visit. A redirect elsewhere, or a view
-/// made for an address the user just entered (`reshow` is `None`), is.
+/// made for an address the user just entered or the app just opened
+/// (`reshow` is `None`, [`reshow_page`]), is.
 fn reshow_commit(reshow: Option<&str>, committed: &str) -> bool {
     reshow.is_some_and(|page| {
         history::recordable(committed).is_some_and(|c| history::recordable(page) == Some(c))
     })
+}
+
+/// Why a tab's next native view loads its page, which decides whether the
+/// view's first commit is a visit ([`reshow_page`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PageLoad {
+    /// An address the user entered (typed, a suggestion, a blank tab's
+    /// row) or retried, before the tab had a view.
+    Typed,
+    /// A tab made to load its URL now: a routed link, Ports' Open, a
+    /// page's new window (`open_browser_tab_in`).
+    Opened,
+    /// A tab restored from `browser-tabs.json` at launch: the page it was
+    /// on, already recorded when it was visited.
+    Restored,
+    /// The tab shown again after a tab switch (hiding dropped its view).
+    Reshown,
+}
+
+/// What the view being made now loads for (`next`), leaving `Reshown` for
+/// every later view: only the first view of a typed or opened page is new.
+fn take_load(next: &mut PageLoad) -> PageLoad {
+    std::mem::replace(next, PageLoad::Reshown)
+}
+
+/// The page a view made to load `url` for `load` brings back, whose first
+/// commit isn't a visit ([`reshow_commit`]): `None` for a page the user or
+/// the app just asked for.
+fn reshow_page(load: PageLoad, url: &str) -> Option<String> {
+    matches!(load, PageLoad::Restored | PageLoad::Reshown).then(|| url.to_string())
 }
 
 /// How many recent pages a blank tab lists.
@@ -698,9 +731,9 @@ pub(crate) struct BrowserPane {
     /// ([`reshow_commit`]). `None` when the view loads a page the user just
     /// asked for.
     reshow: Option<String>,
-    /// `navigate` ran with no view: the next view's load is a fresh visit,
-    /// not a page coming back.
-    fresh_load: bool,
+    /// Why the next native view loads the page ([`take_load`]): a visit
+    /// for a page just typed or opened, not for one coming back.
+    next_load: PageLoad,
     /// What a blank tab lists under "Running in this task" (`set_running`).
     running: Vec<RunningServer>,
     /// The page's Web Inspector is open, as last polled
@@ -714,9 +747,12 @@ pub(crate) struct BrowserPane {
 }
 
 impl BrowserPane {
+    /// A tab on `url` (`None`: blank), whose first page view loads for
+    /// `load` (a visit or not; a blank tab's comes from `navigate`).
     pub(crate) fn new(
         url: Option<String>,
         title: Option<String>,
+        load: PageLoad,
         history: Entity<BrowserHistory>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -828,7 +864,7 @@ impl BrowserPane {
             project: None,
             suggestions: None,
             reshow: None,
-            fresh_load: false,
+            next_load: load,
             running: Vec::new(),
             inspector_open: false,
             inspector_watch: InspectorWatch::Closed,
@@ -984,7 +1020,7 @@ impl BrowserPane {
         }
         match &self.native {
             Some(native) => native.view.load(&url),
-            None => self.fresh_load = true,
+            None => self.next_load = PageLoad::Typed,
         }
         cx.notify();
     }
@@ -1082,7 +1118,7 @@ impl BrowserPane {
                     })
                 });
                 self.failure = None;
-                self.reshow = (!std::mem::take(&mut self.fresh_load)).then(|| url.clone());
+                self.reshow = reshow_page(take_load(&mut self.next_load), &url);
                 self.attempted = Some(url);
                 self.inspector_open = false;
                 self.inspector_watch = InspectorWatch::Closed;
@@ -1252,7 +1288,7 @@ impl BrowserPane {
                 Some(native) => native.view.load(&failure.url),
                 None => {
                     // A retry of a page that never loaded: a visit if it does.
-                    self.fresh_load = true;
+                    self.next_load = PageLoad::Typed;
                     self.ensure_native(window, cx);
                 }
             }
@@ -2237,6 +2273,32 @@ mod tests {
         // A view made for what the user just entered.
         assert!(!reshow_commit(None, "http://localhost:8765/"));
         assert!(!reshow_commit(Some("about:blank"), "about:blank"));
+    }
+
+    /// Whether each of a tab's first two native views' first commit of
+    /// `url` is recorded, for a tab whose first view loads because of
+    /// `first`: what `ensure_native` and the `Committed` handler do.
+    fn visits(first: PageLoad, url: &str) -> [bool; 2] {
+        let mut next = first;
+        [(); 2].map(|_| !reshow_commit(reshow_page(take_load(&mut next), url).as_deref(), url))
+    }
+
+    #[test]
+    fn a_tab_s_first_load_is_a_visit_unless_it_brings_a_page_back() {
+        let url = "http://localhost:8765/";
+        // Typed into the address bar (or a suggestion, or a retry).
+        assert_eq!(visits(PageLoad::Typed, url), [true, false]);
+        // Ports' Open, a routed link, a page's new window.
+        assert_eq!(visits(PageLoad::Opened, url), [true, false]);
+        // Restored at launch: last session already recorded it.
+        assert_eq!(visits(PageLoad::Restored, url), [false, false]);
+        // Shown again after a tab switch.
+        assert_eq!(visits(PageLoad::Reshown, url), [false, false]);
+        // A restored page that redirects elsewhere is a visit there.
+        assert!(!reshow_commit(
+            reshow_page(PageLoad::Restored, url).as_deref(),
+            "http://localhost:8765/login"
+        ));
     }
 
     #[test]
