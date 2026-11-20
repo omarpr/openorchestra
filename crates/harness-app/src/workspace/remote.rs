@@ -1033,6 +1033,8 @@ impl HarnessWorkspace {
             return;
         };
         self.remote_close_setup();
+        // The keyboard was in the dialog; no window here to move it.
+        self.remote_setup_refocus.set(true);
         self.set_note(format!("Paired \u{2018}{name}\u{2019}"));
         cx.notify();
     }

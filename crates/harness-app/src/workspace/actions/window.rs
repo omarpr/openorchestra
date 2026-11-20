@@ -211,6 +211,7 @@ impl HarnessWorkspace {
             return;
         }
         self.settings_open = true;
+        self.remote_setup_refocus.set(false);
         self.settings_section = section;
         self.settings_focus.reset_scroll();
         let focus = self.settings_focus.control_focus(section.focus_id(), cx);

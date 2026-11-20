@@ -682,6 +682,11 @@ pub struct HarnessWorkspace {
     /// The settings screen (⌘, or the gear). Transient, never persisted.
     settings_open: bool,
     settings_focus: ui::ModalFocus,
+    /// Tab order inside the "Add a device" dialog over Settings.
+    remote_setup_focus: ui::ModalFocus,
+    /// The dialog closed itself (a device paired) with no window at hand:
+    /// the next Settings render hands the keyboard back to the Remote tab.
+    remote_setup_refocus: std::cell::Cell<bool>,
     /// Which Settings pane is showing. Not persisted: reopening Settings should
     /// land where the page starts, not where you happened to leave it.
     settings_section: SettingsSection,

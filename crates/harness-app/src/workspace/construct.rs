@@ -184,6 +184,8 @@ impl HarnessWorkspace {
             clearing_review: false,
             settings_open: false,
             settings_focus: ui::ModalFocus::new(cx),
+            remote_setup_focus: ui::ModalFocus::new(cx),
+            remote_setup_refocus: std::cell::Cell::new(false),
             settings_section: SettingsSection::General,
             review_model_catalogs: Default::default(),
             // Probed once at startup; the screen opens below if this machine is

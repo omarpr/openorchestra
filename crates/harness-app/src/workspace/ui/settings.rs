@@ -219,6 +219,9 @@ impl HarnessWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if self.remote_setup_refocus.take() && !self.remote.ui.setup_open {
+            self.focus_remote_section(window, cx);
+        }
         let viewport = window.viewport_size();
         let focus = &self.settings_focus;
         let mut card = focus

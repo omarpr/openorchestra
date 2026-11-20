@@ -753,7 +753,15 @@ impl HarnessWorkspace {
 
     pub(crate) fn focus_active_pane(&self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings_open {
-            self.settings_focus.restore(window, cx);
+            // "Add a device" sits over Settings, outside its card: while it
+            // is open the keyboard belongs to it.
+            if self.remote.ui.setup_open
+                && self.remote.serve == crate::workspace::remote::RemoteServe::Serving
+            {
+                self.remote_setup_focus.restore(window, cx);
+            } else {
+                self.settings_focus.restore(window, cx);
+            }
             return;
         }
         let Some(r) = self.resolve() else {
