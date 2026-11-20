@@ -63,8 +63,9 @@ pub(crate) struct History {
 ///
 /// Secrets never reach the history file or the lists that show it
 /// (ruling R16): `user:password@` is dropped, and so is a fragment that
-/// carries a token (`access_token`, `id_token`, `token=`, any case), as an
-/// OAuth redirect's does. Other fragments stay: hash routers need them.
+/// carries a token (`access_token`, `id_token`, `token=`, any case, also
+/// percent-encoded: `access%5Ftoken`), as an OAuth redirect's does. Other
+/// fragments stay: hash routers need them.
 pub(crate) fn recordable(url: &str) -> Option<String> {
     let mut parsed = url::Url::parse(url).ok()?;
     if !(matches!(parsed.scheme(), "http" | "https")
@@ -76,12 +77,37 @@ pub(crate) fn recordable(url: &str) -> Option<String> {
     let _ = parsed.set_username("");
     let _ = parsed.set_password(None);
     if parsed.fragment().is_some_and(|f| {
-        let f = f.to_ascii_lowercase();
+        // `fragment()` is as serialized: encoded bytes stay encoded.
+        let f = percent_decoded(f).to_ascii_lowercase();
         ["access_token", "id_token", "token="].iter().any(|t| f.contains(t))
     }) {
         parsed.set_fragment(None);
     }
     Some(parsed.into())
+}
+
+/// `text` with every `%XX` escape decoded (only to look for token names: the
+/// recorded URL keeps its own spelling). A `%` not followed by two hex
+/// digits stays as it is; bytes that aren't UTF-8 become U+FFFD.
+fn percent_decoded(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| char::from(b).to_digit(16);
+        match (bytes[i], bytes.get(i + 1).copied().and_then(hex), bytes.get(i + 2).copied().and_then(hex)) {
+            (b'%', Some(hi), Some(lo)) => {
+                // Two hex digits: always below 256.
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+            }
+            (b, _, _) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 impl History {
@@ -458,13 +484,25 @@ mod tests {
             ),
             ("http://localhost:3000/#/login?token=xyz", "http://localhost:3000/"),
             ("http://localhost:3000/#ID_TOKEN=x", "http://localhost:3000/"),
+            // A token name spelled with escapes is still a token name.
+            ("https://app.example.com/cb#access%5Ftoken=abc", "https://app.example.com/cb"),
+            ("https://app.example.com/cb#%69d_token=eyJ", "https://app.example.com/cb"),
+            ("http://localhost:3000/#/login?token%3Dxyz", "http://localhost:3000/"),
             // Hash routers and anchors keep theirs.
             ("http://localhost:3000/#/settings", "http://localhost:3000/#/settings"),
             ("https://docs.rs/url#examples", "https://docs.rs/url#examples"),
             ("http://localhost:3000/#/tokens", "http://localhost:3000/#/tokens"),
+            // Escapes that spell no token name keep the fragment as written.
+            ("http://localhost:3000/#/a%20b", "http://localhost:3000/#/a%20b"),
+            ("http://localhost:3000/#100%", "http://localhost:3000/#100%"),
         ] {
             assert_eq!(recordable(given).as_deref(), Some(kept), "{given}");
         }
+        // Nor does an encoded one reach the entries the suggestions read.
+        let mut h = History::default();
+        h.record("https://app.example.com/cb#access%5Ftoken=secret123", 1);
+        assert_eq!(urls(&h.entries), ["https://app.example.com/cb"]);
+        assert!(h.suggest("secret123", 1, MAX_SUGGESTIONS).is_empty());
     }
 
     #[test]
