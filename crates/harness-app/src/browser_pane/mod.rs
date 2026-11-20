@@ -245,6 +245,26 @@ fn page_refocus(pending: bool, in_pane: bool, in_address: bool) -> Refocus {
     }
 }
 
+/// A docked inspector holding AppKit's keyboard (`inspector_has_keyboard`)
+/// with gpui's focus off the page's side of its tab ([`gpui_focus_on_page`]):
+/// whether gpui's focus is pulled to the tab, and the page's pending
+/// keyboard request after that (`pending`, the pane's `focus_page`). A pull
+/// drops the request, as a click into the page does: the inspector has the
+/// keyboard, and a request left pending would make the next frame's
+/// [`page_refocus`] hand it to the page instead.
+fn inspector_focus_pull(
+    pending: bool,
+    inspector_has_keyboard: bool,
+    in_pane: bool,
+    in_address: bool,
+) -> (bool, bool) {
+    if inspector_has_keyboard && !gpui_focus_on_page(in_pane, in_address) {
+        (true, false)
+    } else {
+        (false, pending)
+    }
+}
+
 /// Where the keyboard goes when a browser tab is activated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ActivationFocus {
@@ -1246,6 +1266,11 @@ impl BrowserPane {
                 self.focus_page.set(true);
             }
             if opening {
+                // The inspector is about to take the keyboard (WebKit makes
+                // it first responder when it docks): a pending request for
+                // the page must not hand it to the page on the next frame
+                // ([`inspector_focus_pull`]).
+                self.focus_page.set(false);
                 window.focus(&self.focus_handle, cx);
             }
         }
@@ -1294,10 +1319,17 @@ impl BrowserPane {
             // it with the window; gpui's view gets it back.
             native.view.recover_focus();
         }
-        if open && native.view.inspector_has_focus() {
+        if open {
             let in_pane = self.focus_handle.contains_focused(window, cx);
             let in_address = self.address.focus_handle(cx).contains_focused(window, cx);
-            if !gpui_focus_on_page(in_pane, in_address) {
+            let (pull, pending) = inspector_focus_pull(
+                self.focus_page.get(),
+                native.view.inspector_has_focus(),
+                in_pane,
+                in_address,
+            );
+            self.focus_page.set(pending);
+            if pull {
                 window.focus(&self.focus_handle, cx);
             }
         }
@@ -2200,6 +2232,35 @@ mod tests {
         assert_eq!(page_label(Some("http://localhost:3000/x"), None), "Browser · localhost");
         assert_eq!(page_label(Some("http://localhost:3000/x"), Some("Vite")), "Browser · Vite");
         assert_eq!(page_label(Some("not a url"), None), "Browser");
+    }
+
+    #[test]
+    fn a_docked_inspector_that_took_the_keyboard_pulls_focus_without_the_page_taking_it() {
+        // (pending, inspector has keyboard, in pane, in address) ->
+        // (pull gpui's focus to the tab, pending after).
+        // The reported case: the page had the keyboard, the user clicked a
+        // terminal (focus-out: pending = true), then Inspect Element docked
+        // the inspector, which took the keyboard. The pull drops the
+        // request, so the next frame leaves the keyboard with the inspector.
+        let (pull, pending) = inspector_focus_pull(true, true, false, false);
+        assert_eq!((pull, pending), (true, false));
+        // gpui's focus is now on the page's side of the tab: no Take.
+        assert_eq!(page_refocus(pending, true, false), Refocus::Keep);
+        // (Left pending, it would have been handed to the page.)
+        assert_eq!(page_refocus(true, true, false), Refocus::Take);
+        // In the address bar (just clicked; it took the keyboard back
+        // itself): pulled to the page's side, request dropped.
+        assert_eq!(inspector_focus_pull(true, true, true, true), (true, false));
+        // Already on the page's side: nothing to pull, request untouched.
+        assert_eq!(inspector_focus_pull(true, true, true, false), (false, true));
+        assert_eq!(inspector_focus_pull(false, true, true, false), (false, false));
+        // The inspector doesn't hold the keyboard (closed, own window, or
+        // the page has it): nothing changes.
+        for pending in [false, true] {
+            for (in_pane, in_address) in [(false, false), (true, false), (true, true)] {
+                assert_eq!(inspector_focus_pull(pending, false, in_pane, in_address), (false, pending));
+            }
+        }
     }
 
     #[test]
