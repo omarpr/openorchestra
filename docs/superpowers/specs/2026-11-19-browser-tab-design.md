@@ -297,44 +297,69 @@ what changed against this spec, and why.
 
 ### Rulings during the build (R1–R11)
 
-- **R1:** Names follow the spec: "Shell" in the menu and on the tab; tabs
-  use short agent names (Claude, Codex, OpenCode, Kimi, Pi, Grok); the menu
-  keeps full names. The user asked for this in the design session.
-- **R2:** Editor and file tabs keep the Zed mark (`IconName::AiZed`) in
-  `EDITOR_MARK` `#3d8bfd`, not §5's cyan Code icon: a newer, deliberate
-  brand-mark choice already on the base branch.
-- **R3:** Shell keeps the `❯_` glyph in `TERMINAL_MARK` `#3ec7d6` (cyan),
-  not §5's yellow, which existed only to avoid the Editor's cyan; R2
-  removes that clash.
-- **R4:** New kinds use §5's colors: Diff `⑂` in `#e06c9f`, Browser in
-  `#61afef` (`IconName::ToolWeb`; this zed rev has no Globe). pi chat uses
-  the Pi logo (`agent_icon(Pi)`), in the menu and, after the final review,
-  on its tab too.
-- **R5:** The base branch's "AGENTS" heading (uppercase small label over a
-  rule) stays; the entry model calls it `Separator("Agents")`.
-- **R6:** Subagents ran no GUI, manual or universal-build checks; the
-  controller runs one consolidated visual check and one universal build
-  at the end (Task 9).
-- **R7:** The controller checked visually, after Task 6, that the page
-  draws above gpui and takes clicks before the keyboard work built on it.
-- **R8 (security, fail-safe):** §3's "non-http(s) navigations → OS" is
-  narrowed. `file:`, `javascript:` and unknown schemes are ignored; app
-  schemes leave only for a link click in the main frame; downloads only
-  from the main frame; `open_external` is rate-limited to one per second
-  and passes the normalized URL; `blob:`/`data:` downloads report "not
-  supported". Cost: "open in app" redirects not started by a click don't
-  launch (Open in default browser is the way out).
-- **R9:** A user's own action (the Open in default browser button, an app
-  address typed in the bar) uses the unthrottled `open_external_now`; the
-  rate limit stays for page-originated opens. Unsupported downloads show
-  a transient notice, not the full-page error.
-- **R10:** Saves after browser changes are coalesced into one save ~1 s
-  after the last change (fsync'd three-file saves on the UI thread
-  otherwise); open, close, move and quit still save at once. Narrowed by
-  the final review: only URL changes schedule it (below).
-- **R11:** Failure toasts count as an overlay while showing (they must be
-  seen); info toasts, tooltips, drag previews and the conductor stay under
-  the page (hiding it whenever the conductor speaks would blank it).
+The rulings as logged during the build (ruling text verbatim), with a
+note where what shipped differs.
+
+- **R1:** Names follow the spec — "Shell" in menu and tab; tabs use short
+  agent names (Claude, Codex, OpenCode, Kimi, Pi, Grok); menu keeps full
+  names. — user asked for this explicitly in the design session — cost if
+  wrong: rename strings.
+- **R2:** Editor and file tabs keep the base branch's Zed mark
+  (IconName::AiZed) in EDITOR_MARK 0x3d8bfd instead of spec's cyan Code
+  icon. — newer, deliberate brand-mark choice already committed by the
+  user's other session; matches "like agent colors" — cost if wrong: one
+  icon + constant.
+- **R3:** Shell keeps base's ❯_ glyph in TERMINAL_MARK 0x3ec7d6 (cyan)
+  instead of spec yellow; spec's yellow existed only to avoid Editor-cyan,
+  which R2 removes. — cost if wrong: one constant.
+- **R4:** New kinds use spec colors: Diff ⑂ glyph in 0xe06c9f (pink, was
+  grey), Browser Globe in 0x61afef. pi chat row uses agent_icon(Pi). —
+  spec values — cost: constants. *As built:* this zed rev has no Globe, so
+  the Browser icon is `IconName::ToolWeb`; after the final review the pi
+  chat tab uses `agent_icon(Pi)` too.
+- **R5:** Keep base's "AGENTS" heading style (uppercase small label over a
+  rule); the entry model calls it Separator("Agents"). — satisfies "an
+  agents separator" — cost: style tweak.
+- **R6:** Subagents don't do GUI/manual checks or release/universal builds
+  (no release cache; hours to build; scratch-app needs isolation + Screen
+  Recording). Implementers verify with cargo test + debug cargo
+  build/check; the controller runs one consolidated scratch-app visual
+  check + one `make dmg`-style universal build at Task 9. — cost if wrong:
+  UI bugs found later, in one batch.
+- **R7:** Controller runs a visual smoke check (page draws above gpui +
+  takes clicks) right after Task 6, before Task 7 — fallback per T5
+  report: sibling view in contentView. — cost if wrong: T6 rework. *As
+  run:* a partial check from the user's screenshot confirmed the page
+  draws above gpui, aligned, with its label; clicks weren't confirmed then
+  and are in the Task 9 manual checks.
+- **R8 (security, fail-safe):** file:/javascript:/unknown → Ignore; custom
+  app schemes → External only on LinkActivated from main frame, else
+  Ignore+log; downloads main-frame only (+LinkActivated on action path);
+  open_external rate-limited 1/s and passes normalized URL; blob/data
+  downloads emit on_failed. — spec said "non-http(s) → OS"; narrowed for
+  safety — cost if wrong: OAuth/redirect-to-app flows don't launch from a
+  browser tab (user has Open-in-default-browser button). *As built:*
+  blob/data downloads report through `on_notice` (R9); a link counts as
+  clicked only right after a real gesture, and download responses are
+  gated too (both below).
+- **R9 (carry to T6):** add an unthrottled user-action entry (e.g.
+  link_routing::open_external_now) for the "Open in default browser"
+  button and typed non-web address-bar input; rate limiter stays for
+  page-originated opens. DOWNLOAD_UNSUPPORTED and similar non-load
+  failures render as a transient notice, not the full-page error. — cost
+  if wrong: button silently dead while a page spams.
+- **R10** (Task 6 review: an uncoalesced fsync'd 3-file save on every
+  title/URL change, on the UI thread): coalesce to one trailing save ~1s
+  after last browser change; immediate saves stay for open/close/move/quit
+  — overrides brief's save-per-event — cost: up to 1s of title/url lost on
+  crash. *As built:* after the final review only URL changes schedule
+  that save (below).
+- **R11 (T7 Important 2):** failure/error toasts count as an overlay while
+  visible (rare, must be seen); info toasts, tooltips, drag previews and
+  the conductor stay under the page (conductor can be dragged off the
+  page; hiding the page whenever he speaks would blank it constantly) —
+  cost if wrong: conductor bubble unseen while over a page; mention to
+  user.
 
 ### CodeRabbit review (PR #28)
 
@@ -367,8 +392,11 @@ what changed against this spec, and why.
 - **Popups:** `javaScriptCanOpenWindowsAutomatically` is off (macOS
   defaults it on), and a page opens at most one tab per second; §3's
   `window.open` → new tab now needs a user gesture.
-- **zed context menus:** the Files/Git panels' menus can flip over the
-  center column, so a live `ui::ContextMenu` counts as an overlay.
+- **zed context menus (open):** the Files/Git panels' menus can flip over
+  the center column and draw under the page. Counting live
+  `ui::ContextMenu` entities as an overlay was tried and reverted: at zed
+  e8bc16a a parent dismissed with a submenu open (the Git panel's "Copy
+  Tag") leaks with it, which would hide every page until restart.
 - **Routed hosts:** also `0.0.0.0` and `[::]` (what dev servers print when
   bound to every interface), Tailscale's IPv6 range `fd7a:115c:a1e0::/48`,
   names ending in the root dot (`localhost.`) and IPv4-mapped IPv6
@@ -377,9 +405,9 @@ what changed against this spec, and why.
   ⌘1..9, an open, the restored active tab) gives the page the keyboard
   with no click; a blank tab still focuses its address bar.
 - **Download responses:** a server-marked download leaves only if the app
-  started the navigation that fetched it, or it followed a real gesture on
-  the page within 1 s; a script's own navigation to an attachment is
-  ignored.
+  started the navigation that fetched it (read as no source frame, an
+  assumption not yet observed), or it followed a real gesture on the page
+  within 1 s; a script's own navigation to an attachment is ignored.
 - **Saves:** a title-only change relabels the tab but saves nothing (an
   animated title would save forever); the title rides along with the
   next save.
