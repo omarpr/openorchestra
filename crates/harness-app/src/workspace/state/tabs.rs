@@ -564,7 +564,13 @@ impl HarnessWorkspace {
         cx: &mut Context<Self>,
     ) -> Entity<crate::browser_pane::BrowserPane> {
         use crate::browser_pane::{BrowserEvent, BrowserPane};
-        let page = cx.new(|cx| BrowserPane::new(url, title, window, cx));
+        let history = self.browser_history.clone();
+        let project = self.browser_project(key);
+        let page = cx.new(|cx| {
+            let mut page = BrowserPane::new(url, title, history, window, cx);
+            page.set_project(project, cx);
+            page
+        });
         let key = key.to_string();
         cx.subscribe_in(&page, window, move |ws, page, event: &BrowserEvent, window, cx| {
             match event {
@@ -616,6 +622,38 @@ impl HarnessWorkspace {
         }));
     }
 
+    /// The project a browser tab in pane `key` belongs to, for its history:
+    /// the repository the sidebar groups the pane's worktree under, keyed
+    /// by that repository's main checkout. Every pane of a task (each
+    /// member, the coordinator) belongs to the task's home repository.
+    /// `None` while the pane's repository isn't known (not loaded yet, or
+    /// removed).
+    pub(crate) fn browser_project(&self, key: &str) -> Option<crate::browser_pane::BrowserProject> {
+        let by_name = |name: &str| {
+            self.repo_root_for_name(name).map(|root| (root, name.to_string()))
+        };
+        let (root, name) = match pane_owner(key) {
+            PaneOwner::Main(name) => by_name(name)?,
+            PaneOwner::Task(task_id) => {
+                let task = self.task_store.get(task_id)?;
+                // The home member's own registry entry names its main
+                // checkout exactly; the repo name is the fallback.
+                task.home_member()
+                    .and_then(|m| self.manager.registry.get(&m.worktree_id))
+                    .map(|e| (e.repo_root.clone(), e.repo.clone()))
+                    .or_else(|| by_name(&task.home_repo))?
+            }
+            PaneOwner::Worktree(id) => {
+                let entry = self.manager.registry.get(id)?;
+                (entry.repo_root.clone(), entry.repo.clone())
+            }
+        };
+        Some(crate::browser_pane::BrowserProject {
+            key: root.to_string_lossy().into_owned(),
+            name,
+        })
+    }
+
     /// The browser pane whose page should be on screen: the selected
     /// worktree's active tab, when it is a browser tab, the center is drawn
     /// (not covered by the maximized tools panel) and the window isn't
@@ -643,6 +681,10 @@ impl HarnessWorkspace {
     /// they overlap the page they are under it. Native `window.prompt`
     /// sheets (NSAlert) are their own window, above the page, and need
     /// nothing.
+    ///
+    /// A browser tab's own address-bar suggestion list isn't listed here:
+    /// the pane hides its page for it itself, in the same frame
+    /// (`BrowserPane::page_visible`).
     pub(crate) fn overlay_open(&self, cx: &App) -> bool {
         self.tab_menu.is_some()
             || self.tab_context_menu.is_some()
@@ -675,6 +717,18 @@ impl HarnessWorkspace {
     pub(crate) fn sync_browser_views(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let shown = self.shown_browser();
         let overlay = self.overlay_open(cx);
+        // The shown tab's project, in case its repository wasn't known when
+        // the tab was made (restored before the data loaded).
+        let shown_project = shown.and_then(|id| {
+            self.panes
+                .iter()
+                .find(|(_, p)| {
+                    p.tabs.iter().any(
+                        |t| matches!(&t.content, TabContent::Browser(b) if b.entity_id() == id),
+                    )
+                })
+                .and_then(|(key, _)| self.browser_project(key))
+        });
         let pages: Vec<Entity<crate::browser_pane::BrowserPane>> = self
             .panes
             .values()
@@ -696,6 +750,9 @@ impl HarnessWorkspace {
             // hidden rather than flashing up for a frame.
             page.update(cx, |page, cx| {
                 page.set_overlay_open(overlay);
+                if let Some(project) = shown_project.clone() {
+                    page.set_project(Some(project), cx);
+                }
                 page.set_shown(true, window, cx);
             });
         }
@@ -1174,6 +1231,31 @@ pub(crate) enum BrowserOpen {
 
 /// The tab an open of `url` lands on instead of a new one, if any: never
 /// for a blank tab (`None`) or [`BrowserOpen::AlwaysNew`].
+/// What a pane key names, for finding the repository it belongs to
+/// ([`HarnessWorkspace::browser_project`]): the keys `resolve` gives panes.
+#[derive(Debug, PartialEq, Eq)]
+enum PaneOwner<'a> {
+    /// `main:<repo name>`: a repository's main checkout.
+    Main(&'a str),
+    /// `task:<id>:member:<worktree>` (the coordinator's included) or the
+    /// legacy `task:<id>`: a task.
+    Task(&'a str),
+    /// Anything else: a lone worktree's id.
+    Worktree(&'a str),
+}
+
+fn pane_owner(key: &str) -> PaneOwner<'_> {
+    if let Some(name) = key.strip_prefix("main:") {
+        PaneOwner::Main(name)
+    } else if let Some((task_id, _)) = a2a_broker::parse_task_member_pane_key(key) {
+        PaneOwner::Task(task_id)
+    } else if let Some(task_id) = a2a_broker::parse_legacy_task_pane_key(key) {
+        PaneOwner::Task(task_id)
+    } else {
+        PaneOwner::Worktree(key)
+    }
+}
+
 pub(crate) fn reusable_browser_tab(
     tabs: &[crate::panes_state::TabRecord],
     url: Option<&str>,
@@ -1256,6 +1338,24 @@ fn pane_to_evict<'a>(
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn a_pane_key_names_its_checkout_task_or_worktree() {
+        assert_eq!(pane_owner("main:omar-harness"), PaneOwner::Main("omar-harness"));
+        assert_eq!(
+            pane_owner(&a2a_broker::task_member_pane_key("auth", "omar-harness/auth")),
+            PaneOwner::Task("auth")
+        );
+        assert_eq!(
+            pane_owner(&a2a_broker::coordinator_pane_key("auth")),
+            PaneOwner::Task("auth")
+        );
+        assert_eq!(pane_owner("task:auth"), PaneOwner::Task("auth"));
+        assert_eq!(
+            pane_owner("omar-harness/fix-login"),
+            PaneOwner::Worktree("omar-harness/fix-login")
+        );
+    }
 
     #[test]
     fn closing_a_tab_selects_the_next_tab_then_the_previous() {

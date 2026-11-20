@@ -15,7 +15,10 @@ Unreleased is empty.
 ### Added
 
 - **Browser** tabs (＋ → Browser): a WebKit page next to your shells and
-  agents, with back, forward, reload and Open in default browser.
+  agents, with back, forward, reload and Open in default browser. Each
+  project remembers the pages its browser tabs open, and the address bar
+  suggests them as you type (↑/↓ and Enter to pick one). **Settings ›
+  General › Clear browsing history** forgets them.
 - Links to local addresses (localhost, your network, Tailscale) and ports
   opened from the current project or task open in a browser tab. Other links
   still use your default browser. Change it in **Settings › General**.

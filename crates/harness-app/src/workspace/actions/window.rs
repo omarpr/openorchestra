@@ -148,6 +148,7 @@ impl HarnessWorkspace {
     /// waiting on the user.
     pub(crate) fn request_quit(&mut self, cx: &mut Context<Self>) -> bool {
         self.save_panes(cx);
+        self.browser_history.update(cx, |h, _| h.flush());
         let sessions = self.live_harness_sessions();
         // Nothing of ours is running — no reason to ask.
         if sessions.is_empty() {

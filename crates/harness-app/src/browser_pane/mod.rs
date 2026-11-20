@@ -29,8 +29,18 @@
 //! The pane talks to the workspace through [`BrowserEvent`]s: a changed URL
 //! (relabel the tab, save), a changed title (relabel only; the next save
 //! carries it), and a page's request for a new window.
+//!
+//! **History.** Each pane belongs to a project ([`BrowserProject`], set by
+//! the workspace) and records its committed pages into that project's
+//! history ([`history`]), shared by every browser tab through one
+//! [`BrowserHistory`] entity. Typing in the address bar suggests pages from
+//! it: a list gpui draws over the page, so while it is open the page hides
+//! as it does for any other overlay ([`Self::page_visible`]).
 
+mod history;
 mod webview;
+
+pub(crate) use history::BrowserHistory;
 
 use std::cell::Cell;
 use std::time::{Duration, Instant};
@@ -38,9 +48,10 @@ use std::time::{Duration, Instant};
 use editor::Editor;
 use futures::StreamExt as _;
 use futures::channel::mpsc;
+use editor::EditorEvent;
 use gpui::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, ParentElement, Render,
-    Styled, Task, Window, canvas, div, prelude::*, px, svg,
+    App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton,
+    ParentElement, Render, Styled, Task, Window, canvas, div, prelude::*, px, svg,
 };
 
 use crate::link_routing;
@@ -258,6 +269,8 @@ impl EventEmitter<BrowserEvent> for BrowserPane {}
 enum PageEvent {
     Title(String),
     Url(String),
+    /// The page is now at this URL for real (`NativeEvents::on_commit`).
+    Committed(String),
     Loading(bool),
     /// The failing URL (when WebKit names it), the reason, and the view's
     /// navigation number at the time ([`failure_is_current`]).
@@ -302,6 +315,41 @@ struct Native {
 /// How long a notice (e.g. an unsupported download) stays in the bar.
 const NOTICE_TTL: Duration = Duration::from_secs(5);
 
+/// The project (repository) a browser tab belongs to, whose history it
+/// records into and suggests from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BrowserProject {
+    /// The history's key: the main checkout's path.
+    pub key: String,
+    /// The project's display name, for "Recent in …".
+    pub name: String,
+}
+
+/// The address bar's suggestion list: pages from the project's history
+/// matching what was typed.
+struct Suggestions {
+    items: Vec<history::HistoryEntry>,
+    /// The row ↑/↓ moved to; Enter loads it. `None` until the first ↑/↓,
+    /// so Enter loads what was typed.
+    highlight: Option<usize>,
+}
+
+/// The highlighted row after ↑ (`down` false) or ↓ in a list of `len`,
+/// from `current`. ↓ from nothing takes the first row and ↑ the last;
+/// moving past either end goes back to no row, where Enter loads what was
+/// typed.
+fn move_highlight(current: Option<usize>, len: usize, down: bool) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    match (current, down) {
+        (None, true) => Some(0),
+        (None, false) => Some(len - 1),
+        (Some(i), true) => (i + 1 < len).then_some(i + 1),
+        (Some(i), false) => i.checked_sub(1),
+    }
+}
+
 pub(crate) struct BrowserPane {
     /// The page's URL; `None` for a blank tab.
     url: Option<String>,
@@ -341,12 +389,22 @@ pub(crate) struct BrowserPane {
     /// request outlives the view that made it.
     new_window_tx: mpsc::UnboundedSender<String>,
     _new_windows: Task<()>,
+    /// Every project's browsing history (shared by all panes).
+    history: Entity<BrowserHistory>,
+    /// The project this tab records into; `None` until the workspace knows
+    /// it (`set_project`).
+    project: Option<BrowserProject>,
+    /// The address bar's suggestion list, while open.
+    suggestions: Option<Suggestions>,
+    /// Opens and refreshes the suggestions as the user types.
+    _address_edits: gpui::Subscription,
 }
 
 impl BrowserPane {
     pub(crate) fn new(
         url: Option<String>,
         title: Option<String>,
+        history: Entity<BrowserHistory>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -402,9 +460,19 @@ impl BrowserPane {
         let address_focus_out =
             cx.on_focus_out(&address.focus_handle(cx), window, |pane, _, window, cx| {
                 if window.is_window_active() {
+                    pane.close_suggestions(cx);
                     pane.reset_address(window, cx);
                 }
             });
+        let address_edits = cx.subscribe_in(
+            &address,
+            window,
+            |pane, _, event: &EditorEvent, window, cx| {
+                if matches!(event, EditorEvent::BufferEdited) {
+                    pane.update_suggestions(window, cx);
+                }
+            },
+        );
         let (new_window_tx, mut new_window_rx) = mpsc::unbounded::<String>();
         let new_windows = cx.spawn_in(window, async move |this, cx| {
             let mut last_opened = None;
@@ -443,7 +511,105 @@ impl BrowserPane {
             _address_focus_out: address_focus_out,
             new_window_tx,
             _new_windows: new_windows,
+            history,
+            project: None,
+            suggestions: None,
+            _address_edits: address_edits,
         }
+    }
+
+    /// The project this tab belongs to (the workspace works it out from the
+    /// tab's pane). Loads that project's history if it isn't yet.
+    /// Idempotent, and it never notifies: the workspace calls it while
+    /// rendering.
+    pub(crate) fn set_project(&mut self, project: Option<BrowserProject>, cx: &mut Context<Self>) {
+        if self.project == project {
+            return;
+        }
+        if let Some(p) = &project {
+            self.history.update(cx, |h, _| h.ensure_loaded(&p.key));
+        }
+        self.project = project;
+    }
+
+    /// The page committed `url`: a visit to record, unless it is already
+    /// the project's latest page (a reload, or this tab's view coming back
+    /// on a tab switch, which loads the page again).
+    fn record_visit(&mut self, url: &str, cx: &mut Context<Self>) {
+        let Some(project) = &self.project else {
+            return;
+        };
+        let key = project.key.clone();
+        self.history.update(cx, |h, cx| h.record(&key, url, cx));
+    }
+
+    /// The page's title arrived: it names the page's history entry.
+    fn record_title(&mut self, cx: &mut Context<Self>) {
+        let (Some(project), Some(url), Some(title)) = (&self.project, &self.url, &self.title)
+        else {
+            return;
+        };
+        let (key, url, title) = (project.key.clone(), url.clone(), title.clone());
+        self.history
+            .update(cx, |h, cx| h.set_title(&key, &url, &title, cx));
+    }
+
+    /// The user typed in the address bar: show the history pages matching
+    /// it, or close the list when nothing does. Our own `set_text` (the
+    /// page's URL put back, an address loaded) edits the bar too; those
+    /// leave it equal to the page's URL, or out of focus, and open nothing.
+    fn update_suggestions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.address.read(cx).text(cx);
+        let typing = self.address.focus_handle(cx).is_focused(window)
+            && text.trim() != self.url.as_deref().unwrap_or_default();
+        let items: Vec<history::HistoryEntry> = match (&self.project, typing) {
+            (Some(project), true) => self
+                .history
+                .read(cx)
+                .get(&project.key)
+                .map(|h| {
+                    h.suggest(&text, history::unix_now(), history::MAX_SUGGESTIONS)
+                        .into_iter()
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        self.suggestions = (!items.is_empty()).then_some(Suggestions {
+            items,
+            highlight: None,
+        });
+        cx.notify();
+    }
+
+    fn close_suggestions(&mut self, cx: &mut Context<Self>) {
+        if self.suggestions.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// ↑/↓ in the address bar move through the suggestions; with none open
+    /// they do what they did before (nothing, in a one-line field).
+    fn select_suggestion(&mut self, down: bool, cx: &mut Context<Self>) {
+        match &mut self.suggestions {
+            Some(s) => {
+                s.highlight = move_highlight(s.highlight, s.items.len(), down);
+                cx.notify();
+            }
+            None => cx.propagate(),
+        }
+    }
+
+    /// Load `url` (absolute, http(s)) in this tab as if typed: the bar shows
+    /// it, the list closes and the page takes the keyboard once shown.
+    fn load_here(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.suggestions = None;
+        self.address
+            .update(cx, |e, cx| e.set_text(url.as_str(), window, cx));
+        self.navigate(url, cx);
+        window.focus(&self.focus_handle, cx);
+        self.focus_page.set(true);
     }
 
     pub(crate) fn url(&self) -> Option<&str> {
@@ -503,6 +669,7 @@ impl BrowserPane {
         } else {
             self.native = None;
             self.loading = false;
+            self.suggestions = None;
             // A focus request the page never got to take (e.g. Enter that
             // ended in an error) must not grab the keyboard on a later visit.
             self.focus_page.set(false);
@@ -531,9 +698,15 @@ impl BrowserPane {
     }
 
     /// [`web_view_visible`] for this pane; `slot` is whether the tab body is
-    /// the page's slot this frame.
+    /// the page's slot this frame. The address bar's suggestion list counts
+    /// as an overlay: gpui draws it over the page.
     fn page_visible(&self, slot: bool) -> bool {
-        web_view_visible(self.shown, slot, self.overlay_open, self.failure.is_some())
+        web_view_visible(
+            self.shown,
+            slot,
+            self.overlay_open || self.suggestions.is_some(),
+            self.failure.is_some(),
+        )
     }
 
     /// Create the native view if the tab is shown and has a page. Loading it
@@ -585,6 +758,7 @@ impl BrowserPane {
                 let title = Some(title).filter(|t| !t.trim().is_empty());
                 if title != self.title {
                     self.title = title;
+                    self.record_title(cx);
                     cx.emit(BrowserEvent::TitleChanged);
                 }
             }
@@ -594,6 +768,11 @@ impl BrowserPane {
                     cx.emit(BrowserEvent::UrlChanged);
                 }
                 self.sync_address(window, cx);
+            }
+            PageEvent::Committed(url) => {
+                self.record_visit(&url, cx);
+                // A title that came before its page was recorded.
+                self.record_title(cx);
             }
             PageEvent::Loading(loading) => self.loading = loading,
             PageEvent::Failed(url, reason, navigation) => {
@@ -651,17 +830,21 @@ impl BrowserPane {
         cx.notify();
     }
 
-    /// Enter in the address bar.
+    /// Enter in the address bar: the highlighted suggestion, else what was
+    /// typed.
     fn confirm(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(url) = self
+            .suggestions
+            .take()
+            .and_then(|s| s.highlight.and_then(|i| s.items.into_iter().nth(i)))
+            .map(|e| e.url)
+        {
+            self.load_here(url, window, cx);
+            return;
+        }
         let typed = self.address.read(cx).text(cx);
         match normalize_address(&typed) {
-            Some(Address::Web(url)) => {
-                self.address
-                    .update(cx, |e, cx| e.set_text(url.as_str(), window, cx));
-                self.navigate(url, cx);
-                window.focus(&self.focus_handle, cx);
-                self.focus_page.set(true);
-            }
+            Some(Address::Web(url)) => self.load_here(url, window, cx),
             Some(Address::External(url)) => {
                 link_routing::open_external_now(&url);
                 self.reset_address(window, cx);
@@ -671,8 +854,13 @@ impl BrowserPane {
         }
     }
 
-    /// Esc in the address bar: put the page's URL back and return to the page.
+    /// Esc in the address bar: close the suggestions; with none open, put
+    /// the page's URL back and return to the page.
     fn cancel(&mut self, _: &menu::Cancel, window: &mut Window, cx: &mut Context<Self>) {
+        if self.suggestions.take().is_some() {
+            cx.notify();
+            return;
+        }
         window.focus(&self.focus_handle, cx);
         self.reset_address(window, cx);
         self.focus_page.set(true);
@@ -772,6 +960,13 @@ impl BrowserPane {
                     .key_context("HarnessInput")
                     .on_action(cx.listener(Self::confirm))
                     .on_action(cx.listener(Self::cancel))
+                    // A one-line editor passes ↑/↓ on.
+                    .on_action(cx.listener(|pane, _: &zed_actions::editor::MoveUp, _, cx| {
+                        pane.select_suggestion(false, cx)
+                    }))
+                    .on_action(cx.listener(|pane, _: &zed_actions::editor::MoveDown, _, cx| {
+                        pane.select_suggestion(true, cx)
+                    }))
                     .flex()
                     .flex_1()
                     .min_w_0()
@@ -815,6 +1010,79 @@ impl BrowserPane {
                     }))
                 }),
             )
+    }
+
+    /// The suggestion list under the address bar, over the page (hidden
+    /// meanwhile: `page_visible`). Rows act on mouse-down: a click elsewhere
+    /// takes gpui's focus out of the address bar, whose focus-out closes the
+    /// list before a mouse-up could land.
+    fn render_suggestions(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let suggestions = self.suggestions.as_ref()?;
+        let mut list = div()
+            .id("browser-suggestions")
+            .absolute()
+            .top(px(32.0))
+            // Under the address field: past back, forward and reload.
+            .left(px(92.0))
+            .right(px(36.0))
+            .max_w(px(640.0))
+            .flex()
+            .flex_col()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(hx.border)
+            .bg(hx.bg1)
+            .shadow_md();
+        for (i, entry) in suggestions.items.iter().enumerate() {
+            let highlighted = suggestions.highlight == Some(i);
+            let url = entry.url.clone();
+            let title = if entry.title.is_empty() {
+                history::display_url(&entry.url).to_string()
+            } else {
+                entry.title.clone()
+            };
+            list = list.child(
+                div()
+                    .id(("browser-suggestion", i))
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_2()
+                    .py_1()
+                    .mx_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .when(highlighted, |d| d.bg(hx.surface_hover))
+                    .hover(|d| d.bg(hx.surface_hover))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |pane, _, window, cx| {
+                            cx.stop_propagation();
+                            pane.load_here(url.clone(), window, cx);
+                        }),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .max_w(px(260.0))
+                            .truncate()
+                            .text_xs()
+                            .text_color(hx.tx0)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(hx.tx2)
+                            .child(history::display_url(&entry.url).to_string()),
+                    ),
+            );
+        }
+        Some(list.into_any_element())
     }
 
     fn render_body(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -917,6 +1185,7 @@ fn page_events(
     NativeEvents {
         on_title: sender(PageEvent::Title),
         on_url: sender(PageEvent::Url),
+        on_commit: sender(PageEvent::Committed),
         on_loading: Box::new(move |loading| {
             let _ = loading_tx.unbounded_send(PageEvent::Loading(loading));
         }),
@@ -1023,11 +1292,13 @@ impl Render for BrowserPane {
             .track_focus(&self.focus_handle)
             .key_context("BrowserPane")
             .flex()
+            .relative()
             .flex_col()
             .size_full()
             .bg(hx.bg0)
             .child(self.render_bar(&hx, cx))
             .child(self.render_body(&hx, cx))
+            .children(self.render_suggestions(&hx, cx))
     }
 }
 
@@ -1225,6 +1496,18 @@ mod tests {
         // The request then waits for gpui's focus on the page's side of
         // the tab, which activation just put there.
         assert_eq!(page_refocus(true, true, false), Refocus::Take);
+    }
+
+    #[test]
+    fn arrows_walk_the_suggestions_and_past_the_ends_back_to_the_typed_text() {
+        assert_eq!(move_highlight(None, 3, true), Some(0));
+        assert_eq!(move_highlight(Some(0), 3, true), Some(1));
+        assert_eq!(move_highlight(Some(2), 3, true), None);
+        assert_eq!(move_highlight(None, 3, false), Some(2));
+        assert_eq!(move_highlight(Some(1), 3, false), Some(0));
+        assert_eq!(move_highlight(Some(0), 3, false), None);
+        assert_eq!(move_highlight(None, 0, true), None);
+        assert_eq!(move_highlight(None, 0, false), None);
     }
 
     #[test]

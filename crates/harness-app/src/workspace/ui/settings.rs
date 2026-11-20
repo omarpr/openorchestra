@@ -726,6 +726,39 @@ impl HarnessWorkspace {
                     cx.notify();
                 })),
             );
+            body = body
+                .child(
+                    div().flex().pt_1().child(
+                        focus
+                            .scroll_button("browser-history-clear", "Clear browsing history", hx, cx)
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(hx.border)
+                            .bg(hx.surface)
+                            .text_xs()
+                            .text_color(hx.tx1)
+                            .cursor_pointer()
+                            .hover(|d| d.bg(hx.surface_hover).text_color(hx.tx0))
+                            .child("Clear browsing history")
+                            .on_click(cx.listener(|ws, _, _, cx| {
+                                cx.stop_propagation();
+                                let cleared = ws.browser_history.update(cx, |h, cx| h.clear(cx));
+                                match cleared {
+                                    Ok(()) => ws.set_note("Browsing history cleared".into()),
+                                    Err(e) => ws.set_error_note(format!(
+                                        "Couldn't clear browsing history: {e}"
+                                    )),
+                                }
+                                cx.notify();
+                            })),
+                    ),
+                )
+                .child(hint(
+                    "Pages you open in browser tabs are remembered per project, to suggest addresses.",
+                    hx,
+                ));
 
             // ---- Conductor -------------------------------------------------------
             let always = self.prefs.conductor_always_on;

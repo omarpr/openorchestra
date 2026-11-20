@@ -176,7 +176,7 @@ impl HarnessWorkspace {
     }
 
     /// The tracked git root for a repo group, by its display name.
-    fn repo_root_for_name(&self, name: &str) -> Option<PathBuf> {
+    pub(crate) fn repo_root_for_name(&self, name: &str) -> Option<PathBuf> {
         self.data
             .repos
             .iter()

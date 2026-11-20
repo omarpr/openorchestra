@@ -781,6 +781,9 @@ pub struct HarnessWorkspace {
     /// The pending save after browser URL changes
     /// (`schedule_browser_save`); dropping it cancels it.
     browser_save: Option<gpui::Task<()>>,
+    /// Every project's browsing history, shared with the browser tabs
+    /// (`~/.openorchestra/browser-history`).
+    browser_history: Entity<crate::browser_pane::BrowserHistory>,
     /// The quit confirmation is open (keep vs. close terminals). Present only
     /// while the user is deciding; carries the "remember my choice" checkbox.
     close_prompt: Option<ClosePrompt>,

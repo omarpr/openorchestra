@@ -250,8 +250,15 @@ fn us_key(key_code: u16) -> Option<&'static str> {
 pub(crate) struct NativeEvents {
     /// The page title; empty when the page has none.
     pub on_title: Box<dyn Fn(String)>,
-    /// The page URL, including `pushState` changes.
+    /// The page URL, including `pushState` changes. It also moves to an
+    /// address WebKit is only trying (and falls back if that fails), so it
+    /// is not a visit: see `on_commit`.
     pub on_url: Box<dyn Fn(String)>,
+    /// The page is now at this URL for real: a top-level navigation
+    /// committed (`didCommitNavigation`), or the URL changed in place with
+    /// nothing loading (`pushState`, a `#fragment`). What browsing history
+    /// records.
+    pub on_commit: Box<dyn Fn(String)>,
     pub on_loading: Box<dyn Fn(bool)>,
     /// A page load failed: the URL that failed, when WebKit names it (the
     /// view's own URL has already fallen back to the last committed page by
@@ -285,6 +292,7 @@ impl Default for NativeEvents {
         Self {
             on_title: Box::new(|_| {}),
             on_url: Box::new(|_| {}),
+            on_commit: Box::new(|_| {}),
             on_loading: Box::new(|_| {}),
             on_failed: Box::new(|_, _, _| {}),
             on_notice: Box::new(|_| {}),
@@ -634,6 +642,12 @@ mod mac {
                     "URL" => {
                         let url = url_string(unsafe { view.URL() });
                         if !url.is_empty() {
+                            // Nothing loading: a same-page change, which
+                            // commits nothing but is where the page now is.
+                            if !unsafe { view.isLoading() } {
+                                let committed = url.clone();
+                                self.post(move |e| (e.on_commit)(committed));
+                            }
                             self.post(move |e| (e.on_url)(url));
                         }
                     }
@@ -714,6 +728,14 @@ mod mac {
                     self.act_on(decide_download(&url, origin), &url);
                 } else {
                     handler.call((WKNavigationResponsePolicy::Allow,));
+                }
+            }
+
+            #[unsafe(method(webView:didCommitNavigation:))]
+            fn did_commit(&self, web_view: &WKWebView, _navigation: Option<&WKNavigation>) {
+                let url = url_string(unsafe { web_view.URL() });
+                if !url.is_empty() {
+                    self.post(move |e| (e.on_commit)(url));
                 }
             }
 

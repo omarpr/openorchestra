@@ -231,6 +231,9 @@ impl HarnessWorkspace {
             diff_base_menu: None,
             browser_window_hidden: false,
             browser_save: None,
+            browser_history: cx.new(|_| {
+                crate::browser_pane::BrowserHistory::new(data_dir.join("browser-history"))
+            }),
             close_prompt: None,
             edit_prompt: None,
             ending: HashMap::new(),
@@ -790,6 +793,15 @@ impl HarnessWorkspace {
                     break;
                 }
             }
+        })
+        .detach();
+
+        // Browsing history waits up to a second to be written; every quit
+        // path writes what's pending (`request_quit` does too, beside the
+        // tab save, for the quits that go through it).
+        cx.on_app_quit(|ws, cx| {
+            ws.browser_history.update(cx, |h, _| h.flush());
+            async {}
         })
         .detach();
 
