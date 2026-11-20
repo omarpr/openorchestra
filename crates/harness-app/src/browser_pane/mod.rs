@@ -289,6 +289,8 @@ pub(crate) struct BrowserPane {
     /// Takes the keyboard from the page when the address bar gets gpui's
     /// focus.
     _address_focus_in: gpui::Subscription,
+    /// Puts the page's URL back in the address bar when the user leaves it.
+    _address_focus_out: gpui::Subscription,
 }
 
 impl BrowserPane {
@@ -340,6 +342,19 @@ impl BrowserPane {
                     native.view.release_focus();
                 }
             });
+        // While the address bar has focus `sync_address` leaves the user's
+        // text alone, so a page that moved meanwhile (a redirect, a
+        // single-page app's `pushState`) left the bar behind. Leaving the
+        // bar puts the page's URL back. Enter has already set the bar to the
+        // address it loaded. A window going inactive (⌘-Tab away) also
+        // reports focus out; a half-typed address stays for when the user
+        // comes back.
+        let address_focus_out =
+            cx.on_focus_out(&address.focus_handle(cx), window, |pane, _, window, cx| {
+                if window.is_window_active() {
+                    pane.reset_address(window, cx);
+                }
+            });
         Self {
             attempted: url.clone(),
             url,
@@ -357,6 +372,7 @@ impl BrowserPane {
             view_failed: false,
             _focus_out: focus_out,
             _address_focus_in: address_focus_in,
+            _address_focus_out: address_focus_out,
         }
     }
 
@@ -526,7 +542,8 @@ impl BrowserPane {
         cx.notify();
     }
 
-    /// Show the page's URL in the address bar, unless the user is typing.
+    /// Show the page's URL in the address bar, unless the user is typing
+    /// (leaving the bar catches it up: `_address_focus_out`).
     fn sync_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.address.focus_handle(cx).is_focused(window) {
             self.reset_address(window, cx);
