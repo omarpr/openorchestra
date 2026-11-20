@@ -368,6 +368,16 @@ fn take_title(held: &mut Option<String>, arrived: String) -> (bool, Option<Strin
     (relabel, arrived)
 }
 
+/// Whether a native view's first commit (`committed`) is only the page it
+/// was made to bring back (`reshow`: a tab shown again, or restored),
+/// which reloads it; that isn't a visit. A redirect elsewhere, or a view
+/// made for an address the user just entered (`reshow` is `None`), is.
+fn reshow_commit(reshow: Option<&str>, committed: &str) -> bool {
+    reshow.is_some_and(|page| {
+        history::recordable(committed).is_some_and(|c| history::recordable(page) == Some(c))
+    })
+}
+
 /// How many recent pages a blank tab lists.
 const RECENT_ON_BLANK: usize = 8;
 
@@ -442,6 +452,14 @@ pub(crate) struct BrowserPane {
     project: Option<BrowserProject>,
     /// The address bar's suggestion list, while open.
     suggestions: Option<Suggestions>,
+    /// The page a newly made native view is bringing back (the tab shown
+    /// again, or restored), whose first commit is not a visit
+    /// ([`reshow_commit`]). `None` when the view loads a page the user just
+    /// asked for.
+    reshow: Option<String>,
+    /// `navigate` ran with no view: the next view's load is a fresh visit,
+    /// not a page coming back.
+    fresh_load: bool,
     /// What a blank tab lists under "Running in this task" (`set_running`).
     running: Vec<RunningServer>,
     /// Opens and refreshes the suggestions as the user types.
@@ -562,6 +580,8 @@ impl BrowserPane {
             history,
             project: None,
             suggestions: None,
+            reshow: None,
+            fresh_load: false,
             running: Vec::new(),
             _address_edits: address_edits,
         }
@@ -713,8 +733,9 @@ impl BrowserPane {
             self.url = Some(url.clone());
             cx.emit(BrowserEvent::UrlChanged);
         }
-        if let Some(native) = &self.native {
-            native.view.load(&url);
+        match &self.native {
+            Some(native) => native.view.load(&url),
+            None => self.fresh_load = true,
         }
         cx.notify();
     }
@@ -795,6 +816,7 @@ impl BrowserPane {
                     }
                 });
                 self.failure = None;
+                self.reshow = (!std::mem::take(&mut self.fresh_load)).then(|| url.clone());
                 self.attempted = Some(url);
                 self.native = Some(Native {
                     view,
@@ -834,7 +856,9 @@ impl BrowserPane {
                 self.sync_address(window, cx);
             }
             PageEvent::Committed(url, same_document) => {
-                self.record_visit(&url, cx);
+                if !reshow_commit(self.reshow.take().as_deref(), &url) {
+                    self.record_visit(&url, cx);
+                }
                 if let Some(title) = commit_title(same_document, self.title.as_deref()) {
                     let title = title.to_string();
                     // The committed URL, never `self.url`, which may lag.
@@ -957,7 +981,11 @@ impl BrowserPane {
             self.attempted = Some(failure.url.clone());
             match &self.native {
                 Some(native) => native.view.load(&failure.url),
-                None => self.ensure_native(window, cx),
+                None => {
+                    // A retry of a page that never loaded: a visit if it does.
+                    self.fresh_load = true;
+                    self.ensure_native(window, cx);
+                }
             }
         } else if let Some(native) = &self.native {
             native.view.reload();
@@ -1087,6 +1115,9 @@ impl BrowserPane {
         let suggestions = self.suggestions.as_ref()?;
         let mut list = div()
             .id("browser-suggestions")
+            // Its padding and gaps must not pass presses (or hover) to the
+            // blank tab's rows beneath.
+            .occlude()
             .absolute()
             .top(px(32.0))
             // Under the address field: past back, forward and reload.
@@ -1156,11 +1187,18 @@ impl BrowserPane {
     /// and the project's recent pages, each a click away. A list with
     /// nothing in it isn't shown.
     fn render_blank(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        // Centred by auto margins, not `justify_center`: in a scroll
+        // container that is shorter than the block, centring would push its
+        // top out of reach; auto margins collapse to zero and it scrolls
+        // from the top.
         let mut block = div()
             .flex()
             .flex_col()
+            .flex_none()
             .w_full()
             .max_w(px(520.0))
+            .mx_auto()
+            .my_auto()
             .child(
                 div()
                     .flex()
@@ -1265,8 +1303,6 @@ impl BrowserPane {
             .flex_col()
             .flex_1()
             .min_h_0()
-            .items_center()
-            .justify_center()
             .px_4()
             .py_6()
             .overflow_y_scroll()
@@ -1746,6 +1782,17 @@ mod tests {
         assert_eq!(take_title(&mut held, "  ".into()), (true, None));
         assert_eq!(held, None);
         assert_eq!(take_title(&mut held, String::new()), (false, None));
+    }
+
+    #[test]
+    fn a_page_coming_back_is_not_a_visit_but_a_redirect_is() {
+        let page = Some("http://localhost:8765/");
+        assert!(reshow_commit(page, "http://localhost:8765/"));
+        assert!(reshow_commit(page, "HTTP://LOCALHOST:8765"));
+        assert!(!reshow_commit(page, "http://localhost:8765/login"));
+        // A view made for what the user just entered.
+        assert!(!reshow_commit(None, "http://localhost:8765/"));
+        assert!(!reshow_commit(Some("about:blank"), "about:blank"));
     }
 
     #[test]

@@ -65,7 +65,6 @@ pub fn is_local_url(url: &str) -> bool {
     }
 }
 
-/// [`is_local_url`]'s IPv4 ranges.
 /// The address to load for `url` in a browser tab: an http(s) URL on the
 /// unspecified address, which dev servers bound to every interface print
 /// (`0.0.0.0`, `[::]`), goes to loopback instead (`127.0.0.1`, `[::1]`),
@@ -95,6 +94,7 @@ pub fn loopback_for_unspecified(url: &str) -> String {
     }
 }
 
+/// [`is_local_url`]'s IPv4 ranges.
 fn is_local_v4(ip: std::net::Ipv4Addr) -> bool {
     let [a, b, ..] = ip.octets();
     ip.is_unspecified()

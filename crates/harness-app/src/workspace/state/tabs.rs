@@ -1251,9 +1251,6 @@ impl HarnessWorkspace {
 /// How long after a browser tab's last URL change its save runs.
 const BROWSER_SAVE_DELAY: Duration = Duration::from_secs(1);
 
-/// The browser tab among `tabs` showing `url`, compared as parsed URLs (so
-/// `http://localhost:3000` matches `http://localhost:3000/`). A blank tab, or
-/// an unparsable `url`, never matches.
 /// Whether opening a URL in a browser tab may land on a tab already there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BrowserOpen {
@@ -1265,8 +1262,6 @@ pub(crate) enum BrowserOpen {
     AlwaysNew,
 }
 
-/// The tab an open of `url` lands on instead of a new one, if any: never
-/// for a blank tab (`None`) or [`BrowserOpen::AlwaysNew`].
 /// What a pane key names, for finding the repository it belongs to
 /// ([`HarnessWorkspace::browser_project`]): the keys `resolve` gives panes.
 #[derive(Debug, PartialEq, Eq)]
@@ -1292,6 +1287,8 @@ fn pane_owner(key: &str) -> PaneOwner<'_> {
     }
 }
 
+/// The tab an open of `url` lands on instead of a new one, if any: never
+/// for a blank tab (`None`) or [`BrowserOpen::AlwaysNew`].
 pub(crate) fn reusable_browser_tab(
     tabs: &[crate::panes_state::TabRecord],
     url: Option<&str>,
@@ -1303,6 +1300,9 @@ pub(crate) fn reusable_browser_tab(
     }
 }
 
+/// The browser tab among `tabs` showing `url`, compared as parsed URLs (so
+/// `http://localhost:3000` matches `http://localhost:3000/`). A blank tab, or
+/// an unparsable `url`, never matches.
 pub(crate) fn find_browser_tab(tabs: &[crate::panes_state::TabRecord], url: &str) -> Option<u64> {
     use crate::panes_state::TabRecordKind as K;
     let comparable = |u: &str| url::Url::parse(u.trim()).ok().map(String::from);

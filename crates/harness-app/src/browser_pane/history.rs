@@ -14,6 +14,11 @@
 //! at once, and writes the changed projects [`SAVE_DELAY`] after the first
 //! unsaved change; quit flushes ([`BrowserHistory::flush`]). Older builds
 //! never look in that folder.
+//!
+//! **Two app instances** (Dev and release share `~/.openorchestra`) each
+//! keep their own copy in memory and write whole files: the last writer
+//! wins, so one can drop pages the other recorded, and a Clear in one can
+//! be undone by the other's next write. Accepted for browsing history.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
