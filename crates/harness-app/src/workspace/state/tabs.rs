@@ -40,6 +40,11 @@ impl HarnessWorkspace {
             return;
         }
 
+        // Task 6 wires the Browser tab; until then there is nothing to open.
+        if kind == TabKind::Browser {
+            return;
+        }
+
         if kind == TabKind::ReviewOverview {
             self.tools_maximized = false;
             if let Some(pane) = self.panes.get_mut(&r.key)
@@ -128,6 +133,8 @@ impl HarnessWorkspace {
                 };
                 (TabContent::Editor(ws), "{ } editor".to_string())
             }
+            // Handled above; Task 6 builds the tab.
+            TabKind::Browser => return,
             TabKind::Chat => {
                 let path = r.path.clone();
                 (

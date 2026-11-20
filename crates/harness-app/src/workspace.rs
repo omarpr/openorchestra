@@ -173,7 +173,7 @@ enum OverviewStatus {
 }
 
 /// What to open, before the entity exists.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TabKind {
     /// A plain `$SHELL`. What a worktree opens with.
     Shell,
@@ -186,6 +186,8 @@ pub(crate) enum TabKind {
     ReviewOverview,
     /// The full editor (IDE) tab — one per worktree.
     Editor,
+    /// An in-app web page tab, e.g. a dev server preview.
+    Browser,
 }
 
 /// The tab being dragged, and the pane set it came from.

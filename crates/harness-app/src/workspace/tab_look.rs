@@ -147,6 +147,44 @@ pub(crate) fn tab_running_spinner(hx: &HarnessTheme, tab_id: u64, t: f32) -> imp
         .child(spin_arc(hx.accent, tint(hx.accent, 0.3), 10.0, t))
 }
 
+/// One row (or heading) of the ＋ menu, in display order.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum MenuEntry {
+    Kind(TabKind),
+    /// A non-clickable section heading.
+    Separator(&'static str),
+    Agent(AgentKind),
+    PiChat,
+}
+
+/// What the ＋ menu lists: Shell and Editor, then Diff (tab mode only) and
+/// Browser, then the enabled agents in Settings order under their heading,
+/// then pi chat. `pi_chat` is the caller's gate: a worktree is selected and
+/// pi is enabled.
+pub(crate) fn tab_menu_entries(
+    prefs: &Prefs,
+    diff_in_tab: bool,
+    browser: bool,
+    pi_chat: bool,
+) -> Vec<MenuEntry> {
+    let mut out = vec![MenuEntry::Kind(TabKind::Shell), MenuEntry::Kind(TabKind::Editor)];
+    if diff_in_tab {
+        out.push(MenuEntry::Kind(TabKind::Diff));
+    }
+    if browser {
+        out.push(MenuEntry::Kind(TabKind::Browser));
+    }
+    let agents = enabled_agents(prefs);
+    if !agents.is_empty() {
+        out.push(MenuEntry::Separator("Agents"));
+        out.extend(agents.into_iter().map(MenuEntry::Agent));
+    }
+    if pi_chat {
+        out.push(MenuEntry::PiChat);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,5 +233,31 @@ mod tests {
         assert_eq!(kind_look(LookKind::Editor).color, rgb(0x3d8bfd));
         assert_eq!(kind_look(LookKind::Diff).color, rgb(0xe06c9f));
         assert_eq!(kind_look(LookKind::Browser).color, rgb(0x61afef));
+    }
+
+    #[test]
+    fn menu_puts_kinds_then_agents_in_settings_order_then_pi_chat() {
+        let mut prefs = Prefs::default();
+        prefs.agent_order = vec!["claude-code".into(), "codex".into()];
+        for k in ["pi", "opencode", "kimi"] {
+            prefs.agents.entry(k.into()).or_default().disabled = true;
+        }
+        let e = tab_menu_entries(&prefs, true, true, true);
+        assert_eq!(
+            e,
+            vec![
+                MenuEntry::Kind(TabKind::Shell),
+                MenuEntry::Kind(TabKind::Editor),
+                MenuEntry::Kind(TabKind::Diff),
+                MenuEntry::Kind(TabKind::Browser),
+                MenuEntry::Separator("Agents"),
+                MenuEntry::Agent(AgentKind::ClaudeCode),
+                MenuEntry::Agent(AgentKind::Codex),
+                MenuEntry::Agent(AgentKind::Grok),
+                MenuEntry::PiChat,
+            ]
+        );
+        let e = tab_menu_entries(&prefs, false, true, false);
+        assert!(!e.contains(&MenuEntry::Kind(TabKind::Diff)) && !e.contains(&MenuEntry::PiChat));
     }
 }

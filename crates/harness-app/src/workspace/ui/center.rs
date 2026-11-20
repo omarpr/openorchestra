@@ -796,61 +796,90 @@ impl HarnessWorkspace {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
-            )
-            .child(self.tab_menu_row(
-                hx,
-                "tabmenu-Terminal".to_string(),
-                kind_icon(hx, LookKind::Shell, 14.0),
-                "Terminal".to_string(),
-                "⌘T",
-                TabKind::Shell,
-                cx,
-            ))
-            .child(self.tab_menu_row(
-                hx,
-                "tabmenu-Editor".to_string(),
-                kind_icon(hx, LookKind::Editor, 14.0),
-                "Editor".to_string(),
-                "⌘E",
-                TabKind::Editor,
-                cx,
-            ));
-        // Only in Tab mode: in Dock mode the dock IS the surface, and a tab
-        // showing the same review is the duplicate the setting exists to avoid.
-        if self.prefs.diff_location == DiffLocation::Tab {
-            menu = menu.child(self.tab_menu_item(hx, "⑂", "Diff", "", TabKind::Diff, cx));
-        }
-        // Every enabled agent, on any selection (D8 revised: main included) —
-        // a worktree's recorded default merely decides which signal the
-        // status pill trusts first. Under their own heading, in the order
-        // Settings › Agents gives them.
-        let agents: Vec<AgentKind> = enabled_agents(&self.prefs);
-        if !agents.is_empty() {
-            menu = menu
-                .child(div().mx_1().my_0p5().h(px(1.0)).bg(hx.border))
-                .child(
-                    div()
-                        .px_2()
-                        .pt_0p5()
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(hx.tx2)
-                        .child("AGENTS"),
-                );
-            for kind in &agents {
-                menu = menu.child(self.tab_menu_item_agent(hx, kind, cx));
-            }
-        }
-        // The chat tab is pi's RPC surface specifically — approvals as UI,
-        // session capture for training (§4.4) — so it appears only for
-        // worktrees and only while pi is enabled.
+            );
         let pi_enabled = !self
             .prefs
             .agents
             .get(AgentKind::Pi.as_str())
             .is_some_and(|p| p.disabled);
-        if agent.is_some() && pi_enabled {
-            menu = menu.child(self.tab_menu_item(hx, "π", "pi chat", "⌘⇧C", TabKind::Chat, cx));
+        // Browser is wired in Task 6; until then it never shows.
+        let entries = tab_menu_entries(
+            &self.prefs,
+            self.prefs.diff_location == DiffLocation::Tab,
+            false,
+            // The chat tab is pi's RPC surface specifically — approvals as UI,
+            // session capture for training (§4.4) — so it appears only for
+            // worktrees and only while pi is enabled.
+            agent.is_some() && pi_enabled,
+        );
+        // Every enabled agent shows on any selection (D8 revised: main
+        // included) — a worktree's recorded default merely decides which
+        // signal the status pill trusts first.
+        for entry in entries {
+            menu = match entry {
+                MenuEntry::Kind(TabKind::Shell) => menu.child(self.tab_menu_row(
+                    hx,
+                    "tabmenu-Shell".to_string(),
+                    kind_icon(hx, LookKind::Shell, 14.0),
+                    "Shell".to_string(),
+                    "⌘T",
+                    TabKind::Shell,
+                    cx,
+                )),
+                MenuEntry::Kind(TabKind::Editor) => menu.child(self.tab_menu_row(
+                    hx,
+                    "tabmenu-Editor".to_string(),
+                    kind_icon(hx, LookKind::Editor, 14.0),
+                    "Editor".to_string(),
+                    "⌘E",
+                    TabKind::Editor,
+                    cx,
+                )),
+                // Only in Tab mode: in Dock mode the dock IS the surface, and
+                // a tab showing the same review is the duplicate the setting
+                // exists to avoid.
+                MenuEntry::Kind(TabKind::Diff) => menu.child(self.tab_menu_row(
+                    hx,
+                    "tabmenu-Diff".to_string(),
+                    kind_icon(hx, LookKind::Diff, 14.0),
+                    "Diff".to_string(),
+                    "",
+                    TabKind::Diff,
+                    cx,
+                )),
+                MenuEntry::Kind(TabKind::Browser) => menu.child(self.tab_menu_row(
+                    hx,
+                    "tabmenu-Browser".to_string(),
+                    kind_icon(hx, LookKind::Browser, 14.0),
+                    "Browser".to_string(),
+                    "",
+                    TabKind::Browser,
+                    cx,
+                )),
+                // Not menu entries; `tab_menu_entries` never yields them.
+                MenuEntry::Kind(_) => menu,
+                MenuEntry::Separator(label) => menu
+                    .child(div().mx_1().my_0p5().h(px(1.0)).bg(hx.border))
+                    .child(
+                        div()
+                            .px_2()
+                            .pt_0p5()
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(hx.tx2)
+                            .child(label.to_uppercase()),
+                    ),
+                MenuEntry::Agent(kind) => menu.child(self.tab_menu_item_agent(hx, &kind, cx)),
+                MenuEntry::PiChat => menu.child(self.tab_menu_row(
+                    hx,
+                    "tabmenu-pi-chat".to_string(),
+                    agent_icon(&AgentKind::Pi, 15.0),
+                    "pi chat".to_string(),
+                    "⌘⇧C",
+                    TabKind::Chat,
+                    cx,
+                )),
+            };
         }
         menu
     }
@@ -896,28 +925,6 @@ impl HarnessWorkspace {
                 ws.tab_menu = None;
                 ws.open_tab(kind.clone(), window, cx);
             }))
-    }
-
-    /// A ＋ menu row whose icon is a text glyph (the same mark the tab shows).
-    pub(crate) fn tab_menu_item(
-        &self,
-        hx: &HarnessTheme,
-        glyph: &str,
-        label: &str,
-        shortcut: &str,
-        kind: TabKind,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let icon = tab_glyph(hx, glyph);
-        self.tab_menu_row(
-            hx,
-            format!("tabmenu-{label}"),
-            icon,
-            label.to_string(),
-            shortcut,
-            kind,
-            cx,
-        )
     }
 
     /// A ＋ menu row with the agent's brand mark.

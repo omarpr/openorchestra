@@ -39,8 +39,9 @@ Unreleased is empty.
   **Editor**, and the Diff pane is now called **Review**.
 - With no saved order, OpenCode now appears first in the **+** menu, since
   it's the out-of-the-box default.
-- The **+** menu lists agents under their own **Agents** heading, and every
-  item's label now lines up.
+- The **+** menu lists Shell and Editor first, then your agents under their
+  own **Agents** heading in Settings order, and every item's label now lines
+  up. Terminal is now Shell.
 - Tabs show a colored icon for every kind and title-case names (Shell,
   Editor, Diff, Claude, Codex, …) instead of the stored lowercase titles, and
   the phone UI uses the same names. An agent tab's running spinner sits after
