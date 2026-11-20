@@ -773,6 +773,9 @@ pub struct HarnessWorkspace {
     /// The window is minimized or the app hidden: no browser tab keeps its
     /// native view (see `sync_browser_views`).
     browser_window_hidden: bool,
+    /// The pending save after browser title/URL changes
+    /// (`schedule_browser_save`); dropping it cancels it.
+    browser_save: Option<gpui::Task<()>>,
     /// The quit confirmation is open (keep vs. close terminals). Present only
     /// while the user is deciding; carries the "remember my choice" checkbox.
     close_prompt: Option<ClosePrompt>,

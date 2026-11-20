@@ -163,6 +163,14 @@ enum PageEvent {
     NewWindow(String),
 }
 
+/// Whether `ev` still means something once its view is gone. Callbacks
+/// queued before the view was dropped can still be in flight; only a new
+/// window request (a tab of its own) survives it. A stale `Loading(true)`,
+/// say, would leave a Stop button on a tab with no page.
+fn applies_without_view(ev: &PageEvent) -> bool {
+    matches!(ev, PageEvent::NewWindow(_))
+}
+
 /// A load that failed, shown in place of the page.
 struct LoadFailure {
     url: String,
@@ -197,6 +205,9 @@ pub(crate) struct BrowserPane {
     /// Hand the page keyboard focus once its view is next placed (after
     /// Enter or Esc in the address bar).
     focus_page: Cell<bool>,
+    /// Creating the native view failed. Latched so render doesn't retry
+    /// every frame; the in-tab Retry clears it.
+    view_failed: bool,
 }
 
 impl BrowserPane {
@@ -228,6 +239,7 @@ impl BrowserPane {
             address,
             focus_handle: cx.focus_handle(),
             focus_page: Cell::new(false),
+            view_failed: false,
         }
     }
 
@@ -291,7 +303,7 @@ impl BrowserPane {
     /// Create the native view if the tab is shown and has a page. Loading it
     /// is a fresh attempt, so a stale error is cleared.
     fn ensure_native(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.shown || self.native.is_some() {
+        if !self.shown || self.native.is_some() || self.view_failed {
             return;
         }
         let Some(url) = self.url.clone() else {
@@ -319,15 +331,15 @@ impl BrowserPane {
             }
             Err(e) => {
                 log::warn!("browser: could not create the web view: {e}");
-                self.failure = Some(LoadFailure {
-                    url,
-                    reason: "the page view could not be created".to_string(),
-                });
+                self.view_failed = true;
             }
         }
     }
 
     fn apply(&mut self, ev: PageEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.native.is_none() && !applies_without_view(&ev) {
+            return;
+        }
         match ev {
             PageEvent::Title(title) => {
                 let title = Some(title).filter(|t| !t.trim().is_empty());
@@ -446,6 +458,13 @@ impl BrowserPane {
         cx.notify();
     }
 
+    /// The in-tab Retry after the web view couldn't be created: clear the
+    /// latch so the next render tries again.
+    fn retry_view(&mut self, cx: &mut Context<Self>) {
+        self.view_failed = false;
+        cx.notify();
+    }
+
     fn stop(&mut self, cx: &mut Context<Self>) {
         if let Some(native) = &self.native {
             native.view.stop();
@@ -547,38 +566,25 @@ impl BrowserPane {
     }
 
     fn render_body(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        if self.view_failed {
+            return error_view(
+                hx,
+                "Couldn't open a web view".to_string(),
+                div()
+                    .id("browser-view-retry")
+                    .child("Retry")
+                    .on_click(cx.listener(|pane, _, _, cx| pane.retry_view(cx))),
+            );
+        }
         if let Some(failure) = &self.failure {
-            return div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_h_0()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .px_6()
-                .child(
-                    div()
-                        .max_w(px(560.0))
-                        .text_sm()
-                        .text_color(hx.tx1)
-                        .child(format!("Couldn't load {}: {}", failure.url, failure.reason)),
-                )
-                .child(
-                    div()
-                        .id("browser-error-reload")
-                        .px_3()
-                        .py_1()
-                        .rounded_md()
-                        .bg(tint(hx.accent, 0.16))
-                        .text_sm()
-                        .text_color(hx.accent)
-                        .cursor_pointer()
-                        .hover(|d| d.bg(tint(hx.accent, 0.24)))
-                        .child("Reload")
-                        .on_click(cx.listener(|pane, _, window, cx| pane.reload(window, cx))),
-                )
-                .into_any_element();
+            return error_view(
+                hx,
+                format!("Couldn't load {}: {}", failure.url, failure.reason),
+                div()
+                    .id("browser-error-reload")
+                    .child("Reload")
+                    .on_click(cx.listener(|pane, _, window, cx| pane.reload(window, cx))),
+            );
         }
         if self.url.is_none() {
             return div()
@@ -644,6 +650,43 @@ fn page_events(tx: mpsc::UnboundedSender<PageEvent>) -> NativeEvents {
         on_new_window: sender(PageEvent::NewWindow),
         ..NativeEvents::default()
     }
+}
+
+/// A message in place of the page, with one action under it (`button`
+/// brings its own id, label and click handler; this styles it).
+fn error_view(
+    hx: &HarnessTheme,
+    message: String,
+    button: gpui::Stateful<gpui::Div>,
+) -> gpui::AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .items_center()
+        .justify_center()
+        .gap_3()
+        .px_6()
+        .child(
+            div()
+                .max_w(px(560.0))
+                .text_sm()
+                .text_color(hx.tx1)
+                .child(message),
+        )
+        .child(
+            button
+                .px_3()
+                .py_1()
+                .rounded_md()
+                .bg(tint(hx.accent, 0.16))
+                .text_sm()
+                .text_color(hx.accent)
+                .cursor_pointer()
+                .hover(|d| d.bg(tint(hx.accent, 0.24))),
+        )
+        .into_any_element()
 }
 
 /// An icon button in the address bar; dimmed and inert when `enabled` is
@@ -755,6 +798,20 @@ mod tests {
         ] {
             assert_eq!(normalize_address(refused), None, "{refused}");
         }
+    }
+
+    #[test]
+    fn a_dropped_view_s_queued_events_are_ignored_but_new_windows() {
+        for ev in [
+            PageEvent::Title("t".into()),
+            PageEvent::Url("http://localhost/".into()),
+            PageEvent::Loading(true),
+            PageEvent::Failed(None, "x".into()),
+            PageEvent::Notice("n".into()),
+        ] {
+            assert!(!applies_without_view(&ev));
+        }
+        assert!(applies_without_view(&PageEvent::NewWindow("http://localhost/".into())));
     }
 
     #[test]

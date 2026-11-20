@@ -476,38 +476,39 @@ impl HarnessWorkspace {
 
     /// Focus the active worktree's browser tab already showing `url`, or
     /// open a new browser tab just after the active tab (always a new, blank
-    /// one for `None`). Returns the tab's id; 0 when no worktree is selected
-    /// (tab ids start at 1).
+    /// one for `None`). Returns the tab's id; `None` when no worktree is
+    /// selected or its pane isn't live.
     pub(crate) fn open_browser_tab(
         &mut self,
         url: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> u64 {
-        let Some(r) = self.resolve() else { return 0 };
-        self.open_browser_tab_in(&r.key, url, window, cx)
+    ) -> Option<u64> {
+        let key = self.resolve()?.key;
+        self.open_browser_tab_in(&key, url, window, cx)
     }
 
     /// [`Self::open_browser_tab`] in pane `key`: a page's new window opens
     /// beside it, in the pane that owns that page.
+    ///
+    /// Only into a live pane: a pane created here would hold just this tab,
+    /// and the next save would replace that worktree's saved tabs with it.
     fn open_browser_tab_in(
         &mut self,
         key: &str,
         url: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> u64 {
+    ) -> Option<u64> {
         let url = url.filter(|u| !u.is_empty());
-        let existing = url.as_deref().and_then(|url| {
-            let records: Vec<_> = self
-                .panes
-                .get(key)?
-                .tabs
-                .iter()
-                .filter_map(|t| t.record(cx))
-                .collect();
-            find_browser_tab(&records, url)
-        });
+        let records: Vec<_> = self
+            .panes
+            .get(key)?
+            .tabs
+            .iter()
+            .filter_map(|t| t.record(cx))
+            .collect();
+        let existing = url.as_deref().and_then(|url| find_browser_tab(&records, url));
         let id = match existing {
             Some(id) => {
                 if let Some(pane) = self.panes.get_mut(key) {
@@ -520,14 +521,8 @@ impl HarnessWorkspace {
                 let page = self.new_browser_pane(key, url, None, window, cx);
                 let title = page.read(cx).label();
                 self.pane_clock = self.pane_clock.wrapping_add(1);
-                let pane = self
-                    .panes
-                    .entry(key.to_string())
-                    .or_insert_with(|| PaneSet {
-                        tabs: Vec::new(),
-                        active: 0,
-                        last_used: 0,
-                    });
+                // Checked live above; nothing here creates a pane.
+                let pane = self.panes.get_mut(key)?;
                 pane.last_used = self.pane_clock;
                 pane.insert_after_active(Tab {
                     id,
@@ -542,13 +537,14 @@ impl HarnessWorkspace {
         self.sync_browser_views(window, cx);
         self.focus_active_pane(window, cx);
         cx.notify();
-        id
+        Some(id)
     }
 
     /// A browser pane for a tab in pane `key`, wired to the workspace: a
-    /// changed URL or title relabels the tab and saves, and a page's new
-    /// window opens as another browser tab in the same pane. The
-    /// subscription ends when the pane is released.
+    /// changed URL or title relabels the tab at once and saves a moment
+    /// later ([`Self::schedule_browser_save`]), and a page's new window opens
+    /// as another browser tab in the same pane. The subscription ends when
+    /// the pane is released.
     fn new_browser_pane(
         &mut self,
         key: &str,
@@ -571,7 +567,7 @@ impl HarnessWorkspace {
                     }) {
                         tab.title = label;
                     }
-                    ws.save_panes(cx);
+                    ws.schedule_browser_save(cx);
                     cx.notify();
                 }
                 BrowserEvent::NewWindow(url) => {
@@ -581,6 +577,20 @@ impl HarnessWorkspace {
         })
         .detach();
         page
+    }
+
+    /// Save the tabs [`BROWSER_SAVE_DELAY`] after the last browser change.
+    /// A navigation brings several title/URL changes (more for single-page
+    /// apps and animated titles), and each full save rewrites and syncs
+    /// three files on the UI thread, which WebKit's input shares. Replacing
+    /// the task cancels the previous one, so a burst ends in one save; any
+    /// other save (open, close, move, quit) clears it, having written the
+    /// same state.
+    fn schedule_browser_save(&mut self, cx: &mut Context<Self>) {
+        self.browser_save = Some(cx.spawn(async move |ws, cx| {
+            cx.background_executor().timer(BROWSER_SAVE_DELAY).await;
+            let _ = ws.update(cx, |ws, cx| ws.save_panes(cx));
+        }));
     }
 
     /// The browser pane whose page should be on screen: the selected
@@ -776,6 +786,8 @@ impl HarnessWorkspace {
     /// restore-on-reselect still finds them — eviction stays non-destructive.
     pub(crate) fn save_panes(&mut self, cx: &App) {
         use crate::panes_state::{TabRecord, WorktreePanes};
+        // This save covers any browser change still waiting to be saved.
+        self.browser_save = None;
         // Collect first to avoid borrowing self.panes and self.panes_state at once.
         let updates: Vec<(String, WorktreePanes)> = self
             .panes
@@ -1061,6 +1073,9 @@ impl HarnessWorkspace {
         pane.tabs.push(tab);
     }
 }
+
+/// How long after a browser tab's last URL/title change its save runs.
+const BROWSER_SAVE_DELAY: Duration = Duration::from_secs(1);
 
 /// The browser tab among `tabs` showing `url`, compared as parsed URLs (so
 /// `http://localhost:3000` matches `http://localhost:3000/`). A blank tab, or

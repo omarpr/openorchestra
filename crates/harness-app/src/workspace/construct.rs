@@ -228,6 +228,7 @@ impl HarnessWorkspace {
             tab_context_menu: None,
             diff_base_menu: None,
             browser_window_hidden: false,
+            browser_save: None,
             close_prompt: None,
             edit_prompt: None,
             ending: HashMap::new(),

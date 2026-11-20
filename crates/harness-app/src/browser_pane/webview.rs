@@ -203,6 +203,31 @@ pub(crate) fn flip_y(bounds_y: f32, height: f32, parent_height: f32) -> f32 {
     parent_height - bounds_y - height
 }
 
+/// Safari's version when it can't be read from Safari.app (Safari 26
+/// shipped with macOS 26, the fall 2025 release). Only the fallback; the
+/// installed Safari's own version is preferred.
+pub(crate) const SAFARI_FALLBACK_VERSION: &str = "26.0";
+
+/// What WebKit appends to its user agent so sites see Safari:
+/// `Version/<major.minor> Safari/605.1.15`, the token Safari itself sends.
+/// WKWebView's default agent stops at "(KHTML, like Gecko)", and sites such
+/// as Google then serve their legacy page. Only the suffix is set, never a
+/// full custom agent, so WebKit keeps its own platform and engine parts.
+/// `version` is Safari.app's `CFBundleShortVersionString`.
+pub(crate) fn safari_app_name(version: Option<&str>) -> String {
+    let major_minor = version
+        .map(|v| v.split('.').take(2).collect::<Vec<_>>().join("."))
+        .filter(|v| {
+            !v.is_empty()
+                && v.split('.')
+                    .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+        });
+    format!(
+        "Version/{} Safari/605.1.15",
+        major_minor.as_deref().unwrap_or(SAFARI_FALLBACK_VERSION)
+    )
+}
+
 fn scheme(url: &str) -> Option<String> {
     url::Url::parse(url).ok().map(|u| u.scheme().to_owned())
 }
@@ -234,7 +259,7 @@ mod mac {
     use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
     use objc2_app_kit::{NSApplication, NSAutoresizingMaskOptions, NSView};
     use objc2_foundation::{
-        NSDictionary, NSError, NSHTTPURLResponse, NSKeyValueChangeKey,
+        NSBundle, NSDictionary, NSError, NSHTTPURLResponse, NSKeyValueChangeKey,
         NSKeyValueObservingOptions, NSObjectNSKeyValueObserverRegistration, NSObjectProtocol,
         NSPoint, NSRect, NSSize, NSString, NSURL, NSURLRequest, ns_string,
     };
@@ -248,6 +273,7 @@ mod mac {
     use super::{
         DOWNLOAD_UNSUPPORTED, NavDecision, NavOrigin, NativeEvents, decide_download,
         decide_navigation, decide_new_window, flip_y, is_benign_failure, is_download,
+        safari_app_name,
     };
 
     /// The WKWebView properties we observe. All are documented KVO-compliant.
@@ -258,6 +284,19 @@ mod mac {
 
     fn kvo_context() -> *mut c_void {
         &KVO_TAG as *const u8 as *mut c_void
+    }
+
+    /// The user-agent suffix (see [`safari_app_name`]), from the installed
+    /// Safari's version, read once.
+    fn user_agent_app_name() -> &'static str {
+        static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        NAME.get_or_init(|| {
+            let version = NSBundle::bundleWithPath(ns_string!("/Applications/Safari.app"))
+                .and_then(|b| b.objectForInfoDictionaryKey(ns_string!("CFBundleShortVersionString")))
+                .and_then(|v| v.downcast::<NSString>().ok())
+                .map(|v| v.to_string());
+            safari_app_name(version.as_deref())
+        })
     }
 
     /// Whether the user clicked a link, and whether the main frame started it.
@@ -526,6 +565,11 @@ mod mac {
                 // One persistent store for every tab: cookies and storage
                 // survive restarts and are shared across browser tabs.
                 config.setWebsiteDataStore(&WKWebsiteDataStore::defaultDataStore(mtm));
+                // Sites serve their full page only to an agent that names
+                // Safari; WebKit appends this to its own agent.
+                config.setApplicationNameForUserAgent(Some(&NSString::from_str(
+                    user_agent_app_name(),
+                )));
                 WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), NSRect::ZERO, &config)
             };
             // Safari's Web Inspector; macOS 13.3+ (we support 12).
@@ -836,6 +880,19 @@ mod tests {
         assert!(!is_download(true, None));
         assert!(!is_download(true, Some("inline")));
         assert!(!is_download(true, Some("attach")));
+    }
+
+    #[test]
+    fn user_agent_names_safari_like_safari_does() {
+        assert_eq!(safari_app_name(Some("27.3")), "Version/27.3 Safari/605.1.15");
+        // Safari's own token carries major.minor only.
+        assert_eq!(safari_app_name(Some("18.6.1")), "Version/18.6 Safari/605.1.15");
+        assert_eq!(safari_app_name(Some("26")), "Version/26 Safari/605.1.15");
+        // No Safari, or a version we can't read: the fallback.
+        let fallback = format!("Version/{SAFARI_FALLBACK_VERSION} Safari/605.1.15");
+        assert_eq!(safari_app_name(None), fallback);
+        assert_eq!(safari_app_name(Some("")), fallback);
+        assert_eq!(safari_app_name(Some("beta 3")), fallback);
     }
 
     #[test]
