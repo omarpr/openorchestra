@@ -49,9 +49,13 @@
 //!   fetched it, the last one the policy let load: it goes only if that
 //!   one followed a real gesture on the page within [`GESTURE_WINDOW`] (a
 //!   link, a form's button, a script answering the click) or the app
-//!   started it (the address bar, a restore, a routed link: no source
-//!   frame). A script's own navigation to an attachment is ignored. The
-//!   default browser fetches the file again itself.
+//!   started it (the address bar, a restore, a routed link). "The app
+//!   started it" is read as a nil `sourceFrame`, on the assumption, not yet
+//!   observed in the app, that WebKit reports `loadRequest` that way and
+//!   never a page's own navigation; if a page's navigation could arrive
+//!   with no source frame, its attachment would go out. A script's own
+//!   navigation to an attachment is otherwise ignored. The default browser
+//!   fetches the file again itself.
 //! - `link_routing::open_external` also rate-limits to one open per second.
 //! - New windows (each a tab here) need a user gesture:
 //!   `javaScriptCanOpenWindowsAutomatically` is off (macOS defaults it on),
@@ -400,7 +404,8 @@ pub(crate) fn decide_download(url: &str, origin: NavOrigin) -> NavDecision {
 
 /// Whether a main-frame navigation counts as the user's when its response
 /// turns out to be a download: the app started it (`app_initiated`: no
-/// source frame, as for the address bar, a restore or a routed link), or it
+/// source frame, assumed to mean the address bar, a restore or a routed
+/// link; see the module docs), or it
 /// came within [`GESTURE_WINDOW`] of a real gesture on the page, whatever
 /// its type (a link, a form's submit button, a script answering the click).
 /// A script on its own (a timer, page load) never counts.
