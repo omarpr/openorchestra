@@ -1085,7 +1085,9 @@ impl HarnessWorkspace {
                 // native view yet: `sync_browser_views` makes one if this
                 // ends up the visible tab.
                 K::Browser { url, title } => {
-                    let url = (!url.is_empty()).then_some(url);
+                    // Saved before `0.0.0.0`/`[::]` loaded through loopback.
+                    let url = (!url.is_empty())
+                        .then(|| crate::link_routing::loopback_for_unspecified(&url));
                     let page = self.new_browser_pane(key, url, title, window, cx);
                     let title = page.read(cx).label();
                     self.attach_tab(
