@@ -12,7 +12,11 @@
 //! callbacks only `unbounded_send` a [`PageEvent`], and a `spawn_in` task
 //! holding a `WeakEntity<BrowserPane>` drains it and applies each event with
 //! a window and context. Channel and task live and die with that one view, so
-//! nothing an old view queued can reach the next one. Within one view, a
+//! nothing an old view queued can reach the next one. The exception is a
+//! page's new-window request, which is a tab of its own and must survive its
+//! view being dropped (a tab switch right after the click): it goes inline
+//! into a channel the pane owns, drained by a task that lives as long as the
+//! pane ([`BrowserPane::new`]). Within one view, a
 //! load failure carries the number of the navigation it belongs to, so one
 //! still queued when the user starts another navigation is dropped
 //! ([`failure_is_current`]).
@@ -222,17 +226,8 @@ enum PageEvent {
     /// navigation number at the time ([`failure_is_current`]).
     Failed(Option<String>, String, u64),
     Notice(String),
-    NewWindow(String),
     /// The user clicked into the page.
     Clicked,
-}
-
-/// Whether `ev` still means something once its view is gone. Callbacks
-/// queued before the view was dropped can still be in flight; only a new
-/// window request (a tab of its own) survives it. A stale `Loading(true)`,
-/// say, would leave a Stop button on a tab with no page.
-fn applies_without_view(ev: &PageEvent) -> bool {
-    matches!(ev, PageEvent::NewWindow(_))
 }
 
 /// Whether a failure tagged with navigation `tagged` belongs to the view's
@@ -291,6 +286,11 @@ pub(crate) struct BrowserPane {
     _address_focus_in: gpui::Subscription,
     /// Puts the page's URL back in the address bar when the user leaves it.
     _address_focus_out: gpui::Subscription,
+    /// Where every view of this pane sends its page's new-window requests;
+    /// drained by `_new_windows`, which lives as long as the pane, so a
+    /// request outlives the view that made it.
+    new_window_tx: mpsc::UnboundedSender<String>,
+    _new_windows: Task<()>,
 }
 
 impl BrowserPane {
@@ -355,6 +355,17 @@ impl BrowserPane {
                     pane.reset_address(window, cx);
                 }
             });
+        let (new_window_tx, mut new_window_rx) = mpsc::unbounded::<String>();
+        let new_windows = cx.spawn_in(window, async move |this, cx| {
+            while let Some(url) = new_window_rx.next().await {
+                if this
+                    .update(cx, |_, cx| cx.emit(BrowserEvent::NewWindow(url)))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
         Self {
             attempted: url.clone(),
             url,
@@ -373,6 +384,8 @@ impl BrowserPane {
             _focus_out: focus_out,
             _address_focus_in: address_focus_in,
             _address_focus_out: address_focus_out,
+            new_window_tx,
+            _new_windows: new_windows,
         }
     }
 
@@ -470,7 +483,7 @@ impl BrowserPane {
             return;
         };
         let (tx, mut rx) = mpsc::unbounded();
-        match NativeWebView::new(window, &url, page_events(tx)) {
+        match NativeWebView::new(window, &url, page_events(tx, self.new_window_tx.clone())) {
             Ok(view) => {
                 let events = cx.spawn_in(window, async move |this, cx| {
                     while let Some(ev) = rx.next().await {
@@ -497,7 +510,11 @@ impl BrowserPane {
     }
 
     fn apply(&mut self, ev: PageEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.native.is_none() && !applies_without_view(&ev) {
+        // Callbacks queued before the view was dropped can still be in
+        // flight; none means anything without it. A stale `Loading(true)`,
+        // say, would leave a Stop button on a tab with no page. (New-window
+        // requests, which do, come through `new_window_tx` instead.)
+        if self.native.is_none() {
             return;
         }
         match ev {
@@ -529,7 +546,6 @@ impl BrowserPane {
                 self.loading = false;
             }
             PageEvent::Notice(text) => self.show_notice(text, cx),
-            PageEvent::NewWindow(url) => cx.emit(BrowserEvent::NewWindow(url)),
             // AppKit already gave the page the keyboard; gpui's focus follows
             // to the tab (out of the address bar or the tools panel), so
             // the key monitor routes the page's ⌘-keys to it. A pending
@@ -821,8 +837,12 @@ impl BrowserPane {
     }
 }
 
-/// The callbacks for one native view: each only forwards to the channel.
-fn page_events(tx: mpsc::UnboundedSender<PageEvent>) -> NativeEvents {
+/// The callbacks for one native view: each only forwards to the view's
+/// channel, or for a new-window request to the pane's own `new_windows`.
+fn page_events(
+    tx: mpsc::UnboundedSender<PageEvent>,
+    new_windows: mpsc::UnboundedSender<String>,
+) -> NativeEvents {
     let sender = |f: fn(String) -> PageEvent| {
         let tx = tx.clone();
         Box::new(move |s: String| {
@@ -841,7 +861,9 @@ fn page_events(tx: mpsc::UnboundedSender<PageEvent>) -> NativeEvents {
             let _ = failed_tx.unbounded_send(PageEvent::Failed(url, reason, navigation));
         }),
         on_notice: sender(PageEvent::Notice),
-        on_new_window: sender(PageEvent::NewWindow),
+        on_new_window: Box::new(move |url| {
+            let _ = new_windows.unbounded_send(url);
+        }),
         on_click: {
             let tx = tx.clone();
             Box::new(move || {
@@ -1002,27 +1024,23 @@ mod tests {
     }
 
     #[test]
-    fn a_dropped_view_s_queued_events_are_ignored_but_new_windows() {
-        for ev in [
-            PageEvent::Title("t".into()),
-            PageEvent::Url("http://localhost/".into()),
-            PageEvent::Loading(true),
-            PageEvent::Failed(None, "x".into(), 0),
-            PageEvent::Notice("n".into()),
-            PageEvent::Clicked,
-        ] {
-            assert!(!applies_without_view(&ev));
-        }
-        assert!(applies_without_view(&PageEvent::NewWindow("http://localhost/".into())));
-    }
-
-    #[test]
     fn only_the_current_navigation_s_failure_shows() {
         assert!(failure_is_current(3, 3));
         // Queued from the navigation before the user's new address.
         assert!(!failure_is_current(2, 3));
         // The counter wraps rather than overflowing.
         assert!(!failure_is_current(u64::MAX, 0));
+    }
+
+    #[test]
+    fn a_new_window_request_outlives_its_view_s_channel() {
+        let (tx, rx) = mpsc::unbounded();
+        let (new_tx, mut new_rx) = mpsc::unbounded();
+        let events = page_events(tx, new_tx);
+        // The view is dropped (a tab switch): its channel and task go.
+        drop(rx);
+        (events.on_new_window)("http://localhost:3000/new".into());
+        assert_eq!(new_rx.try_recv().ok().as_deref(), Some("http://localhost:3000/new"));
     }
 
     #[test]

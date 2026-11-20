@@ -226,10 +226,11 @@ fn us_key(key_code: u16) -> Option<&'static str> {
 
 /// Callbacks from the page, owned by the [`NativeWebView`] that runs them.
 ///
-/// Every callback is posted to the main dispatch queue, never run inline. KVO
-/// fires synchronously inside our own `load`/`reload` calls, so an inline
-/// callback that updated the gpui entity calling `load` would re-borrow it and
-/// panic. Callbacks queued when the view is dropped are discarded.
+/// Every callback but `on_new_window` and `open_external` is posted to the
+/// main dispatch queue, never run inline. KVO fires synchronously inside our
+/// own `load`/`reload` calls, so an inline callback that updated the gpui
+/// entity calling `load` would re-borrow it and panic. Callbacks queued when
+/// the view is dropped are discarded.
 pub(crate) struct NativeEvents {
     /// The page title; empty when the page has none.
     pub on_title: Box<dyn Fn(String)>,
@@ -248,7 +249,9 @@ pub(crate) struct NativeEvents {
     /// Something the user should hear about that is not a load failure; the
     /// page stays as it is. Today only [`DOWNLOAD_UNSUPPORTED`].
     pub on_notice: Box<dyn Fn(String)>,
-    /// `target=_blank` or `window.open` asked for an http(s) page.
+    /// `target=_blank` or `window.open` asked for an http(s) page. Called
+    /// inline, so the request can't be lost to the view being dropped
+    /// before a post would run; it must only queue (it can't touch gpui).
     pub on_new_window: Box<dyn Fn(String)>,
     /// The user clicked into the page: gpui's focus should follow (AppKit's
     /// first responder already has), so the tab, not whatever gpui had
@@ -700,7 +703,13 @@ mod mac {
             ) -> Option<Retained<WKWebView>> {
                 let url = url_string(unsafe { action.request() }.URL());
                 match decide_new_window(&url, origin_of(action, self.ivars().gesture.get())) {
-                    NavDecision::Load => self.post(move |e| (e.on_new_window)(url)),
+                    // Inline (see `on_new_window`): a tab switch right after
+                    // the click drops this view, and a post would be skipped.
+                    NavDecision::Load => {
+                        if let Some(events) = self.ivars().events.upgrade() {
+                            (events.on_new_window)(url);
+                        }
+                    }
                     other => self.act_on(other, &url),
                 }
                 // We never hand WebKit a second view; the app opens a tab.
