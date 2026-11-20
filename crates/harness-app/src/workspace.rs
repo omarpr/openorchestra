@@ -781,13 +781,6 @@ pub struct HarnessWorkspace {
     /// The pending save after browser URL changes
     /// (`schedule_browser_save`); dropping it cancels it.
     browser_save: Option<gpui::Task<()>>,
-    /// zed context menus alive right now (`ui::ContextMenu`: the Files and
-    /// Git panels' right-click and ⋯ menus, an open dropdown), kept by
-    /// `_zed_menu_watch`. Those draw through zed's own `deferred(anchored())`
-    /// and can flip over the center column, so a count above 0 is an
-    /// overlay (`overlay_open`).
-    zed_menus: std::rc::Rc<std::cell::Cell<usize>>,
-    _zed_menu_watch: gpui::Subscription,
     /// The quit confirmation is open (keep vs. close terminals). Present only
     /// while the user is deciding; carries the "remember my choice" checkbox.
     close_prompt: Option<ClosePrompt>,

@@ -149,23 +149,6 @@ impl HarnessWorkspace {
         let (a2a_inbox_tx, a2a_inbox_rx) =
             crossbeam_channel::unbounded::<a2a_broker::InboxDelivery>();
 
-        // Count zed's context menus from creation to release (see
-        // `zed_menus`). No redraw is asked for here: a menu's owner already
-        // redraws to show or remove it, and the effects that run these
-        // callbacks are flushed before that frame. (A redraw here would loop
-        // with a dropdown that builds its menu in render, like Settings ›
-        // Review's model picker, which creates and drops one every frame.)
-        let zed_menus = std::rc::Rc::new(std::cell::Cell::new(0usize));
-        let zed_menu_watch = {
-            let open = zed_menus.clone();
-            cx.observe_new::<::ui::ContextMenu>(move |_, _, cx| {
-                open.set(open.get() + 1);
-                let open = open.clone();
-                cx.on_release(move |_, _| open.set(open.get().saturating_sub(1)))
-                    .detach();
-            })
-        };
-
         let mut this = Self {
             manager,
             task_store,
@@ -248,8 +231,6 @@ impl HarnessWorkspace {
             diff_base_menu: None,
             browser_window_hidden: false,
             browser_save: None,
-            zed_menus,
-            _zed_menu_watch: zed_menu_watch,
             close_prompt: None,
             edit_prompt: None,
             ending: HashMap::new(),
