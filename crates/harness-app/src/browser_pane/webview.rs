@@ -26,14 +26,28 @@
 //! be able to launch apps or local files on its own.
 //! - `file:`, `javascript:` and unclassifiable URLs are never handed out.
 //! - App schemes (`mailto:`, `vscode:`, `zed:` …) go to the system only for a
-//!   link click (`LinkActivated`) whose source frame is the main frame and
-//!   whose target is the main frame or a new window. Script navigations,
-//!   iframes and redirects the user didn't click are ignored with a log line
-//!   (scheme only). Accepted cost: "open in app" redirect flows that weren't
-//!   started by a click don't launch; "Open in default browser" is the way out.
+//!   link click whose source frame is the main frame and whose target is the
+//!   main frame or a new window. Script navigations, iframes and redirects
+//!   the user didn't click are ignored with a log line (scheme only).
+//!   Accepted cost: "open in app" redirect flows that weren't started by a
+//!   click don't launch; "Open in default browser" is the way out.
+//! - A "click" is a `LinkActivated` navigation within [`GESTURE_WINDOW`] of
+//!   a real user gesture on that page ([`user_clicked`]). WebKit reports a
+//!   script's `a.click()` as `LinkActivated` too, and the public
+//!   `WKNavigationAction` API carries no gesture flag, so the key monitor
+//!   below stamps each page's last gesture: a left mouse-down or mouse-up on
+//!   it, or Return/Space while it has the keyboard (keyboard activation of a
+//!   focused link or button). Known limits: a script click that runs within
+//!   the window of a real gesture on the same page still counts, and so
+//!   does any `LinkActivated` navigation right after typing Space or Return
+//!   into the page.
 //! - Downloads go out only from the main frame (and, for `<a download>`, only
-//!   on a click), and only http(s); `blob:`/`data:` downloads report
-//!   "not supported" through `on_notice` (not a load failure: the page stays).
+//!   on a click, as above), and only http(s); `blob:`/`data:` downloads
+//!   report "not supported" through `on_notice` (not a load failure: the
+//!   page stays). A response the server marks as a download carries no
+//!   navigation type and isn't gated by the gesture: the navigation that
+//!   fetched it already passed the policy (a script may load an http(s)
+//!   page), and the default browser fetches the file again itself.
 //! - `link_routing::open_external` also rate-limits to one open per second.
 //!
 //! **⌘-chords over a focused page: one app-wide local `NSEvent` monitor**
@@ -64,8 +78,9 @@
 //! - leaving the tab while the page had it also asks for the page to get it
 //!   back once gpui's focus returns to the page's side without a click (Esc,
 //!   the panel toggled off); returning to the address bar drops the request;
-//! - a click into the page (the monitor also watches left mouse-downs)
-//!   moves gpui's focus to the tab (`on_click`).
+//! - a click into the page (the monitor also watches left mouse-downs, and
+//!   stamps them as the page's last gesture) moves gpui's focus to the tab
+//!   (`on_click`).
 //!
 //! Bindings without ⌘ (`ctrl-q`) are untouched: the monitor lets them by,
 //! and gpui sees them first through its view's `performKeyEquivalent:` as
@@ -90,6 +105,7 @@
 //! inside it (⌘W closing the tab) can't pull it out from under itself.
 
 use std::cell::RefCell;
+use std::time::{Duration, Instant};
 
 use crate::link_routing;
 use crate::shortcuts::Chord;
@@ -270,11 +286,26 @@ pub(crate) enum NavDecision {
     Unsupported,
 }
 
+/// How long after a real gesture on a page (see the module docs) a link
+/// activation still counts as the user's click. Link activation follows the
+/// mouse-up or the key press within a frame or two; a second leaves room for
+/// a busy page.
+pub(crate) const GESTURE_WINDOW: Duration = Duration::from_secs(1);
+
+/// Whether a navigation of `link_activated` type (`LinkActivated`) is the
+/// user's click: one within [`GESTURE_WINDOW`] of the page's last real
+/// gesture. WebKit reports a script's `a.click()` as link activation too.
+pub(crate) fn user_clicked(link_activated: bool, last_gesture: Option<Instant>, now: Instant) -> bool {
+    link_activated && last_gesture.is_some_and(|t| now.saturating_duration_since(t) <= GESTURE_WINDOW)
+}
+
 /// Where a navigation comes from, as WebKit reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct NavOrigin {
-    /// The user clicked a link (`WKNavigationTypeLinkActivated`), as opposed
-    /// to a script (`location = …`), a form, a reload or our own `load`.
+    /// The user clicked a link ([`user_clicked`]: `LinkActivated` right
+    /// after a real gesture on the page), as opposed to a script
+    /// (`location = …`, `a.click()` with no gesture), a form, a reload or
+    /// our own `load`.
     pub user_initiated: bool,
     /// The frame that started it (`sourceFrame`) is the main frame.
     pub from_main_frame: bool,
@@ -427,6 +458,7 @@ mod mac {
     use std::ffi::c_void;
     use std::ptr::{self, NonNull};
     use std::rc::{Rc, Weak};
+    use std::time::Instant;
 
     use anyhow::{Context as _, anyhow, bail};
     use block2::{DynBlock, RcBlock};
@@ -456,7 +488,7 @@ mod mac {
     use super::{
         APP_CHORDS, DOWNLOAD_UNSUPPORTED, KeyRoute, NavDecision, NavOrigin, NativeEvents,
         decide_download, decide_navigation, decide_new_window, event_chords, flip_y,
-        is_benign_failure, is_download, route_key, safari_app_name,
+        is_benign_failure, is_download, route_key, safari_app_name, user_clicked,
     };
     use crate::shortcuts::{Chord, PageEdit, is_app_shortcut, page_edit};
 
@@ -483,11 +515,13 @@ mod mac {
         })
     }
 
-    /// Whether the user clicked a link, and whether the main frame started it.
-    /// A nil `sourceFrame` (an app-initiated load) is not the main frame.
-    fn origin_of(action: &WKNavigationAction) -> NavOrigin {
+    /// Whether the user clicked a link ([`user_clicked`], from the page's
+    /// last real gesture), and whether the main frame started it. A nil
+    /// `sourceFrame` (an app-initiated load) is not the main frame.
+    fn origin_of(action: &WKNavigationAction, last_gesture: Option<Instant>) -> NavOrigin {
+        let link_activated = unsafe { action.navigationType() } == WKNavigationType::LinkActivated;
         NavOrigin {
-            user_initiated: unsafe { action.navigationType() } == WKNavigationType::LinkActivated,
+            user_initiated: user_clicked(link_activated, last_gesture, Instant::now()),
             from_main_frame: unsafe { action.sourceFrame() }.is_some_and(|f| unsafe { f.isMainFrame() }),
         }
     }
@@ -503,6 +537,9 @@ mod mac {
         /// delegate for a moment after the view is dropped; nothing reaches
         /// the callbacks then.
         events: Weak<NativeEvents>,
+        /// The page's last real gesture, stamped by the key monitor; shared
+        /// with its `PageEntry`.
+        gesture: Rc<Cell<Option<Instant>>>,
     }
 
     define_class!(
@@ -573,7 +610,7 @@ mod mac {
                 // main-frame load: web URLs go on to createWebView (below).
                 let to_main_frame =
                     unsafe { action.targetFrame() }.is_none_or(|f| unsafe { f.isMainFrame() });
-                let origin = origin_of(action);
+                let origin = origin_of(action, self.ivars().gesture.get());
                 // `<a download>` and the like. macOS 11.3+; we require 12.
                 let decision = if unsafe { action.shouldPerformDownload() } {
                     decide_download(&url, origin)
@@ -653,7 +690,7 @@ mod mac {
                 _features: &WKWindowFeatures,
             ) -> Option<Retained<WKWebView>> {
                 let url = url_string(unsafe { action.request() }.URL());
-                match decide_new_window(&url, origin_of(action)) {
+                match decide_new_window(&url, origin_of(action, self.ivars().gesture.get())) {
                     NavDecision::Load => self.post(move |e| (e.on_new_window)(url)),
                     other => self.act_on(other, &url),
                 }
@@ -664,8 +701,12 @@ mod mac {
     );
 
     impl Delegate {
-        fn new(events: Weak<NativeEvents>, mtm: MainThreadMarker) -> Retained<Self> {
-            let this = Self::alloc(mtm).set_ivars(Ivars { events });
+        fn new(
+            events: Weak<NativeEvents>,
+            gesture: Rc<Cell<Option<Instant>>>,
+            mtm: MainThreadMarker,
+        ) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(Ivars { events, gesture });
             unsafe { msg_send![super(this), init] }
         }
 
@@ -733,6 +774,8 @@ mod mac {
         /// gpui's focus is on this page's side of its tab: in the tab, not
         /// its address bar (see [`route_key`]).
         pane_focused: Rc<Cell<bool>>,
+        /// The page's last real gesture (see the module docs).
+        gesture: Rc<Cell<Option<Instant>>>,
         events: Weak<NativeEvents>,
     }
 
@@ -762,13 +805,22 @@ mod mac {
                 note_page_click(ev);
                 return event.as_ptr();
             }
+            if ev.r#type() == NSEventType::LeftMouseUp {
+                // A link activates on mouse-up; a press held a while still
+                // counts.
+                if let Some(entry) = page_hit(ev) {
+                    entry.gesture.set(Some(Instant::now()));
+                }
+                return event.as_ptr();
+            }
+            note_page_key_gesture(ev);
             if route_page_key(ev) {
                 ptr::null_mut()
             } else {
                 event.as_ptr()
             }
         });
-        let mask = NSEventMask::KeyDown | NSEventMask::LeftMouseDown;
+        let mask = NSEventMask::KeyDown | NSEventMask::LeftMouseDown | NSEventMask::LeftMouseUp;
         // SAFETY: the block has the handler signature AppKit documents.
         let monitor = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &handler) };
         match monitor {
@@ -900,32 +952,72 @@ mod mac {
         }
     }
 
+    /// What the monitor needs of the page a mouse event lands on, if it
+    /// lands on one of ours. Hidden pages aren't hit.
+    struct PageHit {
+        pane_focused: Rc<Cell<bool>>,
+        gesture: Rc<Cell<Option<Instant>>>,
+        events: Weak<NativeEvents>,
+    }
+
+    fn page_hit(event: &NSEvent) -> Option<PageHit> {
+        let mtm = MainThreadMarker::new()?;
+        let page = event
+            .window(mtm)
+            .and_then(|w| w.contentView())
+            .and_then(|content| content.hitTest(event.locationInWindow()))
+            .and_then(page_containing)?;
+        page_entry(&page)
+    }
+
+    fn page_entry(page: &WKWebView) -> Option<PageHit> {
+        let addr = page as *const WKWebView as usize;
+        PAGES.with(|pages| {
+            pages.borrow().iter().find(|p| p.view == addr).map(|p| PageHit {
+                pane_focused: p.pane_focused.clone(),
+                gesture: p.gesture.clone(),
+                events: p.events.clone(),
+            })
+        })
+    }
+
     /// A left mouse-down: when it lands on one of our pages, that page's tab
-    /// takes gpui's focus (the click itself goes on to the page). Hidden
-    /// pages aren't hit.
+    /// takes gpui's focus (the click itself goes on to the page), and the
+    /// page's last gesture is now.
     fn note_page_click(event: &NSEvent) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
-        let Some(page) = event
-            .window(mtm)
-            .and_then(|w| w.contentView())
-            .and_then(|content| content.hitTest(event.locationInWindow()))
-            .and_then(page_containing)
-        else {
+        let Some(entry) = page_hit(event) else {
             return;
         };
-        let addr = Retained::as_ptr(&page) as usize;
-        let events = PAGES.with(|pages| {
-            let pages = pages.borrow();
-            let entry = pages.iter().find(|p| p.view == addr)?;
-            // Now, not when gpui's focus lands: a ⌘V right after the click
-            // must already go to the page.
-            entry.pane_focused.set(true);
-            Some(entry.events.clone())
-        });
-        if let Some(events) = events {
-            post_event(events, mtm, |e| (e.on_click)());
+        entry.gesture.set(Some(Instant::now()));
+        // Now, not when gpui's focus lands: a ⌘V right after the click must
+        // already go to the page.
+        entry.pane_focused.set(true);
+        post_event(entry.events, mtm, |e| (e.on_click)());
+    }
+
+    /// Return, keypad Enter or Space while a page has the keyboard: the keys
+    /// that activate a focused link or button, so the page's last gesture is
+    /// now.
+    fn note_page_key_gesture(event: &NSEvent) {
+        const RETURN: u16 = 36;
+        const SPACE: u16 = 49;
+        const KEYPAD_ENTER: u16 = 76;
+        if !matches!(event.keyCode(), RETURN | SPACE | KEYPAD_ENTER) {
+            return;
+        }
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        if let Some(entry) = event
+            .window(mtm)
+            .as_deref()
+            .and_then(focused_page)
+            .and_then(|page| page_entry(&page))
+        {
+            entry.gesture.set(Some(Instant::now()));
         }
     }
 
@@ -987,7 +1079,8 @@ mod mac {
             });
 
             let events = Rc::new(events);
-            let delegate = Delegate::new(Rc::downgrade(&events), mtm);
+            let gesture = Rc::new(Cell::new(None));
+            let delegate = Delegate::new(Rc::downgrade(&events), gesture.clone(), mtm);
             unsafe {
                 view.setNavigationDelegate(Some(ProtocolObject::from_ref(&*delegate)));
                 view.setUIDelegate(Some(ProtocolObject::from_ref(&*delegate)));
@@ -1009,6 +1102,7 @@ mod mac {
                 pages.borrow_mut().push(PageEntry {
                     view: Retained::as_ptr(&view) as usize,
                     pane_focused: pane_focused.clone(),
+                    gesture,
                     events: Rc::downgrade(&events),
                 })
             });
@@ -1308,6 +1402,23 @@ mod tests {
         assert_eq!(decide_download("data:application/json,{}", CLICK), NavDecision::Unsupported);
         assert_eq!(decide_download("file:///etc/hosts", CLICK), NavDecision::Unsupported);
         assert_eq!(decide_download("", CLICK), NavDecision::Unsupported);
+    }
+
+    #[test]
+    fn a_link_activation_is_a_click_only_right_after_a_real_gesture() {
+        let t0 = Instant::now();
+        // A real click or Return on a focused link, then WebKit's activation.
+        assert!(user_clicked(true, Some(t0), t0));
+        assert!(user_clicked(true, Some(t0), t0 + Duration::from_millis(300)));
+        assert!(user_clicked(true, Some(t0), t0 + GESTURE_WINDOW));
+        // A script's `a.click()` with no gesture, or long after the last one.
+        assert!(!user_clicked(true, None, t0));
+        assert!(!user_clicked(true, Some(t0), t0 + GESTURE_WINDOW + Duration::from_millis(1)));
+        // Not a link activation (a script's `location = …`, a reload), even
+        // right after a click.
+        assert!(!user_clicked(false, Some(t0), t0));
+        // A clock that reads earlier than the gesture never panics.
+        assert!(user_clicked(true, Some(t0 + Duration::from_millis(5)), t0));
     }
 
     #[test]
