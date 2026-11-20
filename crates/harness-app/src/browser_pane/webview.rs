@@ -23,14 +23,20 @@
 //! gives the full delegate and KVO surface directly.
 //!
 //! **Navigation policy is fail-safe** (Task 5 review ruling): a page must not
-//! be able to launch apps or local files on its own.
+//! be able to open local files at all, nor launch apps without a real user
+//! gesture on it.
 //! - `file:`, `javascript:` and unclassifiable URLs are never handed out.
-//! - App schemes (`mailto:`, `vscode:`, `zed:` …) go to the system only for a
-//!   link click whose source frame is the main frame and whose target is the
-//!   main frame or a new window. Script navigations, iframes and redirects
-//!   the user didn't click are ignored with a log line (scheme only).
-//!   Accepted cost: "open in app" redirect flows that weren't started by a
-//!   click don't launch; "Open in default browser" is the way out.
+//! - App schemes (`mailto:`, `vscode:`, `zed:` …) go to the system only for
+//!   what passes as a link click (below) whose source frame is the main
+//!   frame and whose target is the main frame or a new window. Everything
+//!   else (a script's `location = …`, iframes, redirects, a link activation
+//!   with no recent gesture) is ignored with a log line (scheme only). The
+//!   click test is a heuristic, not proof the user clicked that link: it
+//!   requires a real user gesture on the page within [`GESTURE_WINDOW`],
+//!   so a script's `a.click()` inside that window still passes and can
+//!   launch an app. Accepted cost: "open in app" redirect flows that
+//!   weren't started by a click don't launch; "Open in default browser" is
+//!   the way out.
 //! - A "click" is a `LinkActivated` navigation within [`GESTURE_WINDOW`] of
 //!   a real user gesture on that page ([`user_clicked`]). WebKit reports a
 //!   script's `a.click()` as `LinkActivated` too, and the public
@@ -651,12 +657,15 @@ impl NavOrigin {
 /// - `file:`, `javascript:` and anything we can't classify are ignored,
 ///   never handed out: `open file:///…/x.app` would launch local files.
 /// - Any other scheme (`mailto:`, `tel:`, `vscode:`, `zed:`, `slack:` …)
-///   leaves the app only when the user clicked a link in the main frame and
-///   the target is the main frame (or a new window). Scripts, iframes and
-///   navigations the user didn't click are ignored with a log line, so a page
-///   can't launch apps on its own. Cost: an "open in app" redirect chain that
-///   wasn't started by a click won't launch; the tab's "Open in default
-///   browser" button is the way out.
+///   leaves the app only when it passes as a link click in the main frame
+///   and the target is the main frame (or a new window). Passing is a
+///   heuristic ([`user_clicked`]): a link activation within
+///   [`GESTURE_WINDOW`] of a real user gesture on the page, so a script's
+///   `a.click()` inside that window passes too. Other script navigations,
+///   iframes and navigations with no recent gesture are ignored with a log
+///   line, so a page can't launch apps without a real gesture on it. Cost:
+///   an "open in app" redirect chain that wasn't started by a click won't
+///   launch; the tab's "Open in default browser" button is the way out.
 pub(crate) fn decide_navigation(url: &str, to_main_frame: bool, origin: NavOrigin) -> NavDecision {
     match scheme(url).as_deref() {
         Some("http" | "https" | "about" | "data" | "blob") => NavDecision::Load,
