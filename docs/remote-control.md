@@ -18,7 +18,9 @@ network. Keep the phone or tablet on the same network as your Mac.
    and expires after 10 minutes.
 
 If the Mac’s IP address or remote port changes, update the address on the
-device or add the web app to your Home Screen again.
+device or add the web app to your Home Screen again. Then get a new pairing
+code from the Mac and pair again: the device keeps its pairing per address,
+so the new address starts unpaired.
 
 ## Share and use tabs
 
