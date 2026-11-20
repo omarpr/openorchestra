@@ -219,6 +219,12 @@
 //!   method again on the object it is sent to. Missing anything, the button
 //!   hides and the app logs it once.
 //!
+//! A third private piece is a delegate method, not a message we send:
+//! WebKit calls `_webView:navigation:didSameDocumentNavigation:` on a
+//! navigation delegate that implements it, the only signal that tells a
+//! single-page app's `pushState` from the URL falling back after a failed
+//! load (`NativeEvents::on_commit`). Implementing it sends nothing.
+//!
 //! Acceptable because the app ships as a DMG and through Homebrew, not the
 //! Mac App Store, whose review rejects private API. It degrades rather than
 //! breaks: on a macOS that renamed or dropped any of it, Inspect Element
@@ -600,10 +606,12 @@ pub(crate) struct NativeEvents {
     /// is not a visit: see `on_commit`.
     pub on_url: Box<dyn Fn(String)>,
     /// The page is now at this URL for real: a top-level navigation
-    /// committed (`didCommitNavigation`; `false`), or the URL changed in
-    /// place with nothing loading (`pushState`, a `#fragment`; `true`, the
-    /// same document, whose title is still its own). What browsing history
-    /// records.
+    /// committed (`didCommitNavigation`; `false`), or the document changed
+    /// its URL in place (`pushState`, `replaceState`, back or forward
+    /// between those, a `#fragment`; `true`, the same document, whose title
+    /// is still its own), as WebKit's private same-document callback
+    /// reports it (see the module docs). Never the URL falling back after a
+    /// failed load. What browsing history records.
     pub on_commit: Box<dyn Fn(String, bool)>,
     pub on_loading: Box<dyn Fn(bool)>,
     /// A page load failed: the URL that failed, when WebKit names it (the
@@ -1567,18 +1575,11 @@ mod mac {
                         self.post(move |e| (e.on_title)(title));
                     }
                     "URL" => {
+                        // The address bar's. A same-document change is
+                        // also a commit, which `did_same_document` reports.
                         let url = url_string(unsafe { view.URL() });
                         if !url.is_empty() {
-                            // Nothing loading: a same-page change, which
-                            // commits nothing but is where the page now is.
-                            // Posted after `on_url`, so the pane already
-                            // has the new URL when it hears of the commit.
-                            let same_page = !unsafe { view.isLoading() };
-                            let committed = url.clone();
                             self.post(move |e| (e.on_url)(url));
-                            if same_page {
-                                self.post(move |e| (e.on_commit)(committed, true));
-                            }
                         }
                     }
                     "loading" => {
@@ -1586,6 +1587,33 @@ mod mac {
                         self.post(move |e| (e.on_loading)(loading));
                     }
                     _ => {}
+                }
+            }
+        }
+
+        impl Delegate {
+            /// `WKNavigationDelegatePrivate`'s same-document navigation:
+            /// `pushState`, `replaceState`, back or forward between those,
+            /// a `#fragment` (`kind`, `_WKSameDocumentNavigationType`, isn't
+            /// needed). Observed on macOS 27 with the 27.2 SDK: it fires for
+            /// a `pushState` made while the page still loads its images,
+            /// which the old test (the URL changing with nothing loading)
+            /// missed, and not for the URL falling back after a failed
+            /// load, which that test counted as a visit. Private API (see the module docs): a WebKit that
+            /// stopped calling it would leave same-document pages out of
+            /// history, and nothing else.
+            #[unsafe(method(_webView:navigation:didSameDocumentNavigation:))]
+            fn did_same_document(
+                &self,
+                web_view: &WKWebView,
+                _navigation: Option<&WKNavigation>,
+                _kind: isize,
+            ) {
+                // After the URL change it follows (KVO fires first), so the
+                // pane already has the new URL when it hears of the commit.
+                let url = url_string(unsafe { web_view.URL() });
+                if !url.is_empty() {
+                    self.post(move |e| (e.on_commit)(url, true));
                 }
             }
         }
