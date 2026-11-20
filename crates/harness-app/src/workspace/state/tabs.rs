@@ -536,6 +536,13 @@ impl HarnessWorkspace {
                 id
             }
         };
+        // The page shows only with the center drawn: an open into the
+        // selected worktree (Ports' Open from a maximized tools panel, say)
+        // restores it. A request that lands for another worktree, after the
+        // user moved on, leaves the layout alone.
+        if self.resolve().is_some_and(|r| r.key == key) {
+            self.tools_maximized = false;
+        }
         self.sync_browser_views(window, cx);
         self.focus_active_pane(window, cx);
         cx.notify();
