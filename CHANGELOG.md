@@ -46,6 +46,8 @@ Unreleased is empty.
 
 ### Changed
 
+- Sidebar rows leave a little more room between the status pill and the
+  badges (PR, ahead/behind, CI) below it.
 - Review Overview tabs show their icon first and the same running spinner as
   agent tabs.
 - Settings are tidier. The long explainer above Agents is gone; its useful
