@@ -1006,21 +1006,26 @@ struct TextTooltip {
 
 impl Render for TextTooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let hx = theme(cx);
-        // Cap width so longer help (new-task info) wraps instead of spanning
-        // the whole window; short tips stay compact because content shrinks.
-        div()
-            .bg(hx.surface2)
-            .border_1()
-            .border_color(hx.border2)
-            .rounded_md()
-            .px_1p5()
-            .py_0p5()
-            .max_w(px(280.0))
-            .text_xs()
-            .text_color(hx.tx0)
-            .child(self.text.clone())
+        tip_label(self.text.clone(), cx)
     }
+}
+
+/// A [`tip`]'s look: `text` on a small rounded (`rounded_md`) panel.
+pub(crate) fn tip_label(text: gpui::SharedString, cx: &App) -> gpui::Div {
+    let hx = theme(cx);
+    // Cap width so longer help (new-task info) wraps instead of spanning
+    // the whole window; short tips stay compact because content shrinks.
+    div()
+        .bg(hx.surface2)
+        .border_1()
+        .border_color(hx.border2)
+        .rounded_md()
+        .px_1p5()
+        .py_0p5()
+        .max_w(px(280.0))
+        .text_xs()
+        .text_color(hx.tx0)
+        .child(text)
 }
 
 /// Build the closure `.tooltip()` wants: it hands back a fresh tooltip view

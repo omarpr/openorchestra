@@ -30,7 +30,12 @@
 //! follows gpui layout every frame without feeding back into it. The
 //! conductor is cut out of the page where they overlap, along his outline,
 //! so he shows through it and takes the pointer there
-//! ([`set_punch_through`], `webview.rs`).
+//! ([`set_punch_through`], `webview.rs`). So are the toolbar buttons'
+//! tooltips, which gpui draws reaching down over the page: each reports
+//! where it is drawn from its own prepaint ([`PageTooltip`]), after the
+//! page's slot has prepainted, and the slot's paint, after both, cuts it
+//! out ([`set_tooltip_hole`]), or clears the hole of one that hid, every
+//! frame it draws.
 //!
 //! The pane talks to the workspace through [`BrowserEvent`]s: a changed URL
 //! (relabel the tab, save), a changed title (relabel only; the next save
@@ -69,6 +74,7 @@ mod webview;
 pub(crate) use history::BrowserHistory;
 
 use std::cell::Cell;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use editor::Editor;
@@ -82,11 +88,12 @@ use gpui::{
 
 use crate::link_routing;
 use crate::theme::{HarnessTheme, theme, tint};
-use crate::workspace::{LookKind, browser_label, kind_icon, tip};
+use crate::workspace::{LookKind, browser_label, kind_icon, tip, tip_label};
 
 pub(crate) use webview::{
     Hole, Sprite, set_app_shortcuts, set_punch_through, window_is_minimized_or_hidden,
 };
+use webview::set_tooltip_hole;
 use webview::{
     DockSide, InspectorMove, InspectorPlace, NativeEvents, NativeWebView, inspector_available,
 };
@@ -769,6 +776,10 @@ pub(crate) struct BrowserPane {
     inspector_watch: InspectorWatch,
     /// Opens and refreshes the suggestions as the user types.
     _address_edits: gpui::Subscription,
+    /// Where a toolbar button's tooltip is drawn this frame, set by its
+    /// prepaint ([`PageTooltip`]) and cut from the page by the page slot's
+    /// paint, which clears it for the next frame.
+    tooltip_hole: Rc<Cell<Option<Hole>>>,
 }
 
 impl BrowserPane {
@@ -894,6 +905,7 @@ impl BrowserPane {
             inspector_open: false,
             inspector_watch: InspectorWatch::Closed,
             _address_edits: address_edits,
+            tooltip_hole: Rc::new(Cell::new(None)),
         }
     }
 
@@ -1452,11 +1464,12 @@ impl BrowserPane {
         let can_back = native.is_some_and(|v| v.can_go_back());
         let can_forward = native.is_some_and(|v| v.can_go_forward());
         let has_page = self.url.is_some();
+        let tip = &self.tooltip_hole;
         let reload = if self.loading {
-            bar_button(hx, "browser-stop", ::ui::IconName::Close, "Stop", true)
+            bar_button(hx, tip, "browser-stop", ::ui::IconName::Close, "Stop", true)
                 .on_click(cx.listener(|pane, _, _, cx| pane.stop(cx)))
         } else {
-            bar_button(hx, "browser-reload", ::ui::IconName::RotateCw, "Reload", has_page)
+            bar_button(hx, tip, "browser-reload", ::ui::IconName::RotateCw, "Reload", has_page)
                 .when(has_page, |d| {
                     d.on_click(cx.listener(|pane, _, window, cx| pane.reload(window, cx)))
                 })
@@ -1472,7 +1485,7 @@ impl BrowserPane {
             .border_b_1()
             .border_color(hx.border)
             .child(
-                bar_button(hx, "browser-back", ::ui::IconName::ArrowLeft, "Back", can_back)
+                bar_button(hx, tip, "browser-back", ::ui::IconName::ArrowLeft, "Back", can_back)
                     .when(can_back, |d| {
                         d.on_click(cx.listener(|pane, _, window, cx| pane.back(window, cx)))
                     }),
@@ -1480,6 +1493,7 @@ impl BrowserPane {
             .child(
                 bar_button(
                     hx,
+                    tip,
                     "browser-forward",
                     ::ui::IconName::ArrowRight,
                     "Forward",
@@ -1540,6 +1554,7 @@ impl BrowserPane {
                     Some(
                         bar_toggle(
                             hx,
+                            tip,
                             "browser-devtools",
                             ::ui::IconName::Code,
                             "Developer tools",
@@ -1555,6 +1570,7 @@ impl BrowserPane {
             .child(
                 bar_button(
                     hx,
+                    tip,
                     "browser-open-external",
                     ::ui::IconName::ArrowUpRight,
                     "Open in default browser",
@@ -1805,6 +1821,8 @@ impl BrowserPane {
         // its first frame lands, so it never flashes at a zero rect, and
         // only while `web_view_visible` says so.
         let pane = cx.entity();
+        let tooltip_hole = self.tooltip_hole.clone();
+        let reported_hole = tooltip_hole.clone();
         div()
             .flex_1()
             .min_h_0()
@@ -1812,6 +1830,9 @@ impl BrowserPane {
             .child(
                 canvas(
                     move |bounds, window, cx| {
+                        // A toolbar tooltip showing this frame reports
+                        // in its own prepaint, which comes after this.
+                        tooltip_hole.set(None);
                         let pane = pane.read(cx);
                         let Some(native) = &pane.native else {
                             return;
@@ -1841,7 +1862,10 @@ impl BrowserPane {
                             Refocus::Keep => {}
                         }
                     },
-                    |_, _, _, _| {},
+                    // After every prepaint, the tooltip's included: cut it
+                    // out where it is, or clear the hole of one that hid
+                    // (gpui redraws when a tooltip hides).
+                    move |_, _, window, _| set_tooltip_hole(window, reported_hole.take()),
                 )
                 .size_full(),
             )
@@ -1959,21 +1983,25 @@ fn blank_row(hx: &HarnessTheme, id: impl Into<gpui::ElementId>) -> gpui::Statefu
 }
 
 /// An icon button in the address bar; dimmed and inert when `enabled` is
-/// false (the caller adds `on_click` only when it is true).
+/// false (the caller adds `on_click` only when it is true). Its tooltip,
+/// `label`, reports where it is drawn into `tooltip_hole`
+/// ([`PageTooltip`]).
 fn bar_button(
     hx: &HarnessTheme,
+    tooltip_hole: &Rc<Cell<Option<Hole>>>,
     id: &'static str,
     icon: ::ui::IconName,
     label: &'static str,
     enabled: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    bar_toggle(hx, id, icon, label, enabled, false)
+    bar_toggle(hx, tooltip_hole, id, icon, label, enabled, false)
 }
 
 /// [`bar_button`] for a toggle: while `on`, it shows the app's selected
 /// state (an accent tint behind an accent icon).
 fn bar_toggle(
     hx: &HarnessTheme,
+    tooltip_hole: &Rc<Cell<Option<Hole>>>,
     id: &'static str,
     icon: ::ui::IconName,
     label: &'static str,
@@ -1993,12 +2021,49 @@ fn bar_toggle(
         .justify_center()
         .size(px(24.0))
         .rounded_md()
-        .tooltip(tip(label))
+        .tooltip(page_tip(label, tooltip_hole))
         .child(svg().path(icon.path()).size(px(14.0)).text_color(color))
         .when(on, |d| d.bg(tint(hx.accent, 0.16)))
         .when(enabled, |d| {
             d.cursor_pointer().hover(|d| d.bg(hx.surface_hover))
         })
+}
+
+/// A toolbar button's tooltip: [`tip`]'s look, reporting where it is drawn.
+/// gpui draws tooltips last but still under the native page, which starts
+/// just below the toolbar where a tooltip hangs, so the page's slot cuts
+/// it out ([`set_tooltip_hole`]). gpui prepaints a tooltip after
+/// everything else, in window coordinates, and only while it shows.
+struct PageTooltip {
+    text: gpui::SharedString,
+    /// The pane's [`BrowserPane::tooltip_hole`].
+    hole: Rc<Cell<Option<Hole>>>,
+}
+
+impl Render for PageTooltip {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let hole = self.hole.clone();
+        div()
+            .on_children_prepainted(move |bounds, window, _| {
+                // `rounded_md` (0.375rem), as `tip_label` draws it.
+                let radius = f32::from(window.rem_size()) * 0.375;
+                hole.set(bounds.first().map(|b| Hole::from_bounds(*b, radius)));
+            })
+            .child(tip_label(self.text.clone(), cx))
+    }
+}
+
+/// The `.tooltip()` builder for a toolbar button: a fresh [`PageTooltip`]
+/// reporting into `hole` each time one shows.
+fn page_tip(
+    text: &'static str,
+    hole: &Rc<Cell<Option<Hole>>>,
+) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
+    let hole = hole.clone();
+    move |_, cx| {
+        let hole = hole.clone();
+        cx.new(|_| PageTooltip { text: text.into(), hole }).into()
+    }
 }
 
 impl Focusable for BrowserPane {

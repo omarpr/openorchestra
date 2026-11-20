@@ -177,6 +177,14 @@
 //!   partly cut and gpui's drawing shows through in proportion. That
 //!   drawing is him over the tab's background, not over the page, so his
 //!   edge carries a faint dark fringe.
+//! - **Tooltips** (Task 16). The browser toolbar's tooltips hang down over
+//!   the page, so they are cut out too, as a second source of holes
+//!   ([`HoleSources`], [`set_tooltip_hole`]): each source replaces only its
+//!   own, the conductor's every frame and the tooltip's every frame the
+//!   page's slot paints (none once it hides), and a change recuts the
+//!   window's pages as his does. A tooltip's hole is cut clear of his
+//!   holes and his figure's layer, so the even-odd rule never cancels two
+//!   where they would overlap ([`HoleSources::combined`]).
 //! - **Pointer.** The container's `hitTest:` answers nil inside a hole or
 //!   anywhere in his rect, transparent corners included
 //!   ([`PageMask::hit`]), so AppKit hands a click, drag or scroll there to
@@ -909,6 +917,102 @@ impl Hole {
     }
 }
 
+/// What cuts holes in a window's pages ([`HoleSources`]), in the order
+/// their holes go into the mask.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum HoleSource {
+    /// The conductor's bubble or badge (his figure goes as a [`Sprite`]).
+    Conductor,
+    /// A tooltip gpui draws over the browser toolbar and the page under it.
+    Tooltip,
+}
+
+/// One window's holes, by the source that reported them: each source
+/// replaces or clears only its own ([`HoleSources::set`]), so the
+/// conductor's report every frame leaves a tooltip's hole alone.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct HoleSources(Vec<(HoleSource, Vec<Hole>)>);
+
+impl HoleSources {
+    /// `source`'s holes are now `holes` (none clears them). Whether that
+    /// changed anything.
+    pub(crate) fn set(&mut self, source: HoleSource, holes: Vec<Hole>) -> bool {
+        let at = self.0.binary_search_by_key(&source, |(s, _)| *s);
+        match (at, holes.is_empty()) {
+            (Ok(i), _) if self.0[i].1 == holes => false,
+            (Err(_), true) => false,
+            (Ok(i), true) => {
+                self.0.remove(i);
+                true
+            }
+            (Ok(i), false) => {
+                self.0[i].1 = holes;
+                true
+            }
+            (Err(i), false) => {
+                self.0.insert(i, (source, holes));
+                true
+            }
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Every hole to cut, the conductor's first. The mask's even-odd rule
+    /// would cancel two holes where they overlap, so a tooltip's is cut
+    /// clear of his holes and of `figure` (his sprite's layer rect,
+    /// [`sprite_layer_rect`]) into square pieces ([`clear_of`]); away
+    /// from him, it is untouched.
+    pub(crate) fn combined(&self, figure: Option<Hole>) -> Vec<Hole> {
+        let his: Vec<Hole> = self
+            .0
+            .iter()
+            .filter(|(s, _)| *s == HoleSource::Conductor)
+            .flat_map(|(_, holes)| holes.iter().copied())
+            .chain(figure)
+            .collect();
+        self.0
+            .iter()
+            .flat_map(|(source, holes)| match source {
+                HoleSource::Conductor => holes.clone(),
+                HoleSource::Tooltip => holes.iter().flat_map(|h| clear_of(*h, &his)).collect(),
+            })
+            .collect()
+    }
+}
+
+/// `hole` less every rect in `cuts` (taken as their bounding rects): the
+/// pieces left, square-cornered once cut, none overlapping another; `hole`
+/// itself when nothing touches it.
+fn clear_of(hole: Hole, cuts: &[Hole]) -> Vec<Hole> {
+    cuts.iter().fold(vec![hole], |pieces, cut| {
+        pieces.into_iter().flat_map(|p| subtract(p, cut)).collect()
+    })
+}
+
+/// `hole` less `cut`: up to four pieces (above, below, then left and right
+/// of the overlap), or `hole` itself when they don't overlap.
+fn subtract(hole: Hole, cut: &Hole) -> Vec<Hole> {
+    let (left, top) = (hole.x.max(cut.x), hole.y.max(cut.y));
+    let right = (hole.x + hole.w).min(cut.x + cut.w);
+    let bottom = (hole.y + hole.h).min(cut.y + cut.h);
+    if left >= right || top >= bottom {
+        return vec![hole];
+    }
+    let piece = |x: f32, y: f32, w: f32, h: f32| Hole { x, y, w, h, radius: 0.0 };
+    [
+        piece(hole.x, hole.y, hole.w, top - hole.y),
+        piece(hole.x, bottom, hole.w, hole.y + hole.h - bottom),
+        piece(hole.x, top, left - hole.x, bottom - top),
+        piece(right, top, hole.x + hole.w - right, bottom - top),
+    ]
+    .into_iter()
+    .filter(|p| p.w > 0.0 && p.h > 0.0)
+    .collect()
+}
+
 /// The window's `holes` that touch a page placed at `page` (x, y, width,
 /// height, in the same window coordinates `set_frame` takes), moved into
 /// the page's own top-left coordinates. Holes that miss the page or have
@@ -1158,7 +1262,8 @@ fn scheme_label(url: &str) -> String {
 
 #[cfg(target_os = "macos")]
 pub(crate) use mac::{
-    NativeWebView, inspector_available, set_punch_through, window_is_minimized_or_hidden,
+    NativeWebView, inspector_available, set_punch_through, set_tooltip_hole,
+    window_is_minimized_or_hidden,
 };
 
 #[cfg(target_os = "macos")]
@@ -1204,7 +1309,7 @@ mod mac {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     use super::{
-        APP_CHORDS, DOWNLOAD_UNSUPPORTED, DockSide, Hole, InspectorMove, InspectorPlace, KeyRoute,
+        APP_CHORDS, DOWNLOAD_UNSUPPORTED, DockSide, Hole, HoleSource, HoleSources, InspectorMove, InspectorPlace, KeyRoute,
         MonitorTarget, NavDecision, NavOrigin, Navigations, NativeEvents, PageMask, PageSizer, SPRITE_PAD_PX,
         SourceFrame, Sprite, decide_download, decide_navigation, decide_new_window, dock_side,
         event_chords, flip_y, holes_in_page, inverted_alpha, is_benign_failure, is_download, mask_changed,
@@ -2136,7 +2241,14 @@ mod mac {
             };
             let punch = window_punch(Retained::as_ptr(&parent) as usize);
             let sprite = punch.sprite.as_ref().and_then(|s| sprite_in_page(s.mask(), page));
-            let next = page_mask(holes_in_page(&punch.holes, page), sprite, page.2, page.3);
+            // His image layer's rect, overhang included: a tooltip's hole
+            // keeps clear of it as of his other holes.
+            let figure = punch.sprite.as_ref().map(|s| {
+                let frame = frame_size(&s.image);
+                sprite_layer_rect(s.rect, frame.0, frame.1)
+            });
+            let holes = punch.holes.combined(figure);
+            let next = page_mask(holes_in_page(&holes, page), sprite, page.2, page.3);
             let (reshape, new_frame) = {
                 let applied = self.ivars().mask.borrow();
                 (
@@ -2169,8 +2281,9 @@ mod mac {
         /// image (it couldn't be made) the whole rect stays cut, as before
         /// his outline was followed. Holes never overlap each other (the
         /// conductor's bubble and badge sit 2pt beside him, beyond the
-        /// image's 1pt overhang); two that did would cancel where they
-        /// meet. With implicit animations off, so the cut follows him
+        /// image's 1pt overhang, and a tooltip's hole is cut clear of all
+        /// three: [`HoleSources::combined`]); two that did would cancel
+        /// where they meet. With implicit animations off, so the cut follows him
         /// instead of easing after him. `false` when there is no layer yet:
         /// nothing was applied.
         fn apply_mask(&self, mask: Option<&PageMask>, image: Option<&Arc<RenderImage>>) -> bool {
@@ -2302,10 +2415,11 @@ mod mac {
     }
 
     /// What one window cuts out of its pages: the conductor's bubble or
-    /// badge, whole, and his sprite, by its outline ([`set_punch_through`]).
+    /// badge and a toolbar tooltip, whole, by source, and his sprite, by
+    /// its outline ([`set_punch_through`], [`set_tooltip_hole`]).
     #[derive(Clone, Default, PartialEq)]
     struct Punch {
-        holes: Vec<Hole>,
+        holes: HoleSources,
         sprite: Option<Sprite>,
     }
 
@@ -2420,36 +2534,56 @@ mod mac {
     /// every frame (empty and `None` for nothing); the same as last time
     /// costs a comparison. A change recuts each of the window's pages (a
     /// new frame alone swaps their mask image), and `set_frame` recuts a
-    /// page that moved.
+    /// page that moved. A tooltip's hole ([`set_tooltip_hole`]) is its own
+    /// and stays.
     pub(crate) fn set_punch_through(window: &Window, holes: Vec<Hole>, sprite: Option<Sprite>) {
+        // Where gpui will actually draw him: on the device-pixel grid.
+        let scale = window.scale_factor();
+        let sprite = sprite.map(|s| Sprite { rect: snap_to_device(s.rect, scale), ..s });
+        update_punch(window, |punch| {
+            let holes_changed = punch.holes.set(HoleSource::Conductor, holes);
+            let sprite_changed = punch.sprite != sprite;
+            punch.sprite = sprite;
+            holes_changed || sprite_changed
+        });
+    }
+
+    /// Where a browser toolbar's tooltip is drawn over `window` this frame
+    /// (`None`: no tooltip), cut whole from its pages as the conductor's
+    /// bubble is. The browser pane reports it every frame it draws its page
+    /// (`mod.rs`), so one that hid is cleared the frame it goes. The same
+    /// as last time costs a comparison.
+    pub(crate) fn set_tooltip_hole(window: &Window, hole: Option<Hole>) {
+        update_punch(window, |punch| {
+            punch.holes.set(HoleSource::Tooltip, hole.into_iter().collect())
+        });
+    }
+
+    /// Applies `change` to `window`'s punch-through (`true`: it changed
+    /// something), and on a change recuts each of the window's pages. A
+    /// window left with nothing to cut has no entry.
+    fn update_punch(window: &Window, change: impl FnOnce(&mut Punch) -> bool) {
         let Some(parent) = gpui_view(window) else {
             return;
         };
         let parent = Retained::as_ptr(&parent) as usize;
-        // Where gpui will actually draw him: on the device-pixel grid.
-        let scale = window.scale_factor();
-        let sprite = sprite.map(|s| Sprite { rect: snap_to_device(s.rect, scale), ..s });
-        let punch = Punch { holes, sprite };
-        let empty = punch.holes.is_empty() && punch.sprite.is_none();
         let changed = HOLES.with(|h| {
             let mut h = h.borrow_mut();
             let at = h.iter().position(|(view, _)| *view == parent);
+            let mut punch = at.map(|i| h[i].1.clone()).unwrap_or_default();
+            if !change(&mut punch) {
+                return false;
+            }
+            let empty = punch.holes.is_empty() && punch.sprite.is_none();
             match (at, empty) {
-                (Some(i), _) if h[i].1 == punch => false,
-                (None, true) => false,
                 (Some(i), true) => {
                     h.remove(i);
-                    true
                 }
-                (Some(i), false) => {
-                    h[i].1 = punch;
-                    true
-                }
-                (None, false) => {
-                    h.push((parent, punch));
-                    true
-                }
+                (Some(i), false) => h[i].1 = punch,
+                (None, true) => {}
+                (None, false) => h.push((parent, punch)),
             }
+            true
         });
         if !changed {
             return;
@@ -3387,6 +3521,72 @@ mod tests {
 
     fn hole(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Hole {
         Hole { x, y, w, h, radius }
+    }
+
+    #[test]
+    fn each_source_sets_and_clears_only_its_own_holes() {
+        let bubble = hole(500.0, 400.0, 200.0, 60.0, 8.0);
+        let tip = hole(10.0, 20.0, 60.0, 20.0, 6.0);
+        let mut sources = HoleSources::default();
+        assert!(sources.is_empty());
+        // Nothing to clear: no change.
+        assert!(!sources.set(HoleSource::Tooltip, Vec::new()));
+        // The tooltip reports first; the conductor's holes still come first.
+        assert!(sources.set(HoleSource::Tooltip, vec![tip]));
+        assert!(sources.set(HoleSource::Conductor, vec![bubble]));
+        assert_eq!(sources.combined(None), vec![bubble, tip]);
+        // The same report again costs nothing.
+        assert!(!sources.set(HoleSource::Tooltip, vec![tip]));
+        // No conductor (his empty report) leaves the tooltip's hole alone…
+        assert!(sources.set(HoleSource::Conductor, Vec::new()));
+        assert_eq!(sources.combined(None), vec![tip]);
+        assert!(!sources.is_empty());
+        // …and the tooltip hiding clears only its own.
+        assert!(sources.set(HoleSource::Conductor, vec![bubble]));
+        assert!(sources.set(HoleSource::Tooltip, Vec::new()));
+        assert_eq!(sources.combined(None), vec![bubble]);
+        assert!(sources.set(HoleSource::Conductor, Vec::new()));
+        assert!(sources.is_empty());
+    }
+
+    #[test]
+    fn a_tooltip_hole_never_overlaps_the_conductor_s() {
+        // Even-odd: two holes that overlapped would cancel where they met.
+        let tip = hole(100.0, 20.0, 80.0, 20.0, 6.0);
+        let mut sources = HoleSources::default();
+        sources.set(HoleSource::Tooltip, vec![tip]);
+        // Clear of him: untouched, corners and all.
+        sources.set(HoleSource::Conductor, vec![hole(300.0, 300.0, 50.0, 50.0, 8.0)]);
+        assert_eq!(sources.combined(Some(hole(400.0, 400.0, 90.0, 90.0, 0.0)))[1..], [tip]);
+        // His bubble over its right end: the tooltip keeps its left part.
+        let bubble = hole(160.0, 0.0, 100.0, 30.0, 8.0);
+        sources.set(HoleSource::Conductor, vec![bubble]);
+        assert_eq!(
+            sources.combined(None),
+            vec![bubble, hole(100.0, 30.0, 80.0, 10.0, 0.0), hole(100.0, 20.0, 60.0, 10.0, 0.0)]
+        );
+        // His figure (the sprite's padded layer rect) over its middle.
+        sources.set(HoleSource::Conductor, Vec::new());
+        let figure = hole(130.0, 10.0, 20.0, 20.0, 0.0);
+        let cut = sources.combined(Some(figure));
+        assert_eq!(
+            cut,
+            vec![
+                hole(100.0, 30.0, 80.0, 10.0, 0.0),
+                hole(100.0, 20.0, 30.0, 10.0, 0.0),
+                hole(150.0, 20.0, 30.0, 10.0, 0.0),
+            ]
+        );
+        // Under him entirely: no tooltip hole at all.
+        assert_eq!(sources.combined(Some(hole(90.0, 10.0, 100.0, 40.0, 0.0))), vec![]);
+        // Whatever the cut, no piece overlaps him or another piece.
+        let overlaps = |a: &Hole, b: &Hole| {
+            a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+        };
+        for (i, p) in cut.iter().enumerate() {
+            assert!(!overlaps(p, &figure));
+            assert!(cut[i + 1..].iter().all(|q| !overlaps(p, q)));
+        }
     }
 
     #[test]
