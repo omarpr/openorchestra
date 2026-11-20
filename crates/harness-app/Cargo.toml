@@ -291,7 +291,16 @@ objc2-quartz-core = { version = "0.3", default-features = false, features = [
     "CAShapeLayer",
     "CATransaction",
 ] }
-objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGPath"] }
+# The conductor's outline in that mask: his frame's inverted alpha as a
+# CGImage (gray + alpha, from a copied CFData). Also already in the lockfile.
+objc2-core-graphics = { version = "0.3", default-features = false, features = [
+    "std",
+    "CGPath",
+    "CGImage",
+    "CGColorSpace",
+    "CGDataProvider",
+] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFData"] }
 # Posts web view callbacks back onto the main queue (see NativeEvents).
 dispatch2 = { version = "0.3", default-features = false, features = ["std", "objc2"] }
 # gpui's Window hands out its NSView through HasWindowHandle.

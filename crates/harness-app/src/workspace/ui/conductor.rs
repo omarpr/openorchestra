@@ -6,7 +6,7 @@ use super::super::*;
 
 use gpui::{RenderImage, img};
 
-use crate::browser_pane::Hole;
+use crate::browser_pane::{Hole, Sprite};
 use crate::conductor::scene::FRAME_PX;
 
 /// The figure's on-screen size; frames are rendered at 2× this.
@@ -31,17 +31,20 @@ fn accent_of(hx: &HarnessTheme) -> [f32; 3] {
 }
 
 /// What the conductor's drawn children cut out of a browser page, from
-/// their laid-out `bounds` and, in the same order, each one's corner radius
-/// (`None`: it cuts nothing, like the full-window drag shield).
+/// their laid-out `bounds`: the holes cut whole, from each child's corner
+/// radius in the same order (`None`: it cuts no hole, like the full-window
+/// drag shield), and the figure's rect, the last child, which is cut along
+/// his sprite's outline instead.
 pub(crate) fn conductor_holes(
     bounds: &[gpui::Bounds<Pixels>],
     radii: &[Option<f32>],
-) -> Vec<Hole> {
-    bounds
+) -> (Vec<Hole>, Option<Hole>) {
+    let holes = bounds
         .iter()
         .zip(radii)
         .filter_map(|(b, r)| r.map(|r| Hole::from_bounds(*b, r)))
-        .collect()
+        .collect();
+    (holes, bounds.last().map(|b| Hole::from_bounds(*b, 0.0)))
 }
 
 /// "(repo)" for a main checkout, "(repo · worktree)" otherwise.
@@ -232,8 +235,10 @@ impl HarnessWorkspace {
     ///
     /// A browser page is native and sits above all of this, so he and his
     /// bubble or badge are cut out of it each frame, from their laid-out
-    /// bounds (`browser_pane::set_punch_through`): he shows through the
-    /// page and takes the pointer there. No conductor, no holes.
+    /// bounds and his current frame (`browser_pane::set_punch_through`):
+    /// the bubble or badge whole, him along his outline, so the page still
+    /// shows around him. He takes the pointer there. No conductor, no
+    /// holes.
     pub(crate) fn render_conductor(
         &self,
         hx: &HarnessTheme,
@@ -242,7 +247,7 @@ impl HarnessWorkspace {
     ) -> Option<AnyElement> {
         let conductor = self.conductor_element(hx, window, cx);
         if conductor.is_none() {
-            crate::browser_pane::set_punch_through(window, Vec::new());
+            crate::browser_pane::set_punch_through(window, Vec::new(), None);
         }
         conductor
     }
@@ -282,7 +287,7 @@ impl HarnessWorkspace {
             } else {
                 gpui::CursorStyle::OpenHand
             })
-            .child(img(frame).size_full())
+            .child(img(frame.clone()).size_full())
             .on_hover(cx.listener(|ws, hovered: &bool, _, cx| {
                 ws.conductor_hovered = *hovered;
                 cx.notify();
@@ -450,15 +455,16 @@ impl HarnessWorkspace {
 
         // What each child below cuts out of a browser page, in child order:
         // the bubble with its `rounded_lg` corners (half a rem), the badge
-        // as a pill (clamped to half its height), him as a square. Not the
-        // shield: it covers the whole window, and only while dragging.
+        // as a pill (clamped to half its height). Not the shield: it covers
+        // the whole window, and only while dragging. Nor him as a hole: he
+        // is cut along his sprite, the frame drawn now (never mirrored).
         let radii: Vec<Option<f32>> = shield
             .is_some()
             .then_some(None)
             .into_iter()
             .chain(bubble.is_some().then_some(Some(f32::from(window.rem_size()) * 0.5)))
             .chain(badge.is_some().then_some(Some(f32::MAX)))
-            .chain([Some(0.0)])
+            .chain([None])
             .collect();
 
         Some(
@@ -468,7 +474,9 @@ impl HarnessWorkspace {
                 .top_0()
                 .left_0()
                 .on_children_prepainted(move |bounds, window, _| {
-                    crate::browser_pane::set_punch_through(window, conductor_holes(&bounds, &radii));
+                    let (holes, figure) = conductor_holes(&bounds, &radii);
+                    let sprite = figure.map(|rect| Sprite { image: frame.clone(), rect });
+                    crate::browser_pane::set_punch_through(window, holes, sprite);
                 })
                 .children(shield)
                 .children(bubble)
@@ -487,21 +495,19 @@ mod tests {
     use crate::browser_pane::Hole;
 
     #[test]
-    fn the_shield_cuts_nothing_and_the_rest_keep_their_corners() {
+    fn the_shield_cuts_nothing_the_bubble_keeps_its_corners_and_he_his_outline() {
         let b = |x: f32, y: f32, w: f32, h: f32| Bounds::new(point(px(x), px(y)), size(px(w), px(h)));
         // While dragging with the bubble open: shield, bubble, figure.
-        let bounds = [b(0.0, 0.0, 1200.0, 800.0), b(900.0, 680.0, 230.0, 60.0), b(1120.0, 700.0, 64.0, 64.0)];
-        let radii = [None, Some(8.0), Some(0.0)];
+        let bounds = [b(0.0, 0.0, 1200.0, 800.0), b(900.0, 680.0, 230.0, 60.0), b(1120.0, 700.0, 88.0, 88.0)];
+        let radii = [None, Some(8.0), None];
+        let figure = Hole { x: 1120.0, y: 700.0, w: 88.0, h: 88.0, radius: 0.0 };
         assert_eq!(
             conductor_holes(&bounds, &radii),
-            [
-                Hole { x: 900.0, y: 680.0, w: 230.0, h: 60.0, radius: 8.0 },
-                Hole { x: 1120.0, y: 700.0, w: 64.0, h: 64.0, radius: 0.0 },
-            ]
+            (vec![Hole { x: 900.0, y: 680.0, w: 230.0, h: 60.0, radius: 8.0 }], Some(figure))
         );
-        // Him alone.
-        assert_eq!(conductor_holes(&bounds[2..], &[Some(0.0)]).len(), 1);
-        assert!(conductor_holes(&[], &[]).is_empty());
+        // Him alone: no whole hole, just his outline.
+        assert_eq!(conductor_holes(&bounds[2..], &[None]), (Vec::new(), Some(figure)));
+        assert_eq!(conductor_holes(&[], &[]), (Vec::new(), None));
     }
 
     #[test]

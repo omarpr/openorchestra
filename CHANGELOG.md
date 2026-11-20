@@ -21,7 +21,8 @@ Unreleased is empty.
   project remembers the pages its browser tabs open, and the address bar
   suggests them as you type (↑/↓ and Enter to pick one). **Settings ›
   General › Clear browsing history** forgets them. The conductor stays
-  visible over a browser page and can be dragged there. Browser tabs have
+  visible over a browser page, with the page showing right up to his
+  outline, and can be dragged there. Browser tabs have
   Developer tools (Web Inspector) from the address bar and from right-click
   → Inspect Element. Developer tools open docked in the tab (bottom by
   default; dock left/right or in a window from the inspector's toolbar,

@@ -26,8 +26,9 @@
 //! **Placement.** The tab body is a `canvas` whose prepaint reads the pane
 //! (no update, no notify) and hands its bounds to `set_frame`, so the page
 //! follows gpui layout every frame without feeding back into it. The
-//! conductor is cut out of the page where they overlap, so he shows through
-//! it and takes the pointer there ([`set_punch_through`], `webview.rs`).
+//! conductor is cut out of the page where they overlap, along his outline,
+//! so he shows through it and takes the pointer there
+//! ([`set_punch_through`], `webview.rs`).
 //!
 //! The pane talks to the workspace through [`BrowserEvent`]s: a changed URL
 //! (relabel the tab, save), a changed title (relabel only; the next save
@@ -80,7 +81,7 @@ use crate::theme::{HarnessTheme, theme, tint};
 use crate::workspace::{LookKind, browser_label, kind_icon, tip};
 
 pub(crate) use webview::{
-    Hole, set_app_shortcuts, set_punch_through, window_is_minimized_or_hidden,
+    Hole, Sprite, set_app_shortcuts, set_punch_through, window_is_minimized_or_hidden,
 };
 use webview::{
     DockSide, InspectorMove, InspectorPlace, NativeEvents, NativeWebView, inspector_available,
