@@ -426,7 +426,14 @@ impl HarnessWorkspace {
             .and_then(|p| p.tabs.iter().find(|t| t.id == id))
             .and_then(|t| t.agent.clone());
         let was_agent = closed_agent.is_some();
-        if self.has_tmux {
+        // Only a terminal tab has a tmux session; a browser tab (or any
+        // other) would wait on tmux for nothing, up to its timeout.
+        let terminal = self.panes.get(&key).is_some_and(|p| {
+            p.tabs
+                .iter()
+                .any(|t| t.id == id && matches!(t.content, TabContent::Terminal(_)))
+        });
+        if self.has_tmux && terminal {
             // Explicit close tears the session down (only app-exit detaches).
             crate::tmux::kill_session(&crate::tmux::session_name(&key, id));
         }
