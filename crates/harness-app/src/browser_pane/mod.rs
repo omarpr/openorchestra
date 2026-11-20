@@ -773,6 +773,13 @@ pub(crate) struct BrowserPane {
     project: Option<BrowserProject>,
     /// The address bar's suggestion list, while open.
     suggestions: Option<Suggestions>,
+    /// The URL of the document the view shows, as of its last commit:
+    /// whose history entry a title names, as the title events arrive in
+    /// order with the commits. Not `self.url`, which `navigate` moves to an
+    /// address before it loads (and keeps if it fails), so a title the old
+    /// page sent meanwhile would land on the new page's entry. `None` until
+    /// the view's first commit: no entry to name.
+    committed: Option<String>,
     /// The page a newly made native view is bringing back (the tab shown
     /// again, or restored), whose first commit is not a visit
     /// ([`reshow_commit`]). `None` when the view loads a page the user just
@@ -919,6 +926,7 @@ impl BrowserPane {
             history,
             project: None,
             suggestions: None,
+            committed: None,
             reshow: None,
             next_load: load,
             running: Vec::new(),
@@ -1101,6 +1109,7 @@ impl BrowserPane {
             // Dropping the view closes its inspector first (`webview.rs`);
             // shown again, the page reloads with it closed.
             self.native = None;
+            self.committed = None;
             self.inspector_open = false;
             self.inspector_watch = InspectorWatch::Closed;
             self.loading = false;
@@ -1211,7 +1220,8 @@ impl BrowserPane {
                 if relabel {
                     cx.emit(BrowserEvent::TitleChanged);
                 }
-                if let (Some(url), Some(title)) = (self.url.clone(), record) {
+                // The document that sent it, never the tab's address.
+                if let (Some(url), Some(title)) = (self.committed.clone(), record) {
                     self.record_title(&url, &title, cx);
                 }
             }
@@ -1223,6 +1233,7 @@ impl BrowserPane {
                 self.sync_address(window, cx);
             }
             PageEvent::Committed(url, same_document) => {
+                self.committed = Some(url.clone());
                 let asked = !same_document
                     && asked_for(take_load(&mut self.next_load), self.attempted.as_deref(), &url);
                 if !reshow_commit(self.reshow.take().as_deref(), &url) {
