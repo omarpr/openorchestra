@@ -72,6 +72,9 @@ jobs:
           rustc -vV
           gcc --version
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Keep the build cached while these jobs are still red.
+          cache-on-failure: true
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
@@ -97,6 +100,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: crates/harness-app
+          cache-on-failure: true
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
