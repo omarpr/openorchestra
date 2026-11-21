@@ -334,6 +334,12 @@
 //! moves gpui's focus to the tab the same way. Plain typing goes straight
 //! to it as first responder.
 
+// Most helpers below (key routing, inspector docking, gesture and download
+// rules, sprite masks) serve the `WKWebView`; WebView2 does that work itself
+// and shares only the navigation rules. They stay compiled, and tested, on
+// every platform. `webview_win.rs` turns the lint back on for itself.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
 

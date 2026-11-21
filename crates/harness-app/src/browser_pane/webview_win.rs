@@ -60,6 +60,8 @@
 //! started with `--remote-debugging-port`); the port is random and
 //! loopback-only.
 
+#![warn(dead_code)]
+
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::rc::{Rc, Weak};

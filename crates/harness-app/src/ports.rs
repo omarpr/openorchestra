@@ -642,11 +642,13 @@ pub fn url_for(row: &PortRow) -> String {
 /// Every individual command a sample runs gets at most this long. The sample
 /// also has one overall deadline, so serial optional enrichment cannot turn a
 /// three-second poll into a long-running background job.
+#[cfg(not(windows))]
 const SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The total time one Ports sample may spend, including tmux, cwd lookup and
 /// Docker enrichment. The two core probes can each consume their full per-
 /// command allowance; optional work uses only what remains.
+#[cfg(not(windows))]
 const SCAN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(6);
 
 /// Run `lsof`, `ps`, and (when available) `tmux list-panes`, each bounded by
@@ -707,6 +709,8 @@ pub fn sample(has_tmux: bool) -> Option<PortsSample> {
 
 /// [`sample`] with the command runner passed in, so tests can play a stalled
 /// or empty scan. `run` returns stdout, or `None` on timeout or spawn failure.
+/// Windows samples without commands (above); only its tests run this.
+#[cfg_attr(windows, allow(dead_code))]
 fn sample_using(
     run: impl Fn(&str, &[&str]) -> Option<String>,
     has_tmux: bool,
@@ -795,6 +799,7 @@ fn sample_using(
 
 /// Remaining scan budget, if any. A zero-duration command timeout is not
 /// useful: skip the optional operation instead.
+#[cfg(not(windows))]
 fn time_left(deadline: std::time::Instant) -> Option<std::time::Duration> {
     deadline
         .checked_duration_since(std::time::Instant::now())
@@ -826,6 +831,7 @@ pub struct Ran {
 /// for real errors, which it reports on stderr (`-w` silences warnings).
 /// A signal (no exit code) is never clean, even with empty output: an empty
 /// listener list would otherwise clear every row.
+#[cfg_attr(windows, allow(dead_code))]
 fn accepted(cmd: &str, ran: Ran) -> Option<String> {
     let clean = match ran.code {
         Some(0) => true,
@@ -838,6 +844,7 @@ fn accepted(cmd: &str, ran: Ran) -> Option<String> {
 /// Windows: no process groups or O_NONBLOCK pipes, so read each pipe on its
 /// own thread and stop the whole tree with `taskkill /T` on timeout.
 #[cfg(windows)]
+#[allow(dead_code)] // only tests run commands on Windows
 fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration) -> Option<Ran> {
     use std::io::Read;
     use std::os::windows::process::CommandExt;

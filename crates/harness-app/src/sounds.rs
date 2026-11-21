@@ -193,6 +193,7 @@ fn resolve_default() -> Sound {
 /// The filename `UNNotificationSound::soundNamed` wants, or `None` when the
 /// sound is silent or the system default (both of which the caller expresses
 /// differently — an absent sound is not a named one).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn file_name(sound: Sound) -> Option<String> {
     match sound.source {
         Source::Bundled => Some(format!("{}.wav", sound.id)),

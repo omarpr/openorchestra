@@ -1,6 +1,7 @@
 //! Snapshot Git changes and ask a one-shot CLI for a reviewer-oriented overview.
 
 use std::collections::BTreeMap;
+#[cfg(unix)]
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::io::{self, Read, Seek, Write};
@@ -1033,6 +1034,7 @@ impl Capture {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
 
     #[test]
     fn report_file_links_open_only_unambiguous_snapshot_paths() {
