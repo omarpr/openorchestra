@@ -55,6 +55,53 @@ jobs:
       - name: Test
         run: cargo test
 
+  # Windows, on the documented toolchain: rustup's GNU host plus a MinGW GCC
+  # (the runner image ships one in C:\mingw64), not the runner's MSVC default.
+  # Without these jobs nothing under #[cfg(windows)] is ever compiled in CI.
+  headless-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust (GNU host)
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal -c clippy
+          rustup default stable-x86_64-pc-windows-gnu
+          "C:\mingw64\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+      - name: Toolchain versions
+        run: |
+          rustc -vV
+          gcc --version
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test
+
+  app-windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: crates/harness-app
+    env:
+      # Several git dependencies fetch more reliably through the git CLI
+      # (as script/windows/make.ps1 sets).
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust (GNU host)
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal -c clippy
+          rustup default stable-x86_64-pc-windows-gnu
+          "C:\mingw64\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/harness-app
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test
+
   pi-ext:
     runs-on: ubuntu-latest
     defaults:
