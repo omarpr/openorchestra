@@ -323,8 +323,7 @@ fn install_shim(target: &Path, contents: &str) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
     tmp.write_all(contents.as_bytes())?;
-    tmp.persist(target)?;
-    Ok(())
+    persist_shim(tmp, target, contents)
 }
 
 /// Update a user hooks file atomically, keeping concurrent launches from
@@ -392,8 +391,11 @@ pub fn default_command_display(kind: &AgentKind) -> String {
 /// this being *the user's own installed, authenticated CLI*.
 pub fn resolve_on_path(program: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
+    // Windows: native installs are `claude.exe`; npm's extensionless file is a
+    // sh shim, which agents launched through Git Bash can run too.
+    let exts: &[&str] = if cfg!(windows) { &["", ".exe"] } else { &[""] };
     std::env::split_paths(&path_var)
-        .map(|dir| dir.join(program))
+        .flat_map(|dir| exts.iter().map(move |ext| dir.join(format!("{program}{ext}"))))
         .find(|candidate| is_executable(candidate))
 }
 
@@ -502,3 +504,60 @@ impl AgentRuntime for TerminalOnlyRuntime {
 /// mapping table in §4.5 can be asserted directly without exposing the whole
 /// module.
 pub use opencode::classify as opencode_classify;
+
+/// Whether `haystack` (a serialized hook entry or command) mentions `marker`
+/// (a shim path). JSON, TOML and `{:?}` all escape a Windows path's `\` as
+/// `\\`, so a plain `contains` never matched there and every spawn appended
+/// another copy of our hooks. Unix paths have no backslashes: unchanged.
+pub(crate) fn mentions(haystack: &str, marker: &str) -> bool {
+    haystack.contains(marker)
+        || (marker.contains('\\') && haystack.contains(&marker.replace('\\', "\\\\")))
+}
+
+/// The hook command that runs a status shim with node.
+///
+/// On Windows the agents run hook commands through Git Bash, where an
+/// unquoted `C:\Users\…\shim.mjs` loses its backslashes (`C:Users…`) and node
+/// finds nothing: there it is `node "C:/Users/…/shim.mjs"`, which bash and
+/// cmd both read as one path. Elsewhere it is unchanged.
+pub(crate) fn node_command(shim: &Path) -> String {
+    if cfg!(windows) {
+        format!("node \"{}\"", shim.display().to_string().replace('\\', "/"))
+    } else {
+        format!("node {}", shim.display())
+    }
+}
+
+/// [`mentions`] for a shim path (`marker`, as `display()` writes it), in
+/// either spelling [`node_command`] has used, so hooks written before the
+/// forward-slash form are replaced rather than kept beside it.
+pub(crate) fn mentions_shim(haystack: &str, marker: &str) -> bool {
+    mentions(haystack, marker) || (marker.contains('\\') && haystack.contains(&marker.replace('\\', "/")))
+}
+
+/// `tmp.persist(target)`, tolerant of concurrent launches installing the same
+/// shim. On Windows, replacing a file another thread is replacing at that
+/// instant fails with Access Denied (Unix `rename` just wins or loses): retry
+/// briefly, and treat "the target already holds exactly our contents" as done.
+pub(crate) fn persist_shim(
+    mut tmp: tempfile::NamedTempFile,
+    target: &Path,
+    contents: &str,
+) -> std::io::Result<()> {
+    for _ in 0..50 {
+        match tmp.persist(target) {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                if std::fs::read_to_string(target).is_ok_and(|t| t == contents) {
+                    return Ok(());
+                }
+                if e.error.kind() != std::io::ErrorKind::PermissionDenied {
+                    return Err(e.error);
+                }
+                tmp = e.file;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+    tmp.persist(target).map(|_| ()).map_err(|e| e.error)
+}

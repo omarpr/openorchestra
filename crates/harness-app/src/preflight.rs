@@ -19,6 +19,14 @@
 //! Probing is injected rather than called directly so the classification is
 //! testable without a machine that happens to have the right tools installed.
 
+/// tmux has no native Windows build; there the app runs its bundled stand-in,
+/// `oo-session`, and without it degrades (agents die with their tab) instead
+/// of blocking startup.
+#[cfg(not(windows))]
+const TMUX_SEVERITY: Severity = Severity::Required;
+#[cfg(windows)]
+const TMUX_SEVERITY: Severity = Severity::Recommended;
+
 /// How much a missing tool costs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
@@ -82,16 +90,20 @@ pub fn probe(lookup: impl Fn(&str, &str) -> Option<String>) -> Vec<Check> {
             severity: Severity::Required,
             found: lookup("git", "--version"),
             cost: "worktrees, diffs and branch status — the app has nothing to show without it",
-            fix: "xcode-select --install",
+            fix: if cfg!(windows) { "winget install --id Git.Git" } else { "xcode-select --install" },
             version_flag: "--version",
         },
         Check {
             name: "tmux",
-            severity: Severity::Required,
+            severity: TMUX_SEVERITY,
             found: lookup("tmux", "-V"),
             cost: "agents run inside tmux sessions; without it an agent dies when you close a tab, \
                    and nothing reattaches after a restart",
-            fix: "brew install tmux",
+            fix: if cfg!(windows) {
+                "bundled as oo-session.exe beside the app: rebuild (make build) or reinstall"
+            } else {
+                "brew install tmux"
+            },
             version_flag: "-V",
         },
         Check {
@@ -108,7 +120,11 @@ pub fn probe(lookup: impl Fn(&str, &str) -> Option<String>) -> Vec<Check> {
             severity: Severity::Optional,
             found: lookup("gh", "--version"),
             cost: "pull-request and CI badges stay hidden on worktree cards",
-            fix: "brew install gh   (then: gh auth login)",
+            fix: if cfg!(windows) {
+                "winget install --id GitHub.cli   (then: gh auth login)"
+            } else {
+                "brew install gh   (then: gh auth login)"
+            },
             version_flag: "--version",
         },
         Check {
@@ -142,7 +158,27 @@ pub fn any_missing(checks: &[Check]) -> bool {
 /// "present on PATH" is the wrong question for at least one of these tools, and
 /// asking the binary is the only answer that survives that case.
 pub fn version_on_path(bin: &str, flag: &str) -> Option<String> {
-    let out = std::process::Command::new(bin).arg(flag).output().ok()?;
+    // Windows: "tmux" is the bundled oo-session, which lives beside the app
+    // rather than on PATH.
+    let resolved = if cfg!(windows) && bin == "tmux" {
+        crate::tmux::program()
+    } else {
+        bin.to_string()
+    };
+    let bin = resolved.as_str();
+    // Windows: std finds `bin.exe` on PATH but not the `bin.cmd` launcher npm
+    // installs agent CLIs as (`claude.cmd`), so try that too.
+    let out = std::process::Command::new(bin)
+        .arg(flag)
+        .output()
+        .or_else(|e| {
+            if cfg!(windows) && e.kind() == std::io::ErrorKind::NotFound {
+                std::process::Command::new(format!("{bin}.cmd")).arg(flag).output()
+            } else {
+                Err(e)
+            }
+        })
+        .ok()?;
     if !out.status.success() {
         return None;
     }

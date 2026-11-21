@@ -33,7 +33,8 @@ impl SidebarSection {
             Self::Projects => "PROJECTS",
             Self::Archived => "ARCHIVED",
             Self::PortsTask => "THIS TASK",
-            Self::PortsOther => "OTHER ON THIS MAC",
+            Self::PortsOther if cfg!(target_os = "macos") => "OTHER ON THIS MAC",
+            Self::PortsOther => "OTHER ON THIS PC",
         }
     }
 

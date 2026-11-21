@@ -23,7 +23,8 @@ impl HarnessWorkspace {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         // Fullscreen hides the traffic lights, so their padding goes too.
-        let traffic_light_room = if window.is_fullscreen() {
+        // Off macOS there are no traffic lights to leave room for.
+        let traffic_light_room = if window.is_fullscreen() || !cfg!(target_os = "macos") {
             12.0
         } else {
             TRAFFIC_LIGHT_PADDING
@@ -40,6 +41,9 @@ impl HarnessWorkspace {
         // so it sits on the left and is named for the panel, not its list.
         let sidebar_toggle = div()
             .id("toggle-sidebar")
+            // Windows: the bar is the window's drag area (HTCAPTION), which takes
+            // the click unless this blocks it, as the caption buttons do.
+            .when(cfg!(windows), |d| d.occlude())
             .flex_none()
             .px_2()
             .py_0p5()
@@ -51,7 +55,10 @@ impl HarnessWorkspace {
                 hx.tx2
             })
             .cursor_pointer()
-            .tooltip(tip("Toggle sidebar (⌘B)"))
+            .tooltip(tip(format!(
+                "Toggle sidebar ({})",
+                crate::shortcuts::global_label("cmd-b")
+            )))
             .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
             .child("▤ sidebar")
             // Stop here so a double-click on the toggle doesn't also zoom the
@@ -65,6 +72,9 @@ impl HarnessWorkspace {
         // even when Review lives in a center tab.
         let tools_toggle = div()
             .id("toggle-diff")
+            // Windows: the bar is the window's drag area (HTCAPTION), which takes
+            // the click unless this blocks it, as the caption buttons do.
+            .when(cfg!(windows), |d| d.occlude())
             .flex_none()
             .px_2()
             .py_0p5()
@@ -72,7 +82,10 @@ impl HarnessWorkspace {
             .text_xs()
             .text_color(if self.prefs.diff_open { hx.tx1 } else { hx.tx2 })
             .cursor_pointer()
-            .tooltip(tip("Toggle tools panel: Files / Git / Review (⌘⇧B)"))
+            .tooltip(tip(format!(
+                "Toggle tools panel: Files / Git / Review ({})",
+                crate::shortcuts::global_label("cmd-shift-b")
+            )))
             .hover(|d| d.bg(hx.surface).text_color(hx.tx0))
             .child("tools ▤")
             .on_click(cx.listener(|ws, _, window, cx| {
@@ -88,7 +101,7 @@ impl HarnessWorkspace {
             .items_center()
             .h(px(TOP_BAR_H))
             .pl(px(traffic_light_room))
-            .pr_3()
+            .when(!cfg!(windows), |d| d.pr_3())
             .bg(hx.bg0)
             .border_b_1()
             .border_color(hx.border)
@@ -122,6 +135,7 @@ impl HarnessWorkspace {
                 }
             })
             // Left: sidebar toggle. Center: title. Right: tools panel toggle.
+            .children(app_menu_button())
             .child(sidebar_toggle)
             .child(
                 div()
@@ -196,6 +210,7 @@ impl HarnessWorkspace {
                     .children(self.render_remote_chip(hx, cx)),
             )
             .child(tools_toggle)
+            .children(caption_buttons(hx, window))
     }
 
     /// Remote control for the current tab: a chip that shows whether paired
@@ -254,6 +269,9 @@ impl HarnessWorkspace {
         Some(
             div()
                 .id("top-remote-chip")
+                // Windows: the bar is the window's drag area (HTCAPTION), which takes
+                // the click unless this blocks it, as the caption buttons do.
+                .when(cfg!(windows), |d| d.occlude())
                 .flex_none()
                 .flex()
                 .items_center()
@@ -408,4 +426,102 @@ impl HarnessWorkspace {
             },
         }
     }
+}
+
+thread_local! {
+    static APP_MENU: ::ui::PopoverMenuHandle<::ui::ContextMenu> = Default::default();
+}
+
+/// The ☰ menu is open: an overlay a browser page must not cover
+/// (`HarnessWorkspace::overlay_open`).
+pub(crate) fn app_menu_open() -> bool {
+    APP_MENU.with(|h| h.is_deployed())
+}
+
+/// The app's menus behind a ☰ button at the bar's left, off macOS: gpui
+/// draws no menu bar there, so About, Check for updates, Settings, First-time
+/// Checks, Quit and the Go / View items (`main.rs`'s `app_menus`, the same
+/// list the macOS menu bar shows) would otherwise be reachable only by
+/// shortcut. Each entry shows its binding. The Edit menu is left out: its
+/// verbs are the standard keys and act where the focus is, which a click on
+/// this menu would move.
+fn app_menu_button() -> Option<gpui::AnyElement> {
+    if cfg!(target_os = "macos") {
+        return None;
+    }
+    use ::ui::ButtonCommon as _;
+    let menu = ::ui::PopoverMenu::new("app-menu")
+        .with_handle(APP_MENU.with(|h| h.clone()))
+        .trigger(
+            ::ui::IconButton::new("app-menu-button", ::ui::IconName::Menu)
+                .icon_size(::ui::IconSize::Small)
+                .tooltip(::ui::Tooltip::text("Menu")),
+        )
+        .anchor(gpui::Anchor::TopLeft)
+        .menu(|window, cx| {
+            Some(::ui::ContextMenu::build(window, cx, |mut menu, _, _| {
+                let menus = crate::app_menus().into_iter().filter(|m| m.name != "Edit");
+                for (i, m) in menus.enumerate() {
+                    if i > 0 {
+                        menu = menu.separator();
+                    }
+                    if m.name != "openOrchestra" {
+                        menu = menu.header(m.name.clone());
+                    }
+                    for item in m.items {
+                        menu = match item {
+                            gpui::MenuItem::Separator => menu.separator(),
+                            gpui::MenuItem::Action { name, action, .. } => menu.action(name, action),
+                            _ => menu,
+                        };
+                    }
+                }
+                menu
+            }))
+        });
+    Some(div().flex_none().pl_1().occlude().child(menu).into_any_element())
+}
+
+/// Windows port (exploratory): the native title bar is hidden (transparent
+/// titlebar, as on macOS) but Windows draws no traffic lights, so the bar
+/// carries its own minimize / maximize / close. Hit-testing is native: each
+/// button is a `WindowControlArea`, which gpui answers WM_NCHITTEST with.
+fn caption_buttons(hx: &HarnessTheme, window: &Window) -> Option<gpui::AnyElement> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let button = |id: &'static str, glyph: &'static str, area: gpui::WindowControlArea| {
+        let close = matches!(area, gpui::WindowControlArea::Close);
+        let hover_bg = if close { gpui::rgb(0xe81120) } else { hx.surface };
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .justify_center()
+            .occlude()
+            .w(px(46.0))
+            .h_full()
+            .text_size(px(10.0))
+            .text_color(hx.tx1)
+            .hover(move |d| d.bg(hover_bg).text_color(if close { gpui::rgb(0xffffff) } else { hx.tx0 }))
+            .window_control_area(area)
+            .child(glyph)
+    };
+    Some(
+        div()
+            .id("windows-caption-buttons")
+            .font_family("Segoe Fluent Icons")
+            .flex()
+            .flex_none()
+            .h_full()
+            .ml_2()
+            .child(button("caption-min", "\u{e921}", gpui::WindowControlArea::Min))
+            .child(if window.is_maximized() {
+                button("caption-max", "\u{e923}", gpui::WindowControlArea::Max)
+            } else {
+                button("caption-max", "\u{e922}", gpui::WindowControlArea::Max)
+            })
+            .child(button("caption-close", "\u{e8bb}", gpui::WindowControlArea::Close))
+            .into_any_element(),
+    )
 }

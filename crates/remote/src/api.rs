@@ -1198,7 +1198,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires tmux"]
     async fn screenshot_upload_delivers_image_path_and_caption_to_codex() {
-        use std::os::unix::fs::PermissionsExt;
+        use os_compat::fs::PermissionsExt;
 
         struct PrivateTmux(crate::Tmux);
         impl Drop for PrivateTmux {
@@ -1265,7 +1265,7 @@ mod tests {
     }
 
     fn voice_fixture(probe_status: u8) -> (tempfile::TempDir, Router, String, String) {
-        use std::os::unix::fs::PermissionsExt;
+        use os_compat::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
         let (mut shared, _, writer, reader) = paired_fixture(dir.path(), crate::Tmux::default());
@@ -1361,7 +1361,7 @@ mod tests {
 
     #[tokio::test]
     async fn voice_rechecks_write_access_before_starting_helper() {
-        use std::os::unix::fs::PermissionsExt;
+        use os_compat::fs::PermissionsExt;
 
         const WAV: &[u8] = b"RIFF\x26\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x80\x3e\0\0\0\x7d\0\0\x02\0\x10\0data\x02\0\0\0\0\0";
         let dir = tempfile::tempdir().unwrap();

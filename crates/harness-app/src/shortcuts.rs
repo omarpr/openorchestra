@@ -110,6 +110,7 @@ impl Entry {
         what: &'static str,
         action: impl gpui::Action,
     ) -> Self {
+        let keys = platform_keys(keys, scope);
         Entry {
             binding: Some(KeyBinding::new(keys, action, scope.context())),
             keys: keys.to_string(),
@@ -117,6 +118,47 @@ impl Entry {
             what,
         }
     }
+}
+
+/// The catalog is written in macOS terms (`cmd-…`). Elsewhere gpui reads
+/// `cmd` as the Super/Windows key, which the OS keeps for itself (Win+E opens
+/// Explorer). So off macOS:
+///
+/// - `Global` chords also fire while a terminal or agent has focus, where
+///   Ctrl+letter belongs to the shell (Ctrl+E, Ctrl+W, Ctrl+R …): `cmd` → `alt`
+///   (or `ctrl` when the chord already has `alt`).
+/// - Every other scope is editor-side, where Windows convention is Ctrl:
+///   `cmd` → `ctrl`.
+///
+/// Exploratory Windows port; leaked strings are interned, so rebuilding the
+/// catalog does not grow memory.
+fn platform_keys(keys: &'static str, scope: Scope) -> &'static str {
+    if cfg!(target_os = "macos") || !keys.contains("cmd-") {
+        return keys;
+    }
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static INTERNED: OnceLock<Mutex<HashMap<(&'static str, bool), &'static str>>> =
+        OnceLock::new();
+    let global = scope == Scope::Global;
+    let mut map = INTERNED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    map.entry((keys, global)).or_insert_with(|| {
+        let mapped: Vec<String> = keys
+            .split_whitespace()
+            .map(|k| {
+                let to = if global && !k.contains("alt-") { "alt-" } else { "ctrl-" };
+                if k.contains("ctrl-") && to == "ctrl-" {
+                    k.replacen("cmd-", "alt-", 1)
+                } else {
+                    k.replacen("cmd-", to, 1)
+                }
+            })
+            .collect();
+        Box::leak(mapped.join(" ").into_boxed_str())
+    })
 }
 
 /// The OS keystrokes are parsed for. `KeyBinding::new` only takes static
@@ -275,7 +317,9 @@ pub fn app_chords(entries: &[Entry]) -> Vec<Chord> {
         .iter()
         .filter(|e| e.scope == Scope::Global)
         .filter_map(|e| Chord::parse(&e.keys))
-        .filter(|c| c.cmd && page_edit(c).is_none())
+        // Off macOS the Global ⌘ chords are Alt (or Ctrl) chords
+        // (`platform_keys`).
+        .filter(|c| (c.cmd || (!cfg!(target_os = "macos") && (c.alt || c.ctrl))) && page_edit(c).is_none())
         .collect()
 }
 
@@ -683,9 +727,33 @@ pub fn entries() -> Vec<Entry> {
     ]
 }
 
-/// Render a binding's keys the way macOS users read them: `cmd-shift-z`
-/// becomes `⌘⇧Z`. Display-only — the gpui syntax stays the source of truth.
+/// A Global-scope catalog chord (`cmd-t`) as this OS's user reads it where
+/// it is bound: `⌘T` on macOS, `Alt+T` elsewhere (`platform_keys`). For the
+/// fixed hints in menus and tooltips; interned, so it is a `&'static str`.
+pub fn global_label(keys: &'static str) -> &'static str {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static LABELS: OnceLock<Mutex<HashMap<&'static str, &'static str>>> = OnceLock::new();
+    let mut labels = LABELS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    labels.entry(keys).or_insert_with(|| {
+        Box::leak(display_keys(platform_keys(keys, Scope::Global)).into_boxed_str())
+    })
+}
+
+/// Render a binding's keys the way this OS's users read them: on macOS
+/// `cmd-shift-z` becomes `⌘⇧Z`; elsewhere `ctrl-shift-z` becomes
+/// `Ctrl+Shift+Z`. Display-only — the gpui syntax stays the source of truth.
 pub fn display_keys(keys: &str) -> String {
+    if !cfg!(target_os = "macos") {
+        return keys
+            .split_whitespace()
+            .map(windows_keystroke)
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
     let mut out = String::new();
     let mut key = keys;
     // Modifiers first, in the conventional macOS order.
@@ -722,6 +790,51 @@ pub fn display_keys(keys: &str) -> String {
     out
 }
 
+/// One keystroke (`ctrl-shift-left`) as Windows writes it: `Ctrl+Shift+Left`,
+/// modifiers in Windows' order (Ctrl, Alt, Shift, Win).
+fn windows_keystroke(keystroke: &str) -> String {
+    let mut key = keystroke;
+    let (mut ctrl, mut alt, mut shift, mut win) = (false, false, false, false);
+    loop {
+        if let Some(rest) = key.strip_prefix("ctrl-") {
+            ctrl = true;
+            key = rest;
+        } else if let Some(rest) = key.strip_prefix("alt-") {
+            alt = true;
+            key = rest;
+        } else if let Some(rest) = key.strip_prefix("shift-") {
+            shift = true;
+            key = rest;
+        } else if let Some(rest) = key.strip_prefix("cmd-") {
+            win = true;
+            key = rest;
+        } else {
+            break;
+        }
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for (on, name) in [(ctrl, "Ctrl"), (alt, "Alt"), (shift, "Shift"), (win, "Win")] {
+        if on {
+            parts.push(name.to_string());
+        }
+    }
+    parts.push(match key {
+        "escape" => "Esc".to_string(),
+        "delete" => "Del".to_string(),
+        "pageup" => "PgUp".to_string(),
+        "pagedown" => "PgDn".to_string(),
+        k if k.chars().count() == 1 => k.to_uppercase(),
+        // enter, tab, backspace, space, up, left, home, f5 …
+        k => {
+            let mut c = k.chars();
+            c.next()
+                .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                .unwrap_or_default()
+        }
+    });
+    parts.join("+")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -740,14 +853,30 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn keys_display_as_mac_conventions() {
         assert_eq!(display_keys("cmd-shift-z"), "⇧⌘Z");
         assert_eq!(display_keys("cmd-,"), "⌘,");
         assert_eq!(display_keys("escape"), "Esc");
         assert_eq!(display_keys("cmd-left"), "⌘←");
+        assert_eq!(global_label("cmd-t"), "⌘T");
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn keys_display_as_windows_conventions() {
+        assert_eq!(display_keys("ctrl-shift-z"), "Ctrl+Shift+Z");
+        assert_eq!(display_keys("alt-,"), "Alt+,");
+        assert_eq!(display_keys("escape"), "Esc");
+        assert_eq!(display_keys("alt-left"), "Alt+Left");
+        assert_eq!(display_keys("ctrl-k ctrl-t"), "Ctrl+K Ctrl+T");
+        // The catalog's ⌘ chords as they are bound here (`platform_keys`).
+        assert_eq!(global_label("cmd-t"), "Alt+T");
+        assert_eq!(global_label("cmd-shift-b"), "Alt+Shift+B");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
     fn overrides_rebind_and_bad_chords_fall_back() {
         let mut ov = std::collections::BTreeMap::new();
         ov.insert(
@@ -780,7 +909,25 @@ mod tests {
         Chord::parse(keys).unwrap_or_else(|| panic!("{keys} parses"))
     }
 
+    /// Windows binds the catalog's Global ⌘ chords as Alt (`platform_keys`):
+    /// those reach the app over a focused page, and the page keeps Ctrl+C/V
+    /// and the rest of its own keys.
     #[test]
+    #[cfg(windows)]
+    fn a_focused_page_keeps_its_keys_and_the_app_keeps_alt_chords() {
+        let app = app_chords(&entries());
+        for keys in ["alt-t", "alt-e", "alt-w", "alt-,", "alt-shift-b", "alt-p", "ctrl-alt-down"] {
+            assert!(is_app_shortcut(&chord(keys), &app), "{keys} must reach the app");
+        }
+        for keys in ["ctrl-c", "ctrl-v", "ctrl-a", "ctrl-z", "ctrl-f", "ctrl-l", "enter"] {
+            assert!(!is_app_shortcut(&chord(keys), &app), "{keys} must stay with the page");
+        }
+        let term = entries().into_iter().find(|e| e.what == "New terminal tab").unwrap();
+        assert_eq!(term.keys, "alt-t");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
     fn a_focused_page_keeps_editing_keys_and_the_app_keeps_its_chords() {
         let app = app_chords(&entries());
         for keys in [
@@ -807,6 +954,7 @@ mod tests {
     /// Drift guard: every global ⌘-chord in the catalog reaches the app over
     /// a page, except the editing keys, which the page owns.
     #[test]
+    #[cfg(target_os = "macos")]
     fn every_global_command_chord_is_an_app_shortcut() {
         let all = entries();
         let app = app_chords(&all);

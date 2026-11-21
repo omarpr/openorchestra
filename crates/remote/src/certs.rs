@@ -591,7 +591,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
     use std::net::IpAddr;
-    use std::os::unix::fs::PermissionsExt;
+    use os_compat::fs::PermissionsExt;
     use std::time::{Duration, SystemTime};
     use x509_parser::extensions::{GeneralName, ParsedExtension};
     use x509_parser::prelude::*;

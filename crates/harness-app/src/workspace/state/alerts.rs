@@ -555,7 +555,8 @@ fn status_pid(target: &AgentTarget) -> Option<u32> {
 /// signal; it just probes existence — 0 means alive, `ESRCH` means gone. Agents
 /// run as us, so `EPERM` (exists, other user) can't arise here.
 pub(crate) fn pid_alive(pid: u32) -> bool {
-    pid != 0 && unsafe { libc::kill(pid as libc::pid_t, 0) } == 0
+    // os_compat: kill(pid, 0) on Unix, OpenProcess + exit code on Windows.
+    os_compat::process::is_alive(pid)
 }
 
 /// Which of `candidates` (root, tmux session prefix) no longer have a live

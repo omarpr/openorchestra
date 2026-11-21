@@ -223,14 +223,120 @@ pub fn parse_session_panes(output: &str) -> Vec<(String, u32)> {
 
 use std::process::Command;
 
-/// Whether a `tmux` binary is on PATH. Cached by the caller (checked once at
-/// startup); cheap enough to compute directly here.
+/// The tmux client to run: `tmux` on PATH, or on Windows, where there is no
+/// tmux, the bundled `oo-session` (`crates/oo-session`), which speaks the
+/// same commands for everything in this file. Every tmux invocation in the
+/// app goes through this, so the rest of the app is the same on both.
+#[cfg(not(windows))]
+pub fn program() -> String {
+    "tmux".to_string()
+}
+
+#[cfg(windows)]
+pub fn program() -> String {
+    static PROGRAM: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PROGRAM
+        .get_or_init(|| {
+            windows_backend::resolve()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "oo-session".to_string())
+        })
+        .clone()
+}
+
+/// Finding `oo-session.exe`, and running it from a copy.
+#[cfg(windows)]
+mod windows_backend {
+    use std::path::{Path, PathBuf};
+
+    /// `oo-session.exe` beside the app (or, for `cargo test`, beside the
+    /// test binary's `deps` folder), or `$OO_SESSION_BIN`.
+    ///
+    /// Each session's host keeps running the exe it was started from, and
+    /// Windows will not overwrite a running exe, so a rebuild or a
+    /// reinstall would fail while any session lives. Sessions are therefore
+    /// run from a copy under `%LOCALAPPDATA%\openOrchestra\oo-session\`,
+    /// one per build (size + mtime); copies no longer running are removed.
+    pub fn resolve() -> Option<PathBuf> {
+        if let Some(bin) = std::env::var_os("OO_SESSION_BIN") {
+            return Some(PathBuf::from(bin));
+        }
+        let exe = std::env::current_exe().ok()?;
+        let dir = exe.parent()?;
+        let source = [dir.join("oo-session.exe"), dir.parent()?.join("oo-session.exe")]
+            .into_iter()
+            .find(|p| p.is_file())?;
+        Some(stable_copy(&source).unwrap_or(source))
+    }
+
+    fn stable_copy(source: &Path) -> Option<PathBuf> {
+        let meta = source.metadata().ok()?;
+        let mtime = meta
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs();
+        let root = PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
+            .join("openOrchestra")
+            .join("oo-session");
+        let stamp = format!("{}-{mtime}", meta.len());
+        let target = root.join(&stamp).join("oo-session.exe");
+        if !target.is_file() {
+            std::fs::create_dir_all(target.parent()?).ok()?;
+            let partial = target.with_extension(format!("partial-{}", std::process::id()));
+            std::fs::copy(source, &partial).ok()?;
+            if std::fs::rename(&partial, &target).is_err() && !target.is_file() {
+                let _ = std::fs::remove_file(&partial);
+                return None;
+            }
+        }
+        // Windows Terminal's ConPTY, when bundled beside the app: the host
+        // loads `conpty.dll` from its own folder, which runs `OpenConsole.exe`
+        // from there. Copied whenever missing (it may be added after the exe).
+        for companion in ["conpty.dll", "OpenConsole.exe"] {
+            let (from, to) = (source.with_file_name(companion), target.with_file_name(companion));
+            if from.is_file() && !to.is_file() {
+                let partial = to.with_extension(format!("partial-{}", std::process::id()));
+                if std::fs::copy(&from, &partial).is_ok() && std::fs::rename(&partial, &to).is_err() {
+                    let _ = std::fs::remove_file(&partial);
+                }
+            }
+        }
+        // Older builds' copies: a running one cannot be deleted, and stays
+        // (with its conpty.dll, which its host holds open).
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                if entry.file_name() != stamp.as_str() {
+                    let _ = std::fs::remove_file(entry.path().join("oo-session.exe"))
+                        .and_then(|_| std::fs::remove_dir_all(entry.path()));
+                }
+            }
+        }
+        Some(target)
+    }
+}
+
+/// Whether the tmux client ([`program`]) runs. Cached by the caller (checked
+/// once at startup); cheap enough to compute directly here.
 pub fn has_tmux() -> bool {
-    Command::new("tmux")
-        .arg("-V")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    let mut command = Command::new(program());
+    command.arg("-V");
+    no_window(&mut command);
+    command.output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// Windows: a console program started from the app must not flash a console
+/// window. Nothing elsewhere.
+fn no_window(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = command;
 }
 
 /// Names of currently-live tmux sessions. Empty on any error (no server yet,
@@ -337,7 +443,18 @@ pub fn agent_from_start_command(cmd: &str) -> Option<(AgentKind, &'static str)> 
     PROGRAMS.into_iter().find_map(|(prog, kind)| {
         let quoted_path = format!("/{prog}'");
         let quoted_bare = format!("'{prog}'");
-        (cmd.contains(&quoted_path) || cmd.contains(&quoted_bare)).then_some((kind, prog))
+        // Windows: `'C:\…\claude.exe'`, or a POSIX-form path from Git Bash.
+        let windows = cfg!(windows)
+            && [
+                format!("\\{prog}'"),
+                format!("\\{prog}.exe'"),
+                format!("/{prog}.exe'"),
+                format!("'{prog}.exe'"),
+            ]
+            .iter()
+            .any(|p| cmd.contains(p.as_str()));
+        (cmd.contains(&quoted_path) || cmd.contains(&quoted_bare) || windows)
+            .then_some((kind, prog))
     })
 }
 
@@ -393,10 +510,11 @@ pub fn pane_commands() -> Option<Vec<PaneInfo>> {
 /// A login/interactive shell, i.e. what an agent session drops to when the
 /// agent exits (`agent_script` ends in `exec "$SHELL" -li`).
 pub fn is_shell(command: &str) -> bool {
+    let command = command.trim_start_matches('-');
     matches!(
-        command.trim_start_matches('-'),
+        command,
         "zsh" | "bash" | "fish" | "sh" | "dash" | "ksh" | "tcsh" | "csh" | "nu" | "login"
-    )
+    ) || (cfg!(windows) && matches!(command, "cmd" | "powershell" | "pwsh"))
 }
 
 /// Which of `expected` pane keys have no agent running. A key has a running
@@ -435,13 +553,14 @@ pub fn kill_session(name: &str) {
 pub fn run_bounded(args: &[&str], timeout: std::time::Duration) -> Option<std::process::Output> {
     use std::io::Read;
     use std::process::Stdio;
-    let mut child = Command::new("tmux")
+    let mut command = Command::new(program());
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::piped());
+    no_window(&mut command);
+    let mut child = command.spawn().ok()?;
     let deadline = std::time::Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
@@ -830,6 +949,8 @@ mod tests {
         assert!(parse_sessions("").is_empty());
     }
 
+    // Windows has no tmux; `program()` is the bundled oo-session there.
+    #[cfg(not(windows))]
     #[test]
     fn has_tmux_matches_which() {
         let via_which = std::process::Command::new("which")
@@ -881,6 +1002,81 @@ mod tests {
         assert_eq!(agent_from_start_command("'/home/pilot/run.sh'"), None);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_agent_paths_name_their_agent() {
+        // As oo-session reports it: the script double-quoted, `\` escaped.
+        let claude = r#""C:\\Program Files\\Git\\bin\\bash.exe" -lic "'C:\\Users\\u\\.local\\bin\\claude.exe' '--permission-mode' 'auto'; exec \"\$SHELL\" -li""#;
+        assert_eq!(
+            agent_from_start_command(claude).map(|a| a.0),
+            Some(AgentKind::ClaudeCode)
+        );
+        assert_eq!(
+            agent_from_start_command("'/c/Users/u/bin/codex.exe'").map(|a| a.0),
+            Some(AgentKind::Codex)
+        );
+        assert_eq!(agent_from_start_command(r"'C:\tools\pilot.exe'"), None);
+        assert!(is_shell("bash") && is_shell("pwsh") && !is_shell("claude"));
+    }
+
+    /// Against the bundled oo-session on a private label: a session started
+    /// with `client_args` (minus the attach) is listed, answers the pane
+    /// queries the app makes, takes `send-keys`, and is gone after
+    /// `kill-session`. Skipped when oo-session.exe was not built.
+    #[cfg(windows)]
+    #[test]
+    fn oo_session_round_trip() {
+        use std::time::{Duration, Instant};
+        if !has_tmux() {
+            return;
+        }
+        let label = format!("oo-test-{}", std::process::id());
+        let run = |args: &[&str]| {
+            let mut all = vec!["-L", label.as_str()];
+            all.extend_from_slice(args);
+            run_bounded(&all, Duration::from_secs(10)).expect("oo-session ran")
+        };
+        let session = session_name("k", 3);
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = client_args(&session, dir.path(), None, false, &[]);
+        let attach = args.iter().position(|a| a == "attach-session").unwrap();
+        args.truncate(attach - 1);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = run(&argv);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let ls = run(&["ls", "-F", "#{session_name}"]);
+        assert_eq!(parse_sessions(&String::from_utf8_lossy(&ls.stdout)), vec![session.clone()]);
+        let panes = run(&["list-panes", "-a", "-F", "#{session_name} #{pane_pid}"]);
+        let panes = parse_session_panes(&String::from_utf8_lossy(&panes.stdout));
+        assert_eq!(panes.len(), 1);
+        assert_eq!(panes[0].0, session);
+        assert!(panes[0].1 > 0);
+        let mode = run(&["display-message", "-p", "-t", &session, "#{pane_in_mode}"]);
+        assert_eq!(String::from_utf8_lossy(&mode.stdout).trim(), "0");
+
+        assert!(run(&["send-keys", "-t", &session, "-l", "echo oo-$((6*7))"]).status.success());
+        assert!(run(&["send-keys", "-t", &session, "Enter"]).status.success());
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let screen = run(&["capture-pane", "-p", "-t", &session]);
+            // The output line, not the echoed command.
+            if String::from_utf8_lossy(&screen.stdout)
+                .lines()
+                .any(|l| l.trim() == "oo-42")
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the typed command never ran");
+            std::thread::sleep(Duration::from_millis(200));
+        }
+
+        assert!(run(&["kill-session", "-t", &session]).status.success());
+        let ls = run(&["ls"]);
+        assert!(ls.status.success() && ls.stdout.is_empty());
+    }
+
+    // Needs real tmux (`wait-for`); oo-session has no such command.
+    #[cfg(not(windows))]
     #[test]
     fn run_bounded_gives_up_on_a_hung_client() {
         if !has_tmux() {
@@ -1021,7 +1217,7 @@ mod tests {
             ),
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt;
+        use os_compat::fs::PermissionsExt;
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let key = "task:t:member:repo/t".to_string();

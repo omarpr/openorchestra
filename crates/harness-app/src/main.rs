@@ -123,12 +123,43 @@ pub fn probe_paint() -> bool {
     *ON.get_or_init(|| std::env::var_os("HARNESS_PROBE_PAINT").is_some())
 }
 
+/// Windows port (exploratory): the app reads `HOME` for `~/.openorchestra`
+/// and runs agents through `$SHELL -lic '<POSIX script>'`. Windows sets
+/// neither, so default `HOME` to the profile dir and `SHELL` to Git Bash.
+/// Must run before any thread exists (it writes the environment).
+#[cfg(windows)]
+fn windows_env_defaults() {
+    // SAFETY: called first thing in main, single-threaded.
+    unsafe {
+        if std::env::var_os("HOME").is_none()
+            && let Some(profile) = std::env::var_os("USERPROFILE")
+        {
+            std::env::set_var("HOME", profile);
+        }
+        if std::env::var_os("SHELL").is_none() {
+            let candidates = [
+                std::env::var_os("ProgramFiles").map(|p| PathBuf::from(p).join(r"Git\bin\bash.exe")),
+                std::env::var_os("LOCALAPPDATA")
+                    .map(|p| PathBuf::from(p).join(r"Programs\Git\bin\bash.exe")),
+            ];
+            if let Some(bash) = candidates.into_iter().flatten().find(|p| p.is_file()) {
+                std::env::set_var("SHELL", bash);
+            }
+        }
+    }
+}
+
 fn main() {
     env_logger::init();
+
+    #[cfg(windows)]
+    windows_env_defaults();
 
     // Before anything reads PATH — the requirements probe, the agent-CLI
     // lookup, tmux, gh — and before any thread exists to race the write. A
     // Finder-launched bundle otherwise sees only launchd's four directories.
+    // Not on Windows: a Git Bash login shell reports a POSIX-form PATH.
+    #[cfg(not(windows))]
     login_env::hydrate_path();
 
     // Launch hint: an explicit arg/env, else the cwd (unless it's "/", which is
@@ -138,6 +169,9 @@ fn main() {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let worktree_root = std::env::args()
         .nth(1)
+        // Windows starts the app this way for a click on an old toast
+        // (`notifier_win.rs`); it is not a path.
+        .filter(|a| a != "-ToastActivated")
         .map(PathBuf::from)
         .or_else(|| {
             std::env::var("HARNESS_WORKTREE_ROOT")
@@ -230,7 +264,14 @@ fn main() {
             };
             let theme_name = harness_zed_theme::theme_name(&hx);
             harness_zed_theme::install(&hx, cx);
-            apply_zed_settings(cx, "Zed Plex Sans", "Menlo", 13.0, theme_name, true);
+            apply_zed_settings(
+                cx,
+                "Zed Plex Sans",
+                if cfg!(windows) { "Consolas" } else { "Menlo" },
+                13.0,
+                theme_name,
+                true,
+            );
 
             // Editor crate wiring (Spike 3). Safe out-of-tree: registers defensive
             // globals + workspace item hooks; Editor::for_buffer works without it,

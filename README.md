@@ -78,6 +78,24 @@ make setup && make app && open dist/openOrchestra.app
 View or rebind shortcuts in **Settings → Shortcuts** (`⌘,`).
 [Development setup and contribution guide](CONTRIBUTING.md#development-setup)
 
+### Windows (experimental)
+
+The app also builds natively on Windows 10/11, with no admin rights and no
+Visual Studio: rustup with the GNU host (`rustup set default-host
+x86_64-pc-windows-gnu`) and [WinLibs](https://winlibs.com) GCC (POSIX
+threads, MSVCRT) in `~\tools\mingw64` or `$env:OO_MINGW`. From PowerShell:
+
+```powershell
+.\make setup     # check the toolchain
+.\make run       # build and run the debug app
+.\make install   # release build, installed per user with a Start menu entry
+```
+
+Browser tabs use Edge WebView2 and notifications are Windows toasts. Agents
+launch through Git Bash. There is no tmux on Windows, so an agent ends with
+its tab and nothing reattaches after a restart. ⌘ shortcuts are Alt in the
+app and Ctrl in the editor (**Settings → Shortcuts**, `Alt+,`).
+
 ## Community
 
 Join the [Slack community](https://join.slack.com/t/openorchestra-group/shared_invite/zt-4h5n9li83-bbPit9xyTUvizQt7wh9bgQ),

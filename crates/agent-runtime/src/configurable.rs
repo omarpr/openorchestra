@@ -135,7 +135,7 @@ impl ConfigurableRuntime {
 
     /// Claude-local settings hook block pointing at our universal shim.
     pub fn claude_settings_for(shim: &Path) -> Value {
-        let command = format!("node {}", shim.display());
+        let command = crate::node_command(&shim);
         let entry = || {
             json!({
                 "hooks": [{ "type": "command", "command": command }]
@@ -175,9 +175,7 @@ impl ConfigurableRuntime {
                     continue;
                 };
                 list.retain(|e| {
-                    !serde_json::to_string(e)
-                        .unwrap_or_default()
-                        .contains(&shim_marker)
+                    !crate::mentions_shim(&serde_json::to_string(e).unwrap_or_default(), &shim_marker)
                 });
                 if let Some(add) = entries.as_array() {
                     list.extend(add.iter().cloned());

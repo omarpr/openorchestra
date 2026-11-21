@@ -38,7 +38,7 @@ pub struct Sound {
 
 /// Bundled first — they are ours, and the first is the historical default —
 /// then the system sounds in the order macOS lists them.
-pub const CATALOG: &[Sound] = &[
+const MAC_CATALOG: &[Sound] = &[
     Sound {
         id: "uh-oh",
         source: Source::Bundled,
@@ -117,6 +117,47 @@ pub const CATALOG: &[Sound] = &[
     },
 ];
 
+/// Windows: the same bundled sounds, then the notification-ish sounds every
+/// Windows install has in `%WINDIR%\Media` ([`windows_media_file`]).
+const WINDOWS_CATALOG: &[Sound] = &[
+    Sound { id: "uh-oh", source: Source::Bundled },
+    Sound { id: "bell", source: Source::Bundled },
+    Sound { id: "quack", source: Source::Bundled },
+    Sound { id: "default", source: Source::SystemDefault },
+    Sound { id: "silent", source: Source::Silent },
+    Sound { id: "Notify", source: Source::System },
+    Sound { id: "Messaging", source: Source::System },
+    Sound { id: "Email", source: Source::System },
+    Sound { id: "Calendar", source: Source::System },
+    Sound { id: "Nudge", source: Source::System },
+    Sound { id: "Ding", source: Source::System },
+    Sound { id: "Chimes", source: Source::System },
+    Sound { id: "Chord", source: Source::System },
+    Sound { id: "Tada", source: Source::System },
+];
+
+/// The picker's list for this OS.
+pub const CATALOG: &[Sound] = if cfg!(windows) { WINDOWS_CATALOG } else { MAC_CATALOG };
+
+/// How the settings screen names the [`Source::System`] sounds' origin.
+pub const SYSTEM_LABEL: &str = if cfg!(windows) { "Windows" } else { "macOS" };
+
+/// The `%WINDIR%\Media` file behind a Windows system sound id.
+fn windows_media_file(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "Notify" => "Windows Notify System Generic.wav",
+        "Messaging" => "Windows Notify Messaging.wav",
+        "Email" => "Windows Notify Email.wav",
+        "Calendar" => "Windows Notify Calendar.wav",
+        "Nudge" => "Windows Message Nudge.wav",
+        "Ding" => "Windows Ding.wav",
+        "Chimes" => "chimes.wav",
+        "Chord" => "chord.wav",
+        "Tada" => "tada.wav",
+        _ => return None,
+    })
+}
+
 /// What a fresh install uses: the chirp the app has always made.
 pub const DEFAULT: &str = "uh-oh";
 
@@ -159,15 +200,25 @@ pub fn file_name(sound: Sound) -> Option<String> {
 /// settings screen nobody can check their choice with.
 pub fn path(sound: Sound) -> Option<std::path::PathBuf> {
     match sound.source {
+        Source::System if cfg!(windows) => {
+            let windir = std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into());
+            let p = std::path::PathBuf::from(windir)
+                .join("Media")
+                .join(windows_media_file(sound.id)?);
+            p.exists().then_some(p)
+        }
         Source::System => {
             let p = std::path::PathBuf::from(format!("/System/Library/Sounds/{}.aiff", sound.id));
             p.exists().then_some(p)
         }
         Source::Bundled => {
             let file = format!("{}.wav", sound.id);
+            // macOS bundle: Contents/Resources. Windows dist: sounds\ beside
+            // the exe.
+            let resources = if cfg!(windows) { "sounds" } else { "../Resources" };
             let bundled = std::env::current_exe()
                 .ok()
-                .and_then(|exe| exe.parent().map(|d| d.join("../Resources").join(&file)));
+                .and_then(|exe| exe.parent().map(|d| d.join(resources).join(&file)));
             if let Some(p) = bundled.filter(|p| p.exists()) {
                 return Some(p);
             }
@@ -188,6 +239,10 @@ pub fn path(sound: Sound) -> Option<std::path::PathBuf> {
 pub fn preview(id: &str) {
     let sound = resolve(id);
     if sound.source == Source::Silent {
+        return;
+    }
+    if cfg!(windows) {
+        play(sound);
         return;
     }
     // The system default has no file to point at; the closest honest preview is
@@ -230,6 +285,54 @@ pub fn preview(id: &str) {
     }
 }
 
+/// Play `sound` once, asynchronously: a notification's (Windows toasts are
+/// posted silent and the app plays the chosen sound) or a preview. The
+/// bundled wavs are compiled in, so a bare exe plays them; system sounds
+/// come from `%WINDIR%\Media`, and the system default is Windows' own
+/// notification sound. Elsewhere this is the preview.
+pub fn play(sound: Sound) {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Media::Audio::{
+            PlaySoundW, SND_ASYNC, SND_FILENAME, SND_MEMORY, SND_NODEFAULT,
+        };
+        use windows::core::{HSTRING, PCWSTR};
+        static UH_OH: &[u8] = include_bytes!("../sounds/uh-oh.wav");
+        static BELL: &[u8] = include_bytes!("../sounds/bell.wav");
+        static QUACK: &[u8] = include_bytes!("../sounds/quack.wav");
+        let bundled = match (sound.source, sound.id) {
+            (Source::Bundled, "uh-oh") => Some(UH_OH),
+            (Source::Bundled, "bell") => Some(BELL),
+            (Source::Bundled, "quack") => Some(QUACK),
+            _ => None,
+        };
+        // SAFETY: SND_MEMORY reads the static bytes for as long as it plays;
+        // SND_FILENAME copies the path before returning.
+        let played = unsafe {
+            if let Some(bytes) = bundled {
+                PlaySoundW(PCWSTR(bytes.as_ptr().cast()), None, SND_MEMORY | SND_ASYNC | SND_NODEFAULT)
+            } else {
+                let file = match sound.source {
+                    Source::SystemDefault => {
+                        path(Sound { id: "Notify", source: Source::System })
+                    }
+                    _ => path(sound),
+                };
+                let Some(file) = file else {
+                    log::warn!("no audio file for sound {:?}", sound.id);
+                    return;
+                };
+                PlaySoundW(&HSTRING::from(file.as_os_str()), None, SND_FILENAME | SND_ASYNC | SND_NODEFAULT)
+            }
+        };
+        if !played.as_bool() {
+            log::warn!("could not play sound {:?}", sound.id);
+        }
+    }
+    #[cfg(not(windows))]
+    preview(sound.id);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,6 +367,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn file_names_carry_the_extension_each_source_uses() {
         assert_eq!(file_name(resolve("uh-oh")).as_deref(), Some("uh-oh.wav"));
         assert_eq!(file_name(resolve("Glass")).as_deref(), Some("Glass.aiff"));
@@ -276,7 +380,7 @@ mod tests {
         for s in CATALOG.iter().filter(|s| s.source == Source::System) {
             assert!(
                 path(*s).is_some(),
-                "{} is not in /System/Library/Sounds",
+                "{} is not among this OS's system sounds",
                 s.id
             );
         }

@@ -654,6 +654,45 @@ const SCAN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(6);
 /// listener scan or the process table didn't come back in time (an `lsof`
 /// stuck on an unreachable network mount, say): the caller keeps its last
 /// sample and the next tick retries. An empty answer is still `Some`.
+#[cfg(windows)]
+pub fn sample(has_tmux: bool) -> Option<PortsSample> {
+    // No lsof/ps: listeners from the IP Helper table, processes from sysinfo.
+    // Working folders (`lsof -d cwd`) have no cheap Windows equivalent, so
+    // rows are attributed through session panes only (oo-session's).
+    let session_panes = if has_tmux {
+        crate::tmux::list_session_panes().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let listeners = os_compat::net::tcp_listeners()
+        .into_iter()
+        .map(|(pid, addr, port)| Listener { pid, addr, port })
+        .collect();
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    let procs = sys
+        .processes()
+        .iter()
+        .map(|(pid, p)| ProcPath {
+            pid: pid.as_u32(),
+            parent: p.parent().map(|pp| pp.as_u32()).filter(|&pp| pp != 0),
+            path: p
+                .exe()
+                .map(|e| e.to_string_lossy().into_owned())
+                .unwrap_or_else(|| p.name().to_string_lossy().into_owned()),
+        })
+        .collect();
+    Some(PortsSample {
+        app_pid: std::process::id(),
+        listeners,
+        procs,
+        session_panes,
+        containers: Vec::new(),
+        cwds: Default::default(),
+    })
+}
+
+#[cfg(not(windows))]
 pub fn sample(has_tmux: bool) -> Option<PortsSample> {
     let deadline = std::time::Instant::now() + SCAN_DEADLINE;
     sample_using(
@@ -680,7 +719,7 @@ fn sample_using(
     let procs = parse_ps_paths(&run("ps", &["-axo", "pid=,ppid=,comm="])?);
     let session_panes = if has_tmux {
         run(
-            "tmux",
+            &crate::tmux::program(),
             &["list-panes", "-a", "-F", "#{session_name} #{pane_pid}"],
         )
         .map(|s| crate::tmux::parse_session_panes(&s))
@@ -796,6 +835,59 @@ fn accepted(cmd: &str, ran: Ran) -> Option<String> {
     clean.then_some(ran.stdout)
 }
 
+/// Windows: no process groups or O_NONBLOCK pipes, so read each pipe on its
+/// own thread and stop the whole tree with `taskkill /T` on timeout.
+#[cfg(windows)]
+fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration) -> Option<Ran> {
+    use std::io::Read;
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut child = std::process::Command::new(cmd)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .ok()?;
+    let reader = |mut pipe: Box<dyn Read + Send>| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = pipe.read_to_end(&mut buf);
+            let _ = tx.send(buf);
+        });
+        rx
+    };
+    let out_rx = reader(Box::new(child.stdout.take()?));
+    let err_rx = reader(Box::new(child.stderr.take()?));
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                let stdout = out_rx.recv_timeout(left).ok()?;
+                let stderr = err_rx.recv_timeout(left).unwrap_or_default();
+                return Some(Ran {
+                    code: status.code(),
+                    stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&stderr).into_owned(),
+                });
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            _ => {
+                os_compat::process::kill_tree(child.id());
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
 fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration) -> Option<Ran> {
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
@@ -856,12 +948,14 @@ fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration) -> Option
 }
 
 /// A child's pipe, switched to non-blocking, collecting what it has so far.
+#[cfg(unix)]
 struct NonBlocking<R: std::io::Read + std::os::fd::AsRawFd> {
     pipe: R,
     buf: Vec<u8>,
     eof: bool,
 }
 
+#[cfg(unix)]
 impl<R: std::io::Read + std::os::fd::AsRawFd> NonBlocking<R> {
     fn new(pipe: R) -> Self {
         // SAFETY: fcntl on a pipe fd we own, only adding O_NONBLOCK.

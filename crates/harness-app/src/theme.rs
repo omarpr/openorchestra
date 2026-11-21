@@ -165,6 +165,8 @@ fn ui_font_family(cx: &App) -> &'static str {
         &["IBM Plex Sans", "IBMPlexSans"],
         if cfg!(target_os = "macos") {
             "Helvetica Neue"
+        } else if cfg!(windows) {
+            "Segoe UI"
         } else {
             "DejaVu Sans"
         },
@@ -177,6 +179,8 @@ fn mono_font_family(cx: &App) -> &'static str {
         &["IBM Plex Mono", "IBMPlexMono"],
         if cfg!(target_os = "macos") {
             "Menlo"
+        } else if cfg!(windows) {
+            "Consolas"
         } else {
             "DejaVu Sans Mono"
         },

@@ -92,7 +92,15 @@ impl CodexRuntime {
     /// formatting quotes and escapes the path, so a `$HOME` with spaces stays
     /// one argument.
     fn hook_command(shim: &Path) -> String {
-        format!("node {:?}", shim.display().to_string())
+        // Windows: Codex runs hook commands through cmd.exe (and a user's
+        // own setup may use PowerShell or Git Bash); `node "C:/…"` reads as
+        // one path in all three, where the Debug form's `C:\\…` relies on
+        // each shell's escaping.
+        if cfg!(windows) {
+            crate::node_command(shim)
+        } else {
+            format!("node {:?}", shim.display().to_string())
+        }
     }
 
     fn install_hook(&self, shim: &Path) -> io::Result<()> {
@@ -128,7 +136,7 @@ impl CodexRuntime {
         // line-append bug left inside nested tables.
         if doc
             .get("notify")
-            .map(|v| v.to_string().contains(&marker))
+            .map(|v| crate::mentions(&v.to_string(), &marker))
             .unwrap_or(false)
         {
             doc.remove("notify");
@@ -155,7 +163,7 @@ fn remove_stray_notify(table: &mut toml_edit::Table, marker: &str) -> bool {
         if let Some(child) = table.get_mut(&key).and_then(|i| i.as_table_mut()) {
             if child
                 .get("notify")
-                .map(|v| v.to_string().contains(marker))
+                .map(|v| crate::mentions(&v.to_string(), marker))
                 .unwrap_or(false)
             {
                 child.remove("notify");
@@ -205,7 +213,7 @@ fn ensure_hook(root: &mut Value, event: &str, marker: &str, command: &str) {
         handlers.retain_mut(|handler| {
             let belongs_to_us = handler["command"]
                 .as_str()
-                .is_some_and(|cmd| cmd.contains(marker));
+                .is_some_and(|cmd| crate::mentions_shim(cmd, marker));
             if !belongs_to_us {
                 return true;
             }
@@ -221,6 +229,22 @@ fn ensure_hook(root: &mut Value, event: &str, marker: &str, command: &str) {
     if !found {
         arr.push(json!({ "hooks": [ { "type": "command", "command": command } ] }));
     }
+}
+
+/// What can run `program` directly for a probe. npm installs Codex on
+/// Windows as an extensionless sh script (what Git Bash launches) beside
+/// `codex.cmd`; Windows can't execute the script itself, so the probe uses
+/// the launcher next to it. Elsewhere, and for anything else, `program`.
+fn probe_program(program: &Path) -> PathBuf {
+    if cfg!(windows) && program.extension().is_none() {
+        for ext in ["exe", "cmd"] {
+            let sibling = program.with_extension(ext);
+            if sibling.is_file() {
+                return sibling;
+            }
+        }
+    }
+    program.to_path_buf()
 }
 
 impl AgentRuntime for CodexRuntime {
@@ -274,7 +298,7 @@ impl AgentRuntime for CodexRuntime {
         // arguments and are passed through by the caller.
         if command.program.file_name() == Some(PROGRAM.as_ref())
             && !command.args.iter().any(|arg| arg == NO_DAEMON)
-            && Command::new(&command.program)
+            && Command::new(probe_program(&command.program))
                 .args([NO_DAEMON, "--version"])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())

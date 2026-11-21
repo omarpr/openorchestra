@@ -195,11 +195,15 @@ impl TerminalPane {
                 );
                 (
                     Shell::WithArguments {
-                        program: "tmux".to_string(),
+                        program: crate::tmux::program(),
                         args,
                         title_override: Some(label.clone()),
                     },
-                    format!("{label} (tmux {})", sess.name),
+                    format!(
+                        "{label} ({} {})",
+                        if cfg!(windows) { "oo-session" } else { "tmux" },
+                        sess.name
+                    ),
                 )
             }
             // No tmux: direct spawn. Still routed through the user's login

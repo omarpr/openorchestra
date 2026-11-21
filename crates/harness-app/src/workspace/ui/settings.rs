@@ -503,7 +503,11 @@ impl HarnessWorkspace {
                     focus,
                     "show-ignored-toggle",
                     "Show gitignored files",
-                    "In the file tree and ⌘P.",
+                    if cfg!(target_os = "macos") {
+                        "In the file tree and ⌘P."
+                    } else {
+                        "In the file tree and Alt+P."
+                    },
                     enabled,
                     hx,
                     cx,
@@ -528,7 +532,7 @@ impl HarnessWorkspace {
                 let selected = current == id;
                 let origin = match sound.source {
                     crate::sounds::Source::Bundled => "bundled",
-                    crate::sounds::Source::System => "macOS",
+                    crate::sounds::Source::System => crate::sounds::SYSTEM_LABEL,
                     crate::sounds::Source::SystemDefault => "the system alert sound",
                     crate::sounds::Source::Silent => "no sound at all",
                 };
@@ -666,6 +670,39 @@ impl HarnessWorkspace {
         }
 
         if sec == S::General {
+            // ---- Browser developer tools ----------------------------------------
+            // Where a browser tab's inspector opens. macOS also remembers a
+            // move made from the inspector's own dock buttons; on Windows
+            // (WebView2's docked frontend has none) this is the way to pick.
+            {
+                use crate::browser_pane::InspectorPlacement as P;
+                let current = self.prefs.inspector_placement;
+                let mut row = div().flex().gap_1p5().pb_1();
+                for (label, value) in
+                    [("Bottom", P::Bottom), ("Left", P::Left), ("Right", P::Right), ("Window", P::Window)]
+                {
+                    row = row.child(
+                        focus
+                            .scroll_choice(format!("inspector-{label}"), label, current == value, hx, cx)
+                            .child(chip(label.to_string(), current == value, hx))
+                            .on_click(cx.listener(move |ws, _, _, cx| {
+                                cx.stop_propagation();
+                                ws.prefs.inspector_placement = value;
+                                crate::browser_pane::set_inspector_placement(value);
+                                ws.save_prefs(cx);
+                                cx.notify();
+                            })),
+                    );
+                }
+                body = body
+                    .child(section_title("Browser developer tools"))
+                    .child(row)
+                    .child(hint(
+                        "Where a browser tab's inspector opens: docked beside the page, or in its own window.",
+                        hx,
+                    ));
+            }
+
             // ---- Terminals on quit ----------------------------------------------
             // The same choice the quit prompt's "Remember" box saves. Without this
             // row, a remembered answer could only be undone by editing prefs.json.
@@ -700,6 +737,8 @@ impl HarnessWorkspace {
                 .child(hint(
                     if self.has_tmux {
                         "Keep running lets agents pick up where they left off next launch."
+                    } else if cfg!(windows) {
+                        "Windows has no tmux: terminals and agents end when the app quits."
                     } else {
                         "Install tmux so agent sessions survive app restarts."
                     },

@@ -71,6 +71,13 @@ export function writeStatus(cwd, state, sessionFile, tool, sessionId) {
 // functions above without side effects.
 if (process.argv[1] && fs.existsSync(process.argv[1]) &&
 	import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href) {
+	// Only a tab openOrchestra launched reports: a Grok session started
+	// elsewhere in this worktree runs the same hooks (see
+	// claude-code-status.mjs).
+	if (!process.env.HARNESS_AGENT_TAB_ID && !process.env.HARNESS_AGENT_WORKTREE &&
+		!process.env.HARNESS_REMOTE_SESSION) {
+		process.exit(0);
+	}
 	let payload = {};
 	try {
 		payload = JSON.parse(readStdin() || "{}");

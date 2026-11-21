@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use os_compat::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
@@ -100,7 +100,7 @@ fn append(path: &Path, line: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    use os_compat::fs::PermissionsExt;
 
     fn setup() -> (tempfile::TempDir, InputActivity) {
         let dir = tempfile::tempdir().unwrap();

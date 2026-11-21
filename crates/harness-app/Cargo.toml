@@ -14,6 +14,9 @@ name = "harness-app"
 version = "1.4.0"
 edition = "2024"
 publish = false
+# `src/bin/oo-session.rs` is a second binary (Windows' tmux stand-in);
+# `cargo run` still means the app.
+default-run = "harness-app"
 # GPL because we link zed's `terminal` crate (GPL-3.0-or-later). Accepted in
 # docs/architecture.md §3.2. gpui itself is Apache-2.0.
 license = "GPL-3.0-or-later"
@@ -109,6 +112,8 @@ a2a-broker = { path = "../a2a-broker" }
 pi-client = { path = "../pi-client" }
 # oo-remote: phone-reachable HTTP/SSE server + embedded PWA for remote agent control.
 oo-remote = { path = "../remote" }
+# Windows port (exploratory): stand-ins for the std::os::unix bits we use.
+os-compat = { path = "../os-compat" }
 # Name the snapshot channel type and format `status_since` (RFC 3339); both
 # already in the graph through oo-remote.
 tokio = { version = "1", features = ["sync"] }
@@ -305,6 +310,37 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
 dispatch2 = { version = "0.3", default-features = false, features = ["std", "objc2"] }
 # gpui's Window hands out its NSView through HasWindowHandle.
 raw-window-handle = "0.6"
+
+# Windows port: the browser tab is Edge WebView2 (the system runtime that
+# ships with Windows 11), hosted in a child HWND of gpui's window, and agent
+# notifications are WinRT toasts. Both crates use the `windows` 0.62 that
+# gpui_windows already pulls in.
+[target.'cfg(windows)'.dependencies]
+# What tmux does on macOS, for Windows: built as `oo-session.exe` beside the
+# app (src/bin/oo-session.rs), so agent sessions outlive their tab.
+oo-session = { path = "../oo-session" }
+raw-window-handle = "0.6"
+webview2-com = "0.39"
+windows-core = "0.62"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_System_Registry",
+    "Win32_Media_Audio",
+    "Win32_UI_Notifications",
+    "Win32_System_Variant",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_Storage_EnhancedStorage",
+    "Win32_UI_WindowsAndMessaging",
+    "Data_Xml_Dom",
+    "Foundation",
+    "UI_Notifications",
+] }
 
 # zed's own dev profile carries these same four overrides, and they are
 # load-bearing, not a speed nicety: zed's `with_parser` attaches a

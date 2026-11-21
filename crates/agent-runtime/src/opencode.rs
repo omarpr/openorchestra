@@ -182,7 +182,7 @@ impl AgentRuntime for OpenCodeRuntime {
                     // Other launches can install the same shim concurrently.
                     let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
                     tmp.write_all(content.as_bytes())?;
-                    tmp.persist(file)?;
+                    crate::persist_shim(tmp, &file, content)?;
                 }
             }
         }

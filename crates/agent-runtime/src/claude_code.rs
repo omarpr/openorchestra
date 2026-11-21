@@ -84,7 +84,7 @@ impl ClaudeCodeRuntime {
     /// Public so the test suite can assert the exact shape we write without
     /// reaching into the filesystem.
     pub fn settings_for(shim: &Path) -> serde_json::Value {
-        let command = format!("node {}", shim.display());
+        let command = crate::node_command(&shim);
         let entry = || {
             // No `matcher` field, deliberately. Matchers filter *tool names*
             // and only apply to PreToolUse/PostToolUse; on other events an
@@ -143,9 +143,7 @@ impl ClaudeCodeRuntime {
                 };
                 let shim_marker = shim.display().to_string();
                 list.retain(|e| {
-                    !serde_json::to_string(e)
-                        .unwrap_or_default()
-                        .contains(&shim_marker)
+                    !crate::mentions_shim(&serde_json::to_string(e).unwrap_or_default(), &shim_marker)
                 });
                 if let Some(add) = entries.as_array() {
                     list.extend(add.iter().cloned());

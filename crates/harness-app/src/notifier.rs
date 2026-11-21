@@ -6,6 +6,7 @@
 //! uses `notify-send`.
 
 use std::path::Path;
+#[cfg(unix)]
 use std::process::{Command, Stdio};
 
 /// What kind of attention an agent wants — drives the message wording.
@@ -40,6 +41,12 @@ pub fn notify_agent(
             return;
         }
     }
+    #[cfg(windows)]
+    {
+        if win::post(&title, &body, worktree_id, sound) {
+            return;
+        }
+    }
     let _ = (worktree_id, sound);
     post(&title, &body);
 }
@@ -68,7 +75,14 @@ pub fn nav_rx() -> crossbeam_channel::Receiver<String> {
 pub fn init() {
     #[cfg(target_os = "macos")]
     mac::init(nav().0.clone());
+    #[cfg(windows)]
+    win::init(nav().0.clone());
 }
+
+/// Windows toasts: see `notifier_win.rs`.
+#[cfg(windows)]
+#[path = "notifier_win.rs"]
+mod win;
 
 #[cfg(target_os = "macos")]
 mod mac {

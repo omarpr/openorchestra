@@ -6,8 +6,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
-use std::os::unix::io::AsRawFd;
+use os_compat::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -104,23 +103,15 @@ impl LockGuard {
             .write(true)
             .mode(0o600)
             .open(path)?;
-        loop {
-            // SAFETY: valid fd owned by `f` for the duration of the call.
-            if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } == 0 {
-                return Ok(LockGuard(f));
-            }
-            let err = io::Error::last_os_error();
-            if err.kind() != io::ErrorKind::Interrupted {
-                return Err(err);
-            }
-        }
+        // std's portable advisory lock: flock on Unix, LockFileEx on Windows.
+        f.lock()?;
+        Ok(LockGuard(f))
     }
 }
 
 impl Drop for LockGuard {
     fn drop(&mut self) {
-        // SAFETY: valid fd owned by self.0.
-        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+        let _ = self.0.unlock();
     }
 }
 
