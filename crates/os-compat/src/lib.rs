@@ -375,3 +375,151 @@ pub mod power {
         }
     }
 }
+
+/// The environment the OS hands a process, re-read after start.
+pub mod env {
+    /// Add to this process's `PATH` the directories the system `PATH` has
+    /// gained since the app started, and say whether it changed.
+    ///
+    /// On Windows an installer (winget, an .msi) writes the new directory to
+    /// the registry; running processes keep the `PATH` they started with, so
+    /// without this a Re-check after installing still reports "not found" and
+    /// a new terminal cannot run what was just installed. Directories are only
+    /// added, never removed or reordered. Elsewhere there is no system `PATH`
+    /// to re-read: a no-op.
+    #[cfg(not(windows))]
+    pub fn refresh_path() -> bool {
+        false
+    }
+
+    #[cfg(windows)]
+    pub fn refresh_path() -> bool {
+        use std::os::windows::ffi::OsStrExt;
+        use std::path::PathBuf;
+        let current = std::env::var_os("PATH").unwrap_or_default();
+        let mut dirs: Vec<PathBuf> = std::env::split_paths(&current).collect();
+        let before = dirs.len();
+        for system in registry::system_path() {
+            for dir in std::env::split_paths(&system) {
+                // A NUL would make set_var panic, so never let one through.
+                let usable = !dir.as_os_str().is_empty()
+                    && !dir.as_os_str().encode_wide().any(|c| c == 0);
+                if usable && !dirs.iter().any(|d| same_dir(d, &dir)) {
+                    dirs.push(dir);
+                }
+            }
+        }
+        if dirs.len() == before {
+            return false;
+        }
+        match std::env::join_paths(dirs) {
+            Ok(path) => {
+                // Rust's own env access is locked; Windows' environment
+                // block is safe to update from any thread.
+                std::env::set_var("PATH", path);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Windows paths compare case-insensitively, with or without a trailing
+    /// separator.
+    #[cfg(windows)]
+    fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
+        let norm = |p: &std::path::Path| {
+            p.to_string_lossy()
+                .trim_end_matches(['\\', '/'])
+                .to_lowercase()
+        };
+        norm(a) == norm(b)
+    }
+
+    #[cfg(windows)]
+    mod registry {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use windows_sys::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS};
+        use windows_sys::Win32::System::Registry::{
+            RegGetValueW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ,
+        };
+
+        /// The machine `PATH` then the user's, `%VARS%` expanded.
+        pub fn system_path() -> Vec<OsString> {
+            [
+                (
+                    HKEY_LOCAL_MACHINE,
+                    r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+                ),
+                (HKEY_CURRENT_USER, "Environment"),
+            ]
+            .into_iter()
+            .filter_map(|(root, key)| read(root, key, "Path"))
+            .collect()
+        }
+
+        fn wide(s: &str) -> Vec<u16> {
+            std::ffi::OsStr::new(s).encode_wide().chain([0]).collect()
+        }
+
+        /// A string value; `REG_EXPAND_SZ` comes back expanded (RegGetValueW
+        /// does that unless told not to, and reports it as `REG_SZ`).
+        fn read(root: HKEY, key: &str, name: &str) -> Option<OsString> {
+            let (key, name) = (wide(key), wide(name));
+            let mut buf: Vec<u16> = vec![0; 2048];
+            // The expanded size is only known after a try; grow and retry.
+            for _ in 0..4 {
+                let mut bytes = (buf.len() * 2) as u32;
+                // SAFETY: valid NUL-terminated names; `bytes` is the buffer's size.
+                let rc = unsafe {
+                    RegGetValueW(
+                        root,
+                        key.as_ptr(),
+                        name.as_ptr(),
+                        RRF_RT_REG_SZ,
+                        std::ptr::null_mut(),
+                        buf.as_mut_ptr().cast(),
+                        &mut bytes,
+                    )
+                };
+                match rc {
+                    ERROR_SUCCESS => {
+                        // After expansion the reported size can exceed the
+                        // string: it ends at the first NUL, and what follows
+                        // is leftover buffer.
+                        let filled = &buf[..(bytes as usize / 2).min(buf.len())];
+                        let end = filled.iter().position(|&c| c == 0).unwrap_or(filled.len());
+                        return Some(OsString::from_wide(&filled[..end]));
+                    }
+                    ERROR_MORE_DATA => buf.resize(bytes as usize / 2 + 256, 0),
+                    _ => return None,
+                }
+            }
+            None
+        }
+
+        #[cfg(test)]
+        #[test]
+        fn refreshing_keeps_path_settable() {
+            // Would panic inside set_var on a NUL; then PATH must still split.
+            super::refresh_path();
+            let path = std::env::var_os("PATH").unwrap();
+            assert!(std::env::split_paths(&path).count() > 0);
+        }
+
+        #[cfg(test)]
+        #[test]
+        fn reads_the_machine_path() {
+            let path = system_path();
+            let all: Vec<String> = path.iter().map(|p| p.to_string_lossy().into()).collect();
+            assert!(
+                all.iter().any(|p| p.to_lowercase().contains(r"\windows\system32")),
+                "{all:?}"
+            );
+            assert!(all.iter().all(|p| !p.contains("%SystemRoot%")), "not expanded: {all:?}");
+            // Expansion can report more bytes than the string holds; what
+            // follows its NUL must not come along (it crashed set_var).
+            assert!(all.iter().all(|p| !p.contains('\0')), "NUL inside: {all:?}");
+        }
+    }
+}

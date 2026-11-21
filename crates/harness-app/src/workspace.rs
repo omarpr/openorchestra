@@ -193,6 +193,15 @@ pub(crate) enum TabKind {
     Browser,
 }
 
+/// The requirements screen's tabs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PreflightTab {
+    /// What the app needs, and what each missing piece costs.
+    Requirements,
+    /// Every agent CLI it drives, with install commands.
+    Agents,
+}
+
 /// The tab being dragged, and the pane set it came from.
 ///
 /// Carries the worktree key so a drop can refuse a tab from somewhere else: tab
@@ -697,6 +706,13 @@ pub struct HarnessWorkspace {
     /// Last probe result. Re-run by the screen's Re-check button, so installing
     /// a tool does not mean restarting the app.
     preflight: Vec<crate::preflight::Check>,
+    /// The fix command last copied from that screen, shown as "Copied".
+    preflight_copied: Option<&'static str>,
+    /// Every agent CLI the app drives, installed or not (the Agents tab).
+    preflight_agents: Vec<crate::preflight::AgentCheck>,
+    /// Which tab of that screen is showing. Kept while the app runs, so
+    /// reopening it after installing an agent lands back on Agents.
+    preflight_tab: PreflightTab,
     /// The conductor pet: message shown, expiry, and which beat of the
     /// two-pose arm cycle it is on.
     /// The always-on conductor (`Prefs::conductor_always_on`): his state,

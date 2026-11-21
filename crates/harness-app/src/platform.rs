@@ -24,6 +24,7 @@
 //! | Keep awake               | `remote/keepawake.rs` (`caffeinate`) | `os_compat::power`             |
 //! | Unix file APIs           | `std::os::unix`                    | `os_compat::{fs, ffi, process}`  |
 //! | Login environment        | `login_env` (PATH from the login shell) | [`prepare_environment`] (HOME, SHELL) |
+//! | PATH an installer changed | (not needed)                      | `os_compat::env` (registry), via [`refresh_path`] |
 //! | Native About panel, link routing, update check via Homebrew | `#[cfg(target_os = "macos")]` in `update_check.rs`, `link_routing/platform.rs` | the app's own dialog |
 //!
 //! A test (`no_os_checks_outside_platform`) keeps `cfg!(windows)` and
@@ -65,6 +66,9 @@ pub struct Profile {
     pub sessions: Sessions,
     /// The commands the first-run checks suggest for missing tools.
     pub install: Install,
+    /// The agent CLIs the app drives, in `preflight::AGENTS` order, and how to
+    /// install each here (the requirements screen's Agents tab).
+    pub agents: &'static [AgentInstall],
     /// The update dialog's advice when the app was not installed with
     /// Homebrew.
     pub upgrade_hint: &'static str,
@@ -104,12 +108,98 @@ pub struct Sessions {
     pub missing_hint: &'static str,
 }
 
+/// How to install each tool the requirements screen checks for.
 #[derive(Debug)]
 pub struct Install {
-    pub git: &'static str,
-    pub sessions: &'static str,
-    pub gh: &'static str,
+    pub git: Fix,
+    pub sessions: Fix,
+    pub gh: Fix,
+    /// rust-analyzer on a machine without rustup: rustup first, then the
+    /// component (with rustup present it is only the component).
+    pub rustup_then_analyzer: Fix,
 }
+
+/// How to get a missing tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fix {
+    /// Shell commands, run in order. Each is runnable exactly as written:
+    /// the screen copies it or types it into a new shell tab.
+    Run(&'static [&'static str]),
+    /// Nothing to run: what to do instead.
+    Advice(&'static str),
+}
+
+/// rustup's own installer for macOS and Linux (rustup.rs).
+const RUSTUP_SH: &str = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh";
+/// The same on every OS once rustup is there.
+pub const ADD_ANALYZER: &str = "rustup component add rust-analyzer";
+
+/// An agent CLI the app drives, and how to install it on this OS.
+#[derive(Debug)]
+pub struct AgentInstall {
+    /// The command it runs as (`preflight::AGENTS`).
+    pub program: &'static str,
+    /// What its maker calls it.
+    pub label: &'static str,
+    pub fix: Fix,
+}
+
+// Each vendor's own recommended installer. Every command runs in the app's
+// shell: bash, which on Windows is Git Bash — so a vendor's PowerShell
+// installer is invoked through `powershell -Command`.
+//
+// Claude Code's native installer rather than npm: the npm package needs a
+// newer Node than many machines have, the native one needs none.
+const CLAUDE_SH: AgentInstall = AgentInstall {
+    program: "claude",
+    label: "Claude Code",
+    fix: Fix::Run(&["curl -fsSL https://claude.ai/install.sh | bash"]),
+};
+const CLAUDE_PS: AgentInstall = AgentInstall {
+    program: "claude",
+    label: "Claude Code",
+    fix: Fix::Run(&["powershell -NoProfile -Command \"irm https://claude.ai/install.ps1 | iex\""]),
+};
+const CODEX: AgentInstall = AgentInstall {
+    program: "codex",
+    label: "Codex",
+    fix: Fix::Run(&["npm install -g @openai/codex"]),
+};
+const OPENCODE_SH: AgentInstall = AgentInstall {
+    program: "opencode",
+    label: "OpenCode",
+    fix: Fix::Run(&["curl -fsSL https://opencode.ai/install | bash"]),
+};
+const OPENCODE_NPM: AgentInstall = AgentInstall {
+    program: "opencode",
+    label: "OpenCode",
+    fix: Fix::Run(&["npm install -g opencode-ai"]),
+};
+const KIMI_SH: AgentInstall = AgentInstall {
+    program: "kimi",
+    label: "Kimi Code",
+    fix: Fix::Run(&["curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash"]),
+};
+const KIMI_PS: AgentInstall = AgentInstall {
+    program: "kimi",
+    label: "Kimi Code",
+    fix: Fix::Run(&[
+        "powershell -NoProfile -Command \"irm https://code.kimi.com/kimi-code/install.ps1 | iex\"",
+    ]),
+};
+/// xAI's script supports Git Bash too.
+const GROK: AgentInstall = AgentInstall {
+    program: "grok",
+    label: "Grok Build",
+    fix: Fix::Run(&["curl -fsSL https://x.ai/cli/install.sh | bash"]),
+};
+/// Pinned: the version the native chat pane is tested against
+/// (docs/m2-pi-pin.md, `PI_PIN` in script/doctor.sh).
+const PI: AgentInstall = AgentInstall {
+    program: "pi",
+    label: "pi",
+    fix: Fix::Run(&["npm install -g @mariozechner/pi-coding-agent@0.73.1"]),
+};
 
 impl Profile {
     pub const fn of(os: Os) -> &'static Profile {
@@ -141,10 +231,12 @@ const MAC: Profile = Profile {
         required: true,
         missing_hint: "Install tmux so agent sessions survive app restarts.",
     },
+    agents: &[CLAUDE_SH, CODEX, OPENCODE_SH, KIMI_SH, GROK, PI],
     install: Install {
-        git: "xcode-select --install",
-        sessions: "brew install tmux",
-        gh: "brew install gh   (then: gh auth login)",
+        git: Fix::Run(&["xcode-select --install"]),
+        sessions: Fix::Run(&["brew install tmux"]),
+        gh: Fix::Run(&["brew install gh", "gh auth login"]),
+        rustup_then_analyzer: Fix::Run(&[RUSTUP_SH, ADD_ANALYZER]),
     },
     upgrade_hint: "Download the new version from GitHub and replace the app in Applications.",
     about_kind: "A native macOS app",
@@ -174,10 +266,14 @@ const WINDOWS: Profile = Profile {
         missing_hint: "oo-session.exe is missing beside the app: terminals and agents end when \
                        the app quits. Rebuild (make build) or reinstall.",
     },
+    agents: &[CLAUDE_PS, CODEX, OPENCODE_NPM, KIMI_PS, GROK, PI],
     install: Install {
-        git: "winget install --id Git.Git",
-        sessions: "bundled as oo-session.exe beside the app: rebuild (make build) or reinstall",
-        gh: "winget install --id GitHub.cli   (then: gh auth login)",
+        git: Fix::Run(&["winget install --id Git.Git"]),
+        sessions: Fix::Advice(
+            "bundled as oo-session.exe beside the app: rebuild (make build) or reinstall",
+        ),
+        gh: Fix::Run(&["winget install --id GitHub.cli", "gh auth login"]),
+        rustup_then_analyzer: Fix::Run(&["winget install --id Rustlang.Rustup", ADD_ANALYZER]),
     },
     upgrade_hint: "Download the new version from GitHub, or rebuild it from source with \
                    `make install`.",
@@ -207,10 +303,12 @@ const LINUX: Profile = Profile {
         required: true,
         missing_hint: "Install tmux so agent sessions survive app restarts.",
     },
+    agents: &[CLAUDE_SH, CODEX, OPENCODE_SH, KIMI_SH, GROK, PI],
     install: Install {
-        git: "install git with your package manager",
-        sessions: "install tmux with your package manager",
-        gh: "install gh with your package manager   (then: gh auth login)",
+        git: Fix::Advice("install git with your package manager"),
+        sessions: Fix::Advice("install tmux with your package manager"),
+        gh: Fix::Advice("install gh with your package manager, then run gh auth login"),
+        rustup_then_analyzer: Fix::Run(&[RUSTUP_SH, ADD_ANALYZER]),
     },
     upgrade_hint: "Download the new version from GitHub.",
     about_kind: "A native app",
@@ -232,6 +330,25 @@ pub fn prepare_environment() {
     match OS {
         Os::Mac | Os::Linux => crate::login_env::hydrate_path(),
         Os::Windows => windows_env_defaults(),
+    }
+}
+
+/// Pick up `PATH` changes made since the app started, so a tool installed
+/// while it runs is found by the requirements screen's Re-check and by new
+/// terminals.
+///
+/// - macOS / Linux: nothing to do. `PATH` came from the login shell at start
+///   and package managers install into directories already on it.
+/// - Windows: installers add directories to the system `PATH` in the
+///   registry, which running processes never see (`os_compat::env`).
+pub fn refresh_path() {
+    match OS {
+        Os::Mac | Os::Linux => {}
+        Os::Windows => {
+            if os_compat::env::refresh_path() {
+                log::info!("PATH: picked up directories added since start");
+            }
+        }
     }
 }
 

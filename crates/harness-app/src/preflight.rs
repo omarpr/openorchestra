@@ -22,6 +22,8 @@
 /// tmux has no native Windows build; there the app runs its bundled stand-in,
 /// `oo-session`, and without it degrades (agents die with their tab) instead
 /// of blocking startup (`platform::Sessions::required`).
+pub use crate::platform::Fix;
+
 const TMUX_SEVERITY: Severity = if crate::platform::CURRENT.sessions.required {
     Severity::Required
 } else {
@@ -49,8 +51,8 @@ pub struct Check {
     pub found: Option<String>,
     /// What stops working without it. Present tense, specific.
     pub cost: &'static str,
-    /// The command that fixes it.
-    pub fix: &'static str,
+    /// How to get it: commands the screen can copy or run, or advice.
+    pub fix: Fix,
     /// The flag this tool answers its version on.
     ///
     /// Data, not an assumption: `tmux` has no `--version` and exits non-zero on
@@ -77,15 +79,59 @@ pub(crate) const AGENTS: [&str; 6] = ["claude", "codex", "opencode", "kimi", "gr
 ///
 /// The real one is [`version_on_path`]; tests pass a fake so the classification
 /// can be asserted on a machine that has any mix of these installed.
+#[cfg(test)]
 pub fn probe(lookup: impl Fn(&str, &str) -> Option<String>) -> Vec<Check> {
+    probe_all(lookup).checks
+}
+
+/// One agent CLI on the screen's Agents tab.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentCheck {
+    pub program: &'static str,
+    pub label: &'static str,
+    /// Version string when installed.
+    pub found: Option<String>,
+    /// How to install it here.
+    pub fix: Fix,
+}
+
+/// What the requirements screen shows: the requirement rows, and every agent
+/// CLI for the Agents tab.
+#[derive(Debug, Clone, Default)]
+pub struct Probe {
+    pub checks: Vec<Check>,
+    pub agents: Vec<AgentCheck>,
+}
+
+/// [`probe`], plus each agent CLI on its own.
+pub fn probe_all(lookup: impl Fn(&str, &str) -> Option<String>) -> Probe {
+    let agents: Vec<AgentCheck> = crate::platform::CURRENT
+        .agents
+        .iter()
+        .map(|a| AgentCheck {
+            program: a.program,
+            label: a.label,
+            found: lookup(a.program, "--version"),
+            fix: a.fix,
+        })
+        .collect();
     // Any one agent is enough — they are peers, and the harness is useful with
     // whichever one you actually use. A missing row per CLI would imply you
-    // need all of them.
-    let agent_found = AGENTS
+    // need all of them; the Agents tab lists them all instead.
+    let agent_found = agents
         .iter()
-        .find_map(|a| lookup(a, "--version").map(|v| format!("{a} {v}")));
+        .find_map(|a| a.found.as_ref().map(|v| format!("{} {v}", a.program)));
 
-    vec![
+    // `rustup component add` is no help without rustup: then the fix installs
+    // rustup first. Asked only when rust-analyzer is missing.
+    let analyzer = lookup("rust-analyzer", "--version");
+    let analyzer_fix = if analyzer.is_none() && lookup("rustup", "--version").is_none() {
+        crate::platform::CURRENT.install.rustup_then_analyzer
+    } else {
+        Fix::Run(&[crate::platform::ADD_ANALYZER])
+    };
+
+    let checks = vec![
         Check {
             name: "git",
             severity: Severity::Required,
@@ -95,10 +141,11 @@ pub fn probe(lookup: impl Fn(&str, &str) -> Option<String>) -> Vec<Check> {
             version_flag: "--version",
         },
         Check {
-            name: "tmux",
+            // What keeps sessions alive here: "tmux", or "oo-session" on Windows.
+            name: crate::platform::CURRENT.sessions.host,
             severity: TMUX_SEVERITY,
             found: lookup("tmux", "-V"),
-            cost: "agents run inside tmux sessions; without it an agent dies when you close a tab, \
+            cost: "agents run in sessions that outlive their tab; without it an agent dies when you close a tab, \
                    and nothing reattaches after a restart",
             fix: crate::platform::CURRENT.install.sessions,
             version_flag: "-V",
@@ -109,7 +156,7 @@ pub fn probe(lookup: impl Fn(&str, &str) -> Option<String>) -> Vec<Check> {
             found: agent_found,
             cost: "agent tabs fall back to a plain shell — Claude Code, Codex, OpenCode, Kimi \
                    or Grok, any one of them is enough",
-            fix: "npm install -g @anthropic-ai/claude-code",
+            fix: Fix::Advice("install any one of them from the Agents tab"),
             version_flag: "--version",
         },
         Check {
@@ -123,12 +170,13 @@ pub fn probe(lookup: impl Fn(&str, &str) -> Option<String>) -> Vec<Check> {
         Check {
             name: "rust-analyzer",
             severity: Severity::Optional,
-            found: lookup("rust-analyzer", "--version"),
+            found: analyzer,
             cost: "the editor's LSP indicator reports no language server",
-            fix: "rustup component add rust-analyzer",
+            fix: analyzer_fix,
             version_flag: "--version",
         },
-    ]
+    ];
+    Probe { checks, agents }
 }
 
 /// Whether a required tool is missing, which is what makes the screen refuse to
@@ -201,10 +249,10 @@ mod tests {
         // exits non-zero on it — look absent on every machine. tmux blocks, so
         // the app refused to start for everyone who had it installed.
         let checks = with(&[]);
-        let tmux = checks.iter().find(|c| c.name == "tmux").unwrap();
+        let tmux = checks.iter().find(|c| c.name == crate::platform::CURRENT.sessions.host).unwrap();
         assert_eq!(tmux.version_flag, "-V");
         // Everything else does answer the long flag.
-        for c in checks.iter().filter(|c| c.name != "tmux") {
+        for c in checks.iter().filter(|c| c.name != crate::platform::CURRENT.sessions.host) {
             assert_eq!(
                 c.version_flag, "--version",
                 "{} should use --version",
@@ -232,27 +280,45 @@ mod tests {
     }
 
     #[test]
-    fn the_suggested_fix_installs_an_agent_the_probe_accepts() {
-        // Copy and probe drift apart silently: a row can end up recommending a
-        // CLI that the check itself would not count as an agent.
+    fn every_agent_the_probe_accepts_is_installable_on_every_os() {
+        // Copy and probe drift apart silently: the Agents tab could list a CLI
+        // the check would not count, or miss one it would.
+        for os in crate::platform::Os::ALL {
+            let programs: Vec<&str> = crate::platform::Profile::of(os)
+                .agents
+                .iter()
+                .map(|a| a.program)
+                .collect();
+            assert_eq!(programs, AGENTS, "{os:?}");
+            for a in crate::platform::Profile::of(os).agents {
+                assert!(
+                    matches!(a.fix, Fix::Run(cmds) if !cmds.is_empty()),
+                    "{os:?} {}: nothing to run",
+                    a.program
+                );
+            }
+        }
         let row = with(&[]);
         let agent = row.iter().find(|c| c.name == "an agent CLI").unwrap();
-        assert!(
-            AGENTS.iter().any(|a| agent.fix.contains(a)),
-            "fix {:?} names no probed agent",
-            agent.fix
-        );
+        assert!(fix_text(agent).contains("Agents tab"), "{:?}", agent.fix);
         // pi is supported, not required — the screen must not read as if it were.
         assert!(
             !agent.cost.contains("pi"),
             "cost still advertises pi: {:?}",
             agent.cost
         );
-        assert!(
-            !agent.fix.contains("pi-coding-agent"),
-            "fix still installs pi: {:?}",
-            agent.fix
+    }
+
+    #[test]
+    fn the_agents_tab_reports_each_agent_on_its_own() {
+        let p = probe_all(|bin, _| (bin == "codex").then(|| "0.171.0".to_string()));
+        let found: Vec<(&str, bool)> = p.agents.iter().map(|a| (a.program, a.found.is_some())).collect();
+        assert_eq!(
+            found,
+            AGENTS.iter().map(|&a| (a, a == "codex")).collect::<Vec<_>>()
         );
+        let row = p.checks.iter().find(|c| c.name == "an agent CLI").unwrap();
+        assert_eq!(row.found.as_deref(), Some("codex 0.171.0"));
     }
 
     #[test]
@@ -291,7 +357,79 @@ mod tests {
         // teaches the user to dismiss the screen.
         for c in with(&[]) {
             assert!(!c.cost.is_empty(), "{} has no stated cost", c.name);
-            assert!(!c.fix.is_empty(), "{} has no fix command", c.name);
+            assert!(!fix_text(&c).is_empty(), "{} has no fix", c.name);
+        }
+    }
+
+    #[test]
+    fn rust_analyzer_installs_rustup_first_only_when_it_is_missing() {
+        let fix_of = |present: &[&str]| {
+            with(present)
+                .into_iter()
+                .find(|c| c.name == "rust-analyzer")
+                .unwrap()
+                .fix
+        };
+        assert_eq!(
+            fix_of(&["rustup"]),
+            Fix::Run(&[crate::platform::ADD_ANALYZER])
+        );
+        assert_eq!(
+            fix_of(&[]),
+            crate::platform::CURRENT.install.rustup_then_analyzer
+        );
+        for os in crate::platform::Os::ALL {
+            let Fix::Run(cmds) = crate::platform::Profile::of(os).install.rustup_then_analyzer
+            else {
+                panic!("{os:?}: rustup should be installable from the screen");
+            };
+            assert_eq!(cmds.last(), Some(&crate::platform::ADD_ANALYZER), "{os:?}");
+        }
+    }
+
+    fn fix_text(c: &Check) -> String {
+        match c.fix {
+            Fix::Run(cmds) => cmds.join("\n"),
+            Fix::Advice(text) => text.to_string(),
+        }
+    }
+
+    #[test]
+    fn every_runnable_fix_is_one_command_as_typed() {
+        // Run types each command into a shell and presses Enter, and Copy puts
+        // it on the clipboard: a note riding along ("(then: …)") or a line
+        // break would run as part of the command.
+        let mut fixes: Vec<(String, Fix)> = with(&[])
+            .into_iter()
+            .map(|c| (c.name.to_string(), c.fix))
+            .collect();
+        for os in crate::platform::Os::ALL {
+            let i = &crate::platform::Profile::of(os).install;
+            for (name, fix) in [
+                ("git", i.git),
+                ("sessions", i.sessions),
+                ("gh", i.gh),
+                ("rustup", i.rustup_then_analyzer),
+            ] {
+                fixes.push((format!("{os:?} {name}"), fix));
+            }
+            for a in crate::platform::Profile::of(os).agents {
+                fixes.push((format!("{os:?} {}", a.program), a.fix));
+            }
+        }
+        for (name, fix) in fixes {
+            if let Fix::Run(cmds) = fix {
+                assert!(!cmds.is_empty(), "{name}: nothing to run");
+                for cmd in cmds {
+                    assert!(
+                        !cmd.is_empty()
+                            && cmd.trim() == *cmd
+                            && !cmd.contains(['\n', '(', ')'])
+                            && !cmd.contains("  "),
+                        "{name}: {cmd:?} is not a single command"
+                    );
+                }
+            }
         }
     }
 }

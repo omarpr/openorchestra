@@ -7,14 +7,93 @@
 
 use super::super::*;
 
-use crate::preflight::{self, Severity};
+use crate::preflight::{self, Fix, Severity};
 
 impl HarnessWorkspace {
     pub(crate) fn render_preflight(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
         let blocked = preflight::blocked(&self.preflight);
         let missing = preflight::any_missing(&self.preflight);
 
-        let row = |c: &preflight::Check| {
+        // A command, runnable as written: copy it, or type it into a new
+        // shell tab. Text in this UI cannot be selected, so without these the
+        // command could only be retyped.
+        let can_run = self.can_run_fix();
+        let copied = self.preflight_copied;
+        let small_button = |id: String, label: &'static str| {
+            div()
+                .id(gpui::ElementId::Name(id.into()))
+                .flex_none()
+                .flex()
+                .items_center()
+                .h(px(20.0))
+                .px_2()
+                .rounded_md()
+                .border_1()
+                .border_color(hx.border2)
+                .bg(hx.surface)
+                .text_xs()
+                .text_color(hx.tx1)
+                .cursor_pointer()
+                .hover(|d| d.border_color(hx.accent).text_color(hx.accent))
+                .child(label)
+        };
+        let command_line = |name: &str, i: usize, command: &'static str, cx: &mut Context<Self>| {
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .pl_1p5()
+                .pr_0p5()
+                .py_0p5()
+                .rounded_md()
+                .bg(hx.bg0)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_xs()
+                        .font_family(hx.font_mono)
+                        .text_color(hx.accent)
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(command),
+                )
+                .child(
+                    small_button(
+                        format!("preflight-copy-{name}-{i}"),
+                        if copied == Some(command) { "Copied ✓" } else { "Copy" },
+                    )
+                    .on_click(cx.listener(move |ws, _, _, cx| ws.copy_fix(command, cx))),
+                )
+                .when(can_run, |d| {
+                    d.child(
+                        small_button(format!("preflight-run-{name}-{i}"), "Run in shell")
+                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                ws.run_fix_in_shell(command, window, cx)
+                            })),
+                    )
+                })
+        };
+
+        // How to get something: its commands (each with Copy / Run), or advice.
+        let fix_lines = |key: &str, fix: Fix, cx: &mut Context<Self>| match fix {
+            Fix::Advice(text) => div()
+                .pl(px(24.0))
+                .mt_0p5()
+                .text_xs()
+                .text_color(hx.tx2)
+                .child(text),
+            Fix::Run(commands) => {
+                let mut lines = div().flex().flex_col().gap_1().pl(px(24.0)).mt_0p5();
+                for (i, &command) in commands.iter().enumerate() {
+                    lines = lines.child(command_line(key, i, command, cx));
+                }
+                lines
+            }
+        };
+
+        let row = |c: &preflight::Check, cx: &mut Context<Self>| {
             let (mark, color) = match (c.missing(), c.severity) {
                 (false, _) => ("✓", hx.green),
                 (true, Severity::Required) => ("✗", hx.red),
@@ -67,23 +146,57 @@ impl HarnessWorkspace {
                             .text_color(hx.tx1)
                             .child(c.cost),
                     )
-                    .child(
-                        div()
-                            .pl(px(24.0))
-                            .mt_0p5()
-                            .px_1p5()
-                            .py_0p5()
-                            .rounded_md()
-                            .bg(hx.bg0)
-                            .text_xs()
-                            .font_family(hx.font_mono)
-                            .text_color(hx.accent)
-                            .child(c.fix),
-                    );
+                    .child(fix_lines(c.name, c.fix, cx));
             }
             line
         };
 
+        // One agent CLI: installed (with its version) or not, and if not, how.
+        let agent_row = |a: &preflight::AgentCheck, cx: &mut Context<Self>| {
+            let installed = a.found.is_some();
+            let mut line = div().flex().flex_col().gap_0p5().py_1p5().child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(12.0))
+                            .text_color(if installed { hx.green } else { hx.tx2 })
+                            .child(if installed { "✓" } else { "·" }),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(110.0))
+                            .text_xs()
+                            .text_color(if installed { hx.tx1 } else { hx.tx0 })
+                            .child(a.label),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .font_family(hx.font_mono)
+                            .text_color(hx.tx2)
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(match &a.found {
+                                Some(v) => format!("{} {v}", a.program),
+                                None => format!("{} — not installed", a.program),
+                            }),
+                    ),
+            );
+            if !installed {
+                line = line.child(fix_lines(a.program, a.fix, cx));
+            }
+            line
+        };
+
+        let tab = self.preflight_tab;
         let mut body = div()
             .id("preflight-body")
             .flex()
@@ -93,9 +206,50 @@ impl HarnessWorkspace {
             .overflow_y_scroll()
             .px_4()
             .py_2();
-        for c in &self.preflight {
-            body = body.child(row(c));
+        match tab {
+            PreflightTab::Requirements => {
+                for c in &self.preflight {
+                    body = body.child(row(c, cx));
+                }
+            }
+            PreflightTab::Agents => {
+                for a in &self.preflight_agents {
+                    body = body.child(agent_row(a, cx));
+                }
+            }
         }
+
+        let installed = self.preflight_agents.iter().filter(|a| a.found.is_some()).count();
+        let tab_button = |which: PreflightTab, label: String, cx: &mut Context<Self>| {
+            let active = tab == which;
+            div()
+                .id(match which {
+                    PreflightTab::Requirements => "preflight-tab-requirements",
+                    PreflightTab::Agents => "preflight-tab-agents",
+                })
+                .px_2()
+                .py_0p5()
+                .rounded_md()
+                .text_xs()
+                .cursor_pointer()
+                .when(active, |d| d.bg(hx.surface).text_color(hx.tx0))
+                .when(!active, |d| d.text_color(hx.tx2).hover(|d| d.text_color(hx.tx1)))
+                .child(label)
+                .on_click(cx.listener(move |ws, _, _, cx| {
+                    ws.preflight_tab = which;
+                    cx.notify();
+                }))
+        };
+        let tabs = div()
+            .flex()
+            .gap_1()
+            .mt_1()
+            .child(tab_button(PreflightTab::Requirements, "Requirements".into(), cx))
+            .child(tab_button(
+                PreflightTab::Agents,
+                format!("Agents · {installed} of {} installed", self.preflight_agents.len()),
+                cx,
+            ));
 
         let button = |id: &'static str, label: &'static str, primary: bool| {
             div()
@@ -157,13 +311,22 @@ impl HarnessWorkspace {
                                 "What openOrchestra uses"
                             }),
                     )
-                    .child(div().text_xs().text_color(hx.tx2).child(if blocked {
-                        "Install what is marked ✗, then Re-check — no restart needed."
-                    } else if missing {
-                        "Everything required is here. The rest is optional; each line says what it costs."
-                    } else {
-                        "Everything is installed. This screen lives in the openOrchestra menu."
-                    })),
+                    .child(div().text_xs().text_color(hx.tx2).child(match tab {
+                        PreflightTab::Agents => {
+                            "openOrchestra runs these in a terminal; any one is enough. \
+                             Each asks you to sign in the first time it runs."
+                        }
+                        PreflightTab::Requirements if blocked => {
+                            "Install what is marked ✗, then Re-check — no restart needed."
+                        }
+                        PreflightTab::Requirements if missing => {
+                            "Everything required is here. The rest is optional; each line says what it costs."
+                        }
+                        PreflightTab::Requirements => {
+                            "Everything is installed. This screen lives in the openOrchestra menu."
+                        }
+                    }))
+                    .child(tabs),
             )
             .child(body)
             .child(

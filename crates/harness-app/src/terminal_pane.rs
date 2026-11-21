@@ -66,6 +66,8 @@ pub struct TerminalSession {
 
 pub struct TerminalPane {
     view: Option<Entity<TerminalView>>,
+    /// Typed into the terminal as soon as it exists ([`Self::type_when_ready`]).
+    pending_input: Option<String>,
     /// Human-readable description of what's running (status bar chrome).
     pub spawned: String,
     error: Option<String>,
@@ -105,6 +107,7 @@ impl TerminalPane {
         let window_id = window.window_handle().window_id().as_u64();
         let mut this = Self {
             view: None,
+            pending_input: None,
             spawned: String::new(),
             error: None,
             worktree_root,
@@ -134,6 +137,7 @@ impl TerminalPane {
         let window_id = window.window_handle().window_id().as_u64();
         Self {
             view: None,
+            pending_input: None,
             spawned: label,
             error: None,
             worktree_root,
@@ -162,6 +166,22 @@ impl TerminalPane {
         let task = self.spawn(agent, session, window, cx);
         cx.notify();
         task
+    }
+
+    /// Type `text` into the terminal as if from the keyboard: now, or once
+    /// the terminal has been spawned. A shell started a moment ago reads it as
+    /// typeahead when its prompt comes up.
+    ///
+    /// For a pane without a session; a tmux-backed one is driven through its
+    /// session instead (`tmux::send_keys`), which waits for it to exist.
+    pub fn type_when_ready(&mut self, text: String, cx: &mut Context<Self>) {
+        match &self.view {
+            Some(view) => {
+                let terminal = view.read(cx).terminal().clone();
+                terminal.update(cx, |term, _| term.input(text.into_bytes()));
+            }
+            None => self.pending_input = Some(text),
+        }
     }
 
     fn spawn(
@@ -288,6 +308,9 @@ impl TerminalPane {
                     pane.view = Some(view);
                     if had_focus {
                         window.focus(&handle, cx);
+                    }
+                    if let Some(text) = pane.pending_input.take() {
+                        pane.type_when_ready(text, cx);
                     }
                     cx.notify();
                     true
