@@ -14,8 +14,8 @@ use oo_remote::ServerStatus;
 /// Pairing codes live this long (`oo_remote::auth`'s TTL).
 const CODE_TTL: Duration = Duration::from_secs(10 * 60);
 /// What the computer serving the phones is called here.
-const THIS: &str = if cfg!(target_os = "macos") { "this Mac" } else { "this PC" };
-const THIS_CAP: &str = if cfg!(target_os = "macos") { "This Mac" } else { "This PC" };
+const THIS: &str = crate::platform::CURRENT.this_computer;
+const THIS_CAP: &str = crate::platform::CURRENT.this_computer_cap;
 /// One QR module, in px.
 const QR_CELL: f32 = 4.0;
 /// Quiet zone around the code, in modules (the spec minimum).

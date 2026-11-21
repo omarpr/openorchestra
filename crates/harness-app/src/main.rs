@@ -31,6 +31,7 @@ mod markdown_preview;
 mod markdown_preview_button;
 mod notifier;
 mod panes_state;
+mod platform;
 mod ports;
 mod preflight;
 mod resource_monitor;
@@ -123,44 +124,13 @@ pub fn probe_paint() -> bool {
     *ON.get_or_init(|| std::env::var_os("HARNESS_PROBE_PAINT").is_some())
 }
 
-/// Windows port (exploratory): the app reads `HOME` for `~/.openorchestra`
-/// and runs agents through `$SHELL -lic '<POSIX script>'`. Windows sets
-/// neither, so default `HOME` to the profile dir and `SHELL` to Git Bash.
-/// Must run before any thread exists (it writes the environment).
-#[cfg(windows)]
-fn windows_env_defaults() {
-    // SAFETY: called first thing in main, single-threaded.
-    unsafe {
-        if std::env::var_os("HOME").is_none()
-            && let Some(profile) = std::env::var_os("USERPROFILE")
-        {
-            std::env::set_var("HOME", profile);
-        }
-        if std::env::var_os("SHELL").is_none() {
-            let candidates = [
-                std::env::var_os("ProgramFiles").map(|p| PathBuf::from(p).join(r"Git\bin\bash.exe")),
-                std::env::var_os("LOCALAPPDATA")
-                    .map(|p| PathBuf::from(p).join(r"Programs\Git\bin\bash.exe")),
-            ];
-            if let Some(bash) = candidates.into_iter().flatten().find(|p| p.is_file()) {
-                std::env::set_var("SHELL", bash);
-            }
-        }
-    }
-}
-
 fn main() {
     env_logger::init();
 
-    #[cfg(windows)]
-    windows_env_defaults();
-
-    // Before anything reads PATH — the requirements probe, the agent-CLI
-    // lookup, tmux, gh — and before any thread exists to race the write. A
-    // Finder-launched bundle otherwise sees only launchd's four directories.
-    // Not on Windows: a Git Bash login shell reports a POSIX-form PATH.
-    #[cfg(not(windows))]
-    login_env::hydrate_path();
+    // Before anything reads PATH, HOME or SHELL — the requirements probe, the
+    // agent-CLI lookup, tmux, gh — and before any thread exists to race the
+    // write.
+    platform::prepare_environment();
 
     // Launch hint: an explicit arg/env, else the cwd (unless it's "/", which is
     // what Finder-launched .app bundles get), else the user's home. If the hint
@@ -267,7 +237,7 @@ fn main() {
             apply_zed_settings(
                 cx,
                 "Zed Plex Sans",
-                if cfg!(windows) { "Consolas" } else { "Menlo" },
+                platform::CURRENT.mono_font,
                 13.0,
                 theme_name,
                 true,

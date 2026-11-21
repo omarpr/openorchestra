@@ -21,11 +21,12 @@
 
 /// tmux has no native Windows build; there the app runs its bundled stand-in,
 /// `oo-session`, and without it degrades (agents die with their tab) instead
-/// of blocking startup.
-#[cfg(not(windows))]
-const TMUX_SEVERITY: Severity = Severity::Required;
-#[cfg(windows)]
-const TMUX_SEVERITY: Severity = Severity::Recommended;
+/// of blocking startup (`platform::Sessions::required`).
+const TMUX_SEVERITY: Severity = if crate::platform::CURRENT.sessions.required {
+    Severity::Required
+} else {
+    Severity::Recommended
+};
 
 /// How much a missing tool costs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -90,7 +91,7 @@ pub fn probe(lookup: impl Fn(&str, &str) -> Option<String>) -> Vec<Check> {
             severity: Severity::Required,
             found: lookup("git", "--version"),
             cost: "worktrees, diffs and branch status — the app has nothing to show without it",
-            fix: if cfg!(windows) { "winget install --id Git.Git" } else { "xcode-select --install" },
+            fix: crate::platform::CURRENT.install.git,
             version_flag: "--version",
         },
         Check {
@@ -99,11 +100,7 @@ pub fn probe(lookup: impl Fn(&str, &str) -> Option<String>) -> Vec<Check> {
             found: lookup("tmux", "-V"),
             cost: "agents run inside tmux sessions; without it an agent dies when you close a tab, \
                    and nothing reattaches after a restart",
-            fix: if cfg!(windows) {
-                "bundled as oo-session.exe beside the app: rebuild (make build) or reinstall"
-            } else {
-                "brew install tmux"
-            },
+            fix: crate::platform::CURRENT.install.sessions,
             version_flag: "-V",
         },
         Check {
@@ -120,11 +117,7 @@ pub fn probe(lookup: impl Fn(&str, &str) -> Option<String>) -> Vec<Check> {
             severity: Severity::Optional,
             found: lookup("gh", "--version"),
             cost: "pull-request and CI badges stay hidden on worktree cards",
-            fix: if cfg!(windows) {
-                "winget install --id GitHub.cli   (then: gh auth login)"
-            } else {
-                "brew install gh   (then: gh auth login)"
-            },
+            fix: crate::platform::CURRENT.install.gh,
             version_flag: "--version",
         },
         Check {
@@ -158,25 +151,25 @@ pub fn any_missing(checks: &[Check]) -> bool {
 /// "present on PATH" is the wrong question for at least one of these tools, and
 /// asking the binary is the only answer that survives that case.
 pub fn version_on_path(bin: &str, flag: &str) -> Option<String> {
-    // Windows: "tmux" is the bundled oo-session, which lives beside the app
-    // rather than on PATH.
-    let resolved = if cfg!(windows) && bin == "tmux" {
+    // "tmux" is whatever keeps sessions alive here: tmux itself, or on
+    // Windows the bundled oo-session beside the app rather than on PATH.
+    let resolved = if bin == "tmux" {
         crate::tmux::program()
     } else {
         bin.to_string()
     };
     let bin = resolved.as_str();
-    // Windows: std finds `bin.exe` on PATH but not the `bin.cmd` launcher npm
-    // installs agent CLIs as (`claude.cmd`), so try that too.
+    use crate::platform::{OS, Os};
     let out = std::process::Command::new(bin)
         .arg(flag)
         .output()
-        .or_else(|e| {
-            if cfg!(windows) && e.kind() == std::io::ErrorKind::NotFound {
+        .or_else(|e| match OS {
+            // std finds `bin.exe` on PATH but not the `bin.cmd` launcher npm
+            // installs agent CLIs as (`claude.cmd`), so try that too.
+            Os::Windows if e.kind() == std::io::ErrorKind::NotFound => {
                 std::process::Command::new(format!("{bin}.cmd")).arg(flag).output()
-            } else {
-                Err(e)
             }
+            Os::Windows | Os::Mac | Os::Linux => Err(e),
         })
         .ok()?;
     if !out.status.success() {

@@ -4,6 +4,96 @@
 //! exist: `mode()` setters are no-ops, `from_mode` only maps the owner-write
 //! bit onto the read-only attribute, and `mode()` reports owner-only `0o600`.
 //! Files under the user's profile are already private to that user by ACL.
+//!
+//! [`Os`] is the one switch for behaviour that differs by OS but compiles
+//! everywhere (a path spelling, an executable suffix): code matches on
+//! [`Os::CURRENT`] instead of scattering `cfg!(windows)`, so every OS's
+//! answer sits side by side and each can be unit-tested on any machine.
+//! `#[cfg]` stays for code that only compiles on one OS (the modules below).
+
+/// The operating systems the app distinguishes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Os {
+    Mac,
+    Windows,
+    /// Linux and the other Unixes: the Mac's tools minus the Mac's APIs.
+    Linux,
+}
+
+impl Os {
+    /// The OS this build runs on.
+    pub const CURRENT: Os = if cfg!(target_os = "macos") {
+        Os::Mac
+    } else if cfg!(windows) {
+        Os::Windows
+    } else {
+        Os::Linux
+    };
+
+    /// Every OS, for tests that check each one's answers.
+    pub const ALL: [Os; 3] = [Os::Mac, Os::Windows, Os::Linux];
+
+    /// `path` as a POSIX shell reads it. Agents and their hooks run through
+    /// Git Bash on Windows, which loses an unquoted `\` and misreads a mixed
+    /// `C:\Users\…/a2a\x.sh`, but reads `C:/Users/…`; elsewhere a path is
+    /// already that.
+    pub fn shell_path(self, path: &std::path::Path) -> String {
+        let shown = path.display().to_string();
+        match self {
+            Os::Windows => shown.replace('\\', "/"),
+            Os::Mac | Os::Linux => shown,
+        }
+    }
+
+    /// The file names `program` can have on `PATH`: Windows native installs
+    /// are `name.exe`, and npm's extensionless sh launcher is what Git Bash
+    /// runs.
+    pub fn executable_names(self, program: &str) -> Vec<String> {
+        match self {
+            Os::Windows => vec![program.to_string(), format!("{program}.exe")],
+            Os::Mac | Os::Linux => vec![program.to_string()],
+        }
+    }
+
+    /// What can run an npm-installed `program` directly (not through a
+    /// shell). On Windows npm installs an extensionless sh script, which only
+    /// a shell runs, beside a `.cmd` launcher (or a native `.exe`) Windows
+    /// runs itself; elsewhere the file itself.
+    pub fn direct_launcher(self, program: &std::path::Path) -> std::path::PathBuf {
+        if self == Os::Windows && program.extension().is_none() {
+            for ext in ["exe", "cmd"] {
+                let sibling = program.with_extension(ext);
+                if sibling.is_file() {
+                    return sibling;
+                }
+            }
+        }
+        program.to_path_buf()
+    }
+}
+
+#[cfg(test)]
+mod os_tests {
+    use super::Os;
+    use std::path::Path;
+
+    #[test]
+    fn shell_path_uses_forward_slashes_only_on_windows() {
+        let p = Path::new(r"C:\Users\me\a2a\complete.sh");
+        assert_eq!(Os::Windows.shell_path(p), "C:/Users/me/a2a/complete.sh");
+        let unix = Path::new("/Users/me/a2a/complete.sh");
+        for os in [Os::Mac, Os::Linux] {
+            assert_eq!(os.shell_path(unix), "/Users/me/a2a/complete.sh");
+        }
+    }
+
+    #[test]
+    fn executable_names_add_exe_only_on_windows() {
+        assert_eq!(Os::Windows.executable_names("claude"), ["claude", "claude.exe"]);
+        assert_eq!(Os::Mac.executable_names("claude"), ["claude"]);
+        assert_eq!(Os::Linux.executable_names("claude"), ["claude"]);
+    }
+}
 
 pub mod fs {
     #[cfg(unix)]

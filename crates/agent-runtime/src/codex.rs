@@ -96,10 +96,10 @@ impl CodexRuntime {
         // own setup may use PowerShell or Git Bash); `node "C:/…"` reads as
         // one path in all three, where the Debug form's `C:\\…` relies on
         // each shell's escaping.
-        if cfg!(windows) {
-            crate::node_command(shim)
-        } else {
-            format!("node {:?}", shim.display().to_string())
+        use os_compat::Os;
+        match Os::CURRENT {
+            Os::Windows => crate::node_command(shim),
+            Os::Mac | Os::Linux => format!("node {:?}", shim.display().to_string()),
         }
     }
 
@@ -236,15 +236,7 @@ fn ensure_hook(root: &mut Value, event: &str, marker: &str, command: &str) {
 /// `codex.cmd`; Windows can't execute the script itself, so the probe uses
 /// the launcher next to it. Elsewhere, and for anything else, `program`.
 fn probe_program(program: &Path) -> PathBuf {
-    if cfg!(windows) && program.extension().is_none() {
-        for ext in ["exe", "cmd"] {
-            let sibling = program.with_extension(ext);
-            if sibling.is_file() {
-                return sibling;
-            }
-        }
-    }
-    program.to_path_buf()
+    os_compat::Os::CURRENT.direct_launcher(program)
 }
 
 impl AgentRuntime for CodexRuntime {

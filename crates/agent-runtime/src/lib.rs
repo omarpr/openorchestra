@@ -391,11 +391,9 @@ pub fn default_command_display(kind: &AgentKind) -> String {
 /// this being *the user's own installed, authenticated CLI*.
 pub fn resolve_on_path(program: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
-    // Windows: native installs are `claude.exe`; npm's extensionless file is a
-    // sh shim, which agents launched through Git Bash can run too.
-    let exts: &[&str] = if cfg!(windows) { &["", ".exe"] } else { &[""] };
+    let names = os_compat::Os::CURRENT.executable_names(program);
     std::env::split_paths(&path_var)
-        .flat_map(|dir| exts.iter().map(move |ext| dir.join(format!("{program}{ext}"))))
+        .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
         .find(|candidate| is_executable(candidate))
 }
 
@@ -521,10 +519,10 @@ pub(crate) fn mentions(haystack: &str, marker: &str) -> bool {
 /// finds nothing: there it is `node "C:/Users/…/shim.mjs"`, which bash and
 /// cmd both read as one path. Elsewhere it is unchanged.
 pub(crate) fn node_command(shim: &Path) -> String {
-    if cfg!(windows) {
-        format!("node \"{}\"", shim.display().to_string().replace('\\', "/"))
-    } else {
-        format!("node {}", shim.display())
+    use os_compat::Os;
+    match Os::CURRENT {
+        Os::Windows => format!("node \"{}\"", Os::Windows.shell_path(shim)),
+        Os::Mac | Os::Linux => format!("node {}", shim.display()),
     }
 }
 

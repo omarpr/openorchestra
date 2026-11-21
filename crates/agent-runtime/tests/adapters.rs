@@ -910,10 +910,9 @@ fn codex_keeps_the_hook_index_used_for_trust() {
     let rt = CodexRuntime::new(state.path());
     // The command `on_spawn` itself writes on this OS (quoted forward
     // slashes on Windows).
-    let cmd = if cfg!(windows) {
-        format!("node \"{}\"", hook_spelling(&rt.shim_path()))
-    } else {
-        format!("node {:?}", rt.shim_path().to_string_lossy())
+    let cmd = match os_compat::Os::CURRENT {
+        os_compat::Os::Windows => format!("node \"{}\"", hook_spelling(&rt.shim_path())),
+        _ => format!("node {:?}", rt.shim_path().to_string_lossy()),
     };
     let hooks = serde_json::json!({
         "hooks": {
@@ -1771,6 +1770,5 @@ fn claude_idle_reminder_is_idle_but_permission_prompt_waits() {
 /// A shim path as hook commands spell it: forward slashes on Windows, where
 /// the agents run hooks through Git Bash (`agent_runtime::node_command`).
 fn hook_spelling(path: &std::path::Path) -> String {
-    let shown = path.display().to_string();
-    if cfg!(windows) { shown.replace('\\', "/") } else { shown }
+    os_compat::Os::CURRENT.shell_path(path)
 }

@@ -38,7 +38,7 @@ pub struct Sound {
 
 /// Bundled first — they are ours, and the first is the historical default —
 /// then the system sounds in the order macOS lists them.
-const MAC_CATALOG: &[Sound] = &[
+pub(crate) const MAC_CATALOG: &[Sound] = &[
     Sound {
         id: "uh-oh",
         source: Source::Bundled,
@@ -119,7 +119,7 @@ const MAC_CATALOG: &[Sound] = &[
 
 /// Windows: the same bundled sounds, then the notification-ish sounds every
 /// Windows install has in `%WINDIR%\Media` ([`windows_media_file`]).
-const WINDOWS_CATALOG: &[Sound] = &[
+pub(crate) const WINDOWS_CATALOG: &[Sound] = &[
     Sound { id: "uh-oh", source: Source::Bundled },
     Sound { id: "bell", source: Source::Bundled },
     Sound { id: "quack", source: Source::Bundled },
@@ -136,11 +136,21 @@ const WINDOWS_CATALOG: &[Sound] = &[
     Sound { id: "Tada", source: Source::System },
 ];
 
-/// The picker's list for this OS.
-pub const CATALOG: &[Sound] = if cfg!(windows) { WINDOWS_CATALOG } else { MAC_CATALOG };
+/// Elsewhere (Linux): the bundled sounds only, until something resolves the
+/// desktop's own.
+pub(crate) const BUNDLED_CATALOG: &[Sound] = &[
+    Sound { id: "uh-oh", source: Source::Bundled },
+    Sound { id: "bell", source: Source::Bundled },
+    Sound { id: "quack", source: Source::Bundled },
+    Sound { id: "default", source: Source::SystemDefault },
+    Sound { id: "silent", source: Source::Silent },
+];
+
+/// The picker's list for this OS (`platform::Profile::sounds`).
+pub const CATALOG: &[Sound] = crate::platform::CURRENT.sounds;
 
 /// How the settings screen names the [`Source::System`] sounds' origin.
-pub const SYSTEM_LABEL: &str = if cfg!(windows) { "Windows" } else { "macOS" };
+pub const SYSTEM_LABEL: &str = crate::platform::CURRENT.system_name;
 
 /// The `%WINDIR%\Media` file behind a Windows system sound id.
 fn windows_media_file(id: &str) -> Option<&'static str> {
@@ -199,23 +209,29 @@ pub fn file_name(sound: Sound) -> Option<String> {
 /// to work in both — a settings screen whose ▶ does nothing in `make run` is a
 /// settings screen nobody can check their choice with.
 pub fn path(sound: Sound) -> Option<std::path::PathBuf> {
+    use crate::platform::{OS, Os};
     match sound.source {
-        Source::System if cfg!(windows) => {
-            let windir = std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into());
-            let p = std::path::PathBuf::from(windir)
-                .join("Media")
-                .join(windows_media_file(sound.id)?);
-            p.exists().then_some(p)
-        }
         Source::System => {
-            let p = std::path::PathBuf::from(format!("/System/Library/Sounds/{}.aiff", sound.id));
+            let p = match OS {
+                Os::Windows => {
+                    let windir = std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into());
+                    std::path::PathBuf::from(windir)
+                        .join("Media")
+                        .join(windows_media_file(sound.id)?)
+                }
+                Os::Mac => std::path::PathBuf::from(format!(
+                    "/System/Library/Sounds/{}.aiff",
+                    sound.id
+                )),
+                Os::Linux => return None,
+            };
             p.exists().then_some(p)
         }
         Source::Bundled => {
             let file = format!("{}.wav", sound.id);
             // macOS bundle: Contents/Resources. Windows dist: sounds\ beside
             // the exe.
-            let resources = if cfg!(windows) { "sounds" } else { "../Resources" };
+            let resources = crate::platform::CURRENT.bundled_sounds_dir;
             let bundled = std::env::current_exe()
                 .ok()
                 .and_then(|exe| exe.parent().map(|d| d.join(resources).join(&file)));
@@ -241,7 +257,8 @@ pub fn preview(id: &str) {
     if sound.source == Source::Silent {
         return;
     }
-    if cfg!(windows) {
+    // Windows plays through its own API (`play`); elsewhere `afplay` below.
+    if crate::platform::OS == crate::platform::Os::Windows {
         play(sound);
         return;
     }

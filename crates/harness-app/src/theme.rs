@@ -163,13 +163,7 @@ fn resolve_font(preferred: &[&str], fallback: &'static str, cx: &App) -> &'stati
 fn ui_font_family(cx: &App) -> &'static str {
     resolve_font(
         &["IBM Plex Sans", "IBMPlexSans"],
-        if cfg!(target_os = "macos") {
-            "Helvetica Neue"
-        } else if cfg!(windows) {
-            "Segoe UI"
-        } else {
-            "DejaVu Sans"
-        },
+        crate::platform::CURRENT.ui_font,
         cx,
     )
 }
@@ -177,13 +171,7 @@ fn ui_font_family(cx: &App) -> &'static str {
 fn mono_font_family(cx: &App) -> &'static str {
     resolve_font(
         &["IBM Plex Mono", "IBMPlexMono"],
-        if cfg!(target_os = "macos") {
-            "Menlo"
-        } else if cfg!(windows) {
-            "Consolas"
-        } else {
-            "DejaVu Sans Mono"
-        },
+        crate::platform::CURRENT.mono_font,
         cx,
     )
 }

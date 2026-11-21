@@ -133,7 +133,7 @@ impl Entry {
 /// Exploratory Windows port; leaked strings are interned, so rebuilding the
 /// catalog does not grow memory.
 fn platform_keys(keys: &'static str, scope: Scope) -> &'static str {
-    if cfg!(target_os = "macos") || !keys.contains("cmd-") {
+    if crate::platform::CURRENT.command_key || !keys.contains("cmd-") {
         return keys;
     }
     use std::collections::HashMap;
@@ -145,32 +145,34 @@ fn platform_keys(keys: &'static str, scope: Scope) -> &'static str {
         .get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    map.entry((keys, global)).or_insert_with(|| {
-        let mapped: Vec<String> = keys
-            .split_whitespace()
-            .map(|k| {
-                let to = if global && !k.contains("alt-") { "alt-" } else { "ctrl-" };
-                if k.contains("ctrl-") && to == "ctrl-" {
-                    k.replacen("cmd-", "alt-", 1)
-                } else {
-                    k.replacen("cmd-", to, 1)
-                }
-            })
-            .collect();
-        Box::leak(mapped.join(" ").into_boxed_str())
-    })
+    map.entry((keys, global))
+        .or_insert_with(|| Box::leak(without_command_key(keys, global).into_boxed_str()))
+}
+
+/// `keys` (macOS terms) for a keyboard without ⌘: see [`platform_keys`].
+fn without_command_key(keys: &str, global: bool) -> String {
+    keys.split_whitespace()
+        .map(|k| {
+            let to = if global && !k.contains("alt-") { "alt-" } else { "ctrl-" };
+            if k.contains("ctrl-") && to == "ctrl-" {
+                k.replacen("cmd-", "alt-", 1)
+            } else {
+                k.replacen("cmd-", to, 1)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The OS keystrokes are parsed for. `KeyBinding::new` only takes static
 /// chords now; runtime strings (user rebindings) go through the OS-aware
 /// parser, which is also what resolves zed's `secondary-` alias.
 pub fn host_os() -> gpui::OperatingSystem {
-    if cfg!(target_os = "macos") {
-        gpui::OperatingSystem::Mac
-    } else if cfg!(target_os = "windows") {
-        gpui::OperatingSystem::Windows
-    } else {
-        gpui::OperatingSystem::Linux
+    use crate::platform::{OS, Os};
+    match OS {
+        Os::Mac => gpui::OperatingSystem::Mac,
+        Os::Windows => gpui::OperatingSystem::Windows,
+        Os::Linux => gpui::OperatingSystem::Linux,
     }
 }
 
@@ -319,7 +321,10 @@ pub fn app_chords(entries: &[Entry]) -> Vec<Chord> {
         .filter_map(|e| Chord::parse(&e.keys))
         // Off macOS the Global ⌘ chords are Alt (or Ctrl) chords
         // (`platform_keys`).
-        .filter(|c| (c.cmd || (!cfg!(target_os = "macos") && (c.alt || c.ctrl))) && page_edit(c).is_none())
+        .filter(|c| {
+            (c.cmd || (!crate::platform::CURRENT.command_key && (c.alt || c.ctrl)))
+                && page_edit(c).is_none()
+        })
         .collect()
 }
 
@@ -747,7 +752,13 @@ pub fn global_label(keys: &'static str) -> &'static str {
 /// `cmd-shift-z` becomes `⌘⇧Z`; elsewhere `ctrl-shift-z` becomes
 /// `Ctrl+Shift+Z`. Display-only — the gpui syntax stays the source of truth.
 pub fn display_keys(keys: &str) -> String {
-    if !cfg!(target_os = "macos") {
+    display_keys_for(crate::platform::CURRENT.command_key, keys)
+}
+
+/// [`display_keys`] for a keyboard with ⌘ (macOS symbols) or without
+/// (`Ctrl+Shift+Z`).
+fn display_keys_for(command_key: bool, keys: &str) -> String {
+    if !command_key {
         return keys
             .split_whitespace()
             .map(windows_keystroke)
@@ -852,27 +863,37 @@ mod tests {
         }
     }
 
+    // Both keyboards are checked on every OS: the Mac's labels from a
+    // Windows build and the other way round.
     #[test]
-    #[cfg(target_os = "macos")]
     fn keys_display_as_mac_conventions() {
-        assert_eq!(display_keys("cmd-shift-z"), "⇧⌘Z");
-        assert_eq!(display_keys("cmd-,"), "⌘,");
-        assert_eq!(display_keys("escape"), "Esc");
-        assert_eq!(display_keys("cmd-left"), "⌘←");
-        assert_eq!(global_label("cmd-t"), "⌘T");
+        let mac = |k: &str| display_keys_for(true, k);
+        assert_eq!(mac("cmd-shift-z"), "⇧⌘Z");
+        assert_eq!(mac("cmd-,"), "⌘,");
+        assert_eq!(mac("escape"), "Esc");
+        assert_eq!(mac("cmd-left"), "⌘←");
+        assert_eq!(mac("cmd-t"), "⌘T");
     }
 
     #[test]
-    #[cfg(not(target_os = "macos"))]
     fn keys_display_as_windows_conventions() {
-        assert_eq!(display_keys("ctrl-shift-z"), "Ctrl+Shift+Z");
-        assert_eq!(display_keys("alt-,"), "Alt+,");
-        assert_eq!(display_keys("escape"), "Esc");
-        assert_eq!(display_keys("alt-left"), "Alt+Left");
-        assert_eq!(display_keys("ctrl-k ctrl-t"), "Ctrl+K Ctrl+T");
-        // The catalog's ⌘ chords as they are bound here (`platform_keys`).
-        assert_eq!(global_label("cmd-t"), "Alt+T");
-        assert_eq!(global_label("cmd-shift-b"), "Alt+Shift+B");
+        let win = |k: &str| display_keys_for(false, k);
+        assert_eq!(win("ctrl-shift-z"), "Ctrl+Shift+Z");
+        assert_eq!(win("alt-,"), "Alt+,");
+        assert_eq!(win("escape"), "Esc");
+        assert_eq!(win("alt-left"), "Alt+Left");
+        assert_eq!(win("ctrl-k ctrl-t"), "Ctrl+K Ctrl+T");
+        // The catalog's ⌘ chords as they are bound there (`platform_keys`).
+        assert_eq!(win(&without_command_key("cmd-t", true)), "Alt+T");
+        assert_eq!(win(&without_command_key("cmd-shift-b", true)), "Alt+Shift+B");
+        assert_eq!(without_command_key("cmd-z", false), "ctrl-z");
+        assert_eq!(without_command_key("cmd-alt-down", true), "ctrl-alt-down");
+    }
+
+    #[test]
+    fn global_labels_follow_this_os() {
+        let want = if crate::platform::CURRENT.command_key { "⌘T" } else { "Alt+T" };
+        assert_eq!(global_label("cmd-t"), want);
     }
 
     #[test]

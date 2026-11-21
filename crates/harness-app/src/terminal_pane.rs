@@ -201,7 +201,7 @@ impl TerminalPane {
                     },
                     format!(
                         "{label} ({} {})",
-                        if cfg!(windows) { "oo-session" } else { "tmux" },
+                        crate::platform::CURRENT.sessions.host,
                         sess.name
                     ),
                 )

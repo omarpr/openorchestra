@@ -440,20 +440,19 @@ pub fn agent_from_start_command(cmd: &str) -> Option<(AgentKind, &'static str)> 
         ("grok", K::Grok),
         ("pi", K::Pi),
     ];
+    use crate::platform::{OS, Os};
+    // Windows: `'C:\…\claude.exe'`, or a POSIX-form path from Git Bash.
+    let separators: &[char] = match OS {
+        Os::Windows => &['/', '\\'],
+        Os::Mac | Os::Linux => &['/'],
+    };
     PROGRAMS.into_iter().find_map(|(prog, kind)| {
-        let quoted_path = format!("/{prog}'");
-        let quoted_bare = format!("'{prog}'");
-        // Windows: `'C:\…\claude.exe'`, or a POSIX-form path from Git Bash.
-        let windows = cfg!(windows)
-            && [
-                format!("\\{prog}'"),
-                format!("\\{prog}.exe'"),
-                format!("/{prog}.exe'"),
-                format!("'{prog}.exe'"),
-            ]
+        OS.executable_names(prog)
             .iter()
-            .any(|p| cmd.contains(p.as_str()));
-        (cmd.contains(&quoted_path) || cmd.contains(&quoted_bare) || windows)
+            .any(|name| {
+                cmd.contains(&format!("'{name}'"))
+                    || separators.iter().any(|s| cmd.contains(&format!("{s}{name}'")))
+            })
             .then_some((kind, prog))
     })
 }
@@ -514,7 +513,7 @@ pub fn is_shell(command: &str) -> bool {
     matches!(
         command,
         "zsh" | "bash" | "fish" | "sh" | "dash" | "ksh" | "tcsh" | "csh" | "nu" | "login"
-    ) || (cfg!(windows) && matches!(command, "cmd" | "powershell" | "pwsh"))
+    ) || crate::platform::CURRENT.extra_shells.contains(&command)
 }
 
 /// Which of `expected` pane keys have no agent running. A key has a running

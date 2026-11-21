@@ -12,6 +12,9 @@ const TOP_BAR_H: f32 = 38.0;
 /// for current SDKs.
 const TRAFFIC_LIGHT_PADDING: f32 = 80.0;
 
+/// Which title-bar parts this OS provides and which the bar draws itself.
+const BAR: &crate::platform::TitleBar = &crate::platform::CURRENT.title_bar;
+
 impl HarnessWorkspace {
     /// The top bar, which is also the window's title bar (the native one is
     /// transparent — see `main.rs`): it leaves room for the traffic lights,
@@ -24,7 +27,7 @@ impl HarnessWorkspace {
     ) -> impl IntoElement {
         // Fullscreen hides the traffic lights, so their padding goes too.
         // Off macOS there are no traffic lights to leave room for.
-        let traffic_light_room = if window.is_fullscreen() || !cfg!(target_os = "macos") {
+        let traffic_light_room = if window.is_fullscreen() || !BAR.traffic_lights {
             12.0
         } else {
             TRAFFIC_LIGHT_PADDING
@@ -43,7 +46,7 @@ impl HarnessWorkspace {
             .id("toggle-sidebar")
             // Windows: the bar is the window's drag area (HTCAPTION), which takes
             // the click unless this blocks it, as the caption buttons do.
-            .when(cfg!(windows), |d| d.occlude())
+            .when(BAR.drag_area_takes_clicks, |d| d.occlude())
             .flex_none()
             .px_2()
             .py_0p5()
@@ -74,7 +77,7 @@ impl HarnessWorkspace {
             .id("toggle-diff")
             // Windows: the bar is the window's drag area (HTCAPTION), which takes
             // the click unless this blocks it, as the caption buttons do.
-            .when(cfg!(windows), |d| d.occlude())
+            .when(BAR.drag_area_takes_clicks, |d| d.occlude())
             .flex_none()
             .px_2()
             .py_0p5()
@@ -101,7 +104,7 @@ impl HarnessWorkspace {
             .items_center()
             .h(px(TOP_BAR_H))
             .pl(px(traffic_light_room))
-            .when(!cfg!(windows), |d| d.pr_3())
+            .when(!BAR.caption_buttons, |d| d.pr_3())
             .bg(hx.bg0)
             .border_b_1()
             .border_color(hx.border)
@@ -271,7 +274,7 @@ impl HarnessWorkspace {
                 .id("top-remote-chip")
                 // Windows: the bar is the window's drag area (HTCAPTION), which takes
                 // the click unless this blocks it, as the caption buttons do.
-                .when(cfg!(windows), |d| d.occlude())
+                .when(BAR.drag_area_takes_clicks, |d| d.occlude())
                 .flex_none()
                 .flex()
                 .items_center()
@@ -446,7 +449,7 @@ pub(crate) fn app_menu_open() -> bool {
 /// verbs are the standard keys and act where the focus is, which a click on
 /// this menu would move.
 fn app_menu_button() -> Option<gpui::AnyElement> {
-    if cfg!(target_os = "macos") {
+    if !BAR.app_menu_button {
         return None;
     }
     use ::ui::ButtonCommon as _;
@@ -487,7 +490,7 @@ fn app_menu_button() -> Option<gpui::AnyElement> {
 /// carries its own minimize / maximize / close. Hit-testing is native: each
 /// button is a `WindowControlArea`, which gpui answers WM_NCHITTEST with.
 fn caption_buttons(hx: &HarnessTheme, window: &Window) -> Option<gpui::AnyElement> {
-    if !cfg!(windows) {
+    if !BAR.caption_buttons {
         return None;
     }
     let button = |id: &'static str, glyph: &'static str, area: gpui::WindowControlArea| {

@@ -215,7 +215,7 @@ pub fn show_about(window: &mut Window, cx: &mut App) {
     if show_native_about() {
         return;
     }
-    let kind = if cfg!(target_os = "macos") { "A native macOS app" } else { "A native app" };
+    let kind = crate::platform::CURRENT.about_kind;
     let detail = format!(
         "Version {VERSION}\n\n\
          {kind} to run coding agents in parallel git worktrees, with Zed built in.\n\n\
@@ -259,14 +259,8 @@ fn show_result(result: Result<Release, String>, brew: bool, window: &mut Window,
                 format!(
                     "You have {VERSION}. You installed openOrchestra with Homebrew, so upgrade with:\n\n{BREW_UPGRADE}"
                 )
-            } else if cfg!(windows) {
-                format!(
-                    "You have {VERSION}. Download the new version from GitHub, or rebuild it from source with `make install`."
-                )
             } else {
-                format!(
-                    "You have {VERSION}. Download the new version from GitHub and replace the app in Applications."
-                )
+                format!("You have {VERSION}. {}", crate::platform::CURRENT.upgrade_hint)
             };
             let buttons: &[&str] = if brew {
                 &["Copy Command", "Release Notes", "Later"]

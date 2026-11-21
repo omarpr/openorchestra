@@ -497,7 +497,7 @@ mod collapsed_prefs_tests {
             [PortsTask.label(), PortsOther.label()],
             [
                 "THIS TASK",
-                if cfg!(target_os = "macos") { "OTHER ON THIS MAC" } else { "OTHER ON THIS PC" }
+                crate::platform::CURRENT.ports_elsewhere
             ]
         );
         assert!(

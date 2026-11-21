@@ -503,10 +503,14 @@ impl HarnessWorkspace {
                     focus,
                     "show-ignored-toggle",
                     "Show gitignored files",
-                    if cfg!(target_os = "macos") {
-                        "In the file tree and ⌘P."
-                    } else {
-                        "In the file tree and Alt+P."
+                    {
+                        static DETAIL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+                        DETAIL.get_or_init(|| {
+                            format!(
+                                "In the file tree and {}.",
+                                crate::shortcuts::global_label("cmd-p")
+                            )
+                        })
                     },
                     enabled,
                     hx,
@@ -737,10 +741,8 @@ impl HarnessWorkspace {
                 .child(hint(
                     if self.has_tmux {
                         "Keep running lets agents pick up where they left off next launch."
-                    } else if cfg!(windows) {
-                        "Windows has no tmux: terminals and agents end when the app quits."
                     } else {
-                        "Install tmux so agent sessions survive app restarts."
+                        crate::platform::CURRENT.sessions.missing_hint
                     },
                     hx,
                 ));

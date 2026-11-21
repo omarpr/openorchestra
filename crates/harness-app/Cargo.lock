@@ -140,6 +140,7 @@ version = "0.1.0"
 dependencies = [
  "agent-schema",
  "crossbeam-channel",
+ "os-compat",
  "serde",
  "serde_json",
  "status-watch",
