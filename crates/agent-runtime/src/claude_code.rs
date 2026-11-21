@@ -84,7 +84,7 @@ impl ClaudeCodeRuntime {
     /// Public so the test suite can assert the exact shape we write without
     /// reaching into the filesystem.
     pub fn settings_for(shim: &Path) -> serde_json::Value {
-        let command = crate::node_command(&shim);
+        let command = crate::node_command(shim);
         let entry = || {
             // No `matcher` field, deliberately. Matchers filter *tool names*
             // and only apply to PreToolUse/PostToolUse; on other events an

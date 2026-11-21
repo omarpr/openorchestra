@@ -1123,7 +1123,8 @@ for (const [payload, want] of cases) {{
         .arg(&shim)
         .current_dir(wt.path())
         .env_remove("HARNESS_AGENT_WORKTREE")
-        .env_remove("HARNESS_AGENT_TAB_ID")
+        // A tab the app launched: the shim ignores sessions without one.
+        .env("HARNESS_AGENT_TAB_ID", "7")
         .env_remove("HARNESS_REMOTE_SESSION")
         .env_remove("TMUX_PANE")
         .env_remove("CLAUDE_PROJECT_DIR")

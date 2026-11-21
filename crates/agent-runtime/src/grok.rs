@@ -72,7 +72,7 @@ impl GrokRuntime {
     /// matcher filters the event out, which is how Claude Code's waiting
     /// signal was lost.
     pub fn hooks_for(shim: &Path) -> serde_json::Value {
-        let command = crate::node_command(&shim);
+        let command = crate::node_command(shim);
         let entry = || {
             serde_json::json!({
                 "hooks": [{ "type": "command", "command": command }]

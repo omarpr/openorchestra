@@ -44,6 +44,9 @@ pub const CURRENT: &Profile = Profile::of(OS);
 /// What differs per OS, as data.
 #[derive(Debug)]
 pub struct Profile {
+    /// The OS this profile describes. Read only by the test that checks
+    /// [`Profile::of`] hands each OS its own profile.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub os: Os,
     /// The OS's name, where something comes from it ("macOS" system sounds).
     pub system_name: &'static str,
