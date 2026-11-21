@@ -919,7 +919,6 @@ async fn send_screenshot_reply(
 mod tests {
     use super::*;
     use axum::body::Body;
-    use futures_util::StreamExt;
     use std::path::Path as FsPath;
     use tower::ServiceExt;
 
@@ -1363,6 +1362,7 @@ mod tests {
     #[cfg(unix)] // the stand-in helper is a `#!/bin/sh` script
     #[tokio::test]
     async fn voice_rechecks_write_access_before_starting_helper() {
+        use futures_util::StreamExt;
         use os_compat::fs::PermissionsExt;
 
         const WAV: &[u8] = b"RIFF\x26\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x80\x3e\0\0\0\x7d\0\0\x02\0\x10\0data\x02\0\0\0\0\0";
