@@ -153,6 +153,8 @@ fn conpty() -> &'static ConptyApi {
 
 fn load_bundled_conpty() -> Option<ConptyApi> {
     use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    /// What `GetProcAddress` returns, unwrapped from its `FARPROC` option.
+    type Proc = unsafe extern "system" fn() -> isize;
     let dll = std::env::current_exe().ok()?.parent()?.join("conpty.dll");
     if !dll.is_file() {
         return None;
@@ -167,9 +169,9 @@ fn load_bundled_conpty() -> Option<ConptyApi> {
         let resize = GetProcAddress(module, c"ResizePseudoConsole".as_ptr().cast())?;
         let close = GetProcAddress(module, c"ClosePseudoConsole".as_ptr().cast())?;
         Some(ConptyApi {
-            create: std::mem::transmute::<_, CreatePseudoConsoleFn>(create),
-            resize: std::mem::transmute::<_, ResizePseudoConsoleFn>(resize),
-            close: std::mem::transmute::<_, ClosePseudoConsoleFn>(close),
+            create: std::mem::transmute::<Proc, CreatePseudoConsoleFn>(create),
+            resize: std::mem::transmute::<Proc, ResizePseudoConsoleFn>(resize),
+            close: std::mem::transmute::<Proc, ClosePseudoConsoleFn>(close),
         })
     }
 }

@@ -368,11 +368,12 @@ pub fn classify(event_name: &Option<String>, data: &str) -> Option<(AgentState, 
 
 #[cfg(test)]
 mod tests {
-    use super::{is_legacy_cli, legacy_server};
+    use super::legacy_server;
 
     #[cfg(unix)]
     #[test]
     fn the_version_probe_runs_once_per_binary() {
+        use super::is_legacy_cli;
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();

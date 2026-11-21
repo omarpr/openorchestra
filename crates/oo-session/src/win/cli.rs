@@ -202,7 +202,7 @@ impl<'a> Ctx<'a> {
     }
 }
 
-fn require_target<'c>(cmd: &'c Command) -> Result<&'c str, i32> {
+fn require_target(cmd: &Command) -> Result<&str, i32> {
     cmd.target().ok_or_else(|| {
         eprintln!("{}: no target session (-t)", cmd.name);
         1

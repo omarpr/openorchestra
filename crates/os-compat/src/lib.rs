@@ -319,8 +319,8 @@ pub mod process {
 pub mod net {
     use std::net::{Ipv4Addr, Ipv6Addr};
     use windows_sys::Win32::NetworkManagement::IpHelper::{
-        GetExtendedTcpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID,
-        MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
+        GetExtendedTcpTable, MIB_TCP6TABLE_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
+        TCP_TABLE_OWNER_PID_LISTENER,
     };
     use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 
@@ -332,7 +332,7 @@ pub mod net {
             let t = unsafe { &*(buf.as_ptr() as *const MIB_TCPTABLE_OWNER_PID) };
             let rows = unsafe {
                 std::slice::from_raw_parts(
-                    t.table.as_ptr() as *const MIB_TCPROW_OWNER_PID,
+                    t.table.as_ptr(),
                     t.dwNumEntries as usize,
                 )
             };
@@ -347,7 +347,7 @@ pub mod net {
             let t = unsafe { &*(buf.as_ptr() as *const MIB_TCP6TABLE_OWNER_PID) };
             let rows = unsafe {
                 std::slice::from_raw_parts(
-                    t.table.as_ptr() as *const MIB_TCP6ROW_OWNER_PID,
+                    t.table.as_ptr(),
                     t.dwNumEntries as usize,
                 )
             };
