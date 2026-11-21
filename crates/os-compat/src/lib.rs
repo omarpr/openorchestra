@@ -61,6 +61,13 @@ impl Os {
     /// runs itself; elsewhere the file itself.
     pub fn direct_launcher(self, program: &std::path::Path) -> std::path::PathBuf {
         if self == Os::Windows && program.extension().is_none() {
+            // npm's wrapper for a native binary (OpenCode) ends in
+            // `exec "$basedir/node_modules/…/x.exe" "$@"`: run that exe. A
+            // `.cmd` is a worse answer — Node refuses to spawn one without a
+            // shell (CVE-2024-27980).
+            if let Some(exe) = npm_native_target(program) {
+                return exe;
+            }
             for ext in ["exe", "cmd"] {
                 let sibling = program.with_extension(ext);
                 if sibling.is_file() {
@@ -70,6 +77,27 @@ impl Os {
         }
         program.to_path_buf()
     }
+}
+
+/// The `.exe` an npm shell wrapper runs, if it runs one directly (not
+/// through `node`).
+fn npm_native_target(wrapper: &std::path::Path) -> Option<std::path::PathBuf> {
+    // A wrapper is a few hundred bytes; anything big is the program itself.
+    if std::fs::metadata(wrapper).ok()?.len() > 4096 {
+        return None;
+    }
+    let text = std::fs::read_to_string(wrapper).ok()?;
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("exec \"$basedir/"))?;
+    let rest = line.strip_prefix("exec \"$basedir/")?;
+    let rel = &rest[..rest.find('"')?];
+    if !rel.to_ascii_lowercase().ends_with(".exe") {
+        return None; // `exec node "$basedir/…js"`: not a native binary.
+    }
+    let exe = wrapper.parent()?.join(rel);
+    exe.is_file().then_some(exe)
 }
 
 #[cfg(test)]
@@ -92,6 +120,44 @@ mod os_tests {
         assert_eq!(Os::Windows.executable_names("claude"), ["claude", "claude.exe"]);
         assert_eq!(Os::Mac.executable_names("claude"), ["claude"]);
         assert_eq!(Os::Linux.executable_names("claude"), ["claude"]);
+    }
+
+    /// npm's wrappers, as `npm install -g` writes them on Windows.
+    const NATIVE_WRAPPER: &str = "#!/bin/sh\nbasedir=$(dirname \"$(echo \"$0\" | sed -e 's,\\\\,/,g')\")\n\ncase `uname` in\n    *CYGWIN*|*MINGW*|*MSYS*) basedir=`cygpath -w \"$basedir\"`;;\nesac\n\nexec \"$basedir/node_modules/opencode-ai/bin/opencode.exe\"   \"$@\"\n";
+    const NODE_WRAPPER: &str = "#!/bin/sh\nbasedir=$(dirname \"$0\")\nif [ -x \"$basedir/node\" ]; then\n  exec \"$basedir/node\"  \"$basedir/node_modules/@openai/codex/bin/codex.js\" \"$@\"\nelse\n  exec node  \"$basedir/node_modules/@openai/codex/bin/codex.js\" \"$@\"\nfi\n";
+
+    #[test]
+    fn an_npm_wrapper_of_a_native_binary_launches_the_binary() {
+        let dir = tempdir();
+        let exe = dir.join("node_modules/opencode-ai/bin/opencode.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, b"MZ").unwrap();
+        std::fs::write(dir.join("opencode"), NATIVE_WRAPPER).unwrap();
+        std::fs::write(dir.join("opencode.cmd"), "@echo off").unwrap();
+        assert_eq!(Os::Windows.direct_launcher(&dir.join("opencode")), exe);
+        // Elsewhere the wrapper is left alone.
+        assert_eq!(Os::Mac.direct_launcher(&dir.join("opencode")), dir.join("opencode"));
+    }
+
+    #[test]
+    fn an_npm_wrapper_of_a_node_script_falls_back_to_its_cmd() {
+        let dir = tempdir();
+        std::fs::write(dir.join("codex"), NODE_WRAPPER).unwrap();
+        std::fs::write(dir.join("codex.cmd"), "@echo off").unwrap();
+        assert_eq!(Os::Windows.direct_launcher(&dir.join("codex")), dir.join("codex.cmd"));
+    }
+
+    fn tempdir() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "os-compat-test-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }
 

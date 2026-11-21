@@ -24,7 +24,7 @@
 //! | Keep awake               | `remote/keepawake.rs` (`caffeinate`) | `os_compat::power`             |
 //! | Unix file APIs           | `std::os::unix`                    | `os_compat::{fs, ffi, process}`  |
 //! | Login environment        | `login_env` (PATH from the login shell) | [`prepare_environment`] (HOME, SHELL) |
-//! | PATH an installer changed | (not needed)                      | `os_compat::env` (registry), via [`refresh_path`] |
+//! | PATH an installer changed | (not needed)                      | `os_compat::env` (registry) and `login_env::add_login_shell_dirs` (Git Bash rc files), via [`refresh_path`] |
 //! | Native About panel, link routing, update check via Homebrew | `#[cfg(target_os = "macos")]` in `update_check.rs`, `link_routing/platform.rs` | the app's own dialog |
 //!
 //! A test (`no_os_checks_outside_platform`) keeps `cfg!(windows)` and
@@ -329,19 +329,36 @@ const LINUX: Profile = Profile {
 pub fn prepare_environment() {
     match OS {
         Os::Mac | Os::Linux => crate::login_env::hydrate_path(),
-        Os::Windows => windows_env_defaults(),
+        Os::Windows => {
+            windows_env_defaults();
+            // Directories only Git Bash's rc files add (`~/.grok/bin`).
+            crate::login_env::add_login_shell_dirs();
+        }
     }
 }
 
 /// Pick up `PATH` changes made since the app started, so a tool installed
-/// while it runs is found by the requirements screen's Re-check and by new
-/// terminals.
+/// while it runs is found by the requirements screen's Re-check, by an agent
+/// tab, and by new terminals. Spawns a shell on Windows: call it off the UI
+/// thread ([`refresh_system_path`] is the quick part).
 ///
 /// - macOS / Linux: nothing to do. `PATH` came from the login shell at start
 ///   and package managers install into directories already on it.
-/// - Windows: installers add directories to the system `PATH` in the
-///   registry, which running processes never see (`os_compat::env`).
+/// - Windows: the registry's `PATH` (winget, .msi installers), then what Git
+///   Bash's rc files add (curl-pipe-bash installers such as Grok's).
 pub fn refresh_path() {
+    match OS {
+        Os::Mac | Os::Linux => {}
+        Os::Windows => {
+            refresh_system_path();
+            crate::login_env::add_login_shell_dirs();
+        }
+    }
+}
+
+/// The registry half of [`refresh_path`]: cheap, fine on the UI thread. What
+/// a new shell tab needs — bash reads its own rc files.
+pub fn refresh_system_path() {
     match OS {
         Os::Mac | Os::Linux => {}
         Os::Windows => {

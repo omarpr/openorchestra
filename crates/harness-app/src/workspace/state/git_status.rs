@@ -159,7 +159,7 @@ impl HarnessWorkspace {
         let Some(r) = self.resolve() else { return };
         // A tool installed a moment ago (gh, before `gh auth login`) must be
         // on the PATH the new shell starts with.
-        crate::platform::refresh_path();
+        crate::platform::refresh_system_path();
         if crate::preflight::blocked(&self.preflight) {
             self.preflight_open = false;
         } else {

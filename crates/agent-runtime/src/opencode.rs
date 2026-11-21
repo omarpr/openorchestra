@@ -203,11 +203,15 @@ impl AgentRuntime for OpenCodeRuntime {
             return command;
         };
         let launcher = dir.join("shims/opencode-remote-launch.mjs");
+        // The launcher execs `program` itself, without a shell: on Windows
+        // npm's `opencode` is a bash wrapper Node cannot run (it exited at
+        // once, leaving the tab at a prompt), so hand it the real binary.
+        let program = os_compat::Os::CURRENT.direct_launcher(&command.program);
         if let (Some(node), true, Some(launcher), Some(program)) = (
             resolve_on_path("node"),
             launcher.is_file(),
             launcher.to_str(),
-            command.program.to_str(),
+            program.to_str(),
         ) {
             command
                 .args
