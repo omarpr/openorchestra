@@ -1429,7 +1429,9 @@ Open both files.
             "original content\nunstaged behavior\n",
         )
         .unwrap();
-        std::fs::write(repo.join("new\tfile.rs"), "new behavior\n").unwrap();
+        // A tab in the name tests quoting; Windows forbids tabs in file names.
+        let new_file = if cfg!(windows) { "new file.rs" } else { "new\tfile.rs" };
+        std::fs::write(repo.join(new_file), "new behavior\n").unwrap();
         std::fs::write(repo.join("ignored.txt"), "excluded from overview\n").unwrap();
         let before = git(&repo, &["status", "--porcelain=v1"]);
         let request = ReviewRequest {

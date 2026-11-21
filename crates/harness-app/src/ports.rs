@@ -1501,6 +1501,7 @@ quiet-1\tbusybox\t\t\t\t\n";
         assert_eq!(applied, 3);
     }
 
+    #[cfg(unix)] // process groups, `sh` and `os.setpgrp`
     #[test]
     fn a_timeout_closes_the_pipe_even_on_a_helper_in_its_own_group() {
         // The helper leaves the process group (so no group kill reaches it),

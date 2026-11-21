@@ -192,10 +192,12 @@ mod tests {
         fs::write(&path, "Also:\n- api: `/wt`\n").unwrap();
         let mut cmd = empty_cmd();
         apply_task_context(&mut cmd, &AgentKind::Codex, &path);
+        // The value is a TOML string: a Windows path's `\` arrive doubled.
+        let in_toml = path.to_string_lossy().replace('\\', "\\\\");
         assert!(cmd.args.windows(2).any(|w| {
             w[0] == "-c"
                 && w[1].starts_with("developer_instructions=")
-                && w[1].contains(&*path.to_string_lossy())
+                && w[1].contains(&in_toml)
         }));
     }
 

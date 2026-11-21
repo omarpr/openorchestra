@@ -255,6 +255,7 @@ mod tests {
         assert!(script.contains(&format!("'{BEGIN}'")), "{script}");
     }
 
+    #[cfg(unix)] // `:`-separated PATHs; Windows has its own test below
     #[test]
     fn shell_directories_come_first_and_inherited_ones_survive() {
         let merged = merge(
@@ -278,6 +279,7 @@ mod tests {
         assert_eq!(merge(None, ""), None);
     }
 
+    #[cfg(unix)] // `:`-separated PATHs; Windows has its own test below
     #[test]
     fn a_missing_inherited_path_is_not_an_error() {
         let merged = merge(None, "/opt/homebrew/bin:/usr/bin").unwrap();
@@ -310,6 +312,7 @@ mod tests {
         assert!(script.contains(&format!("'{BEGIN}'")), "{script}");
     }
 
+    #[cfg(unix)] // `:`-separated PATHs; Windows has its own test below
     #[test]
     fn empty_entries_are_dropped_because_they_mean_the_current_directory() {
         // A trailing colon in someone's profile puts "." on PATH; inheriting it

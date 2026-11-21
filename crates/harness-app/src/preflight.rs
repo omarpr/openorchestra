@@ -267,9 +267,12 @@ mod tests {
             blocked(&with(&["tmux", "pi", "gh", "rust-analyzer"])),
             "no git must block"
         );
-        assert!(
+        // On Windows a missing oo-session degrades instead
+        // (`platform::Sessions::required`).
+        assert_eq!(
             blocked(&with(&["git", "pi", "gh", "rust-analyzer"])),
-            "no tmux must block"
+            crate::platform::CURRENT.sessions.required,
+            "no tmux must block where sessions are required"
         );
         // Everything required present: the rest only degrades features.
         assert!(!blocked(&with(&["git", "tmux"])));
