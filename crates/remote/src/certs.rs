@@ -638,8 +638,11 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
-        let dmode = std::fs::metadata(&dir).unwrap().permissions().mode();
-        assert_eq!(dmode & 0o777, 0o700);
+        #[cfg(unix)] // Windows has no folder modes (os-compat reports any path as 0o600)
+        {
+            let dmode = std::fs::metadata(&dir).unwrap().permissions().mode();
+            assert_eq!(dmode & 0o777, 0o700);
+        }
     }
 
     /// rustls/webpki verification of `leaf` for `name` under `ca` alone.

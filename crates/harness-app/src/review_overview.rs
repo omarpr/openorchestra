@@ -1430,7 +1430,10 @@ Open both files.
         )
         .unwrap();
         // A tab in the name tests quoting; Windows forbids tabs in file names.
-        let new_file = if cfg!(windows) { "new file.rs" } else { "new\tfile.rs" };
+        #[cfg(unix)]
+        let new_file = "new\tfile.rs";
+        #[cfg(not(unix))]
+        let new_file = "new file.rs";
         std::fs::write(repo.join(new_file), "new behavior\n").unwrap();
         std::fs::write(repo.join("ignored.txt"), "excluded from overview\n").unwrap();
         let before = git(&repo, &["status", "--porcelain=v1"]);

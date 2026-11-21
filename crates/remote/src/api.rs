@@ -1318,6 +1318,7 @@ mod tests {
         assert_eq!(app.oneshot(request).await.unwrap().status(), 503);
     }
 
+    #[cfg(unix)] // the stand-in helper is a `#!/bin/sh` script
     #[tokio::test]
     async fn voice_requires_write_permission_and_returns_an_uncached_draft() {
         const WAV: &[u8] = b"RIFF\x26\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x80\x3e\0\0\0\x7d\0\0\x02\0\x10\0data\x02\0\0\0\0\0";
@@ -1359,6 +1360,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // the stand-in helper is a `#!/bin/sh` script
     #[tokio::test]
     async fn voice_rechecks_write_access_before_starting_helper() {
         use os_compat::fs::PermissionsExt;

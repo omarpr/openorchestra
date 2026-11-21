@@ -819,7 +819,8 @@ fn codex_migrates_off_the_legacy_notify_line() {
         format!(
             "model = \"gpt-5\"\nnotify = [\"node\", \"{shim}\"]\n\n\
              [mcp_servers.node_repl.env]\nPATH = \"/usr/bin\"\nnotify = [\"node\", \"{shim}\"]\n",
-            shim = legacy.display()
+            // A TOML string, so a Windows path's `\` must be escaped.
+            shim = legacy.display().to_string().replace('\\', "\\\\")
         ),
     )
     .unwrap();
@@ -1085,26 +1086,28 @@ fn grok_preserves_other_hooks_in_its_file_and_stays_idempotent() {
 #[test]
 fn grok_shim_maps_task_complete_to_idle_and_stamps_grok() {
     let shim = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shims/grok-status.mjs");
-    let url = format!("file://{}", shim.display());
+    // Node builds the file URL: a Windows path is not `file://` + its text.
     let check = std::process::Command::new("node")
         .arg("--input-type=module")
         .arg("-e")
-        .arg(format!(
-            r#"import {{ classify }} from "{url}";
+        .arg(
+            r#"import { pathToFileURL } from "node:url";
+const { classify } = await import(pathToFileURL(process.argv[1]).href);
 const cases = [
-  [{{hook_event_name:"Notification", notification_type:"task_complete"}}, "idle"],
-  [{{hook_event_name:"Notification", notification_type:"permission_prompt"}}, "waiting"],
-  [{{hook_event_name:"Stop"}}, "idle"],
-  [{{hook_event_name:"UserPromptSubmit"}}, "running"],
+  [{hook_event_name:"Notification", notification_type:"task_complete"}, "idle"],
+  [{hook_event_name:"Notification", notification_type:"permission_prompt"}, "waiting"],
+  [{hook_event_name:"Stop"}, "idle"],
+  [{hook_event_name:"UserPromptSubmit"}, "running"],
 ];
-for (const [payload, want] of cases) {{
+for (const [payload, want] of cases) {
   const got = classify(payload);
-  if (got !== want) {{
+  if (got !== want) {
     console.error(JSON.stringify(payload), got, "!=", want);
     process.exit(1);
-  }}
-}}"#
-        ))
+  }
+}"#,
+        )
+        .arg(&shim)
         .output();
     match check {
         Ok(out) => assert!(
@@ -1305,7 +1308,8 @@ fn configurable_runtime_codex_hooks_are_idempotent() {
         &std::fs::read_to_string(codex_home.path().join("hooks.json")).unwrap(),
     )
     .unwrap();
-    let shim = rt.shim_path().display().to_string();
+    // Quoted as the command quotes it (a Windows path's `\` arrive doubled).
+    let shim = format!("{:?}", rt.shim_path().display().to_string());
     for event in ["UserPromptSubmit", "Stop"] {
         let cmds = hook_commands(&hooks, event);
         assert_eq!(

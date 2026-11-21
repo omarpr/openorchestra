@@ -483,6 +483,11 @@ async fn unknown_id_404_and_unmarked_id_404() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[cfg_attr(
+    windows,
+    ignore = "the phone server lists sessions with tmux, absent on Windows: 503, not 409 \
+              (docs/windows-port-test-checklist.md, item 1)"
+)]
 async fn send_to_stopped_is_409_and_oversize_413() {
     let h = Harness::start(Harness::unused_tmux());
     let token = h.device(false);
