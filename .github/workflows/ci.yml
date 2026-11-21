@@ -78,7 +78,8 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
-        run: cargo test
+        # Every failure in one run, not just the first crate's.
+        run: cargo test --no-fail-fast
 
   app-windows:
     runs-on: windows-latest
@@ -90,6 +91,9 @@ jobs:
       # Several git dependencies fetch more reliably through the git CLI
       # (as script/windows/make.ps1 sets).
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      # Git Bash, as the app sets SHELL at startup on Windows (platform.rs);
+      # tests that build agent command lines read it.
+      SHELL: C:\Program Files\Git\bin\bash.exe
     steps:
       - uses: actions/checkout@v4
       - name: Rust (GNU host)
@@ -104,7 +108,8 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
-        run: cargo test
+        # Every failure in one run, not just the first crate's.
+        run: cargo test --no-fail-fast
 
   pi-ext:
     runs-on: ubuntu-latest
