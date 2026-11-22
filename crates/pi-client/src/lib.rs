@@ -134,6 +134,9 @@ impl PiRpc {
 
     /// Terminate the sidecar.
     pub fn shutdown(&mut self) -> std::io::Result<()> {
+        // With the tree: on Windows the child may be `pi.cmd`, and its `cmd`
+        // would leave pi itself running.
+        os_compat::process::kill_tree(self.child.id());
         self.child.kill()?;
         self.child.wait().map(|_| ())
     }
@@ -143,6 +146,7 @@ impl Drop for PiRpc {
     fn drop(&mut self) {
         // A leaked pi process per closed worktree would be the M5 pane-cache
         // problem all over again, so never rely on the caller to do this.
+        os_compat::process::kill_tree(self.child.id());
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
