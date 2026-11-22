@@ -13,7 +13,8 @@ use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
 use windows_sys::Win32::System::Console::{
     GetConsoleCP, GetConsoleMode, GetConsoleOutputCP, GetConsoleScreenBufferInfo, GetStdHandle,
     ReadConsoleW, SetConsoleCP, SetConsoleCtrlHandler, SetConsoleMode, SetConsoleOutputCP,
-    CONSOLE_MODE, CONSOLE_SCREEN_BUFFER_INFO, DISABLE_NEWLINE_AUTO_RETURN, ENABLE_EXTENDED_FLAGS,
+    CONSOLE_MODE, CONSOLE_SCREEN_BUFFER_INFO, CTRL_BREAK_EVENT, CTRL_C_EVENT,
+    DISABLE_NEWLINE_AUTO_RETURN, ENABLE_EXTENDED_FLAGS,
     ENABLE_PROCESSED_OUTPUT, ENABLE_VIRTUAL_TERMINAL_INPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING,
     STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
@@ -59,7 +60,7 @@ impl RawConsole {
             SetConsoleCP(CP_UTF8);
             SetConsoleOutputCP(CP_UTF8);
             // Ctrl+C / Ctrl+Break are the session's, not ours.
-            SetConsoleCtrlHandler(None, 1);
+            SetConsoleCtrlHandler(Some(keep_running), 1);
             Self {
                 input,
                 output,
@@ -69,6 +70,14 @@ impl RawConsole {
             }
         }
     }
+}
+
+/// Handles Ctrl+C and Ctrl+Break so neither ends the client. Ctrl+Break is
+/// a signal whatever the input mode (raw mode only turns Ctrl+C into a
+/// key), and its default handler would exit before `RawConsole` restores
+/// the console's modes.
+unsafe extern "system" fn keep_running(ctrl: u32) -> windows_sys::core::BOOL {
+    (ctrl == CTRL_C_EVENT || ctrl == CTRL_BREAK_EVENT) as windows_sys::core::BOOL
 }
 
 impl Drop for RawConsole {
