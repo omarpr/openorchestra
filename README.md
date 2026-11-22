@@ -92,9 +92,11 @@ threads, MSVCRT) in `~\tools\mingw64` or `$env:OO_MINGW`. From PowerShell:
 ```
 
 Browser tabs use Edge WebView2 and notifications are Windows toasts. Agents
-launch through Git Bash. There is no tmux on Windows, so an agent ends with
-its tab and nothing reattaches after a restart. ⌘ shortcuts are Alt in the
-app and Ctrl in the editor (**Settings → Shortcuts**, `Alt+,`).
+launch through Git Bash. There is no tmux on Windows: the app bundles
+`oo-session.exe`, which keeps agents and shells running after you quit, and
+their tabs reattach when you reopen the app. Closing a tab ends its session.
+⌘ shortcuts are Alt in the app and Ctrl in the editor (**Settings →
+Shortcuts**, `Alt+,`).
 
 ## Community
 
