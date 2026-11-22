@@ -307,12 +307,13 @@ pub fn preview(id: &str) {
 /// posted silent and the app plays the chosen sound) or a preview. The
 /// bundled wavs are compiled in, so a bare exe plays them; system sounds
 /// come from `%WINDIR%\Media`, and the system default is Windows' own
-/// notification sound. Elsewhere this is the preview.
+/// notification sound, whatever the user set it to (its event alias).
+/// Elsewhere this is the preview.
 pub fn play(sound: Sound) {
     #[cfg(windows)]
     {
         use windows::Win32::Media::Audio::{
-            PlaySoundW, SND_ASYNC, SND_FILENAME, SND_MEMORY, SND_NODEFAULT,
+            PlaySoundW, SND_ALIAS, SND_ASYNC, SND_FILENAME, SND_MEMORY, SND_NODEFAULT,
         };
         use windows::core::{HSTRING, PCWSTR};
         static UH_OH: &[u8] = include_bytes!("../sounds/uh-oh.wav");
@@ -325,18 +326,16 @@ pub fn play(sound: Sound) {
             _ => None,
         };
         // SAFETY: SND_MEMORY reads the static bytes for as long as it plays;
-        // SND_FILENAME copies the path before returning.
+        // SND_FILENAME and SND_ALIAS copy the name before returning.
         let played = unsafe {
             if let Some(bytes) = bundled {
                 PlaySoundW(PCWSTR(bytes.as_ptr().cast()), None, SND_MEMORY | SND_ASYNC | SND_NODEFAULT)
+            } else if matches!(sound.source, Source::SystemDefault) {
+                // The sound chosen for "Notification" in Windows' Sound
+                // settings (silence if that is None), not a fixed file.
+                PlaySoundW(&HSTRING::from("Notification.Default"), None, SND_ALIAS | SND_ASYNC | SND_NODEFAULT)
             } else {
-                let file = match sound.source {
-                    Source::SystemDefault => {
-                        path(Sound { id: "Notify", source: Source::System })
-                    }
-                    _ => path(sound),
-                };
-                let Some(file) = file else {
+                let Some(file) = path(sound) else {
                     log::warn!("no audio file for sound {:?}", sound.id);
                     return;
                 };
