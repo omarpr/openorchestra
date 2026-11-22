@@ -442,6 +442,18 @@ pub fn install_keymap(overrides: &std::collections::BTreeMap<String, String>, cx
         KeyBinding::new("ctrl-q", Quit, None),
         KeyBinding::new("escape", menu::Cancel, Some("HarnessModal")),
     ]);
+    // On macOS ⌘C/⌘V reach a terminal through the menu bar's Edit items.
+    // Without ⌘ (Windows, Linux) there is no menu bar to do it, so bind the
+    // chords Windows Terminal and zed's own keymap use there.
+    if !crate::platform::CURRENT.command_key {
+        cx.bind_keys([
+            KeyBinding::new("ctrl-shift-c", terminal::Copy, Some("Terminal")),
+            KeyBinding::new("ctrl-insert", terminal::Copy, Some("Terminal")),
+            KeyBinding::new("ctrl-shift-v", terminal::Paste, Some("Terminal")),
+            KeyBinding::new("shift-insert", terminal::Paste, Some("Terminal")),
+            KeyBinding::new("ctrl-v", terminal::Paste, Some("Terminal")),
+        ]);
+    }
     // Match at the editor node too, so form navigation wins over editor indentation.
     for context in ["HarnessModal", "HarnessModal > Editor"] {
         cx.bind_keys([
