@@ -1548,18 +1548,27 @@ Open both files.
             cancelled: cancel.worker_flag(),
             deadline: Instant::now() + Duration::from_secs(30),
         };
-        let job = std::thread::spawn(move || {
-            worker
-                .capture(
-                    // Not `exec`: `sleep` is the launcher's child.
-                    Command::new("sh")
-                        .args(["-c", ": > \"$1\" && sleep 20; true", "mock-cli"])
-                        .arg(child_ready),
-                    None,
-                    100,
-                )
-                .err()
-        });
+        // Not `exec`: the 20 s wait is the launcher's child.
+        #[cfg(unix)]
+        let mut command = {
+            let mut command = Command::new("sh");
+            command
+                .args(["-c", ": > \"$1\" && sleep 20; true", "mock-cli"])
+                .arg(child_ready);
+            command
+        };
+        // `cmd`, as npm's `.cmd` launchers run. Not Git Bash's `sh`: its
+        // fork leaves `sleep` with an exited parent, which no tree walk finds.
+        #[cfg(windows)]
+        let mut command = {
+            use std::os::windows::process::CommandExt;
+            let mut command = Command::new("cmd");
+            command
+                .env("READY", &child_ready)
+                .raw_arg(r#"/d /c type nul > "%READY%" & ping -n 21 127.0.0.1"#);
+            command
+        };
+        let job = std::thread::spawn(move || worker.capture(&mut command, None, 100).err());
         let start = Instant::now();
         while !ready.exists() && start.elapsed() < Duration::from_secs(10) {
             std::thread::sleep(Duration::from_millis(10));
