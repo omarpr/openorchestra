@@ -187,7 +187,7 @@ pub fn add_login_shell_dirs() -> bool {
 }
 
 /// `inherited` plus the `from_shell` directories it lacks (compared without
-/// case or trailing separator, as Windows does), skipping any under
+/// case, trailing separator or `/` vs `\`, as Windows does), skipping any under
 /// `skip_root`. `None` when nothing is new; else the new PATH and what was
 /// added.
 fn append_missing(
@@ -197,7 +197,8 @@ fn append_missing(
 ) -> Option<(OsString, Vec<String>)> {
     let norm = |p: &std::path::Path| {
         p.to_string_lossy()
-            .trim_end_matches(['\\', '/'])
+            .replace('/', "\\")
+            .trim_end_matches('\\')
             .to_lowercase()
     };
     let skip = skip_root.map(norm);
@@ -324,6 +325,15 @@ mod tests {
         );
         // Nothing new: leave PATH alone.
         assert!(append_missing(Some(OsStr::new(r"C:\a")), r"C:\A\", None).is_none());
+        // Git's own folders in `/` spelling are still Git's; a sibling folder
+        // whose name merely starts the same is not.
+        let (_, added) = append_missing(
+            None,
+            r"C:/Git/usr/bin;C:\GitTools\bin",
+            Some(std::path::Path::new(r"C:\Git")),
+        )
+        .unwrap();
+        assert_eq!(added, [r"C:\GitTools\bin"]);
     }
 
     #[test]
