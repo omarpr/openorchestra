@@ -581,7 +581,10 @@ impl HarnessWorkspace {
             .flex_col()
             .gap_3()
             .w(px(440.0))
-            .max_h(px(600.0))
+            // Relative to the Settings frame it sits in: a fixed 600 px filled
+            // a 1080p frame edge to edge, cutting Done off below the fold
+            // with no edge to show the card scrolls.
+            .max_h(gpui::relative(0.92))
             .overflow_y_scroll()
             .p_4()
             .rounded_lg()

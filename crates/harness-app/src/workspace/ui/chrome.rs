@@ -452,13 +452,14 @@ fn app_menu_button() -> Option<gpui::AnyElement> {
     if !BAR.app_menu_button {
         return None;
     }
-    use ::ui::ButtonCommon as _;
     let menu = ::ui::PopoverMenu::new("app-menu")
         .with_handle(APP_MENU.with(|h| h.clone()))
-        .trigger(
+        // The tooltip only while the menu is closed: open, it drew over the
+        // menu's first item ("About openOrchestra").
+        .trigger_with_tooltip(
             ::ui::IconButton::new("app-menu-button", ::ui::IconName::Menu)
-                .icon_size(::ui::IconSize::Small)
-                .tooltip(::ui::Tooltip::text("Menu")),
+                .icon_size(::ui::IconSize::Small),
+            ::ui::Tooltip::text("Menu"),
         )
         .anchor(gpui::Anchor::TopLeft)
         .menu(|window, cx| {
