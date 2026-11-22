@@ -690,8 +690,10 @@ pub fn sample(has_tmux: bool) -> Option<PortsSample> {
     // No lsof/ps: listeners from the IP Helper table, processes from sysinfo.
     // Working folders (`lsof -d cwd`) have no cheap Windows equivalent, so
     // rows are attributed through session panes only (oo-session's).
+    // A failed listing is not "no panes": it would move every task's servers
+    // out of their tasks. Keep the last sample (`None`) instead.
     let session_panes = if has_tmux {
-        crate::tmux::list_session_panes().unwrap_or_default()
+        crate::tmux::list_session_panes().ok()?
     } else {
         Vec::new()
     };
