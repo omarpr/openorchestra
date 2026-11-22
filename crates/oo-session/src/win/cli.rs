@@ -30,7 +30,11 @@ pub fn run(args: &[String]) -> i32 {
                 return 0;
             }
             "-L" | "-S" => {
-                label = args.get(i + 1).cloned().unwrap_or_default();
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("oo-session: {} needs a value", args[i]);
+                    return 1;
+                };
+                label = value.clone();
                 i += 2;
             }
             // Control mode: `attach-session` speaks tmux's `-C` protocol.
@@ -611,5 +615,17 @@ fn new_session(ctx: &Ctx, cmd: &Command) -> i32 {
         0
     } else {
         client::attach(ctx.label, &name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run;
+
+    #[test]
+    fn a_global_flag_without_its_value_is_a_usage_error() {
+        for flag in ["-L", "-S"] {
+            assert_eq!(run(&[flag.to_string()]), 1, "{flag}");
+        }
     }
 }
