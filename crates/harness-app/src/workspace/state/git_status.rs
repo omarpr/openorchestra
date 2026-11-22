@@ -176,8 +176,18 @@ impl HarnessWorkspace {
         if self.has_tmux {
             let session = crate::tmux::session_name(&r.key, tab.id);
             let line = command.to_string();
-            cx.background_spawn(async move {
-                crate::tmux::send_keys_when_live(&session, &line);
+            cx.spawn(async move |view, cx| {
+                let typed = cx
+                    .background_spawn(async move { crate::tmux::send_keys_when_live(&session, &line) })
+                    .await;
+                if !typed {
+                    let _ = view.update(cx, |ws, cx| {
+                        ws.set_error_note(format!(
+                            "couldn't type {command} into the new shell; run it there yourself"
+                        ));
+                        cx.notify();
+                    });
+                }
             })
             .detach();
         } else {
