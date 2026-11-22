@@ -67,9 +67,30 @@ pub fn send_keys_bytes(args: &[String], literal: bool) -> Vec<u8> {
     out
 }
 
+/// What `send-keys -H` types: each argument is one byte in hex. `None` when
+/// one is not (tmux rejects the command then).
+pub fn hex_bytes(args: &[String]) -> Option<Vec<u8>> {
+    args.iter()
+        .map(|a| {
+            let hex = (1..=2).contains(&a.len()) && a.bytes().all(|b| b.is_ascii_hexdigit());
+            hex.then(|| u8::from_str_radix(a, 16).ok())?
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hex_keys() {
+        let args: Vec<String> = ["68", "c3", "a9", "d"].map(String::from).to_vec();
+        assert_eq!(hex_bytes(&args).unwrap(), b"h\xc3\xa9\r");
+        assert_eq!(hex_bytes(&["zz".to_string()]), None);
+        assert_eq!(hex_bytes(&["100".to_string()]), None);
+        assert_eq!(hex_bytes(&["+1".to_string()]), None);
+        assert_eq!(hex_bytes(&[]).unwrap(), b"");
+    }
 
     #[test]
     fn names_and_text() {

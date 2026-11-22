@@ -999,6 +999,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let no_tmux = crate::Tmux {
             socket: Some(crate::store::new_id("oo-unstarted-test-").unwrap()),
+            ..Default::default()
         };
         let (shared, id, writer, reader) = paired_fixture(dir.path(), no_tmux);
         let app = router(Arc::new(shared));
@@ -1020,6 +1021,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let no_tmux = crate::Tmux {
             socket: Some(crate::store::new_id("oo-unstarted-test-").unwrap()),
+            ..Default::default()
         };
         let (shared, id, writer, _) = paired_fixture(dir.path(), no_tmux);
         let app = router(Arc::new(shared));
@@ -1166,6 +1168,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let no_tmux = crate::Tmux {
             socket: Some(crate::store::new_id("oo-unstarted-test-").unwrap()),
+            ..Default::default()
         };
         let (mut shared, id, writer, _) = paired_fixture(dir.path(), no_tmux);
         shared.screenshot_read_timeout = Duration::from_millis(20);
@@ -1211,6 +1214,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tmux = PrivateTmux(crate::Tmux {
             socket: Some(crate::store::new_id("oo-screenshot-test-").unwrap()),
+            ..Default::default()
         });
         let capture = dir.path().join("input");
         let quoted = capture.to_str().unwrap().replace('\'', "'\\''");

@@ -3,6 +3,7 @@
 
 pub mod cli;
 pub mod client;
+pub mod control;
 pub mod host;
 pub mod pipe;
 pub mod procs;
@@ -10,9 +11,14 @@ pub mod procs;
 /// Message kinds on a session pipe.
 pub mod msg {
     // Client → host.
-    /// Start streaming: payload `cols: u16, rows: u16` (LE). The host answers
-    /// with the screen redrawn, then live output.
+    /// Start streaming: payload `cols: u16, rows: u16` (LE), optionally then
+    /// [`ATTACH_IGNORE_SIZE`]. The host answers with the screen redrawn,
+    /// then live output.
     pub const ATTACH: u8 = 1;
+    /// Fifth `ATTACH` byte: the client watches and does not size the session
+    /// (tmux's `ignore-size`). A host from before this flag reads only the
+    /// size, so the client sends the session's current one.
+    pub const ATTACH_IGNORE_SIZE: u8 = 1;
     /// Bytes to type into the session.
     pub const INPUT: u8 = 2;
     /// The attached client's size changed: `cols: u16, rows: u16`.

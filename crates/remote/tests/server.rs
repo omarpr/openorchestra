@@ -52,6 +52,7 @@ impl TmuxServer {
     fn tmux(&self) -> Tmux {
         Tmux {
             socket: Some(self.socket.clone()),
+            ..Default::default()
         }
     }
 
@@ -187,6 +188,7 @@ impl Harness {
     fn unused_tmux() -> Tmux {
         Tmux {
             socket: Some(unique_socket()),
+            ..Default::default()
         }
     }
 

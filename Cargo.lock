@@ -1125,6 +1125,8 @@ dependencies = [
 name = "oo-session"
 version = "0.1.0"
 dependencies = [
+ "oo-remote",
+ "tokio",
  "vt100",
  "windows-sys 0.61.2",
 ]

@@ -452,17 +452,17 @@ impl Shared {
         screen.rows = rows;
     }
 
-    /// `key\tvalue` lines: `pid`, `start`, `size`, `clients`, then one
+    /// `key\tvalue` lines: `pid`, `start`, `size`, `cursor`, `clients`, then one
     /// `opt\t<name>\t<value>` per option set.
     fn info(&self) -> Vec<u8> {
         let flat = |s: &str| s.replace(['\t', '\n', '\r'], " ");
-        let (cols, rows, clients) = {
+        let (cols, rows, clients, (cy, cx)) = {
             let s = self.screen.lock().unwrap_or_else(|e| e.into_inner());
-            (s.cols, s.rows, s.clients.len())
+            (s.cols, s.rows, s.clients.len(), s.parser.screen().cursor_position())
         };
         let members: Vec<String> = job_members(self.job).iter().map(u32::to_string).collect();
         let mut out = format!(
-            "pid\t{}\nstart\t{}\nsize\t{cols}x{rows}\nclients\t{clients}\nprocs\t{}\n",
+            "pid\t{}\nstart\t{}\nsize\t{cols}x{rows}\ncursor\t{cx}x{cy}\nclients\t{clients}\nprocs\t{}\n",
             self.pid,
             flat(&self.start_command),
             members.join(",")
@@ -495,7 +495,10 @@ fn serve(conn: Arc<Pipe>, shared: Arc<Shared>) {
             msg::ATTACH => {
                 let (cols, rows) = super::parse_size(&payload).unwrap_or((80, 24));
                 let mut screen = shared.screen.lock().unwrap_or_else(|e| e.into_inner());
-                shared.resize(&mut screen, cols, rows);
+                // A watcher (`-C`, `ignore-size`) leaves the size alone.
+                if payload.get(4) != Some(&msg::ATTACH_IGNORE_SIZE) {
+                    shared.resize(&mut screen, cols, rows);
+                }
                 // Under the lock, so nothing printed in between is lost or
                 // sent twice.
                 let snapshot = redraw(&mut screen.parser);

@@ -10,6 +10,9 @@
 //! only interpolated values are the pane id (validated `%[0-9]+`), hex tokens
 //! derived from bytes, and integers. Session names are only ever passed as
 //! argv to separate `tmux` processes, as exact-match targets (`=<name>`).
+//!
+//! On Windows the program is the app's `oo-session.exe` (`Tmux.program`),
+//! which implements this subset of control mode (`crates/oo-session/src/win/control.rs`).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
@@ -43,12 +46,23 @@ const STOPPED: &str = "stopped";
 #[derive(Clone, Default, Debug)]
 pub struct Tmux {
     pub socket: Option<String>,
+    /// The tmux client to run; `None` is `tmux` from `PATH`. On Windows the
+    /// app passes its bundled `oo-session.exe`, which speaks the same CLI
+    /// (control mode included) for the commands this bridge uses.
+    pub program: Option<std::path::PathBuf>,
 }
 
 impl Tmux {
+    fn program(&self) -> &std::ffi::OsStr {
+        self.program
+            .as_deref()
+            .map_or("tmux".as_ref(), |p| p.as_os_str())
+    }
+
     /// A `tmux` command, with `-L <socket>` when set.
     pub fn command(&self) -> Command {
-        let mut c = Command::new("tmux");
+        let mut c = Command::new(self.program());
+        no_window(c.as_std_mut());
         if let Some(s) = &self.socket {
             c.arg("-L").arg(s);
         }
@@ -57,7 +71,8 @@ impl Tmux {
 
     /// A blocking `std` `tmux` command, with `-L <socket>` when set.
     fn std_command(&self) -> std::process::Command {
-        let mut c = std::process::Command::new("tmux");
+        let mut c = std::process::Command::new(self.program());
+        no_window(&mut c);
         if let Some(s) = &self.socket {
             c.arg("-L").arg(s);
         }
@@ -93,6 +108,19 @@ impl Tmux {
         }
         Ok(out.stdout)
     }
+}
+
+/// Windows: the app has no console, so each console program it starts would
+/// open a window of its own. Nothing elsewhere.
+fn no_window(command: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = command;
 }
 
 /// Names of all sessions on the server (empty if no server is running).
@@ -1078,6 +1106,7 @@ mod tests {
     fn restore_fits_blocking_without_fits_is_instant() {
         let hubs = Hubs::new(Tmux {
             socket: Some(format!("oo-remote-unused-{}", std::process::id())),
+            ..Default::default()
         });
         let t = Instant::now();
         hubs.restore_fits_blocking(Duration::from_secs(1));

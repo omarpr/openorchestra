@@ -39,8 +39,12 @@ web client.
   record the setup error and mark the terminal check blocked.
 
 The phone server invokes `tmux` for session discovery and `tmux -C` for terminal
-attachment. The Windows app uses `oo-session.exe`, whose CLI has no `-C` mode.
-[Remote `tmux` command](../crates/remote/src/tmux_bridge.rs#L50) · [Remote `tmux -C` attach](../crates/remote/src/tmux_bridge.rs#L380) · [Windows session CLI](../crates/oo-session/src/win/cli.rs#L22)
+attachment. On Windows the app passes it `oo-session.exe`, which implements the
+part of control mode the bridge uses; `cargo test -p oo-session --test
+remote_bridge` exercises discovery, attach, typing, fitting and exit against it.
+If the phone still fails, record whether `oo-session -L <label> -C
+attach-session -t =<session>` prints `%output` lines for that tab's session.
+[Remote `tmux` command](../crates/remote/src/tmux_bridge.rs) · [Windows control mode](../crates/oo-session/src/win/control.rs)
 
 ## 2. `make test` on the documented Windows toolchain
 

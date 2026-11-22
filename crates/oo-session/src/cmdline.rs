@@ -78,6 +78,7 @@ fn value_flags(command: &str) -> &'static str {
         "send-keys" => "Nt",
         "display-message" => "cdt",
         "capture-pane" => "EbSt",
+        "resize-window" => "txy",
         _ => "t",
     }
 }
@@ -170,5 +171,19 @@ mod tests {
         let c = parse(&s(&["send-keys", "-X", "-t", "s", "cancel"])).unwrap();
         assert!(c.has('X'));
         assert_eq!(c.args, s(&["cancel"]));
+    }
+
+    #[test]
+    fn remote_bridge_commands() {
+        let c = parse(&s(&["send-keys", "-t", "%12", "-H", "68", "0d"])).unwrap();
+        assert!(c.has('H'));
+        assert_eq!(c.target(), Some("%12"));
+        assert_eq!(c.args, s(&["68", "0d"]));
+        let c = parse(&s(&["resize-window", "-t", "%12", "-x", "40", "-y", "20"])).unwrap();
+        assert_eq!((c.value('x'), c.value('y')), (Some("40"), Some("20")));
+        let c = parse(&s(&["set-option", "-wu", "-t", "%12", "window-size"])).unwrap();
+        assert!(c.has('w') && c.has('u'));
+        let c = parse(&s(&["attach-session", "-t", "=s", "-f", "ignore-size"])).unwrap();
+        assert_eq!(c.value('f'), Some("ignore-size"));
     }
 }

@@ -10,6 +10,11 @@ publish = false
 name = "oo-session"
 path = "src/main.rs"
 
+# The phone remote's tmux bridge, run against this binary (tests/remote_bridge.rs).
+[target.'cfg(windows)'.dev-dependencies]
+oo-remote = { path = "../remote" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+
 [target.'cfg(windows)'.dependencies]
 vt100 = "0.16"
 windows-sys = { version = "0.61", features = [

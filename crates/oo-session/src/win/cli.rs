@@ -12,7 +12,7 @@ use windows_sys::Win32::System::Threading::GetExitCodeProcess;
 use super::host::{self, HostArgs};
 use super::pipe::{self, Pipe};
 use super::procs::{self, Proc};
-use super::{client, msg};
+use super::{client, control, msg};
 use crate::cmdline::{self, Command};
 use crate::{format, keys};
 
@@ -21,6 +21,7 @@ const START_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub fn run(args: &[String]) -> i32 {
     let mut label = "default".to_string();
+    let mut control = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -31,6 +32,11 @@ pub fn run(args: &[String]) -> i32 {
             "-L" | "-S" => {
                 label = args.get(i + 1).cloned().unwrap_or_default();
                 i += 2;
+            }
+            // Control mode: `attach-session` speaks tmux's `-C` protocol.
+            "-C" | "-CC" => {
+                control = true;
+                i += 1;
             }
             // tmux client flags with no meaning here.
             "-2" | "-u" | "-l" | "-v" | "-N" => i += 1,
@@ -45,7 +51,8 @@ pub fn run(args: &[String]) -> i32 {
         eprintln!("usage: oo-session [-L label] command [flags] [; command …]");
         return 1;
     }
-    let ctx = Ctx::new(&label);
+    let mut ctx = Ctx::new(&label);
+    ctx.control = control;
     for words in cmdline::split(rest) {
         let Some(cmd) = cmdline::parse(&words) else { continue };
         let code = exec(&ctx, &cmd);
@@ -92,6 +99,8 @@ struct Info {
     pid: u32,
     start: String,
     size: (u16, u16),
+    /// `(x, y)`; `None` from a host that predates reporting it.
+    cursor: Option<(u16, u16)>,
     clients: usize,
     /// Every process in the session's job.
     members: Vec<u32>,
@@ -108,6 +117,11 @@ fn parse_info(text: &str) -> Info {
             (Some("size"), Some(v), _) => {
                 if let Some((c, r)) = v.split_once('x') {
                     info.size = (c.parse().unwrap_or(0), r.parse().unwrap_or(0));
+                }
+            }
+            (Some("cursor"), Some(v), _) => {
+                if let Some((x, y)) = v.split_once('x') {
+                    info.cursor = x.parse().ok().zip(y.parse().ok());
                 }
             }
             (Some("clients"), Some(v), _) => info.clients = v.parse().unwrap_or(0),
@@ -135,6 +149,8 @@ fn request(label: &str, session: &str, kind: u8, payload: &[u8]) -> io::Result<(
 /// and the process list is taken once.
 struct Ctx<'a> {
     label: &'a str,
+    /// `-C`: `attach-session` runs a control-mode client.
+    control: bool,
     infos: RefCell<HashMap<String, Option<std::rc::Rc<Info>>>>,
     procs: OnceCell<Vec<Proc>>,
 }
@@ -143,8 +159,40 @@ impl<'a> Ctx<'a> {
     fn new(label: &'a str) -> Self {
         Self {
             label,
+            control: false,
             infos: RefCell::new(HashMap::new()),
             procs: OnceCell::new(),
+        }
+    }
+
+    /// The session a tmux target names: `name`, `=name`, `name:` and
+    /// `name:0.0` (one window, one pane), or the ids `%N` / `$N` that
+    /// `#{pane_id}` / `#{session_id}` print. An id no session has is
+    /// returned as is, so the command fails with "can't find session".
+    fn resolve(&self, target: &str) -> String {
+        let t = target.strip_prefix('=').unwrap_or(target);
+        let t = t.split_once(':').map_or(t, |(session, _)| session);
+        let id = t.strip_prefix('%').or_else(|| t.strip_prefix('$'));
+        if let Some(pid) = id.and_then(|n| n.parse::<u32>().ok()) {
+            let found = self
+                .sessions()
+                .into_iter()
+                .find(|s| self.info(s).is_some_and(|i| i.pid == pid));
+            if let Some(session) = found {
+                return session;
+            }
+        }
+        t.to_string()
+    }
+
+    /// The command's `-t` target, resolved; an error when it has none.
+    fn target(&self, cmd: &Command) -> Result<String, i32> {
+        match cmd.value('t') {
+            Some(t) => Ok(self.resolve(t)),
+            None => {
+                eprintln!("{}: no target session (-t)", cmd.name);
+                Err(1)
+            }
         }
     }
 
@@ -177,6 +225,13 @@ impl<'a> Ctx<'a> {
         let info = self.info(session)?;
         match name {
             "pane_pid" => Some(info.pid.to_string()),
+            // One pane per session, so the program's pid (unique while it
+            // runs) serves as both ids; `resolve` maps them back.
+            "pane_id" => Some(format!("%{}", info.pid)),
+            "session_id" => Some(format!("${}", info.pid)),
+            // An older host does not say: the top-left corner.
+            "cursor_x" => Some(info.cursor.map_or(0, |c| c.0).to_string()),
+            "cursor_y" => Some(info.cursor.map_or(0, |c| c.1).to_string()),
             "pane_start_command" => Some(info.start.clone()),
             "pane_current_command" => {
                 procs::foreground_in(self.procs.get_or_init(procs::snapshot), info.pid, &info.members)
@@ -202,11 +257,15 @@ impl<'a> Ctx<'a> {
     }
 }
 
-fn require_target(cmd: &Command) -> Result<&str, i32> {
-    cmd.target().ok_or_else(|| {
-        eprintln!("{}: no target session (-t)", cmd.name);
-        1
-    })
+/// Send `kind` to `session` and wait until the host has handled it, so a
+/// following command (`send-keys Enter`) cannot overtake it.
+fn deliver(label: &str, session: &str, kind: u8, payload: &[u8]) -> bool {
+    let sent = Pipe::connect(&pipe::path(label, session), REQUEST_TIMEOUT).and_then(|c| {
+        c.send(kind, payload)?;
+        c.send(msg::PING, &[])?;
+        c.recv()
+    });
+    matches!(sent, Ok(Some((msg::OK, _))))
 }
 
 fn exec(ctx: &Ctx, cmd: &Command) -> i32 {
@@ -218,8 +277,8 @@ fn exec(ctx: &Ctx, cmd: &Command) -> i32 {
             }
             0
         }
-        "has-session" => match require_target(cmd) {
-            Ok(t) if ctx.live(t) => 0,
+        "has-session" => match ctx.target(cmd) {
+            Ok(t) if ctx.live(&t) => 0,
             Ok(t) => {
                 eprintln!("can't find session: {t}");
                 1
@@ -230,8 +289,8 @@ fn exec(ctx: &Ctx, cmd: &Command) -> i32 {
             let sessions = if cmd.has('a') {
                 ctx.sessions()
             } else {
-                match require_target(cmd) {
-                    Ok(t) => vec![t.to_string()],
+                match ctx.target(cmd) {
+                    Ok(t) => vec![t],
                     Err(code) => return code,
                 }
             };
@@ -249,22 +308,22 @@ fn exec(ctx: &Ctx, cmd: &Command) -> i32 {
             if !cmd.has('p') {
                 return 0;
             }
-            let target = match require_target(cmd) {
+            let target = match ctx.target(cmd) {
                 Ok(t) => t,
                 Err(code) => return code,
             };
-            if ctx.info(target).is_none() {
+            if ctx.info(&target).is_none() {
                 eprintln!("can't find session: {target}");
                 return 1;
             }
             let fmt = cmd.args.join(" ");
-            println!("{}", ctx.expand(target, &fmt));
+            println!("{}", ctx.expand(&target, &fmt));
             0
         }
         "new-session" => new_session(ctx, cmd),
         "attach-session" => {
-            let target = match cmd.target() {
-                Some(t) => t.to_string(),
+            let target = match cmd.value('t') {
+                Some(t) => ctx.resolve(t),
                 None => match ctx.sessions().into_iter().next() {
                     Some(s) => s,
                     None => {
@@ -273,10 +332,21 @@ fn exec(ctx: &Ctx, cmd: &Command) -> i32 {
                     }
                 },
             };
-            client::attach(ctx.label, &target)
+            if !ctx.control {
+                return client::attach(ctx.label, &target);
+            }
+            // Control mode never sizes the session (as `-f ignore-size`).
+            let Some(info) = ctx.info(&target) else {
+                eprintln!("can't find session: {target}");
+                return 1;
+            };
+            let label = ctx.label;
+            control::attach(label, &target, info.pid, info.size, &|cmd| {
+                exec(&Ctx::new(label), cmd)
+            })
         }
-        "kill-session" => match require_target(cmd) {
-            Ok(t) => kill(ctx, t),
+        "kill-session" => match ctx.target(cmd) {
+            Ok(t) => kill(ctx, &t),
             Err(code) => code,
         },
         "kill-server" => {
@@ -289,7 +359,7 @@ fn exec(ctx: &Ctx, cmd: &Command) -> i32 {
             if cmd.has('g') || cmd.has('u') {
                 return 0;
             }
-            let target = match require_target(cmd) {
+            let target = match ctx.target(cmd) {
                 Ok(t) => t,
                 Err(code) => return code,
             };
@@ -298,8 +368,8 @@ fn exec(ctx: &Ctx, cmd: &Command) -> i32 {
                 return 1;
             };
             let payload = format!("{name}\0{}", value.map(String::as_str).unwrap_or(""));
-            ctx.forget(target);
-            match request(ctx.label, target, msg::SET_OPTION, payload.as_bytes()) {
+            ctx.forget(&target);
+            match request(ctx.label, &target, msg::SET_OPTION, payload.as_bytes()) {
                 Ok((msg::OK, _)) => 0,
                 _ => {
                     eprintln!("can't find session: {target}");
@@ -312,33 +382,62 @@ fn exec(ctx: &Ctx, cmd: &Command) -> i32 {
             if cmd.has('X') {
                 return 0;
             }
-            let target = match require_target(cmd) {
+            let target = match ctx.target(cmd) {
                 Ok(t) => t,
                 Err(code) => return code,
             };
-            let bytes = keys::send_keys_bytes(&cmd.args, cmd.has('l'));
-            let sent = Pipe::connect(&pipe::path(ctx.label, target), REQUEST_TIMEOUT).and_then(|c| {
-                c.send(msg::INPUT, &bytes)?;
-                // Wait until the host has written it, so a following
-                // `send-keys Enter` cannot overtake it.
-                c.send(msg::PING, &[])?;
-                c.recv()
-            });
-            match sent {
-                Ok(Some((msg::OK, _))) => 0,
-                _ => {
-                    eprintln!("can't find session: {target}");
-                    1
+            let bytes = if cmd.has('H') {
+                match keys::hex_bytes(&cmd.args) {
+                    Some(bytes) => bytes,
+                    None => {
+                        eprintln!("send-keys: invalid hex key");
+                        return 1;
+                    }
                 }
+            } else {
+                keys::send_keys_bytes(&cmd.args, cmd.has('l'))
+            };
+            if deliver(ctx.label, &target, msg::INPUT, &bytes) {
+                0
+            } else {
+                eprintln!("can't find session: {target}");
+                1
+            }
+        }
+        "resize-window" => {
+            let target = match ctx.target(cmd) {
+                Ok(t) => t,
+                Err(code) => return code,
+            };
+            let Some(info) = ctx.info(&target) else {
+                eprintln!("can't find session: {target}");
+                return 1;
+            };
+            // `-A`/`-a` (fit to clients) and no size: nothing to do, as the
+            // attached client sizes the session whenever its pane resizes.
+            let size = |flag, current| match cmd.value(flag) {
+                Some(v) => v.parse::<u16>().ok(),
+                None => Some(current),
+            };
+            let (Some(cols), Some(rows)) = (size('x', info.size.0), size('y', info.size.1)) else {
+                eprintln!("resize-window: bad size");
+                return 1;
+            };
+            ctx.forget(&target);
+            if deliver(ctx.label, &target, msg::RESIZE, &super::size_payload(cols, rows)) {
+                0
+            } else {
+                eprintln!("can't find session: {target}");
+                1
             }
         }
         "capture-pane" => {
-            let target = match require_target(cmd) {
+            let target = match ctx.target(cmd) {
                 Ok(t) => t,
                 Err(code) => return code,
             };
             let escapes = u8::from(cmd.has('e'));
-            match request(ctx.label, target, msg::CAPTURE, &[escapes]) {
+            match request(ctx.label, &target, msg::CAPTURE, &[escapes]) {
                 Ok((msg::OUTPUT, text)) => {
                     use std::io::Write;
                     let mut out = std::io::stdout().lock();
@@ -359,9 +458,9 @@ fn exec(ctx: &Ctx, cmd: &Command) -> i32 {
                 eprintln!("if-shell: only -F conditions are supported");
                 return 1;
             }
-            let session = cmd.target().unwrap_or("");
+            let session = cmd.value('t').map(|t| ctx.resolve(t)).unwrap_or_default();
             let Some(cond) = cmd.args.first() else { return 1 };
-            let branch = if format::truthy(&ctx.expand(session, cond)) {
+            let branch = if format::truthy(&ctx.expand(&session, cond)) {
                 cmd.args.get(1)
             } else {
                 cmd.args.get(2)
@@ -379,7 +478,7 @@ fn exec(ctx: &Ctx, cmd: &Command) -> i32 {
         }
         // Accepted and meaningless here.
         "set-environment" | "refresh-client" | "select-pane" | "select-window"
-        | "resize-window" | "detach-client" | "start-server" => 0,
+        | "detach-client" | "start-server" => 0,
         other => {
             eprintln!("oo-session: unknown command: {other}");
             1

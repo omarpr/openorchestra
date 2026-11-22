@@ -13,8 +13,9 @@
 //! (`crates/harness-app/src/tmux.rs`): `new-session`, `attach-session`,
 //! `list-sessions -F`, `list-panes -a -F`, `has-session`, `kill-session`,
 //! `send-keys`, `set-option`, `display-message -p`, `if-shell -F`, joined by
-//! bare `;` arguments. So the app's tmux code runs unchanged against it; only
-//! the program name differs.
+//! bare `;` arguments, plus the part of control mode (`-C attach-session`)
+//! that the phone remote's bridge uses. So the app's tmux code runs unchanged
+//! against it; only the program name differs.
 //!
 //! Sessions are one process each (not one server for all, as tmux does), so a
 //! crash takes down one session, and the list of sessions is simply the list
