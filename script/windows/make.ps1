@@ -242,22 +242,29 @@ function Use-Fxc {
 $ConPtyVersion = "1.25.261109001"
 function Use-ConPty {
     $pkg = Join-Path $App "target\conpty\$ConPtyVersion\pkg"
-    $dll = Join-Path $pkg "runtimes\win-x64\native\conpty.dll"
-    if (Test-Path $dll) { return }
+    $files = @("runtimes\win-x64\native\conpty.dll", "build\native\runtimes\x64\OpenConsole.exe")
+    # The cache is only ever complete: it is extracted beside it, checked,
+    # and then moved into place, so an interrupted fetch is fetched again.
+    if (@($files | Where-Object { -not (Test-Path (Join-Path $pkg $_)) }).Count -eq 0) { return }
     $dir = Split-Path $pkg
     New-Item -ItemType Directory -Force $dir | Out-Null
     $zip = Join-Path $dir "conpty.zip"
+    $staging = Join-Path $dir "pkg.partial"
+    if (Test-Path $staging) { Remove-Item -Recurse -Force $staging }
     $url = "https://api.nuget.org/v3-flatcontainer/microsoft.windows.console.conpty/$ConPtyVersion/microsoft.windows.console.conpty.$ConPtyVersion.nupkg"
     Write-Host "fetching Windows Terminal's ConPTY $ConPtyVersion from nuget.org"
     Invoke-WebRequest $url -OutFile $zip
-    Expand-Archive $zip -DestinationPath $pkg -Force
-    foreach ($f in @($dll, (Join-Path $pkg "build\native\runtimes\x64\OpenConsole.exe"))) {
-        $sig = Get-AuthenticodeSignature $f
-        if ($sig.Status -ne "Valid" -or $sig.SignerCertificate.Subject -notmatch "O=Microsoft Corporation") {
-            Remove-Item -Recurse -Force $pkg
-            throw "ConPTY package file $f is not validly signed by Microsoft"
+    Expand-Archive $zip -DestinationPath $staging -Force
+    foreach ($f in $files) {
+        $path = Join-Path $staging $f
+        $sig = if (Test-Path $path) { Get-AuthenticodeSignature $path } else { $null }
+        if (-not $sig -or $sig.Status -ne "Valid" -or $sig.SignerCertificate.Subject -notmatch "O=Microsoft Corporation") {
+            Remove-Item -Recurse -Force $staging
+            throw "ConPTY package file $f is missing or not validly signed by Microsoft"
         }
     }
+    if (Test-Path $pkg) { Remove-Item -Recurse -Force $pkg }
+    Move-Item $staging $pkg
 }
 
 function Invoke-Build([string] $BuildProfile = "debug") {
