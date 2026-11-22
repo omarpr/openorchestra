@@ -584,7 +584,7 @@ fn dead_agents(candidates: Vec<(AgentTarget, String)>, has_tmux: bool) -> Vec<Ag
     // `procs` means `ps` failed; skip the tmux path rather than clear on no
     // evidence.
     let procs = if has_tmux {
-        crate::resource_monitor::parse_ps(&ps_snapshot())
+        process_snapshot()
     } else {
         Vec::new()
     };
@@ -628,9 +628,37 @@ fn dead_agents(candidates: Vec<(AgentTarget, String)>, has_tmux: bool) -> Vec<Ag
     dead
 }
 
-/// A `pid ppid comm` snapshot of every process, for agent-liveness checks.
+/// Every process's pid, parent and command, for agent-liveness checks.
 /// Empty on any error — callers treat that as "no evidence" and don't act on it.
-pub(crate) fn ps_snapshot() -> String {
+#[cfg(not(windows))]
+fn process_snapshot() -> Vec<crate::resource_monitor::ProcInfo> {
+    crate::resource_monitor::parse_ps(&ps_snapshot())
+}
+
+/// Windows has no `ps -o`: the snapshot comes from sysinfo. An agent started
+/// from Git Bash can have a dead parent (the MSYS fork that ran it exited),
+/// so a session's job members hang back on its pane, as Ports does.
+#[cfg(windows)]
+fn process_snapshot() -> Vec<crate::resource_monitor::ProcInfo> {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    let mut procs: Vec<_> = sys
+        .processes()
+        .iter()
+        .map(|(pid, p)| {
+            let parent = p.parent().map(|pp| pp.as_u32()).filter(|&pp| pp != 0);
+            crate::resource_monitor::proc_info(pid.as_u32(), parent, &p.name().to_string_lossy())
+        })
+        .collect();
+    for (pane, members) in crate::tmux::session_jobs() {
+        crate::ports::adopt_orphans(procs.iter_mut().map(|p| (p.pid, &mut p.parent)), pane, &members);
+    }
+    procs
+}
+
+/// A `pid ppid comm` snapshot of every process.
+#[cfg(not(windows))]
+fn ps_snapshot() -> String {
     os_compat::process::command("ps")
         .args(["-axo", "pid=,ppid=,comm="])
         .output()

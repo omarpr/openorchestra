@@ -364,12 +364,22 @@ pub fn parse_lsof_cwd(out: &str) -> std::collections::HashMap<u32, PathBuf> {
 /// Members whose parent is another member keep their real parent.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn adopt_job_orphans(procs: &mut [ProcPath], pane: u32, members: &[u32]) {
-    for p in procs.iter_mut() {
-        if p.pid == pane || !members.contains(&p.pid) {
+    adopt_orphans(procs.iter_mut().map(|p| (p.pid, &mut p.parent)), pane, members);
+}
+
+/// [`adopt_job_orphans`] over `(pid, parent)` pairs, for any process list.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn adopt_orphans<'a>(
+    procs: impl Iterator<Item = (u32, &'a mut Option<u32>)>,
+    pane: u32,
+    members: &[u32],
+) {
+    for (pid, parent) in procs {
+        if pid == pane || !members.contains(&pid) {
             continue;
         }
-        if !p.parent.is_some_and(|parent| members.contains(&parent)) {
-            p.parent = Some(pane);
+        if !parent.is_some_and(|parent| members.contains(&parent)) {
+            *parent = Some(pane);
         }
     }
 }
