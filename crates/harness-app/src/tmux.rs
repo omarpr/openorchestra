@@ -1090,6 +1090,14 @@ mod tests {
             return;
         }
         let label = format!("oo-test-{}", std::process::id());
+        // A failed assertion must not leave the session's host running.
+        struct KillServer<'a>(&'a str);
+        impl Drop for KillServer<'_> {
+            fn drop(&mut self) {
+                let _ = run_bounded(&["-L", self.0, "kill-server"], Duration::from_secs(10));
+            }
+        }
+        let _cleanup = KillServer(&label);
         let run = |args: &[&str]| {
             let mut all = vec!["-L", label.as_str()];
             all.extend_from_slice(args);
