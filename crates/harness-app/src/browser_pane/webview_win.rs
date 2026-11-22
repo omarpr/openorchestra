@@ -55,10 +55,13 @@
 //! bottom, left or right). Its side is Settings → General's placement
 //! (`InspectorPlacement`), followed live while open; "Window" opens
 //! WebView2's own DevTools window instead, as does right-click → Inspect.
-//! Cost: while the app runs, any local process that finds the port can
-//! drive these browser tabs over the DevTools protocol (as with a Chrome
-//! started with `--remote-debugging-port`); the port is random and
-//! loopback-only.
+//! Cost: while the debugging server runs, any local process that finds the
+//! port can drive these browser tabs over the DevTools protocol (as with a
+//! Chrome started with `--remote-debugging-port`); the port is random and
+//! loopback-only. So the server runs only when the placement is docked as
+//! the first browser tab opens (the environment is made once per run, with
+//! its arguments): with "Window" there is no listener, and choosing a dock
+//! later opens DevTools in its window until the app restarts.
 
 #![warn(dead_code)]
 
@@ -146,6 +149,9 @@ enum Env {
 
 thread_local! {
     static ENV: RefCell<Env> = const { RefCell::new(Env::Idle) };
+    /// This run's environment was started with the debugging server (a
+    /// `DevToolsActivePort` left by an earlier run must not be trusted).
+    static DEBUG_SERVER: Cell<bool> = const { Cell::new(false) };
     /// Every live page, for recutting a window's pages when its holes change.
     static PAGES: RefCell<Vec<Weak<Inner>>> = const { RefCell::new(Vec::new()) };
     /// Per gpui window (its HWND): what shows through its pages.
@@ -232,7 +238,11 @@ fn with_environment(page: &Rc<Inner>) -> anyhow::Result<()> {
     // browser's debugging server (see the module docs); port 0 lets it pick
     // a free port, which it writes to `DevToolsActivePort`.
     let options = webview2_com::CoreWebView2EnvironmentOptions::default();
-    unsafe { options.set_additional_browser_arguments("--remote-debugging-port=0".to_string()) };
+    let docked = placement_side(crate::browser_pane::inspector_placement()).is_some();
+    if docked {
+        unsafe { options.set_additional_browser_arguments("--remote-debugging-port=0".to_string()) };
+    }
+    DEBUG_SERVER.with(|on| on.set(docked));
     let options: ICoreWebView2EnvironmentOptions = options.into();
     // SAFETY: the loader's documented signature; it AddRefs the handler
     // and the options.
@@ -370,6 +380,9 @@ fn new_window_from_main_frame(args: &ICoreWebView2NewWindowRequestedEventArgs) -
 /// The debugging server's port, from `DevToolsActivePort` in the browser's
 /// data folder (first line).
 fn debug_port() -> Option<u16> {
+    if !DEBUG_SERVER.with(Cell::get) {
+        return None;
+    }
     let file = user_data_folder().join("EBWebView").join("DevToolsActivePort");
     std::fs::read_to_string(file).ok()?.lines().next()?.trim().parse().ok()
 }
@@ -420,7 +433,10 @@ impl Inner {
             return;
         };
         let Some(port) = debug_port() else {
-            log::warn!("browser: no DevTools port; opening the inspector in its own window");
+            log::info!(
+                "browser: no DevTools server (placement was Window when the browser started); \
+                 opening the inspector in its own window"
+            );
             unsafe {
                 let _ = webview.OpenDevToolsWindow();
             }
