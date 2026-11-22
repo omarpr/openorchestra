@@ -365,10 +365,12 @@ fn exec(ctx: &Ctx, cmd: &Command) -> i32 {
             Err(code) => code,
         },
         "kill-server" => {
-            for s in ctx.sessions() {
-                kill(ctx, &s);
+            let sessions = ctx.sessions();
+            for s in &sessions {
+                kill(ctx, s);
             }
-            0
+            // One that ended before its turn is fine; one still running is not.
+            i32::from(sessions.iter().any(|s| ctx.live(s)))
         }
         "set-option" => {
             if cmd.has('g') || cmd.has('u') {
@@ -511,6 +513,12 @@ fn kill(ctx: &Ctx, session: &str) -> i32 {
     let deadline = Instant::now() + Duration::from_secs(3);
     while ctx.live(session) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
+    }
+    // The host answers before it terminates anything: still listed after
+    // the wait means the kill failed.
+    if ctx.live(session) {
+        eprintln!("oo-session: session {session} is still running");
+        return 1;
     }
     0
 }
