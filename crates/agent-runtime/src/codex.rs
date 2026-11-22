@@ -235,6 +235,19 @@ fn ensure_hook(root: &mut Value, event: &str, marker: &str, command: &str) {
 /// Windows as an extensionless sh script (what Git Bash launches) beside
 /// `codex.cmd`; Windows can't execute the script itself, so the probe uses
 /// the launcher next to it. Elsewhere, and for anything else, `program`.
+/// The Codex CLI itself, not an override: `codex`, or on Windows the
+/// native `codex.exe` or npm's `codex.cmd` (any case).
+fn is_codex_program(program: &Path) -> bool {
+    if program.file_name() == Some(PROGRAM.as_ref()) {
+        return true;
+    }
+    let named = |s: Option<&std::ffi::OsStr>, want: &[&str]| {
+        s.and_then(|s| s.to_str())
+            .is_some_and(|s| want.iter().any(|w| s.eq_ignore_ascii_case(w)))
+    };
+    named(program.file_stem(), &[PROGRAM]) && named(program.extension(), &["exe", "cmd"])
+}
+
 fn probe_program(program: &Path) -> PathBuf {
     os_compat::Os::CURRENT.direct_launcher(program)
 }
@@ -288,7 +301,7 @@ impl AgentRuntime for CodexRuntime {
         // Keep the server local to the CLI so both reach the hooks. Older CLI
         // releases reject the flag. Shell-based command overrides own their
         // arguments and are passed through by the caller.
-        if command.program.file_name() == Some(PROGRAM.as_ref())
+        if is_codex_program(&command.program)
             && !command.args.iter().any(|arg| arg == NO_DAEMON)
             && os_compat::process::command(probe_program(&command.program))
                 .args([NO_DAEMON, "--version"])
@@ -301,5 +314,29 @@ impl AgentRuntime for CodexRuntime {
             command.args.push(NO_DAEMON.into());
         }
         command
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_codex_program;
+    use std::path::Path;
+
+    #[test]
+    fn the_codex_cli_is_recognised_in_every_form_it_installs_as() {
+        for program in [
+            "/usr/local/bin/codex",
+            // Forward slashes, which Windows also separates on, so the
+            // test means the same on every OS.
+            "C:/Users/me/AppData/Roaming/npm/codex",
+            "C:/Users/me/AppData/Roaming/npm/codex.cmd",
+            "C:/Tools/codex.exe",
+            "C:/Tools/CODEX.EXE",
+        ] {
+            assert!(is_codex_program(Path::new(program)), "{program}");
+        }
+        for program in ["/usr/bin/codex-wrapper", "/bin/sh", "C:/Tools/codex.ps1", "codexx.exe"] {
+            assert!(!is_codex_program(Path::new(program)), "{program}");
+        }
     }
 }
