@@ -55,9 +55,16 @@ Get-Command sleep.exe, cat.exe -ErrorAction SilentlyContinue
 .\make test
 ```
 
-If the full run fails, run the two suspect tests individually.
+If the full run fails, run the two suspect tests individually. First give
+this PowerShell session what `.\make test` sets only for its own run: SHELL
+is Git Bash, and Git's `usr\bin` (where `sleep` and `cat` live) goes last on
+PATH. (Cargo and WinLibs' `bin` must be on PATH too, as for any build.)
 
 ```powershell
+$bash = @("$env:ProgramFiles\Git\bin\bash.exe", "$env:LOCALAPPDATA\Programs\Git\bin\bash.exe") |
+    Where-Object { Test-Path $_ } | Select-Object -First 1
+$env:SHELL = $bash
+$env:PATH = "$env:PATH;$(Join-Path (Split-Path (Split-Path $bash)) 'usr\bin')"
 cargo test --locked -p oo-remote --lib stalled_control_write_retires_the_client_and_reports_unknown_delivery -- --nocapture
 cargo test --locked -p oo-remote --lib screenshot_cleanup_tracks_whether_the_path_may_have_been_written -- --nocapture
 ```
