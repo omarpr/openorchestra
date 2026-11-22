@@ -255,11 +255,17 @@ fn ensure_shortcut() -> windows::core::Result<()> {
         .map_err(|e| windows::core::Error::new(windows::core::HRESULT(-1), e.to_string()))?;
     let lnk_w = HSTRING::from(lnk.as_os_str());
     let existed = lnk.exists();
+    // A shortcut to an exe that is gone (a moved portable build, a removed
+    // dev build) would start nothing when a toast is clicked: point it here.
+    let stale = existed && shortcut_target(&lnk).is_none_or(|t| !t.is_file());
     unsafe {
         let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
         let file: IPersistFile = link.cast()?;
         if existed {
             file.Load(&lnk_w, STGM_READWRITE)?;
+            if stale {
+                link.SetPath(&HSTRING::from(exe.as_os_str()))?;
+            }
         } else {
             link.SetPath(&HSTRING::from(exe.as_os_str()))?;
             link.SetDescription(&HSTRING::from("Run coding agents in parallel git worktrees"))?;
@@ -285,6 +291,8 @@ fn ensure_shortcut() -> windows::core::Result<()> {
     }
     if !existed {
         log::info!("notifications: added the Start menu shortcut {}", lnk.display());
+    } else if stale {
+        log::info!("notifications: pointed the Start menu shortcut at {}", exe.display());
     }
     // COM finds the activator through this registration, even while the
     // running app has its class object registered; it names the
