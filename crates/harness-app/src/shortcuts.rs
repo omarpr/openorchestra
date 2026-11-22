@@ -292,10 +292,21 @@ pub enum PageEdit {
     Redo,
 }
 
-/// ⌘C/⌘V/⌘X/⌘A/⌘Z/⌘⇧Z: the page's, whatever the catalog binds them to
-/// (the global ⌘C copies diff lines; over a page it must copy page text).
+/// ⌘C/⌘V/⌘X/⌘A/⌘Z/⌘⇧Z (Ctrl+… off macOS): the page's, whatever the
+/// catalog binds them to (the global ⌘C copies diff lines; over a page it
+/// must copy page text).
 pub fn page_edit(chord: &Chord) -> Option<PageEdit> {
-    if !chord.cmd || chord.alt || chord.ctrl {
+    page_edit_with(chord, crate::platform::CURRENT.command_key)
+}
+
+/// [`page_edit`] where the editing keys are ⌘ (`command_key`) or Ctrl.
+fn page_edit_with(chord: &Chord, command_key: bool) -> Option<PageEdit> {
+    let primary = if command_key {
+        chord.cmd && !chord.ctrl
+    } else {
+        chord.ctrl && !chord.cmd
+    };
+    if !primary || chord.alt {
         return None;
     }
     match (chord.key.as_str(), chord.shift) {
@@ -970,6 +981,21 @@ mod tests {
         assert_eq!(page_edit(&chord("cmd-c")), Some(PageEdit::Copy));
         assert_eq!(page_edit(&chord("cmd-shift-z")), Some(PageEdit::Redo));
         assert_eq!(page_edit(&chord("cmd-t")), None);
+    }
+
+    /// Off macOS the page's editing keys are Ctrl chords, so a Global action
+    /// rebound to Ctrl+V still leaves paste with the page.
+    #[test]
+    fn ctrl_editing_keys_stay_with_the_page_off_macos() {
+        let parse = |k: &str| Chord::parse(k).unwrap();
+        assert_eq!(page_edit_with(&parse("ctrl-v"), false), Some(PageEdit::Paste));
+        assert_eq!(page_edit_with(&parse("ctrl-shift-z"), false), Some(PageEdit::Redo));
+        assert_eq!(page_edit_with(&parse("cmd-v"), false), None);
+        assert_eq!(page_edit_with(&parse("alt-v"), false), None);
+        assert_eq!(page_edit_with(&parse("ctrl-alt-v"), false), None);
+        // macOS keeps ⌘, and Ctrl+V is not an edit there.
+        assert_eq!(page_edit_with(&parse("cmd-v"), true), Some(PageEdit::Paste));
+        assert_eq!(page_edit_with(&parse("ctrl-v"), true), None);
     }
 
     /// Drift guard: every global ⌘-chord in the catalog reaches the app over
