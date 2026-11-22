@@ -355,6 +355,9 @@ struct Inner {
     can_forward: Cell<bool>,
     /// The region last applied ([`PageMask`]), to skip unchanged recuts.
     mask: RefCell<Option<PageMask>>,
+    /// The scale it was cut at: the same logical holes are other device
+    /// pixels at another scale. 0 before the first cut.
+    mask_scale: Cell<f32>,
     /// Where the docked inspector is (`Some` from the moment it is asked
     /// for), its controller once WebView2 made it, whether it has the
     /// keyboard, and a counter that retires a slow open the user already
@@ -941,9 +944,11 @@ impl Inner {
         let sprite = punch.sprite.as_ref().and_then(|s| sprite_in_page(s.mask(), page));
         let holes = punch.holes.combined(None);
         let next = page_mask(holes_in_page(&holes, page), sprite, page.2, page.3);
+        let scale = self.scale.get();
         {
             let applied = self.mask.borrow();
-            if !mask_changed(applied.as_ref(), next.as_ref())
+            if self.mask_scale.get() == scale
+                && !mask_changed(applied.as_ref(), next.as_ref())
                 && !mask_frame_changed(applied.as_ref(), next.as_ref())
             {
                 return;
@@ -953,6 +958,7 @@ impl Inner {
         // Remembered only once applied, so a failed cut is tried again.
         if self.apply_region(next.as_ref(), image.as_deref()) {
             *self.mask.borrow_mut() = next;
+            self.mask_scale.set(scale);
         }
     }
 
@@ -1259,6 +1265,7 @@ impl NativeWebView {
             can_back: Cell::new(false),
             can_forward: Cell::new(false),
             mask: RefCell::new(None),
+            mask_scale: Cell::new(0.0),
             inspector_side: Cell::new(None),
             inspector: RefCell::new(None),
             inspector_focus: Cell::new(false),
