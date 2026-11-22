@@ -1404,17 +1404,23 @@ quiet-1\tbusybox\t\t\t\t\n";
     }
 
     /// Windows has no `sh` of its own: use Git Bash, as the app does —
-    /// `$SHELL` (the app sets it at startup, CI sets it too) or Git for
-    /// Windows' default install. Missing, the test says so, rather than
-    /// failing as a command that "did not finish in time".
+    /// `$SHELL` (the app sets it at startup, CI sets it too), else the
+    /// system-wide or per-user Git for Windows install the app looks in.
+    /// Missing, the test says so, rather than failing as a command that
+    /// "did not finish in time".
     #[cfg(windows)]
     fn posix_sh() -> String {
-        let default = std::env::var_os("ProgramFiles")
-            .map(|p| std::path::PathBuf::from(p).join(r"Git\bin\bash.exe"));
-        std::env::var_os("SHELL")
-            .map(std::path::PathBuf::from)
-            .or(default)
-            .filter(|p| p.is_file())
+        use std::path::PathBuf;
+        let candidates = [
+            std::env::var_os("SHELL").map(PathBuf::from),
+            std::env::var_os("ProgramFiles").map(|p| PathBuf::from(p).join(r"Git\bin\bash.exe")),
+            std::env::var_os("LOCALAPPDATA")
+                .map(|p| PathBuf::from(p).join(r"Programs\Git\bin\bash.exe")),
+        ];
+        candidates
+            .into_iter()
+            .flatten()
+            .find(|p| p.is_file())
             .expect("this test needs Git Bash: install Git for Windows or set SHELL to its bash.exe")
             .to_string_lossy()
             .into_owned()
