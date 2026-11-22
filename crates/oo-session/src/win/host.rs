@@ -676,7 +676,12 @@ pub fn run(args: HostArgs) -> i32 {
         GetExitCodeProcess(child.process, &mut code);
     }
     // The program is gone: close its console so the reader drains to EOF.
-    if let Some(hpc) = shared.hpc.lock().unwrap_or_else(|e| e.into_inner()).take() {
+    // Take the handle in its own statement: in an `if let` (edition 2021)
+    // the guard would live through the close, which can wait for that
+    // drain, while a resize holding `screen` waits on it and the reader
+    // waits on `screen`.
+    let hpc = shared.hpc.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(hpc) = hpc {
         unsafe { (conpty().close)(hpc) };
     }
     let deadline = Instant::now() + Duration::from_secs(2);
