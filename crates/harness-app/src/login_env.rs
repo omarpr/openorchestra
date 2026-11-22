@@ -86,13 +86,17 @@ fn merge(inherited: Option<&OsStr>, from_shell: &str) -> Option<OsString> {
 /// deadlock would be at startup, before any window exists to explain it.
 fn ask_login_shell(script: &str) -> Option<String> {
     let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty())?;
-    let out_path = std::env::temp_dir().join(format!("openorchestra-path-{}", std::process::id()));
-    let out = std::fs::File::create(&out_path).ok()?;
+    // Its own file per probe (a Re-check can overlap another), removed when
+    // this returns, however it returns.
+    let out = tempfile::Builder::new()
+        .prefix("openorchestra-path-")
+        .tempfile()
+        .ok()?;
 
     let mut child = os_compat::process::command(&shell)
         .args(["-l", "-i", "-c", script])
         .stdin(std::process::Stdio::null())
-        .stdout(out)
+        .stdout(out.reopen().ok()?)
         .stderr(std::process::Stdio::null())
         .spawn()
         .ok()?;
@@ -111,8 +115,7 @@ fn ask_login_shell(script: &str) -> Option<String> {
         }
     };
 
-    let raw = std::fs::read_to_string(&out_path).ok();
-    let _ = std::fs::remove_file(&out_path);
+    let raw = std::fs::read_to_string(out.path()).ok();
     finished
         .then_some(raw)
         .flatten()
@@ -221,6 +224,24 @@ fn append_missing(
 
 #[cfg(test)]
 mod tests {
+
+    /// Two probes at once (a Re-check while another runs) each read their
+    /// own shell's answer: they used to share one file named by the pid.
+    #[cfg(unix)]
+    #[test]
+    fn overlapping_probes_each_get_their_own_answer() {
+        if std::env::var_os("SHELL").is_none() {
+            return;
+        }
+        let probes: Vec<_> = (0..2)
+            .map(|_| std::thread::spawn(|| ask_login_shell(&probe_script())))
+            .collect();
+        for probe in probes {
+            let path = probe.join().unwrap().expect("the login shell reported its PATH");
+            assert!(!path.is_empty());
+        }
+    }
+
     use super::*;
 
     #[test]
