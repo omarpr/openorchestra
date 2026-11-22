@@ -234,14 +234,20 @@ pub fn program() -> String {
 
 #[cfg(windows)]
 pub fn program() -> String {
-    static PROGRAM: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    PROGRAM
-        .get_or_init(|| {
-            windows_backend::resolve()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "oo-session".to_string())
-        })
-        .clone()
+    static PROGRAM: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    let mut cached = PROGRAM.lock().unwrap_or_else(|e| e.into_inner());
+    // Another build's cleanup can delete our copy while none of our
+    // sessions runs it (`stable_copy`): then copy it again.
+    if let Some(program) = cached.as_deref()
+        && std::path::Path::new(program).is_file()
+    {
+        return program.to_string();
+    }
+    let program = windows_backend::resolve()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "oo-session".to_string());
+    *cached = Some(program.clone());
+    program
 }
 
 /// Finding `oo-session.exe`, and running it from a copy.
@@ -304,7 +310,9 @@ mod windows_backend {
             }
         }
         // Older builds' copies: a running one cannot be deleted, and stays
-        // (with its conpty.dll, which its host holds open).
+        // (with its conpty.dll, which its host holds open). One that an
+        // open, idle app of that build still names is copied back by its
+        // `program`.
         if let Ok(entries) = std::fs::read_dir(&root) {
             for entry in entries.flatten() {
                 if entry.file_name() != stamp.as_str() {
