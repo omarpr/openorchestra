@@ -276,7 +276,8 @@ function Invoke-Run {
     Invoke-Build
     $exe = Join-Path $App "target\debug\harness-app.exe"
     $appArgs = if ($Rest) { $Rest } else { @($Root) }
-    & $exe @appArgs
+    # A crash or failed start is a failed `make run`, not a success.
+    Invoke-Native $exe $appArgs
 }
 
 function Invoke-Check {
