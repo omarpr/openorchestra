@@ -204,7 +204,7 @@ function Invoke-Doctor([switch] $Strict) {
 function Invoke-Web {
     if ((Get-NodeMajor) -lt 20) { throw "make web needs node >= 20 (found $(if (Test-Cmd node) { & node --version } else { 'none' }))" }
     $web = Join-Path $Root "web\remote"
-    $pnpm = Get-PnpmCommand
+    $pnpm = @(Get-PnpmCommand)
     if (-not $pnpm) { throw "make web needs pnpm: npm install -g pnpm" }
     foreach ($step in @(@("install", "--frozen-lockfile"), @("build"))) {
         Invoke-Native $pnpm[0] (@($pnpm | Select-Object -Skip 1) + @("-C", $web) + $step)
