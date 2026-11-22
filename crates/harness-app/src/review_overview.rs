@@ -158,7 +158,10 @@ impl ReviewCli {
         let program = self.program();
         let path = agent_runtime::resolve_on_path(program)
             .ok_or_else(|| format!("Could not find `{program}` on PATH. Install it or choose another CLI in Settings → Review."))?;
-        let mut command = Command::new(&path);
+        // Spawned directly, not through a shell: on Windows npm's extensionless
+        // sh wrapper is "not a valid Win32 application", its .cmd/.exe is.
+        let path = os_compat::Os::CURRENT.direct_launcher(&path);
+        let mut command = os_compat::process::command(&path);
         command.current_dir(cwd);
         match self {
             Self::Codex => {
@@ -217,7 +220,7 @@ fn codex_mcp_servers(program: &Path, cwd: &Path, run: &RunControl) -> Result<Vec
 
     // An empty mcp_servers table merges with the user's existing servers.
     // Disable each configured server without replacing the user's model/auth config.
-    let mut command = Command::new(program);
+    let mut command = os_compat::process::command(program);
     command
         .current_dir(cwd)
         .args(["--disable", "plugins", "mcp", "list", "--json"]);
@@ -849,7 +852,7 @@ fn tracked_changes(bytes: &[u8]) -> Vec<ChangedFile<'_>> {
 }
 
 fn git_command(cwd: &Path) -> Command {
-    let mut command = Command::new("git");
+    let mut command = os_compat::process::command("git");
     command.current_dir(cwd).args([
         "--no-pager",
         "--no-optional-locks",
