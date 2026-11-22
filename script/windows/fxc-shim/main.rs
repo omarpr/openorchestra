@@ -11,6 +11,7 @@
 //! runtime and its blob interface is called through its vtable.
 
 use std::ffi::{c_void, CString};
+use std::ptr::NonNull;
 use std::process::ExitCode;
 
 type Hresult = i32;
@@ -24,8 +25,10 @@ type D3DCompile = unsafe extern "system" fn(
     target: *const u8,
     flags1: u32,
     flags2: u32,
-    code: *mut *mut Blob,
-    errors: *mut *mut Blob,
+    // `Option<NonNull<_>>` is ABI-identical to a nullable pointer, so a
+    // blob D3DCompile leaves unset arrives as `None`, never as null.
+    code: *mut Option<NonNull<Blob>>,
+    errors: *mut Option<NonNull<Blob>>,
 ) -> Hresult;
 
 /// `ID3DBlob`: IUnknown's three methods, then GetBufferPointer/Size.
@@ -43,11 +46,13 @@ struct BlobVtbl {
 }
 
 impl Blob {
-    unsafe fn bytes<'a>(this: *mut Blob) -> &'a [u8] {
+    unsafe fn bytes<'a>(this: NonNull<Blob>) -> &'a [u8] {
+        let this = this.as_ptr();
         let v = &*(*this).vtbl;
         std::slice::from_raw_parts((v.pointer)(this), (v.size)(this))
     }
-    unsafe fn release(this: *mut Blob) {
+    unsafe fn release(this: NonNull<Blob>) {
+        let this = this.as_ptr();
         ((*(*this).vtbl).release)(this);
     }
 }
@@ -127,7 +132,7 @@ fn compile(args: &Args) -> Result<Vec<u8>, String> {
     let c = |s: &str| CString::new(s).map_err(|_| format!("NUL in {s:?}"));
     let (name, entry, target) = (c(&args.file)?, c(&args.entry)?, c(&args.target)?);
     let flags = if args.optimize { D3DCOMPILE_OPTIMIZATION_LEVEL3 } else { 0 };
-    let (mut code, mut errors) = (std::ptr::null_mut(), std::ptr::null_mut());
+    let (mut code, mut errors) = (None, None);
     let hr = unsafe {
         compile(
             source.as_ptr().cast(),
@@ -143,14 +148,15 @@ fn compile(args: &Args) -> Result<Vec<u8>, String> {
             &mut errors,
         )
     };
-    let messages = (!errors.is_null()).then(|| unsafe {
+    let messages = errors.map(|errors| unsafe {
         let text = String::from_utf8_lossy(Blob::bytes(errors)).into_owned();
         Blob::release(errors);
         text
     });
-    if hr < 0 || code.is_null() {
-        return Err(messages.unwrap_or_else(|| format!("D3DCompile failed: 0x{hr:08X}")));
-    }
+    let code = match code {
+        Some(code) if hr >= 0 => code,
+        _ => return Err(messages.unwrap_or_else(|| format!("D3DCompile failed: 0x{hr:08X}"))),
+    };
     if let Some(warnings) = messages.filter(|m| !m.trim().is_empty()) {
         eprint!("{warnings}");
     }
