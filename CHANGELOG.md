@@ -14,8 +14,8 @@ Unreleased is empty.
 
 ### Added
 
-- **Windows** (experimental): openOrchestra runs natively on Windows 10 and
-  11. `.\make setup`, `.\make run` and `.\make install` (or `make.cmd`) build
+- **Windows** (beta): openOrchestra runs natively on Windows 10 and 11,
+  built from source. `.\make setup`, `.\make run` and `.\make install` (or `make.cmd`) build
   it with the GNU toolchain, without Visual Studio or admin rights, and
   `.\make dist` and `.\make uninstall` package and remove it. Agents and
   shells run in the bundled `oo-session.exe`, so they keep running after you
