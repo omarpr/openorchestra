@@ -351,6 +351,22 @@ struct Inner {
     inspector_generation: Cell<u64>,
 }
 
+/// Whether a new-window request came from the page's main frame (as
+/// WKWebView's `sourceFrame` tells on macOS). Only a click there may hand a
+/// link to another app; a frame WebView2 doesn't name (an older runtime)
+/// counts as a subframe. http(s) opens a tab either way.
+fn new_window_from_main_frame(args: &ICoreWebView2NewWindowRequestedEventArgs) -> bool {
+    unsafe {
+        args.cast::<ICoreWebView2NewWindowRequestedEventArgs3>()
+            .and_then(|a| a.OriginalSourceFrameInfo())
+            .and_then(|f| f.cast::<ICoreWebView2FrameInfo2>())
+            .is_ok_and(|f| {
+                let mut kind = COREWEBVIEW2_FRAME_KIND::default();
+                f.FrameKind(&mut kind).is_ok() && kind == COREWEBVIEW2_FRAME_KIND_MAIN_FRAME
+            })
+    }
+}
+
 /// The debugging server's port, from `DevToolsActivePort` in the browser's
 /// data folder (first line).
 fn debug_port() -> Option<u16> {
@@ -766,7 +782,10 @@ impl Inner {
                         log::info!("browser: ignoring a new window the user didn't click for");
                         return Ok(());
                     }
-                    let origin = NavOrigin { user_initiated: true, from_main_frame: true };
+                    let origin = NavOrigin {
+                        user_initiated: true,
+                        from_main_frame: new_window_from_main_frame(&args),
+                    };
                     match decide_new_window(&url, origin) {
                         NavDecision::Load => (me.events.on_new_window)(url),
                         decision => {
