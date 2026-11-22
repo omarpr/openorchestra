@@ -12,6 +12,8 @@ Unreleased is empty.
 
 ## Unreleased
 
+## 1.5.0 - 2026-11-22
+
 ### Added
 
 - **Windows** (beta): openOrchestra runs natively on Windows 10 and 11,

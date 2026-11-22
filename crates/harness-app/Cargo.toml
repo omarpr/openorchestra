@@ -11,7 +11,7 @@
 
 [package]
 name = "harness-app"
-version = "1.4.0"
+version = "1.5.0"
 edition = "2024"
 publish = false
 # `src/bin/oo-session.rs` is a second binary (Windows' tmux stand-in);
