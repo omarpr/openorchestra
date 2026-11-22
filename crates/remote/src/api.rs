@@ -919,7 +919,6 @@ async fn send_screenshot_reply(
 mod tests {
     use super::*;
     use axum::body::Body;
-    use futures_util::StreamExt;
     use std::path::Path as FsPath;
     use tower::ServiceExt;
 
@@ -1000,6 +999,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let no_tmux = crate::Tmux {
             socket: Some(crate::store::new_id("oo-unstarted-test-").unwrap()),
+            ..Default::default()
         };
         let (shared, id, writer, reader) = paired_fixture(dir.path(), no_tmux);
         let app = router(Arc::new(shared));
@@ -1021,6 +1021,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let no_tmux = crate::Tmux {
             socket: Some(crate::store::new_id("oo-unstarted-test-").unwrap()),
+            ..Default::default()
         };
         let (shared, id, writer, _) = paired_fixture(dir.path(), no_tmux);
         let app = router(Arc::new(shared));
@@ -1167,6 +1168,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let no_tmux = crate::Tmux {
             socket: Some(crate::store::new_id("oo-unstarted-test-").unwrap()),
+            ..Default::default()
         };
         let (mut shared, id, writer, _) = paired_fixture(dir.path(), no_tmux);
         shared.screenshot_read_timeout = Duration::from_millis(20);
@@ -1198,7 +1200,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires tmux"]
     async fn screenshot_upload_delivers_image_path_and_caption_to_codex() {
-        use std::os::unix::fs::PermissionsExt;
+        use os_compat::fs::PermissionsExt;
 
         struct PrivateTmux(crate::Tmux);
         impl Drop for PrivateTmux {
@@ -1212,6 +1214,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tmux = PrivateTmux(crate::Tmux {
             socket: Some(crate::store::new_id("oo-screenshot-test-").unwrap()),
+            ..Default::default()
         });
         let capture = dir.path().join("input");
         let quoted = capture.to_str().unwrap().replace('\'', "'\\''");
@@ -1265,7 +1268,7 @@ mod tests {
     }
 
     fn voice_fixture(probe_status: u8) -> (tempfile::TempDir, Router, String, String) {
-        use std::os::unix::fs::PermissionsExt;
+        use os_compat::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
         let (mut shared, _, writer, reader) = paired_fixture(dir.path(), crate::Tmux::default());
@@ -1318,6 +1321,7 @@ mod tests {
         assert_eq!(app.oneshot(request).await.unwrap().status(), 503);
     }
 
+    #[cfg(unix)] // the stand-in helper is a `#!/bin/sh` script
     #[tokio::test]
     async fn voice_requires_write_permission_and_returns_an_uncached_draft() {
         const WAV: &[u8] = b"RIFF\x26\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x80\x3e\0\0\0\x7d\0\0\x02\0\x10\0data\x02\0\0\0\0\0";
@@ -1359,9 +1363,11 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // the stand-in helper is a `#!/bin/sh` script
     #[tokio::test]
     async fn voice_rechecks_write_access_before_starting_helper() {
-        use std::os::unix::fs::PermissionsExt;
+        use futures_util::StreamExt;
+        use os_compat::fs::PermissionsExt;
 
         const WAV: &[u8] = b"RIFF\x26\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x80\x3e\0\0\0\x7d\0\0\x02\0\x10\0data\x02\0\0\0\0\0";
         let dir = tempfile::tempdir().unwrap();

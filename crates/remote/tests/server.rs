@@ -52,6 +52,7 @@ impl TmuxServer {
     fn tmux(&self) -> Tmux {
         Tmux {
             socket: Some(self.socket.clone()),
+            ..Default::default()
         }
     }
 
@@ -94,9 +95,12 @@ impl Drop for TmuxServer {
             .arg(&self.socket)
             .arg("kill-server")
             .output();
-        let dir = std::env::var("TMUX_TMPDIR").unwrap_or_else(|_| "/tmp".into());
-        let uid = unsafe { libc::getuid() };
-        let _ = std::fs::remove_file(format!("{dir}/tmux-{uid}/{}", self.socket));
+        #[cfg(unix)]
+        {
+            let dir = std::env::var("TMUX_TMPDIR").unwrap_or_else(|_| "/tmp".into());
+            let uid = unsafe { libc::getuid() };
+            let _ = std::fs::remove_file(format!("{dir}/tmux-{uid}/{}", self.socket));
+        }
     }
 }
 
@@ -184,6 +188,7 @@ impl Harness {
     fn unused_tmux() -> Tmux {
         Tmux {
             socket: Some(unique_socket()),
+            ..Default::default()
         }
     }
 
@@ -480,6 +485,11 @@ async fn unknown_id_404_and_unmarked_id_404() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[cfg_attr(
+    windows,
+    ignore = "the phone server lists sessions with tmux, absent on Windows: 503, not 409 \
+              (docs/windows-port-test-checklist.md, item 1)"
+)]
 async fn send_to_stopped_is_409_and_oversize_413() {
     let h = Harness::start(Harness::unused_tmux());
     let token = h.device(false);

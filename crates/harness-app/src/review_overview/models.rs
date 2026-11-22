@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, atomic::AtomicBool};
 use std::time::{Duration, Instant};
 
@@ -63,7 +62,9 @@ pub(crate) fn discover(cli: ReviewCli, cwd: &Path) -> Result<Vec<ReviewModel>, S
     let program = cli.program();
     let executable = agent_runtime::resolve_on_path(program)
         .ok_or_else(|| format!("Could not find `{program}` on PATH."))?;
-    let mut command = Command::new(executable);
+    // Spawned directly: npm's extensionless sh wrapper won't run on Windows.
+    let executable = os_compat::Os::CURRENT.direct_launcher(&executable);
+    let mut command = os_compat::process::command(executable);
     command.current_dir(cwd);
     let input = match cli {
         ReviewCli::Codex => {

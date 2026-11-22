@@ -1216,7 +1216,11 @@ impl HarnessWorkspace {
             state_dir: self.remote.state_dir.clone(),
             port,
             setup_port: SETUP_PORT,
-            tmux: Tmux::default(),
+            // The tabs' own session program: tmux, or oo-session on Windows.
+            tmux: Tmux {
+                program: Some(crate::tmux::program().into()),
+                ..Tmux::default()
+            },
             bind_ip: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             hosts_override: None,
         };
@@ -1467,6 +1471,7 @@ mod tests {
             // Private socket name: never the user's default tmux server.
             tmux: Tmux {
                 socket: Some(format!("oo-remote-test-{}", std::process::id())),
+                ..Default::default()
             },
             bind_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
             hosts_override: Some((

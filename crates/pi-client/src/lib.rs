@@ -35,7 +35,7 @@ pub use settle::{AgentState, SettleTracker};
 
 use std::io::{BufReader, Write};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
@@ -59,7 +59,7 @@ impl PiRpc {
         worktree_root: impl AsRef<Path>,
         extra_args: &[&str],
     ) -> std::io::Result<PiRpc> {
-        let mut command = Command::new(program);
+        let mut command = os_compat::process::command(program);
         command
             .arg("--mode")
             .arg("rpc")
@@ -134,6 +134,9 @@ impl PiRpc {
 
     /// Terminate the sidecar.
     pub fn shutdown(&mut self) -> std::io::Result<()> {
+        // With the tree: on Windows the child may be `pi.cmd`, and its `cmd`
+        // would leave pi itself running.
+        os_compat::process::kill_tree(self.child.id());
         self.child.kill()?;
         self.child.wait().map(|_| ())
     }
@@ -143,6 +146,7 @@ impl Drop for PiRpc {
     fn drop(&mut self) {
         // A leaked pi process per closed worktree would be the M5 pane-cache
         // problem all over again, so never rely on the caller to do this.
+        os_compat::process::kill_tree(self.child.id());
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

@@ -193,6 +193,9 @@ impl HarnessWorkspace {
             // missing something that blocks, or if it has never been shown.
             preflight_open: false,
             preflight: Vec::new(),
+            preflight_copied: None,
+            preflight_agents: Vec::new(),
+            preflight_tab: PreflightTab::Requirements,
             conductor: Default::default(),
             conductor_view: None,
             conductor_frames: None,
@@ -295,9 +298,11 @@ impl HarnessWorkspace {
         // gap alone, because a screen that appears every morning because
         // rust-analyzer is absent is a screen nobody reads.
         cx.spawn(async move |view, cx| {
-            let checks = cx
+            let crate::preflight::Probe { checks, agents } = cx
                 .background_spawn(async move {
-                    crate::preflight::probe(crate::preflight::version_on_path)
+                    let mut probe = crate::preflight::probe_all(crate::preflight::version_on_path);
+                    crate::preflight::diagnose(&mut probe.agents);
+                    probe
                 })
                 .await;
             view.update(cx, |ws, cx| {
@@ -312,6 +317,7 @@ impl HarnessWorkspace {
                     ws.prefs.seen_preflight
                 );
                 ws.preflight = checks;
+                ws.preflight_agents = agents;
                 if blocked || !ws.prefs.seen_preflight {
                     ws.preflight_open = true;
                 }

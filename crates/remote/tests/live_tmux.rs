@@ -31,6 +31,7 @@ impl Server {
     fn tmux(&self) -> Tmux {
         Tmux {
             socket: Some(self.socket.clone()),
+            ..Default::default()
         }
     }
 
@@ -97,9 +98,12 @@ impl Drop for Server {
             .arg(&self.socket)
             .arg("kill-server")
             .output();
-        let dir = std::env::var("TMUX_TMPDIR").unwrap_or_else(|_| "/tmp".into());
-        let uid = unsafe { libc::getuid() };
-        let _ = std::fs::remove_file(format!("{dir}/tmux-{uid}/{}", self.socket));
+        #[cfg(unix)]
+        {
+            let dir = std::env::var("TMUX_TMPDIR").unwrap_or_else(|_| "/tmp".into());
+            let uid = unsafe { libc::getuid() };
+            let _ = std::fs::remove_file(format!("{dir}/tmux-{uid}/{}", self.socket));
+        }
     }
 }
 

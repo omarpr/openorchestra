@@ -85,7 +85,12 @@ impl ChatPane {
         // The binary name comes from pi's one definition in agent-runtime;
         // `--mode rpc` is pi-client's own contract, not a default-args thing.
         let (pi_bin, _) = agent_runtime::default_invocation(&AgentKind::Pi);
-        match PiRpc::spawn(pi_bin, &self.worktree_root, &[]) {
+        // Spawned without a shell: on Windows npm's `pi` is an sh wrapper and
+        // a bare name finds only `pi.exe`, so start the `.cmd` beside it.
+        let program = agent_runtime::resolve_on_path(pi_bin)
+            .map(|path| os_compat::Os::CURRENT.direct_launcher(&path).into_os_string())
+            .unwrap_or_else(|| pi_bin.into());
+        match PiRpc::spawn(program, &self.worktree_root, &[]) {
             Ok(rpc) => {
                 let records = rpc.subscribe();
                 self.rpc = Some(rpc);

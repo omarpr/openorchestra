@@ -52,7 +52,7 @@ pub fn update<R>(state_dir: &Path, f: impl FnOnce(&mut SecurityFile) -> R) -> io
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    use os_compat::fs::PermissionsExt;
 
     #[test]
     fn round_trips_privately() {

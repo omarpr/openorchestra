@@ -495,7 +495,10 @@ mod collapsed_prefs_tests {
         use crate::workspace::ui::sidebar::SidebarSection::*;
         assert_eq!(
             [PortsTask.label(), PortsOther.label()],
-            ["THIS TASK", "OTHER ON THIS MAC"]
+            [
+                "THIS TASK",
+                crate::platform::CURRENT.ports_elsewhere
+            ]
         );
         assert!(
             PortsOther.collapsed_by_default(),

@@ -210,6 +210,8 @@ fn multiple_roots_are_keyed_correctly() {
     assert_eq!(event.worktree_root, b.path());
 }
 
+// Windows symlinks need admin or Developer Mode, so the link is Unix-only.
+#[cfg(unix)]
 #[test]
 fn events_arrive_when_the_root_is_reached_through_a_symlink() {
     // Regression: the macOS FSEvents backend reports *canonicalized* paths, so
@@ -221,7 +223,6 @@ fn events_arrive_when_the_root_is_reached_through_a_symlink() {
     let real = tempfile::tempdir().unwrap();
     let link_parent = tempfile::tempdir().unwrap();
     let link = link_parent.path().join("worktree-link");
-    #[cfg(unix)]
     std::os::unix::fs::symlink(real.path(), &link).unwrap();
 
     let (mut watcher, rx) = StatusWatcher::new().unwrap();

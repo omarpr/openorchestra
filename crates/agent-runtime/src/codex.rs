@@ -21,7 +21,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use serde_json::{json, Value};
 
@@ -92,7 +92,15 @@ impl CodexRuntime {
     /// formatting quotes and escapes the path, so a `$HOME` with spaces stays
     /// one argument.
     fn hook_command(shim: &Path) -> String {
-        format!("node {:?}", shim.display().to_string())
+        // Windows: Codex runs hook commands through cmd.exe (and a user's
+        // own setup may use PowerShell or Git Bash); `node "C:/…"` reads as
+        // one path in all three, where the Debug form's `C:\\…` relies on
+        // each shell's escaping.
+        use os_compat::Os;
+        match Os::CURRENT {
+            Os::Windows => crate::node_command(shim),
+            Os::Mac | Os::Linux => format!("node {:?}", shim.display().to_string()),
+        }
     }
 
     fn install_hook(&self, shim: &Path) -> io::Result<()> {
@@ -128,7 +136,7 @@ impl CodexRuntime {
         // line-append bug left inside nested tables.
         if doc
             .get("notify")
-            .map(|v| v.to_string().contains(&marker))
+            .map(|v| crate::mentions(&v.to_string(), &marker))
             .unwrap_or(false)
         {
             doc.remove("notify");
@@ -155,7 +163,7 @@ fn remove_stray_notify(table: &mut toml_edit::Table, marker: &str) -> bool {
         if let Some(child) = table.get_mut(&key).and_then(|i| i.as_table_mut()) {
             if child
                 .get("notify")
-                .map(|v| v.to_string().contains(marker))
+                .map(|v| crate::mentions(&v.to_string(), marker))
                 .unwrap_or(false)
             {
                 child.remove("notify");
@@ -205,7 +213,7 @@ fn ensure_hook(root: &mut Value, event: &str, marker: &str, command: &str) {
         handlers.retain_mut(|handler| {
             let belongs_to_us = handler["command"]
                 .as_str()
-                .is_some_and(|cmd| cmd.contains(marker));
+                .is_some_and(|cmd| crate::mentions_shim(cmd, marker));
             if !belongs_to_us {
                 return true;
             }
@@ -221,6 +229,27 @@ fn ensure_hook(root: &mut Value, event: &str, marker: &str, command: &str) {
     if !found {
         arr.push(json!({ "hooks": [ { "type": "command", "command": command } ] }));
     }
+}
+
+/// What can run `program` directly for a probe. npm installs Codex on
+/// Windows as an extensionless sh script (what Git Bash launches) beside
+/// `codex.cmd`; Windows can't execute the script itself, so the probe uses
+/// the launcher next to it. Elsewhere, and for anything else, `program`.
+/// The Codex CLI itself, not an override: `codex`, or on Windows the
+/// native `codex.exe` or npm's `codex.cmd` (any case).
+fn is_codex_program(program: &Path) -> bool {
+    if program.file_name() == Some(PROGRAM.as_ref()) {
+        return true;
+    }
+    let named = |s: Option<&std::ffi::OsStr>, want: &[&str]| {
+        s.and_then(|s| s.to_str())
+            .is_some_and(|s| want.iter().any(|w| s.eq_ignore_ascii_case(w)))
+    };
+    named(program.file_stem(), &[PROGRAM]) && named(program.extension(), &["exe", "cmd"])
+}
+
+fn probe_program(program: &Path) -> PathBuf {
+    os_compat::Os::CURRENT.direct_launcher(program)
 }
 
 impl AgentRuntime for CodexRuntime {
@@ -272,9 +301,9 @@ impl AgentRuntime for CodexRuntime {
         // Keep the server local to the CLI so both reach the hooks. Older CLI
         // releases reject the flag. Shell-based command overrides own their
         // arguments and are passed through by the caller.
-        if command.program.file_name() == Some(PROGRAM.as_ref())
+        if is_codex_program(&command.program)
             && !command.args.iter().any(|arg| arg == NO_DAEMON)
-            && Command::new(&command.program)
+            && os_compat::process::command(probe_program(&command.program))
                 .args([NO_DAEMON, "--version"])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -285,5 +314,29 @@ impl AgentRuntime for CodexRuntime {
             command.args.push(NO_DAEMON.into());
         }
         command
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_codex_program;
+    use std::path::Path;
+
+    #[test]
+    fn the_codex_cli_is_recognised_in_every_form_it_installs_as() {
+        for program in [
+            "/usr/local/bin/codex",
+            // Forward slashes, which Windows also separates on, so the
+            // test means the same on every OS.
+            "C:/Users/me/AppData/Roaming/npm/codex",
+            "C:/Users/me/AppData/Roaming/npm/codex.cmd",
+            "C:/Tools/codex.exe",
+            "C:/Tools/CODEX.EXE",
+        ] {
+            assert!(is_codex_program(Path::new(program)), "{program}");
+        }
+        for program in ["/usr/bin/codex-wrapper", "/bin/sh", "C:/Tools/codex.ps1", "codexx.exe"] {
+            assert!(!is_codex_program(Path::new(program)), "{program}");
+        }
     }
 }

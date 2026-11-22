@@ -12,6 +12,48 @@ Unreleased is empty.
 
 ## Unreleased
 
+### Added
+
+- **Windows** (beta): openOrchestra runs natively on Windows 10 and 11,
+  built from source. `.\make setup`, `.\make run` and `.\make install` (or `make.cmd`) build
+  it with the GNU toolchain, without Visual Studio or admin rights, and
+  `.\make dist` and `.\make uninstall` package and remove it. Agents and
+  shells run in the bundled `oo-session.exe`, so they keep running after you
+  quit, their tabs reattach when you reopen the app, and the phone remote
+  attaches to them. Browser tabs use Edge WebView2, notifications are
+  Windows toasts, and ⌘ shortcuts are Alt (Ctrl in the editor), shown with
+  Windows labels and remappable in **Settings → Shortcuts**.
+- **First-time Checks** has an **Agents** tab: every agent CLI the app
+  drives, with its version or its vendor's installer. Each fix command has
+  **Copy** and **Run in shell**, which types it into a shell tab in the
+  selected worktree. An agent that is installed but won't start says why
+  (and asks for a newer Node.js when that is the cause) instead of offering
+  to install it again.
+
+### Changed
+
+- The Claude Code and Grok status hooks report only sessions the app
+  launched, so an agent you start yourself in the same worktree no longer
+  drives the task's status.
+
+### Fixed
+
+- First-time Checks shows the version of a tool that prints it on stderr
+  (pi).
+- The app menu's tooltip no longer covers About, and **Add a device** fits
+  smaller windows, so Done stays visible.
+- A task's setup says so when it couldn't be typed into its shell tab,
+  instead of reporting "setup finished", and waits at most 4 seconds for
+  that shell to appear, however slowly tmux answers.
+- An agent tab's status and notifications come only from that agent: a
+  test suite or another agent CLI run inside a Codex tab no longer has it
+  announced as "pi finished" or shown as Grok.
+
+### Security
+
+- `url` is updated to 2.5.9 (RUSTSEC-2026-0592: a stack overflow in
+  `Url::origin()` on nested `blob:` URLs).
+
 ## 1.4.0 - 2026-11-20
 
 ### Added

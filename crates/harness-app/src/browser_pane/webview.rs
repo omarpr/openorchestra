@@ -334,6 +334,12 @@
 //! moves gpui's focus to the tab the same way. Plain typing goes straight
 //! to it as first responder.
 
+// Most helpers below (key routing, inspector docking, gesture and download
+// rules, sprite masks) serve the `WKWebView`; WebView2 does that work itself
+// and shares only the navigation rules. They stay compiled, and tested, on
+// every platform. `webview_win.rs` turns the lint back on for itself.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
@@ -1287,6 +1293,109 @@ pub(crate) use mac::{
     NativeWebView, inspector_available, set_punch_through, set_tooltip_hole,
     window_is_minimized_or_hidden,
 };
+
+#[cfg(windows)]
+pub(crate) use win::{
+    NativeWebView, inspector_available, set_punch_through, set_tooltip_hole,
+    window_is_minimized_or_hidden,
+};
+
+/// Edge WebView2 in a child window of gpui's (see the file's docs).
+#[cfg(windows)]
+#[path = "webview_win.rs"]
+mod win;
+
+#[cfg(not(any(target_os = "macos", windows)))]
+pub(crate) use other::{
+    NativeWebView, inspector_available, set_punch_through, set_tooltip_hole,
+    window_is_minimized_or_hidden,
+};
+
+/// No native web view on Linux yet. `NativeWebView::new` always fails, so
+/// the pane shows its load-failure state; the type is uninhabited, so none
+/// of its methods can ever run.
+#[cfg(not(any(target_os = "macos", windows)))]
+mod other {
+    use super::{Hole, InspectorMove, InspectorPlace, NativeEvents, Sprite};
+    use gpui::{Bounds, Pixels, Window};
+
+    pub(crate) fn inspector_available() -> bool {
+        false
+    }
+    pub(crate) fn set_punch_through(_: &Window, _: Vec<Hole>, _: Option<Sprite>) {}
+    pub(crate) fn set_tooltip_hole(_: &Window, _: Option<Hole>) {}
+    pub(crate) fn window_is_minimized_or_hidden(_: &Window) -> bool {
+        false
+    }
+
+    pub(crate) struct NativeWebView(std::convert::Infallible);
+
+    impl NativeWebView {
+        pub(crate) fn new(_: &Window, _: &str, _: NativeEvents) -> anyhow::Result<Self> {
+            anyhow::bail!("browser tabs need macOS WebKit; not available on this platform yet")
+        }
+        pub(crate) fn set_frame(&self, _: Bounds<Pixels>, _: &Window) {
+            match self.0 {}
+        }
+        pub(crate) fn set_visible(&self, _: bool) {
+            match self.0 {}
+        }
+        pub(crate) fn hide(&self) -> bool {
+            match self.0 {}
+        }
+        pub(crate) fn set_pane_focused(&self, _: bool) {
+            match self.0 {}
+        }
+        pub(crate) fn release_focus(&self) -> bool {
+            match self.0 {}
+        }
+        pub(crate) fn navigation(&self) -> u64 {
+            match self.0 {}
+        }
+        pub(crate) fn load(&self, _: &str) {
+            match self.0 {}
+        }
+        pub(crate) fn back(&self) {
+            match self.0 {}
+        }
+        pub(crate) fn forward(&self) {
+            match self.0 {}
+        }
+        pub(crate) fn reload(&self) {
+            match self.0 {}
+        }
+        pub(crate) fn stop(&self) {
+            match self.0 {}
+        }
+        pub(crate) fn focus(&self) {
+            match self.0 {}
+        }
+        pub(crate) fn can_go_back(&self) -> bool {
+            match self.0 {}
+        }
+        pub(crate) fn can_go_forward(&self) -> bool {
+            match self.0 {}
+        }
+        pub(crate) fn inspector_visible(&self) -> bool {
+            match self.0 {}
+        }
+        pub(crate) fn toggle_inspector(&self) -> bool {
+            match self.0 {}
+        }
+        pub(crate) fn inspector_place(&self) -> InspectorPlace {
+            match self.0 {}
+        }
+        pub(crate) fn inspector_has_focus(&self) -> bool {
+            match self.0 {}
+        }
+        pub(crate) fn move_inspector(&self, _: InspectorMove) {
+            match self.0 {}
+        }
+        pub(crate) fn recover_focus(&self) {
+            match self.0 {}
+        }
+    }
+}
 
 #[cfg(target_os = "macos")]
 mod mac {

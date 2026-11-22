@@ -6,7 +6,6 @@
 //! doesn't grow an HTTP client (zed's stays blocked, see workspace_host.rs).
 
 use std::path::Path;
-use std::process::Command;
 
 use gpui::{App, ClipboardItem, PromptLevel, Window};
 
@@ -76,7 +75,7 @@ pub fn parse_latest(json: &[u8]) -> Result<Release, String> {
 
 /// Ask GitHub for the latest release. Blocking: run it off the main thread.
 pub fn fetch_latest() -> Result<Release, String> {
-    let out = Command::new("/usr/bin/curl")
+    let out = os_compat::process::command(crate::platform::system_curl())
         .args([
             // Must come first: ignore ~/.curlrc, which could add headers to
             // stdout (`include`) and break parsing, or change the request.
@@ -215,9 +214,10 @@ pub fn show_about(window: &mut Window, cx: &mut App) {
     if show_native_about() {
         return;
     }
+    let kind = crate::platform::CURRENT.about_kind;
     let detail = format!(
         "Version {VERSION}\n\n\
-         A native macOS app to run coding agents in parallel git worktrees, with Zed built in.\n\n\
+         {kind} to run coding agents in parallel git worktrees, with Zed built in.\n\n\
          Free software under the GPL-3.0 license."
     );
     let answer = window.prompt(
@@ -259,9 +259,7 @@ fn show_result(result: Result<Release, String>, brew: bool, window: &mut Window,
                     "You have {VERSION}. You installed openOrchestra with Homebrew, so upgrade with:\n\n{BREW_UPGRADE}"
                 )
             } else {
-                format!(
-                    "You have {VERSION}. Download the new version from GitHub and replace the app in Applications."
-                )
+                format!("You have {VERSION}. {}", crate::platform::CURRENT.upgrade_hint)
             };
             let buttons: &[&str] = if brew {
                 &["Copy Command", "Release Notes", "Later"]
@@ -388,6 +386,14 @@ mod tests {
         };
         assert!(link.is_some(), "the repository link is clickable");
         assert_eq!(range.location + range.length, text.length());
+    }
+
+    /// The check runs the OS's own curl; a path that isn't there fails as
+    /// "Could not run curl", which is how this broke on Windows.
+    #[test]
+    fn the_system_curl_exists() {
+        let curl = crate::platform::system_curl();
+        assert!(curl.is_absolute() && curl.is_file(), "{}", curl.display());
     }
 
     #[test]

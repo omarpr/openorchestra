@@ -4,6 +4,7 @@
 
 mod center;
 mod chrome;
+pub(crate) use chrome::app_menu_open;
 pub(crate) mod conductor;
 mod dialogs;
 mod diff;

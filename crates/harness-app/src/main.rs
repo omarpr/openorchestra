@@ -14,6 +14,12 @@
 // linker message. `-Wl,-no_compact_unwind` is NOT a fix: without the compact
 // index, panics abort ("failed to initiate panic, error 5").
 #![cfg_attr(debug_assertions, allow(linker_messages))]
+// Windows release builds are windowed programs: as console programs they open
+// a console window beside the app (Windows Terminal, when it is the default
+// terminal) for as long as the app runs. Every process the app starts then
+// needs `os_compat::process::no_window`, or it opens a window of its own.
+// Debug builds stay console programs so `make run` shows the log.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app_assets;
 mod browser_pane;
@@ -31,6 +37,7 @@ mod markdown_preview;
 mod markdown_preview_button;
 mod notifier;
 mod panes_state;
+mod platform;
 mod ports;
 mod preflight;
 mod resource_monitor;
@@ -126,10 +133,10 @@ pub fn probe_paint() -> bool {
 fn main() {
     env_logger::init();
 
-    // Before anything reads PATH — the requirements probe, the agent-CLI
-    // lookup, tmux, gh — and before any thread exists to race the write. A
-    // Finder-launched bundle otherwise sees only launchd's four directories.
-    login_env::hydrate_path();
+    // Before anything reads PATH, HOME or SHELL — the requirements probe, the
+    // agent-CLI lookup, tmux, gh — and before any thread exists to race the
+    // write.
+    platform::prepare_environment();
 
     // Launch hint: an explicit arg/env, else the cwd (unless it's "/", which is
     // what Finder-launched .app bundles get), else the user's home. If the hint
@@ -138,6 +145,9 @@ fn main() {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let worktree_root = std::env::args()
         .nth(1)
+        // Windows starts the app this way for a click on an old toast
+        // (`notifier_win.rs`); it is not a path.
+        .filter(|a| a != "-ToastActivated")
         .map(PathBuf::from)
         .or_else(|| {
             std::env::var("HARNESS_WORKTREE_ROOT")
@@ -230,7 +240,14 @@ fn main() {
             };
             let theme_name = harness_zed_theme::theme_name(&hx);
             harness_zed_theme::install(&hx, cx);
-            apply_zed_settings(cx, "Zed Plex Sans", "Menlo", 13.0, theme_name, true);
+            apply_zed_settings(
+                cx,
+                "Zed Plex Sans",
+                platform::CURRENT.mono_font,
+                13.0,
+                theme_name,
+                true,
+            );
 
             // Editor crate wiring (Spike 3). Safe out-of-tree: registers defensive
             // globals + workspace item hooks; Editor::for_buffer works without it,
@@ -425,6 +442,18 @@ pub fn install_keymap(overrides: &std::collections::BTreeMap<String, String>, cx
         KeyBinding::new("ctrl-q", Quit, None),
         KeyBinding::new("escape", menu::Cancel, Some("HarnessModal")),
     ]);
+    // On macOS ⌘C/⌘V reach a terminal through the menu bar's Edit items.
+    // Without ⌘ (Windows, Linux) there is no menu bar to do it, so bind the
+    // chords Windows Terminal and zed's own keymap use there.
+    if !crate::platform::CURRENT.command_key {
+        cx.bind_keys([
+            KeyBinding::new("ctrl-shift-c", terminal::Copy, Some("Terminal")),
+            KeyBinding::new("ctrl-insert", terminal::Copy, Some("Terminal")),
+            KeyBinding::new("ctrl-shift-v", terminal::Paste, Some("Terminal")),
+            KeyBinding::new("shift-insert", terminal::Paste, Some("Terminal")),
+            KeyBinding::new("ctrl-v", terminal::Paste, Some("Terminal")),
+        ]);
+    }
     // Match at the editor node too, so form navigation wins over editor indentation.
     for context in ["HarnessModal", "HarnessModal > Editor"] {
         cx.bind_keys([

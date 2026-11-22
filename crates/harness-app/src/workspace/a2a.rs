@@ -310,7 +310,7 @@ fn format_a2a_inject(msg: &InboxMessage, a2a_dir: Option<&std::path::Path>) -> S
         .map(|d| {
             format!(
                 " — when done: {} {} \"summary\"",
-                d.join("complete.sh").display(),
+                shell_path(&d.join("complete.sh")),
                 msg.a2a_task_id
             )
         })
@@ -319,6 +319,11 @@ fn format_a2a_inject(msg: &InboxMessage, a2a_dir: Option<&std::path::Path>) -> S
         "[openOrchestra A2A] task_id={} — {}{}",
         msg.a2a_task_id, text, complete_hint
     )
+}
+
+/// A path as the agent's shell takes it (`Os::shell_path`).
+fn shell_path(path: &std::path::Path) -> String {
+    crate::platform::OS.shell_path(path)
 }
 
 fn write_a2a_helpers(a2a_dir: &std::path::Path, base_url: &str, api_key: &str) {

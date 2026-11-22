@@ -110,6 +110,15 @@ export function writeStatus(cwd, state, sessionFile, tool, sessionId) {
 // functions above without side effects.
 if (process.argv[1] && fs.existsSync(process.argv[1]) &&
 	import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href) {
+	// The hooks live in the worktree's own settings, so every Claude Code
+	// session there runs them: one started outside openOrchestra (another
+	// terminal, an IDE, the Claude app) would drive this worktree's pill and
+	// notifications too. Only a tab the app launched reports — the same rule
+	// as opencode-status.mjs.
+	if (!process.env.HARNESS_AGENT_TAB_ID && !process.env.HARNESS_AGENT_WORKTREE &&
+		!process.env.HARNESS_REMOTE_SESSION) {
+		process.exit(0);
+	}
 	let payload = {};
 	try {
 		payload = JSON.parse(readStdin() || "{}");

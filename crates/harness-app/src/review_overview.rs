@@ -1,6 +1,7 @@
 //! Snapshot Git changes and ask a one-shot CLI for a reviewer-oriented overview.
 
 use std::collections::BTreeMap;
+#[cfg(unix)]
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::io::{self, Read, Seek, Write};
@@ -157,7 +158,10 @@ impl ReviewCli {
         let program = self.program();
         let path = agent_runtime::resolve_on_path(program)
             .ok_or_else(|| format!("Could not find `{program}` on PATH. Install it or choose another CLI in Settings → Review."))?;
-        let mut command = Command::new(&path);
+        // Spawned directly, not through a shell: on Windows npm's extensionless
+        // sh wrapper is "not a valid Win32 application", its .cmd/.exe is.
+        let path = os_compat::Os::CURRENT.direct_launcher(&path);
+        let mut command = os_compat::process::command(&path);
         command.current_dir(cwd);
         match self {
             Self::Codex => {
@@ -216,7 +220,7 @@ fn codex_mcp_servers(program: &Path, cwd: &Path, run: &RunControl) -> Result<Vec
 
     // An empty mcp_servers table merges with the user's existing servers.
     // Disable each configured server without replacing the user's model/auth config.
-    let mut command = Command::new(program);
+    let mut command = os_compat::process::command(program);
     command
         .current_dir(cwd)
         .args(["--disable", "plugins", "mcp", "list", "--json"]);
@@ -848,7 +852,7 @@ fn tracked_changes(bytes: &[u8]) -> Vec<ChangedFile<'_>> {
 }
 
 fn git_command(cwd: &Path) -> Command {
-    let mut command = Command::new("git");
+    let mut command = os_compat::process::command("git");
     command.current_dir(cwd).args([
         "--no-pager",
         "--no-optional-locks",
@@ -993,11 +997,10 @@ fn untracked_diff_usable(status: ExitStatus, bytes: &[u8]) -> bool {
 }
 
 fn stop_child(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    // The subprocess was created as the leader of its own process group.
-    unsafe {
-        libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
-    }
+    // Its whole tree, while the child is still there to find it by: on Unix
+    // the process group it leads, on Windows (`taskkill /T`) what a `.cmd`
+    // launcher started, which holds the output pipes the readers wait on.
+    os_compat::process::kill_tree(child.id());
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -1033,6 +1036,7 @@ impl Capture {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
 
     #[test]
     fn report_file_links_open_only_unambiguous_snapshot_paths() {
@@ -1427,7 +1431,12 @@ Open both files.
             "original content\nunstaged behavior\n",
         )
         .unwrap();
-        std::fs::write(repo.join("new\tfile.rs"), "new behavior\n").unwrap();
+        // A tab in the name tests quoting; Windows forbids tabs in file names.
+        #[cfg(unix)]
+        let new_file = "new\tfile.rs";
+        #[cfg(not(unix))]
+        let new_file = "new file.rs";
+        std::fs::write(repo.join(new_file), "new behavior\n").unwrap();
         std::fs::write(repo.join("ignored.txt"), "excluded from overview\n").unwrap();
         let before = git(&repo, &["status", "--porcelain=v1"]);
         let request = ReviewRequest {
@@ -1525,5 +1534,53 @@ Open both files.
         drop(cancel);
         assert_eq!(job.join().unwrap().as_deref(), Some("Overview cancelled."));
         assert!(!ReviewRun::new().worker_flag().load(Ordering::Relaxed));
+    }
+
+    /// A launcher (npm's `.cmd`) whose child holds the output pipes: the
+    /// readers wait for every holder, so cancelling must end the child too.
+    #[test]
+    fn a_cancelled_cli_takes_the_process_it_launched_with_it() {
+        let cancel = ReviewRun::new();
+        let temp = tempfile::tempdir().unwrap();
+        let ready = temp.path().join("ready");
+        let child_ready = ready.clone();
+        let worker = RunControl {
+            cancelled: cancel.worker_flag(),
+            deadline: Instant::now() + Duration::from_secs(30),
+        };
+        // Not `exec`: the 20 s wait is the launcher's child.
+        #[cfg(unix)]
+        let mut command = {
+            let mut command = Command::new("sh");
+            command
+                .args(["-c", ": > \"$1\" && sleep 20; true", "mock-cli"])
+                .arg(child_ready);
+            command
+        };
+        // `cmd`, as npm's `.cmd` launchers run. Not Git Bash's `sh`: its
+        // fork leaves `sleep` with an exited parent, which no tree walk finds.
+        #[cfg(windows)]
+        let mut command = {
+            use std::os::windows::process::CommandExt;
+            let mut command = Command::new("cmd");
+            command
+                .env("READY", &child_ready)
+                .raw_arg(r#"/d /c type nul > "%READY%" & ping -n 21 127.0.0.1"#);
+            command
+        };
+        let job = std::thread::spawn(move || worker.capture(&mut command, None, 100).err());
+        let start = Instant::now();
+        while !ready.exists() && start.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready.exists(), "mock CLI did not start");
+        let cancelled_at = Instant::now();
+        drop(cancel);
+        assert_eq!(job.join().unwrap().as_deref(), Some("Overview cancelled."));
+        assert!(
+            cancelled_at.elapsed() < Duration::from_secs(10),
+            "cancelling waited {:?} for the launched process",
+            cancelled_at.elapsed()
+        );
     }
 }

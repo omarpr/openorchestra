@@ -95,9 +95,14 @@ impl HarnessWorkspace {
     /// runs from a button the user presses right after installing something.
     pub(crate) fn rerun_preflight(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |view, cx| {
-            let checks = cx
+            let crate::preflight::Probe { checks, agents } = cx
                 .background_spawn(async move {
-                    crate::preflight::probe(crate::preflight::version_on_path)
+                    // Usually pressed right after an install, whose new PATH
+                    // entry this process would otherwise never see.
+                    crate::platform::refresh_path();
+                    let mut probe = crate::preflight::probe_all(crate::preflight::version_on_path);
+                    crate::preflight::diagnose(&mut probe.agents);
+                    probe
                 })
                 .await;
             view.update(cx, |ws, cx| {
@@ -106,6 +111,7 @@ impl HarnessWorkspace {
                 // says everything passes — the one moment worth reading. It
                 // closes when the user says so, via Continue.
                 ws.preflight = checks;
+                ws.preflight_agents = agents;
                 cx.notify();
             })
             .ok();
@@ -124,6 +130,72 @@ impl HarnessWorkspace {
             self.prefs.seen_preflight = true;
             self.save_prefs(cx);
         }
+        cx.notify();
+    }
+
+    /// Put a fix command from the requirements screen on the clipboard.
+    pub(crate) fn copy_fix(&mut self, command: &'static str, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(command.to_string()));
+        self.preflight_copied = Some(command);
+        cx.notify();
+    }
+
+    /// Whether the requirements screen can offer Run: it opens a shell tab,
+    /// which needs a selected worktree or repo to open it in.
+    pub(crate) fn can_run_fix(&self) -> bool {
+        self.resolve().is_some()
+    }
+
+    /// Run a fix command from the requirements screen in a new shell tab, as
+    /// if typed there: the user sees it, answers its prompts (winget's terms,
+    /// sudo, `gh auth login`) and its output stays.
+    ///
+    /// The screen closes so the shell is visible, even when blocking: what it
+    /// runs is the way out. First-time Checks… re-probes when reopened.
+    pub(crate) fn run_fix_in_shell(
+        &mut self,
+        command: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(r) = self.resolve() else { return };
+        // A tool installed a moment ago (gh, before `gh auth login`) must be
+        // on the PATH the new shell starts with.
+        crate::platform::refresh_system_path();
+        if crate::preflight::blocked(&self.preflight) {
+            self.preflight_open = false;
+        } else {
+            self.dismiss_preflight(cx);
+        }
+        self.open_tab(TabKind::Shell, window, cx);
+        let Some(pane) = self.panes.get(&r.key) else { return };
+        let Some(tab) = pane.tabs.iter().find(|t| t.id == pane.active) else {
+            return;
+        };
+        let TabContent::Terminal(term) = &tab.content else { return };
+        if self.has_tmux {
+            let session = crate::tmux::session_name(&r.key, tab.id);
+            let line = command.to_string();
+            cx.spawn(async move |view, cx| {
+                let typed = cx
+                    .background_spawn(async move { crate::tmux::send_keys_when_live(&session, &line) })
+                    .await;
+                if !typed {
+                    let _ = view.update(cx, |ws, cx| {
+                        ws.set_error_note(format!(
+                            "couldn't type {command} into the new shell; run it there yourself"
+                        ));
+                        cx.notify();
+                    });
+                }
+            })
+            .detach();
+        } else {
+            term.update(cx, |term, cx| term.type_when_ready(format!("{command}\r"), cx));
+        }
+        self.set_note(format!(
+            "running {command} — reopen First-time Checks… to re-check when it is done"
+        ));
         cx.notify();
     }
 

@@ -41,15 +41,17 @@ A change that breaks one of these will not merge:
 
 ## Platform support
 
-macOS is the only target built and tested. Linux is **not ruled out** — the
-architecture does not stand in the way, and it is worth knowing why before
-anyone assumes either direction:
+macOS is the main target. Windows 10/11 is in beta: it builds from source
+(`make.cmd`, see the README), and CI builds and tests it (`headless-windows`,
+`app-windows`); `docs/windows-port-test-checklist.md` covers what CI can't.
+Linux is **not ruled out** — the architecture does not stand in the way, and it
+is worth knowing why before anyone assumes either direction:
 
-- Every platform-specific line in the codebase lives in
-  `crates/harness-app/src/notifier.rs`, which already carries a `notify-send`
-  branch and a catch-all for everything else. The `objc2` dependencies are gated
+- OS differences go through `crates/harness-app/src/platform.rs` (one profile
+  per OS) and `os_compat::Os`; the `no_os_checks_outside_platform` test keeps
+  inline OS checks out of everything else. The `objc2` dependencies are gated
   to macOS in `Cargo.toml`, so they would not even be compiled elsewhere.
-- The gaps are known and none of them is architectural: `notify-send` has no
+- The Linux gaps are known and none of them is architectural: `notify-send` has no
   action buttons or response callback, so the notification's **View** button
   needs D-Bus (`org.freedesktop.Notifications`) to reach parity; notification
   sound is macOS-only today; packaging, `setup-macos.sh` and the `.app` bundle

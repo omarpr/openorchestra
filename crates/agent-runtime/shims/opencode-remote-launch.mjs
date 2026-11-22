@@ -87,6 +87,13 @@ try {
 }
 
 const [program, ...args] = process.argv.slice(2);
-if (typeof process.execve === "function") process.execve(program, [program, ...args], process.env);
+// Node 23.11+ has process.execve everywhere, but on Windows it throws
+// ERR_FEATURE_UNAVAILABLE_ON_PLATFORM: run the program as a child there.
+if (typeof process.execve === "function" && process.platform !== "win32") {
+  process.execve(program, [program, ...args], process.env);
+}
 const result = spawnSync(program, args, { stdio: "inherit" });
+// A program that cannot start at all (missing, or a script Node cannot run)
+// would otherwise leave the tab at a prompt with no word of why.
+if (result.error) console.error(`openOrchestra could not start ${program}: ${result.error.message}`);
 process.exitCode = result.status ?? 1;

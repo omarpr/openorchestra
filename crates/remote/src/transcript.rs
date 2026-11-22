@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
-use std::os::unix::fs::PermissionsExt;
+use os_compat::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, SystemTime};

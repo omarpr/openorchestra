@@ -357,12 +357,48 @@ pub fn parse_lsof_cwd(out: &str) -> std::collections::HashMap<u32, PathBuf> {
     cwds
 }
 
+/// Hang a session's job members whose parent chain is broken back on the
+/// session's pane, so [`classify`] counts them as the session's. On Windows a
+/// server started from Git Bash has a dead parent (the MSYS fork that ran it
+/// exits, and `node` goes through `winpty`), yet it stays in the session's job.
+/// Members whose parent is another member keep their real parent.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn adopt_job_orphans(procs: &mut [ProcPath], pane: u32, members: &[u32]) {
+    adopt_orphans(procs.iter_mut().map(|p| (p.pid, &mut p.parent)), pane, members);
+}
+
+/// [`adopt_job_orphans`] over `(pid, parent)` pairs, for any process list.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn adopt_orphans<'a>(
+    procs: impl Iterator<Item = (u32, &'a mut Option<u32>)>,
+    pane: u32,
+    members: &[u32],
+) {
+    for (pid, parent) in procs {
+        if pid == pane || !members.contains(&pid) {
+            continue;
+        }
+        if !parent.is_some_and(|parent| members.contains(&parent)) {
+            *parent = Some(pane);
+        }
+    }
+}
+
 /// Executables under these belong to macOS itself (AirPlay receiver,
 /// rapportd, …), never to something the user would share.
 const SYSTEM_PREFIXES: &[&str] = &["/System/", "/usr/libexec/"];
 
+/// The file name in a process path: `node` from `/usr/local/bin/node`, and
+/// `node.exe` from `C:\Program Files\nodejs\node.exe` (Windows paths use `\`,
+/// which left the whole path as the row's name).
 fn basename(path: &str) -> &str {
-    path.rsplit('/').next().unwrap_or(path)
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+/// The name an agent CLI is known by: `claude.exe` on Windows is `claude`.
+fn program_name(name: &str) -> String {
+    let lower = name.to_ascii_lowercase();
+    lower.strip_suffix(".exe").map(str::to_string).unwrap_or(lower)
 }
 
 /// Split listeners into the selected task's and everything else's.
@@ -427,7 +463,7 @@ pub fn classify(s: &PortsSample, scopes: &[Scope]) -> PortsView {
         };
         // An agent CLI's own listener (Claude Code's IDE bridge, …) is never the
         // user's app, in this task or any other session.
-        if agents.contains(name.to_ascii_lowercase().as_str()) {
+        if agents.contains(program_name(&name).as_str()) {
             continue;
         }
         let member_of = |label: &str| (scopes.len() > 1).then(|| label.to_string());
@@ -445,7 +481,10 @@ pub fn classify(s: &PortsSample, scopes: &[Scope]) -> PortsView {
             });
             continue;
         }
-        if pid == s.app_pid || SYSTEM_PREFIXES.iter().any(|p| path.starts_with(p)) {
+        if pid == s.app_pid
+            || SYSTEM_PREFIXES.iter().any(|p| path.starts_with(p))
+            || crate::platform::is_system_process(path)
+        {
             continue;
         }
         // Container metadata only for a port an engine holds: a native server
@@ -642,11 +681,13 @@ pub fn url_for(row: &PortRow) -> String {
 /// Every individual command a sample runs gets at most this long. The sample
 /// also has one overall deadline, so serial optional enrichment cannot turn a
 /// three-second poll into a long-running background job.
+#[cfg(not(windows))]
 const SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The total time one Ports sample may spend, including tmux, cwd lookup and
 /// Docker enrichment. The two core probes can each consume their full per-
 /// command allowance; optional work uses only what remains.
+#[cfg(not(windows))]
 const SCAN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(6);
 
 /// Run `lsof`, `ps`, and (when available) `tmux list-panes`, each bounded by
@@ -654,6 +695,52 @@ const SCAN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(6);
 /// listener scan or the process table didn't come back in time (an `lsof`
 /// stuck on an unreachable network mount, say): the caller keeps its last
 /// sample and the next tick retries. An empty answer is still `Some`.
+#[cfg(windows)]
+pub fn sample(has_tmux: bool) -> Option<PortsSample> {
+    // No lsof/ps: listeners from the IP Helper table, processes from sysinfo.
+    // Working folders (`lsof -d cwd`) have no cheap Windows equivalent, so
+    // rows are attributed through session panes only (oo-session's).
+    // A failed listing is not "no panes": it would move every task's servers
+    // out of their tasks. Keep the last sample (`None`) instead.
+    let session_panes = if has_tmux {
+        crate::tmux::list_session_panes().ok()?
+    } else {
+        Vec::new()
+    };
+    let listeners = os_compat::net::tcp_listeners()
+        .into_iter()
+        .map(|(pid, addr, port)| Listener { pid, addr, port })
+        .collect();
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    let mut procs: Vec<ProcPath> = sys
+        .processes()
+        .iter()
+        .map(|(pid, p)| ProcPath {
+            pid: pid.as_u32(),
+            parent: p.parent().map(|pp| pp.as_u32()).filter(|&pp| pp != 0),
+            path: p
+                .exe()
+                .map(|e| e.to_string_lossy().into_owned())
+                .unwrap_or_else(|| p.name().to_string_lossy().into_owned()),
+        })
+        .collect();
+    if has_tmux {
+        for (pane, members) in crate::tmux::session_jobs() {
+            adopt_job_orphans(&mut procs, pane, &members);
+        }
+    }
+    Some(PortsSample {
+        app_pid: std::process::id(),
+        listeners,
+        procs,
+        session_panes,
+        containers: Vec::new(),
+        cwds: Default::default(),
+    })
+}
+
+#[cfg(not(windows))]
 pub fn sample(has_tmux: bool) -> Option<PortsSample> {
     let deadline = std::time::Instant::now() + SCAN_DEADLINE;
     sample_using(
@@ -668,6 +755,8 @@ pub fn sample(has_tmux: bool) -> Option<PortsSample> {
 
 /// [`sample`] with the command runner passed in, so tests can play a stalled
 /// or empty scan. `run` returns stdout, or `None` on timeout or spawn failure.
+/// Windows samples without commands (above); only its tests run this.
+#[cfg_attr(windows, allow(dead_code))]
 fn sample_using(
     run: impl Fn(&str, &[&str]) -> Option<String>,
     has_tmux: bool,
@@ -680,7 +769,7 @@ fn sample_using(
     let procs = parse_ps_paths(&run("ps", &["-axo", "pid=,ppid=,comm="])?);
     let session_panes = if has_tmux {
         run(
-            "tmux",
+            &crate::tmux::program(),
             &["list-panes", "-a", "-F", "#{session_name} #{pane_pid}"],
         )
         .map(|s| crate::tmux::parse_session_panes(&s))
@@ -756,6 +845,7 @@ fn sample_using(
 
 /// Remaining scan budget, if any. A zero-duration command timeout is not
 /// useful: skip the optional operation instead.
+#[cfg(not(windows))]
 fn time_left(deadline: std::time::Instant) -> Option<std::time::Duration> {
     deadline
         .checked_duration_since(std::time::Instant::now())
@@ -787,6 +877,7 @@ pub struct Ran {
 /// for real errors, which it reports on stderr (`-w` silences warnings).
 /// A signal (no exit code) is never clean, even with empty output: an empty
 /// listener list would otherwise clear every row.
+#[cfg_attr(windows, allow(dead_code))]
 fn accepted(cmd: &str, ran: Ran) -> Option<String> {
     let clean = match ran.code {
         Some(0) => true,
@@ -796,6 +887,60 @@ fn accepted(cmd: &str, ran: Ran) -> Option<String> {
     clean.then_some(ran.stdout)
 }
 
+/// Windows: no process groups or O_NONBLOCK pipes, so read each pipe on its
+/// own thread and stop the whole tree with `taskkill /T` on timeout.
+#[cfg(windows)]
+#[allow(dead_code)] // only tests run commands on Windows
+fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration) -> Option<Ran> {
+    use std::io::Read;
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut child = std::process::Command::new(cmd)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .ok()?;
+    let reader = |mut pipe: Box<dyn Read + Send>| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = pipe.read_to_end(&mut buf);
+            let _ = tx.send(buf);
+        });
+        rx
+    };
+    let out_rx = reader(Box::new(child.stdout.take()?));
+    let err_rx = reader(Box::new(child.stderr.take()?));
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                let stdout = out_rx.recv_timeout(left).ok()?;
+                let stderr = err_rx.recv_timeout(left).unwrap_or_default();
+                return Some(Ran {
+                    code: status.code(),
+                    stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&stderr).into_owned(),
+                });
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            _ => {
+                os_compat::process::kill_tree(child.id());
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
 fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration) -> Option<Ran> {
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
@@ -856,12 +1001,14 @@ fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration) -> Option
 }
 
 /// A child's pipe, switched to non-blocking, collecting what it has so far.
+#[cfg(unix)]
 struct NonBlocking<R: std::io::Read + std::os::fd::AsRawFd> {
     pipe: R,
     buf: Vec<u8>,
     eof: bool,
 }
 
+#[cfg(unix)]
 impl<R: std::io::Read + std::os::fd::AsRawFd> NonBlocking<R> {
     fn new(pipe: R) -> Self {
         // SAFETY: fcntl on a pipe fd we own, only adding O_NONBLOCK.
@@ -1296,12 +1443,42 @@ quiet-1\tbusybox\t\t\t\t\n";
         assert!(s.listeners.is_empty());
     }
 
+    /// The POSIX shell the next test drives.
+    #[cfg(unix)]
+    fn posix_sh() -> String {
+        "sh".into()
+    }
+
+    /// Windows has no `sh` of its own: use Git Bash, as the app does —
+    /// `$SHELL` (the app sets it at startup, CI sets it too), else the
+    /// system-wide or per-user Git for Windows install the app looks in.
+    /// Missing, the test says so, rather than failing as a command that
+    /// "did not finish in time".
+    #[cfg(windows)]
+    fn posix_sh() -> String {
+        use std::path::PathBuf;
+        let candidates = [
+            std::env::var_os("SHELL").map(PathBuf::from),
+            std::env::var_os("ProgramFiles").map(|p| PathBuf::from(p).join(r"Git\bin\bash.exe")),
+            std::env::var_os("LOCALAPPDATA")
+                .map(|p| PathBuf::from(p).join(r"Programs\Git\bin\bash.exe")),
+        ];
+        candidates
+            .into_iter()
+            .flatten()
+            .find(|p| p.is_file())
+            .expect("this test needs Git Bash: install Git for Windows or set SHELL to its bash.exe")
+            .to_string_lossy()
+            .into_owned()
+    }
+
     #[test]
     fn run_bounded_does_not_wait_on_a_helper_holding_stdout() {
+        let sh = posix_sh();
         // The shell exits at once; its background sleep keeps stdout open.
         let t0 = std::time::Instant::now();
         let out = run_bounded(
-            "sh",
+            &sh,
             &["-c", "sleep 3 & echo hi"],
             std::time::Duration::from_millis(300),
         );
@@ -1313,7 +1490,7 @@ quiet-1\tbusybox\t\t\t\t\n";
         assert!(out.is_none(), "output never completed within the deadline");
         // A command that finishes in time still returns its output and code.
         let ok = run_bounded(
-            "sh",
+            &sh,
             &["-c", "echo hi; echo oops >&2; exit 3"],
             std::time::Duration::from_secs(2),
         )
@@ -1400,6 +1577,7 @@ quiet-1\tbusybox\t\t\t\t\n";
         assert_eq!(applied, 3);
     }
 
+    #[cfg(unix)] // process groups, `sh` and `os.setpgrp`
     #[test]
     fn a_timeout_closes_the_pipe_even_on_a_helper_in_its_own_group() {
         // The helper leaves the process group (so no group kill reaches it),
@@ -1410,7 +1588,7 @@ quiet-1\tbusybox\t\t\t\t\n";
         let script = dir.path().join("helper.py");
         std::fs::write(
             &script,
-            "import os, sys, time\nos.setpgrp()\ntime.sleep(0.8)\ntry:\n    print('late', flush=True)\n    r = 'open'\nexcept BrokenPipeError:\n    r = 'closed'\nopen(sys.argv[1], 'w').write(r)\n",
+            "import os, sys, time\nos.setpgrp()\ntime.sleep(0.8)\ntry:\n    print('late', flush=True)\n    r = 'open'\nexcept BrokenPipeError:\n    r = 'closed'\nopen(sys.argv[1] + '.tmp', 'w').write(r)\nos.replace(sys.argv[1] + '.tmp', sys.argv[1])\n",
         )
         .unwrap();
         let cmd = format!(
@@ -1418,6 +1596,8 @@ quiet-1\tbusybox\t\t\t\t\n";
             script.display(),
             mark.display()
         );
+        // The mark is renamed into place whole: polling for a file that
+        // `open(..., 'w')` had created but not yet written read "".
         let out = run_bounded("sh", &["-c", &cmd], std::time::Duration::from_millis(300));
         assert!(out.is_none());
         for _ in 0..40 {
@@ -1851,5 +2031,42 @@ quiet-1\tbusybox\t\t\t\t\n";
             members,
             vec![(3000, Some("web".into())), (4000, Some("api".into()))]
         );
+    }
+
+    #[test]
+    fn a_server_with_a_dead_parent_is_still_its_sessions() {
+        // Git Bash: bash (pane) -> [exited MSYS fork 32] -> winpty -> agent
+        // -> node. The chain breaks at the dead fork; the job still holds all.
+        let mut procs = vec![
+            p(10, 0, r"C:\Program Files\Git\usr\bin\bash.exe"),
+            p(40, 32, r"C:\Program Files\Git\usr\bin\winpty.exe"),
+            p(41, 40, r"C:\Program Files\Git\usr\bin\winpty-agent.exe"),
+            p(42, 41, r"C:\Program Files\nodejs\node.exe"),
+            p(50, 0, r"C:\elsewhere\node.exe"),
+        ];
+        adopt_job_orphans(&mut procs, 10, &[10, 40, 41, 42]);
+        let parent = |pid: u32| procs.iter().find(|p| p.pid == pid).unwrap().parent;
+        assert_eq!(parent(40), Some(10), "the orphan hangs on the pane");
+        assert_eq!(parent(42), Some(41), "a member keeps its real parent");
+        assert_eq!(parent(50), None, "a process outside the job is untouched");
+        let s = PortsSample {
+            app_pid: 1,
+            listeners: vec![l(42, "*", 5178)],
+            procs,
+            session_panes: vec![("harness_main-qa_1".into(), 10)],
+            containers: vec![],
+            cwds: Default::default(),
+        };
+        let v = classify(&s, &[scope("harness_main-qa_", "qa")]);
+        assert_eq!(ports(&v.task), vec![5178]);
+        assert_eq!(v.task[0].name, "node.exe", "named by file, not full path");
+    }
+
+    #[test]
+    fn an_agent_exe_listener_is_hidden_like_the_bare_name() {
+        assert_eq!(basename(r"C:\Users\me\.local\bin\claude.exe"), "claude.exe");
+        assert_eq!(basename("/usr/local/bin/claude"), "claude");
+        assert_eq!(program_name("Claude.EXE"), "claude");
+        assert_eq!(program_name("node"), "node");
     }
 }

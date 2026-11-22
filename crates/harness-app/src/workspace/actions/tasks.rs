@@ -448,28 +448,17 @@ impl HarnessWorkspace {
         cx.notify();
 
         cx.spawn_in(window, async move |view, cx| {
-            // The shell tab creates its tmux session asynchronously; wait for it
-            // before send-keys or the line vanishes into a missing session.
-            for _ in 0..40 {
-                let live = crate::tmux::live_sessions();
-                if crate::tmux::is_live(&session, &live) {
-                    break;
-                }
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(100))
-                    .await;
-            }
-            // Settle so the interactive shell has painted its first prompt.
-            // One send-keys only — rapid multi-line dumps race fish/zsh and
-            // leave later commands unexecuted in the typeahead buffer.
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(400))
+            // The shell tab creates its tmux session asynchronously.
+            let typed = cx
+                .background_spawn(async move { crate::tmux::send_keys_when_live(&session, &invoke) })
                 .await;
 
-            crate::tmux::send_keys_async(&session, &invoke);
-
             let _ = view.update(cx, |ws, cx| {
-                ws.set_note("setup finished (see shell)".into());
+                if typed {
+                    ws.set_note("setup finished (see shell)".into());
+                } else {
+                    ws.set_error_note("setup didn't start: couldn't type into its shell tab".into());
+                }
                 cx.notify();
             });
         })

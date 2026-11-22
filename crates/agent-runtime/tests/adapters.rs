@@ -733,7 +733,7 @@ fn claude_code_writes_notification_hooks_pointing_at_the_shim() {
     let command = settings["hooks"]["Notification"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap();
-    assert!(command.contains(&rt.shim_path().display().to_string()));
+    assert!(command.contains(&hook_spelling(&rt.shim_path())));
     // Normalizes through the shared status file, like pi.
     assert_eq!(rt.signal_kind(), SignalKind::StatusFile);
     assert_eq!(rt.fidelity(), WaitFidelity::Exact);
@@ -819,7 +819,8 @@ fn codex_migrates_off_the_legacy_notify_line() {
         format!(
             "model = \"gpt-5\"\nnotify = [\"node\", \"{shim}\"]\n\n\
              [mcp_servers.node_repl.env]\nPATH = \"/usr/bin\"\nnotify = [\"node\", \"{shim}\"]\n",
-            shim = legacy.display()
+            // A TOML string, so a Windows path's `\` must be escaped.
+            shim = legacy.display().to_string().replace('\\', "\\\\")
         ),
     )
     .unwrap();
@@ -886,7 +887,7 @@ fn codex_installs_status_hooks_and_stays_idempotent() {
         rt.shim_path().exists(),
         "the hook shim must be materialized"
     );
-    let shim = rt.shim_path().display().to_string();
+    let shim = hook_spelling(&rt.shim_path());
     let hooks: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(codex_home.path().join("hooks.json")).unwrap(),
     )
@@ -908,7 +909,12 @@ fn codex_keeps_the_hook_index_used_for_trust() {
     let state = tempfile::tempdir().unwrap();
     let wt = tempfile::tempdir().unwrap();
     let rt = CodexRuntime::new(state.path());
-    let cmd = format!("node {:?}", rt.shim_path().to_string_lossy());
+    // The command `on_spawn` itself writes on this OS (quoted forward
+    // slashes on Windows).
+    let cmd = match os_compat::Os::CURRENT {
+        os_compat::Os::Windows => format!("node \"{}\"", hook_spelling(&rt.shim_path())),
+        _ => format!("node {:?}", rt.shim_path().to_string_lossy()),
+    };
     let hooks = serde_json::json!({
         "hooks": {
             "UserPromptSubmit": [
@@ -1042,7 +1048,7 @@ fn grok_writes_its_own_hook_file_and_not_claude_settings() {
     let command = settings["hooks"]["Notification"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap();
-    assert!(command.contains(&rt.shim_path().display().to_string()));
+    assert!(command.contains(&hook_spelling(&rt.shim_path())));
     assert_eq!(rt.signal_kind(), SignalKind::StatusFile);
     assert_eq!(rt.fidelity(), WaitFidelity::Exact);
     assert_eq!(rt.kind(), AgentKind::Grok);
@@ -1080,26 +1086,36 @@ fn grok_preserves_other_hooks_in_its_file_and_stays_idempotent() {
 #[test]
 fn grok_shim_maps_task_complete_to_idle_and_stamps_grok() {
     let shim = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shims/grok-status.mjs");
-    let url = format!("file://{}", shim.display());
+    // Node builds the file URL: a Windows path is not `file://` + its text.
+    // The path goes in through the environment, not argv: with the shim as
+    // process.argv[1], its "run as a hook" guard fires on import, and with
+    // the HARNESS_* variables of an agent tab (a suite run inside one) it
+    // wrote this test's state into that tab's real worktree.
     let check = std::process::Command::new("node")
         .arg("--input-type=module")
         .arg("-e")
-        .arg(format!(
-            r#"import {{ classify }} from "{url}";
+        .arg(
+            r#"import { pathToFileURL } from "node:url";
+const { classify } = await import(pathToFileURL(process.env.GROK_SHIM).href);
 const cases = [
-  [{{hook_event_name:"Notification", notification_type:"task_complete"}}, "idle"],
-  [{{hook_event_name:"Notification", notification_type:"permission_prompt"}}, "waiting"],
-  [{{hook_event_name:"Stop"}}, "idle"],
-  [{{hook_event_name:"UserPromptSubmit"}}, "running"],
+  [{hook_event_name:"Notification", notification_type:"task_complete"}, "idle"],
+  [{hook_event_name:"Notification", notification_type:"permission_prompt"}, "waiting"],
+  [{hook_event_name:"Stop"}, "idle"],
+  [{hook_event_name:"UserPromptSubmit"}, "running"],
 ];
-for (const [payload, want] of cases) {{
+for (const [payload, want] of cases) {
   const got = classify(payload);
-  if (got !== want) {{
+  if (got !== want) {
     console.error(JSON.stringify(payload), got, "!=", want);
     process.exit(1);
-  }}
-}}"#
-        ))
+  }
+}"#,
+        )
+        .env("GROK_SHIM", &shim)
+        .env_remove("HARNESS_MANAGED")
+        .env_remove("HARNESS_AGENT_TAB_ID")
+        .env_remove("HARNESS_AGENT_WORKTREE")
+        .env_remove("HARNESS_REMOTE_SESSION")
         .output();
     match check {
         Ok(out) => assert!(
@@ -1118,7 +1134,8 @@ for (const [payload, want] of cases) {{
         .arg(&shim)
         .current_dir(wt.path())
         .env_remove("HARNESS_AGENT_WORKTREE")
-        .env_remove("HARNESS_AGENT_TAB_ID")
+        // A tab the app launched: the shim ignores sessions without one.
+        .env("HARNESS_AGENT_TAB_ID", "7")
         .env_remove("HARNESS_REMOTE_SESSION")
         .env_remove("TMUX_PANE")
         .env_remove("CLAUDE_PROJECT_DIR")
@@ -1252,7 +1269,7 @@ fn configurable_runtime_installs_claude_local_hooks_with_agent_env() {
         &std::fs::read_to_string(wt.path().join(".claude/settings.local.json")).unwrap(),
     )
     .unwrap();
-    let shim = rt.shim_path().display().to_string();
+    let shim = hook_spelling(&rt.shim_path());
     for event in ["UserPromptSubmit", "PreToolUse", "Notification", "Stop"] {
         let blob = settings["hooks"][event].to_string();
         assert!(
@@ -1299,7 +1316,8 @@ fn configurable_runtime_codex_hooks_are_idempotent() {
         &std::fs::read_to_string(codex_home.path().join("hooks.json")).unwrap(),
     )
     .unwrap();
-    let shim = rt.shim_path().display().to_string();
+    // Quoted as the command quotes it (a Windows path's `\` arrive doubled).
+    let shim = format!("{:?}", rt.shim_path().display().to_string());
     for event in ["UserPromptSubmit", "Stop"] {
         let cmds = hook_commands(&hooks, event);
         assert_eq!(
@@ -1619,6 +1637,42 @@ fn harness_status_shim_uses_payload_cwd_for_codex_hooks() {
 /// PreToolUse carries the tool about to run into status.json — trimmed to a
 /// few short fields — so the conductor can say "Editing main.rs" while the
 /// call is in flight. Every other event clears it.
+/// The hooks sit in the worktree's settings, so a Claude Code or Grok session
+/// started outside openOrchestra runs them too; without the tab env the app
+/// sets, they must not touch the worktree's status (it showed "running" for
+/// an unrelated session).
+#[test]
+fn status_shims_ignore_sessions_the_app_did_not_launch() {
+    for name in ["claude-code-status.mjs", "grok-status.mjs"] {
+        let wt = tempfile::tempdir().unwrap();
+        let shim = Path::new(env!("CARGO_MANIFEST_DIR")).join("shims").join(name);
+        use std::io::Write;
+        let Ok(mut child) = std::process::Command::new("node")
+            .arg(&shim)
+            .env("CLAUDE_PROJECT_DIR", wt.path())
+            .env_remove("HARNESS_AGENT_TAB_ID")
+            .env_remove("HARNESS_AGENT_WORKTREE")
+            .env_remove("HARNESS_REMOTE_SESSION")
+            .current_dir(wt.path())
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        else {
+            eprintln!("node not installed — skipping");
+            return;
+        };
+        let _ = child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(br#"{"hook_event_name":"UserPromptSubmit","session_id":"s"}"#);
+        assert!(child.wait().unwrap().success());
+        assert!(
+            !wt.path().join(".harness/status.json").exists(),
+            "{name} wrote status for a session outside the app"
+        );
+    }
+}
+
 #[test]
 fn claude_code_shim_records_the_tool_about_to_run() {
     let wt = tempfile::tempdir().unwrap();
@@ -1628,6 +1682,7 @@ fn claude_code_shim_records_the_tool_about_to_run() {
         let mut child = std::process::Command::new("node")
             .arg(&shim)
             .env("CLAUDE_PROJECT_DIR", wt.path())
+            .env("HARNESS_AGENT_TAB_ID", "7")
             .stdin(std::process::Stdio::piped())
             .spawn()
             .ok()?;
@@ -1723,4 +1778,10 @@ fn claude_idle_reminder_is_idle_but_permission_prompt_waits() {
             assert_eq!(got, want, "{shim}: {payload}");
         }
     }
+}
+
+/// A shim path as hook commands spell it: forward slashes on Windows, where
+/// the agents run hooks through Git Bash (`agent_runtime::node_command`).
+fn hook_spelling(path: &std::path::Path) -> String {
+    os_compat::Os::CURRENT.shell_path(path)
 }

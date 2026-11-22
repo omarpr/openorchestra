@@ -13,6 +13,9 @@ use oo_remote::ServerStatus;
 
 /// Pairing codes live this long (`oo_remote::auth`'s TTL).
 const CODE_TTL: Duration = Duration::from_secs(10 * 60);
+/// What the computer serving the phones is called here.
+const THIS: &str = crate::platform::CURRENT.this_computer;
+const THIS_CAP: &str = crate::platform::CURRENT.this_computer_cap;
 /// One QR module, in px.
 const QR_CELL: f32 = 4.0;
 /// Quiet zone around the code, in modules (the spec minimum).
@@ -148,9 +151,11 @@ impl HarnessWorkspace {
         if serving && r.status.as_ref().is_some_and(|s| s.ca_outdated) {
             col = col
                 .child(div().pb_1().text_xs().text_color(hx.amber).child(
-                    "This Mac's name or address changed since its certificate was made, so \
-                     devices using the new one can't connect. A new certificate fixes that; \
-                     every device then has to be added again.",
+                    format!(
+                        "{THIS_CAP}'s name or address changed since its certificate was made, so \
+                         devices using the new one can't connect. A new certificate fixes that; \
+                         every device then has to be added again."
+                    ),
                 ))
                 .child(
                     div().flex().pb_1().child(
@@ -456,13 +461,13 @@ impl HarnessWorkspace {
         // ---- Android IP notice ---------------------------------------------
         if let Some(st) = r.status.as_ref().filter(|s| !s.stale_ip_devices.is_empty()) {
             col = col.child(div().pb_1().text_xs().text_color(hx.amber).child(format!(
-                "This Mac's IP changed — re-add the app on: {}",
+                "{THIS_CAP}'s IP changed — re-add the app on: {}",
                 st.stale_ip_devices.join(", ")
             )));
         }
         col =
             col.child(div().pb_1().text_xs().text_color(hx.tx2).child(
-                "Tip: reserve this Mac's IP on your router so Android devices keep working.",
+                format!("Tip: reserve {THIS}'s IP on your router so Android devices keep working."),
             ));
 
         // ---- Keep awake ----------------------------------------------------
@@ -473,7 +478,7 @@ impl HarnessWorkspace {
                 focus
                     .scroll_choice(
                         format!("remote-awake-{label}"),
-                        format!("Keep this Mac awake: {label}"),
+                        format!("Keep {THIS} awake: {label}"),
                         awake == on,
                         hx,
                         cx,
@@ -486,7 +491,7 @@ impl HarnessWorkspace {
             );
         }
         col.child(section_title(
-            "Keep this Mac awake while Remote control is on",
+            &format!("Keep {THIS} awake while Remote control is on"),
             hx,
         ))
         .child(awake_row)
@@ -576,7 +581,10 @@ impl HarnessWorkspace {
             .flex_col()
             .gap_3()
             .w(px(440.0))
-            .max_h(px(600.0))
+            // Relative to the Settings frame it sits in: a fixed 600 px filled
+            // a 1080p frame edge to edge, cutting Done off below the fold
+            // with no edge to show the card scrolls.
+            .max_h(gpui::relative(0.92))
             .overflow_y_scroll()
             .p_4()
             .rounded_lg()
@@ -631,7 +639,7 @@ impl HarnessWorkspace {
             .flex()
             .flex_col()
             .gap_1()
-            .child(step("1", "Trust this Mac"));
+            .child(step("1", &format!("Trust {THIS}")));
         let setup_error = setup_error(self.remote.status.as_ref());
         match (setup_error, &ui.setup_url) {
             // The setup port didn't open: a QR would lead nowhere.
@@ -649,7 +657,7 @@ impl HarnessWorkspace {
             }
             (None, None) => {
                 trust = trust.child(div().text_xs().text_color(hx.amber).child(
-                    "This Mac has no local network address. Connect it to Wi-Fi or Ethernet.",
+                    format!("{THIS_CAP} has no local network address. Connect it to Wi-Fi or Ethernet."),
                 ));
             }
         }

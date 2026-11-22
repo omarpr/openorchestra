@@ -7,6 +7,7 @@ description = "PR + CI status via the gh CLI behind a Forge trait (architecture 
 license = "GPL-3.0-or-later"
 
 [dependencies]
+os-compat = { path = "../os-compat" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 crossbeam-channel = "0.5"

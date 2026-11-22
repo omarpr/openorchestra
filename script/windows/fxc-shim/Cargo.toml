@@ -1,0 +1,13 @@
+[package]
+name = "fxc-shim"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "The subset of fxc.exe gpui_windows' release build runs, on Windows' own d3dcompiler_47.dll"
+
+# Its own workspace: it is built by script/windows/make.ps1, not the repo's.
+[workspace]
+
+[[bin]]
+name = "fxc"
+path = "main.rs"

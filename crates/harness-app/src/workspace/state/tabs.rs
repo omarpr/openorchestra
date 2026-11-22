@@ -737,6 +737,7 @@ impl HarnessWorkspace {
             || self.hook_trust.is_some()
             || self.failure_toast_showing()
             || self.zed_modal_open(cx)
+            || super::super::ui::app_menu_open()
     }
 
     /// The one place that decides which browser tab has a native view: the

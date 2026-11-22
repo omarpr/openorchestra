@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use os_compat::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
@@ -89,18 +89,20 @@ fn append(path: &Path, line: &str) -> io::Result<()> {
     if fs::metadata(path).is_ok_and(|m| m.len() > LOG_CAP) {
         fs::rename(path, path.with_extension("log.1"))?;
     }
-    OpenOptions::new()
+    let mut file = OpenOptions::new()
         .create(true)
         .append(true)
         .mode(0o600)
-        .open(path)?
-        .write_all(line.as_bytes())
+        .open(path)?;
+    // Windows has no modes: an owner-only ACL (what the phone typed).
+    os_compat::fs::restrict_to_user(path)?;
+    file.write_all(line.as_bytes())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    use os_compat::fs::PermissionsExt;
 
     fn setup() -> (tempfile::TempDir, InputActivity) {
         let dir = tempfile::tempdir().unwrap();

@@ -7,6 +7,7 @@ description = "Git worktree manager + on-disk registry (architecture §6.1, Spik
 license = "GPL-3.0-or-later"
 
 [dependencies]
+os-compat = { path = "../os-compat" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"

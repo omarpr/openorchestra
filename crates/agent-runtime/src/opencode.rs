@@ -182,7 +182,7 @@ impl AgentRuntime for OpenCodeRuntime {
                     // Other launches can install the same shim concurrently.
                     let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
                     tmp.write_all(content.as_bytes())?;
-                    tmp.persist(file)?;
+                    crate::persist_shim(tmp, &file, content)?;
                 }
             }
         }
@@ -203,11 +203,15 @@ impl AgentRuntime for OpenCodeRuntime {
             return command;
         };
         let launcher = dir.join("shims/opencode-remote-launch.mjs");
+        // The launcher execs `program` itself, without a shell: on Windows
+        // npm's `opencode` is a bash wrapper Node cannot run (it exited at
+        // once, leaving the tab at a prompt), so hand it the real binary.
+        let program = os_compat::Os::CURRENT.direct_launcher(&command.program);
         if let (Some(node), true, Some(launcher), Some(program)) = (
             resolve_on_path("node"),
             launcher.is_file(),
             launcher.to_str(),
-            command.program.to_str(),
+            program.to_str(),
         ) {
             command
                 .args
@@ -249,6 +253,11 @@ impl AgentRuntime for OpenCodeRuntime {
 fn is_legacy_cli(program: &Path) -> bool {
     type Probes = Mutex<HashMap<(PathBuf, Option<SystemTime>), bool>>;
     static PROBES: OnceLock<Probes> = OnceLock::new();
+    // What `prepare_launch` runs: on Windows PATH finds npm's extensionless
+    // sh wrapper first, which Windows cannot start, so the probe failed and
+    // OpenCode 1.x lost its event stream. Keyed by that file, so an upgrade
+    // of the binary itself is probed again.
+    let program = &os_compat::Os::CURRENT.direct_launcher(program);
     let modified = fs::metadata(program).and_then(|m| m.modified()).ok();
     let key = (program.to_path_buf(), modified);
     let probes = PROBES.get_or_init(Default::default);
@@ -263,7 +272,7 @@ fn is_legacy_cli(program: &Path) -> bool {
 
 /// `opencode --version`, or empty when it cannot be run.
 fn cli_version(program: &Path) -> String {
-    std::process::Command::new(program)
+    os_compat::process::command(program)
         .arg("--version")
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -364,11 +373,12 @@ pub fn classify(event_name: &Option<String>, data: &str) -> Option<(AgentState, 
 
 #[cfg(test)]
 mod tests {
-    use super::{is_legacy_cli, legacy_server};
+    use super::legacy_server;
 
     #[cfg(unix)]
     #[test]
     fn the_version_probe_runs_once_per_binary() {
+        use super::is_legacy_cli;
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();

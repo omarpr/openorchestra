@@ -396,6 +396,13 @@ impl AgentLaunchPrep {
         // Resolve the adapter command first so a prefs override can keep the
         // managed env (HARNESS_MANAGED / HARNESS_AGENT) that hooks need.
         let mut runtime_cmd = self.runtime.command(&self.path);
+        if runtime_cmd.is_none() {
+            // Installed since the app started (from the Agents tab, or a
+            // terminal)? Its directory may not be on our PATH yet. This runs
+            // off the UI thread, where refreshing may spawn a shell.
+            crate::platform::refresh_path();
+            runtime_cmd = self.runtime.command(&self.path);
+        }
         let tab_env = [
             ("HARNESS_AGENT_TAB_ID".to_string(), self.tab_id.to_string()),
             (

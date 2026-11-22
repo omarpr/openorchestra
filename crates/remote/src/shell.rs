@@ -12,7 +12,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use os_compat::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -604,6 +604,7 @@ mod housekeeping {
         sync_flags(st, &set(&["a", "b"])).unwrap();
         assert!(flag_path(st, "a").exists() && flag_path(st, "b").exists());
         assert_eq!(mode(&flag_path(st, "a")), 0o600);
+        #[cfg(unix)] // Windows has no folder modes (os-compat reports any path as 0o600)
         assert_eq!(mode(&shell_dir(st)), 0o700);
         sync_flags(st, &set(&["b"])).unwrap();
         assert!(!flag_path(st, "a").exists() && flag_path(st, "b").exists());
@@ -627,6 +628,7 @@ mod housekeeping {
         assert!(!flag_path(dir.path(), &session).exists());
     }
 
+    #[cfg(unix)] // Windows has no folder modes (os-compat reports any path as 0o600)
     #[test]
     fn install_tightens_folders_made_before() {
         let dir = tempfile::tempdir().unwrap();

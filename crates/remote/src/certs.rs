@@ -10,7 +10,6 @@ use std::fs;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
-use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -487,7 +486,7 @@ fn xml_escape(s: &str) -> String {
 }
 
 fn scutil(key: &str) -> Option<String> {
-    let out = Command::new("scutil").args(["--get", key]).output().ok()?;
+    let out = os_compat::process::command("scutil").args(["--get", key]).output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -557,7 +556,7 @@ pub fn pick_primary_ipv4(default_if: Option<&str>, addrs: &[(String, Ipv4Addr)])
 /// [`pick_primary_ipv4`] for this machine (runs `route -n get default`;
 /// blocking, keep it off the UI thread).
 pub fn primary_ipv4() -> Option<IpAddr> {
-    let default_if = Command::new("route")
+    let default_if = os_compat::process::command("route")
         .args(["-n", "get", "default"])
         .output()
         .ok()
@@ -591,7 +590,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
     use std::net::IpAddr;
-    use std::os::unix::fs::PermissionsExt;
+    use os_compat::fs::PermissionsExt;
     use std::time::{Duration, SystemTime};
     use x509_parser::extensions::{GeneralName, ParsedExtension};
     use x509_parser::prelude::*;
@@ -638,8 +637,11 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
-        let dmode = std::fs::metadata(&dir).unwrap().permissions().mode();
-        assert_eq!(dmode & 0o777, 0o700);
+        #[cfg(unix)] // Windows has no folder modes (os-compat reports any path as 0o600)
+        {
+            let dmode = std::fs::metadata(&dir).unwrap().permissions().mode();
+            assert_eq!(dmode & 0o777, 0o700);
+        }
     }
 
     /// rustls/webpki verification of `leaf` for `name` under `ca` alone.

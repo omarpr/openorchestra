@@ -12,6 +12,7 @@ license = "GPL-3.0-or-later"
 # user's mcp_servers config.
 toml_edit = "0.25"
 worktrees = { path = "../worktrees" }
+os-compat = { path = "../os-compat" }
 status-watch = { path = "../status-watch" }
 agent-schema = { path = "../agent-schema" }
 crossbeam-channel = "0.5"

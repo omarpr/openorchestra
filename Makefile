@@ -15,10 +15,25 @@
 #   make dmg-background — regenerate the installer DMG's background art
 #   make web     — build the oo-remote PWA (web/remote/dist, embedded by crates/remote)
 #   make test    — headless workspace tests (harness-app excluded by design)
+#
+#   Windows: the same targets (minus the macOS packaging) plus dist, install
+#   and uninstall, from script/windows/make.ps1; `.\make help` lists them.
 
 APP_DIR := crates/harness-app
 
-.PHONY: setup run build check test app dmg dmg-notarized release icon dmg-background doctor web
+.PHONY: setup run build check test app dmg dmg-notarized release icon dmg-background doctor web dist install uninstall help
+
+# Windows: every target is script/windows/make.ps1's (WinLibs ships make as
+# mingw32-make; `.\make <target>` runs the same script without make). Extra
+# app args for `run`: make run ARGS="C:\path\to\repo".
+ifeq ($(OS),Windows_NT)
+
+WIN_MAKE := powershell -NoProfile -ExecutionPolicy Bypass -File script/windows/make.ps1
+
+setup run build check test app dmg dmg-notarized release icon dmg-background doctor web dist install uninstall help:
+	$(WIN_MAKE) $@ $(ARGS)
+
+else
 
 setup:
 	bash ./script/setup-macos.sh
@@ -64,3 +79,5 @@ doctor:
 web:
 	pnpm -C web/remote install --frozen-lockfile
 	pnpm -C web/remote build
+
+endif

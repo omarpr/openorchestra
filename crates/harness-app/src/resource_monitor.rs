@@ -198,6 +198,8 @@ fn is_shell(comm: &str) -> bool {
 
 /// Parse `ps -axo pid=,ppid=,comm=` output into [`ProcInfo`]s, normalizing the
 /// command to a lowercased basename without a leading login-shell `-`.
+/// Windows has no `ps -o` and reads processes with sysinfo instead.
+#[cfg_attr(windows, allow(dead_code))]
 pub fn parse_ps(output: &str) -> Vec<ProcInfo> {
     output
         .lines()
@@ -210,15 +212,18 @@ pub fn parse_ps(output: &str) -> Vec<ProcInfo> {
             if raw.is_empty() {
                 return None;
             }
-            let base = raw.rsplit('/').next().unwrap_or(&raw);
-            let comm = base.trim_start_matches('-').to_ascii_lowercase();
-            Some(ProcInfo {
-                pid,
-                parent: (ppid != 0).then_some(ppid),
-                comm,
-            })
+            Some(proc_info(pid, (ppid != 0).then_some(ppid), &raw))
         })
         .collect()
+}
+
+/// A [`ProcInfo`] from a process's name or path: `-zsh`, `/opt/bin/claude`,
+/// or Windows' `bash.exe` (a shell, so `bash`) and `node.exe`.
+pub fn proc_info(pid: u32, parent: Option<u32>, name: &str) -> ProcInfo {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let comm = base.trim_start_matches('-').to_ascii_lowercase();
+    let comm = comm.strip_suffix(".exe").map(str::to_string).unwrap_or(comm);
+    ProcInfo { pid, parent, comm }
 }
 
 /// Whether an agent — any non-shell process — is alive anywhere in the subtrees
@@ -602,6 +607,22 @@ mod tests {
             raw.session_panes.is_empty(),
             "has_tmux=false skips the tmux read"
         );
+    }
+
+    #[test]
+    fn a_windows_pane_back_at_its_shell_runs_no_agent() {
+        // Git Bash's launcher, the MSYS bash it starts, and an agent CLI, as
+        // sysinfo names them on Windows.
+        let shell = [
+            proc_info(100, Some(4), "bash.exe"),
+            proc_info(101, Some(100), "BASH.EXE"),
+        ];
+        assert!(!agent_running_in(&shell, &[100]));
+        let mut agent = shell.to_vec();
+        agent.push(proc_info(102, Some(101), "node.exe"));
+        assert_eq!(agent[2].comm, "node");
+        assert!(agent_running_in(&agent, &[100]));
+        assert_eq!(proc_info(7, None, r"C:\Program Files\Git\bin\bash.exe").comm, "bash");
     }
 
     #[test]

@@ -139,23 +139,29 @@ impl HarnessWorkspace {
             .find(|tab| tab.id == tab_id && tab.agent.is_some())
     }
 
-    /// An evicted pane may still have live tmux tabs in its persisted record.
-    fn has_agent_tab(&self, root: &Path, tab_id: u64) -> bool {
-        let Some(key) = self.pane_key_for_path(root) else {
-            return false;
-        };
+    /// The agent of tab `tab_id` under `root`, if it is an agent tab. An
+    /// evicted pane may still have live tmux tabs in its persisted record.
+    fn agent_tab_kind(&self, root: &Path, tab_id: u64) -> Option<AgentKind> {
+        let key = self.pane_key_for_path(root)?;
         if let Some(pane) = self.panes.get(&key) {
             return pane
                 .tabs
                 .iter()
-                .any(|tab| tab.id == tab_id && tab.agent.is_some());
+                .find(|tab| tab.id == tab_id)
+                .and_then(|tab| tab.agent.clone());
         }
-        self.has_tmux
-            && self.panes_state.worktrees.get(&key).is_some_and(|pane| {
-                pane.tabs.iter().any(|tab| {
-                    tab.id == tab_id
-                        && matches!(tab.kind, crate::panes_state::TabRecordKind::Agent(_))
-                })
+        if !self.has_tmux {
+            return None;
+        }
+        self.panes_state
+            .worktrees
+            .get(&key)?
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .and_then(|tab| match &tab.kind {
+                crate::panes_state::TabRecordKind::Agent(kind) => Some(kind.clone()),
+                _ => None,
             })
     }
 
@@ -279,7 +285,15 @@ impl HarnessWorkspace {
         cx: &mut Context<Self>,
     ) {
         if let Some(id) = signal.tab_id {
-            if !self.has_agent_tab(&signal.worktree_root, id) {
+            let tab_kind = self.agent_tab_kind(&signal.worktree_root, id);
+            if !tab_owns_signal(tab_kind.as_ref(), &signal.kind) {
+                if let Some(kind) = tab_kind {
+                    log::info!(
+                        "ignoring a {} status for {} tab {id}: written by something running in it",
+                        signal.kind,
+                        kind
+                    );
+                }
                 return;
             }
         } else if signal.state == AgentState::Unknown {
@@ -555,7 +569,8 @@ fn status_pid(target: &AgentTarget) -> Option<u32> {
 /// signal; it just probes existence — 0 means alive, `ESRCH` means gone. Agents
 /// run as us, so `EPERM` (exists, other user) can't arise here.
 pub(crate) fn pid_alive(pid: u32) -> bool {
-    pid != 0 && unsafe { libc::kill(pid as libc::pid_t, 0) } == 0
+    // os_compat: kill(pid, 0) on Unix, OpenProcess + exit code on Windows.
+    os_compat::process::is_alive(pid)
 }
 
 /// Which of `candidates` (root, tmux session prefix) no longer have a live
@@ -569,7 +584,7 @@ fn dead_agents(candidates: Vec<(AgentTarget, String)>, has_tmux: bool) -> Vec<Ag
     // `procs` means `ps` failed; skip the tmux path rather than clear on no
     // evidence.
     let procs = if has_tmux {
-        crate::resource_monitor::parse_ps(&ps_snapshot())
+        process_snapshot()
     } else {
         Vec::new()
     };
@@ -613,10 +628,38 @@ fn dead_agents(candidates: Vec<(AgentTarget, String)>, has_tmux: bool) -> Vec<Ag
     dead
 }
 
-/// A `pid ppid comm` snapshot of every process, for agent-liveness checks.
+/// Every process's pid, parent and command, for agent-liveness checks.
 /// Empty on any error — callers treat that as "no evidence" and don't act on it.
-pub(crate) fn ps_snapshot() -> String {
-    std::process::Command::new("ps")
+#[cfg(not(windows))]
+fn process_snapshot() -> Vec<crate::resource_monitor::ProcInfo> {
+    crate::resource_monitor::parse_ps(&ps_snapshot())
+}
+
+/// Windows has no `ps -o`: the snapshot comes from sysinfo. An agent started
+/// from Git Bash can have a dead parent (the MSYS fork that ran it exited),
+/// so a session's job members hang back on its pane, as Ports does.
+#[cfg(windows)]
+fn process_snapshot() -> Vec<crate::resource_monitor::ProcInfo> {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    let mut procs: Vec<_> = sys
+        .processes()
+        .iter()
+        .map(|(pid, p)| {
+            let parent = p.parent().map(|pp| pp.as_u32()).filter(|&pp| pp != 0);
+            crate::resource_monitor::proc_info(pid.as_u32(), parent, &p.name().to_string_lossy())
+        })
+        .collect();
+    for (pane, members) in crate::tmux::session_jobs() {
+        crate::ports::adopt_orphans(procs.iter_mut().map(|p| (p.pid, &mut p.parent)), pane, &members);
+    }
+    procs
+}
+
+/// A `pid ppid comm` snapshot of every process.
+#[cfg(not(windows))]
+fn ps_snapshot() -> String {
+    os_compat::process::command("ps")
         .args(["-axo", "pid=,ppid=,comm="])
         .output()
         .ok()
@@ -640,6 +683,33 @@ pub(crate) fn alert_nav_id(target: &str, kind: &AgentKind, tab_id: Option<u64>) 
             kind.as_str()
         ),
         None => format!("{target}{ALERT_AGENT_SEP}{}", kind.as_str()),
+    }
+}
+
+/// Whether a status for a tab of `tab` (None: not an agent tab) is that
+/// tab's agent's. Every agent stamps its own kind, so another kind came from
+/// something running inside the tab, such as a test suite whose shims inherit
+/// the tab's HARNESS_* variables or a second agent CLI the agent started; its
+/// state isn't the tab's and must not be announced under the tab.
+fn tab_owns_signal(tab: Option<&AgentKind>, signal: &AgentKind) -> bool {
+    tab == Some(signal)
+}
+
+#[cfg(test)]
+mod tab_signal_tests {
+    use super::tab_owns_signal;
+    use agent_runtime::AgentKind;
+
+    #[test]
+    fn only_the_tabs_own_agent_drives_it() {
+        assert!(tab_owns_signal(Some(&AgentKind::Codex), &AgentKind::Codex));
+        let custom = AgentKind::Other("aider".into());
+        assert!(tab_owns_signal(Some(&custom), &AgentKind::Other("aider".into())));
+        // pi's and Grok's test shims in a Codex tab, and a tab that is gone
+        // or not an agent's.
+        assert!(!tab_owns_signal(Some(&AgentKind::Codex), &AgentKind::Pi));
+        assert!(!tab_owns_signal(Some(&AgentKind::Codex), &AgentKind::Grok));
+        assert!(!tab_owns_signal(None, &AgentKind::Codex));
     }
 }
 

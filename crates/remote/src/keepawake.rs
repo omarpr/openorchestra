@@ -1,14 +1,19 @@
-//! Keep the Mac from idle-sleeping while remote is on: a
+//! Keep the computer from idle-sleeping while remote is on. macOS: a
 //! `caffeinate -i -w <own pid>` child (it also exits by itself if the app
-//! dies). Dropping the handle kills it.
+//! dies). Windows: an `ES_SYSTEM_REQUIRED` execution-state request
+//! (`os_compat::power`), which Windows drops with the process. Dropping the
+//! handle releases either.
 
 use std::io;
+#[cfg(not(windows))]
 use std::process::{Child, Command, Stdio};
 
+#[cfg(not(windows))]
 pub struct KeepAwake {
     child: Child,
 }
 
+#[cfg(not(windows))]
 impl KeepAwake {
     pub fn start() -> io::Result<KeepAwake> {
         let child = Command::new("/usr/bin/caffeinate")
@@ -28,10 +33,28 @@ impl KeepAwake {
     }
 }
 
+#[cfg(not(windows))]
 impl Drop for KeepAwake {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+#[cfg(windows)]
+pub struct KeepAwake {
+    _request: os_compat::power::StayAwake,
+}
+
+#[cfg(windows)]
+impl KeepAwake {
+    pub fn start() -> io::Result<KeepAwake> {
+        Ok(KeepAwake { _request: os_compat::power::StayAwake::start()? })
+    }
+
+    /// The process holding the request: this one.
+    pub fn pid(&self) -> u32 {
+        std::process::id()
     }
 }
 
@@ -61,5 +84,19 @@ mod tests {
         );
         drop(k);
         assert!(!alive(pid), "caffeinate still running after drop");
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_request_is_held_and_released() {
+        // `powercfg /requests` needs admin; that the request is accepted
+        // and released without hanging is what can be checked here.
+        let k = KeepAwake::start().expect("SetThreadExecutionState");
+        assert_eq!(k.pid(), std::process::id());
+        drop(k);
     }
 }

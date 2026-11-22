@@ -35,6 +35,13 @@ fn probe_script() -> String {
     format!("printf '\\n%s%s%s\\n' '{BEGIN}' \"$PATH\" '{END}'")
 }
 
+/// The same, for Git Bash on Windows: its PATH is POSIX-spelled
+/// (`/c/Users/me/.grok/bin:/usr/bin`); `cygpath -w -p` turns it into the
+/// `C:\…;C:\…` list Windows APIs read.
+fn windows_probe_script() -> String {
+    format!("printf '\\n%s%s%s\\n' '{BEGIN}' \"$(cygpath -w -p \"$PATH\")\" '{END}'")
+}
+
 /// Pull the PATH back out of whatever the shell printed.
 fn extract(raw: &str) -> Option<String> {
     let start = raw.find(BEGIN)? + BEGIN.len();
@@ -77,15 +84,24 @@ fn merge(inherited: Option<&OsStr>, from_shell: &str) -> Option<OsString> {
 /// the user does not recognise. stdout goes to a file rather than a pipe: a
 /// chatty profile can outrun a 64 KiB pipe buffer we are not draining, and the
 /// deadlock would be at startup, before any window exists to explain it.
-fn ask_login_shell() -> Option<String> {
-    let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty())?;
-    let out_path = std::env::temp_dir().join(format!("openorchestra-path-{}", std::process::id()));
-    let out = std::fs::File::create(&out_path).ok()?;
+fn ask_login_shell(script: &str) -> Option<String> {
+    // Windows: no SHELL when Git wasn't installed at startup; Git Bash if it
+    // is now (its rc files are what this probe reads).
+    let shell = std::env::var("SHELL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| crate::platform::git_bash().map(|p| p.to_string_lossy().into_owned()))?;
+    // Its own file per probe (a Re-check can overlap another), removed when
+    // this returns, however it returns.
+    let out = tempfile::Builder::new()
+        .prefix("openorchestra-path-")
+        .tempfile()
+        .ok()?;
 
-    let mut child = std::process::Command::new(&shell)
-        .args(["-l", "-i", "-c", &probe_script()])
+    let mut child = os_compat::process::command(&shell)
+        .args(["-l", "-i", "-c", script])
         .stdin(std::process::Stdio::null())
-        .stdout(out)
+        .stdout(out.reopen().ok()?)
         .stderr(std::process::Stdio::null())
         .spawn()
         .ok()?;
@@ -104,8 +120,7 @@ fn ask_login_shell() -> Option<String> {
         }
     };
 
-    let raw = std::fs::read_to_string(&out_path).ok();
-    let _ = std::fs::remove_file(&out_path);
+    let raw = std::fs::read_to_string(out.path()).ok();
     finished
         .then_some(raw)
         .flatten()
@@ -132,7 +147,7 @@ pub fn hydrate_path() {
     if std::env::var_os("HARNESS_NO_LOGIN_PATH").is_some() || !launched_without_a_shell() {
         return;
     }
-    let Some(from_shell) = ask_login_shell() else {
+    let Some(from_shell) = ask_login_shell(&probe_script()) else {
         return;
     };
     let Some(merged) = merge(std::env::var_os("PATH").as_deref(), &from_shell) else {
@@ -144,8 +159,95 @@ pub fn hydrate_path() {
     unsafe { std::env::set_var("PATH", merged) };
 }
 
+/// Windows: add the directories Git Bash's login shell puts on PATH that
+/// this process lacks, and say whether any were added.
+///
+/// CLI installers run from Git Bash (Grok's, for one) put themselves on
+/// PATH in `~/.bashrc` only, so the app — which resolves agents itself —
+/// reported them missing while a terminal ran them fine. Unlike
+/// [`hydrate_path`] this only appends: Windows' own PATH keeps precedence,
+/// and Git's directories (`usr\bin` holds a `find`, `sort` and `link`) are
+/// left to bash, which adds them itself.
+///
+/// Safe to call while threads run on Windows, where the environment block
+/// is locked (`std::env` and the OS both).
+pub fn add_login_shell_dirs() -> bool {
+    let Some(from_shell) = ask_login_shell(&windows_probe_script()) else {
+        return false;
+    };
+    let git_root = std::env::var_os("SHELL")
+        .map(std::path::PathBuf::from)
+        .and_then(|bash| Some(bash.parent()?.parent()?.to_path_buf()));
+    let Some(added) = append_missing(
+        std::env::var_os("PATH").as_deref(),
+        &from_shell,
+        git_root.as_deref(),
+    ) else {
+        return false;
+    };
+    log::info!("PATH: added from the login shell: {}", added.1.join(";"));
+    // SAFETY: see above; this runs only on Windows.
+    unsafe { std::env::set_var("PATH", added.0) };
+    true
+}
+
+/// `inherited` plus the `from_shell` directories it lacks (compared without
+/// case, trailing separator or `/` vs `\`, as Windows does), skipping any under
+/// `skip_root`. `None` when nothing is new; else the new PATH and what was
+/// added.
+fn append_missing(
+    inherited: Option<&OsStr>,
+    from_shell: &str,
+    skip_root: Option<&std::path::Path>,
+) -> Option<(OsString, Vec<String>)> {
+    let norm = |p: &std::path::Path| {
+        p.to_string_lossy()
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_lowercase()
+    };
+    let skip = skip_root.map(norm);
+    let mut dirs: Vec<std::path::PathBuf> =
+        inherited.into_iter().flat_map(std::env::split_paths).collect();
+    let mut added = Vec::new();
+    for dir in from_shell.split(';').map(str::trim).filter(|d| !d.is_empty()) {
+        let dir = std::path::PathBuf::from(dir);
+        let key = norm(&dir);
+        let under_skip = skip
+            .as_ref()
+            .is_some_and(|root| key == *root || key.starts_with(&format!("{root}\\")));
+        if !dir.is_absolute() || under_skip || dirs.iter().any(|d| norm(d) == key) {
+            continue;
+        }
+        added.push(dir.to_string_lossy().into_owned());
+        dirs.push(dir);
+    }
+    if added.is_empty() {
+        return None;
+    }
+    Some((std::env::join_paths(dirs).ok()?, added))
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// Two probes at once (a Re-check while another runs) each read their
+    /// own shell's answer: they used to share one file named by the pid.
+    #[cfg(unix)]
+    #[test]
+    fn overlapping_probes_each_get_their_own_answer() {
+        if std::env::var_os("SHELL").is_none() {
+            return;
+        }
+        let probes: Vec<_> = (0..2)
+            .map(|_| std::thread::spawn(|| ask_login_shell(&probe_script())))
+            .collect();
+        for probe in probes {
+            let path = probe.join().unwrap().expect("the login shell reported its PATH");
+            assert!(!path.is_empty());
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -180,6 +282,7 @@ mod tests {
         assert!(script.contains(&format!("'{BEGIN}'")), "{script}");
     }
 
+    #[cfg(unix)] // `:`-separated PATHs; Windows has its own test below
     #[test]
     fn shell_directories_come_first_and_inherited_ones_survive() {
         let merged = merge(
@@ -203,12 +306,49 @@ mod tests {
         assert_eq!(merge(None, ""), None);
     }
 
+    #[cfg(unix)] // `:`-separated PATHs; Windows has its own test below
     #[test]
     fn a_missing_inherited_path_is_not_an_error() {
         let merged = merge(None, "/opt/homebrew/bin:/usr/bin").unwrap();
         assert_eq!(merged.to_string_lossy(), "/opt/homebrew/bin:/usr/bin");
     }
 
+    // Windows path semantics (`;`, drive letters): only meaningful there.
+    #[cfg(windows)]
+    #[test]
+    fn windows_appends_only_what_bash_adds_beyond_git_itself() {
+        let (path, added) = append_missing(
+            Some(OsStr::new(r"C:\Windows\system32;C:\Users\me\AppData\Roaming\npm")),
+            r"C:\Users\me\.grok\bin;C:\Program Files\Git\usr\bin;c:\windows\System32\;C:\Program Files\Git\mingw64\bin;C:\Users\me\AppData\Roaming\npm",
+            Some(std::path::Path::new(r"C:\Program Files\Git")),
+        )
+        .unwrap();
+        assert_eq!(added, [r"C:\Users\me\.grok\bin"]);
+        assert_eq!(
+            path.to_string_lossy(),
+            r"C:\Windows\system32;C:\Users\me\AppData\Roaming\npm;C:\Users\me\.grok\bin"
+        );
+        // Nothing new: leave PATH alone.
+        assert!(append_missing(Some(OsStr::new(r"C:\a")), r"C:\A\", None).is_none());
+        // Git's own folders in `/` spelling are still Git's; a sibling folder
+        // whose name merely starts the same is not.
+        let (_, added) = append_missing(
+            None,
+            r"C:/Git/usr/bin;C:\GitTools\bin",
+            Some(std::path::Path::new(r"C:\Git")),
+        )
+        .unwrap();
+        assert_eq!(added, [r"C:\GitTools\bin"]);
+    }
+
+    #[test]
+    fn the_windows_script_reports_a_windows_spelled_path() {
+        let script = windows_probe_script();
+        assert!(script.contains("cygpath -w -p"), "{script}");
+        assert!(script.contains(&format!("'{BEGIN}'")), "{script}");
+    }
+
+    #[cfg(unix)] // `:`-separated PATHs; Windows has its own test below
     #[test]
     fn empty_entries_are_dropped_because_they_mean_the_current_directory() {
         // A trailing colon in someone's profile puts "." on PATH; inheriting it

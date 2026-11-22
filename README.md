@@ -10,8 +10,8 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue" alt="License GPL-3.0-or-later"></a>
 </p>
 
-A native macOS workspace for running coding agents in parallel Git worktrees, editing
-with Zed, and reviewing changes before you ship. openOrchestra runs locally and
+A native macOS workspace (and, in beta, Windows) for running coding agents in
+parallel Git worktrees, editing with Zed, and reviewing changes before you ship. openOrchestra runs locally and
 requires no openOrchestra account. It collects no telemetry.
 
 ![A pi agent in the Trail Notes worktree with Git changes visible in the tools panel](docs/screenshots/running-agent.png)
@@ -28,6 +28,11 @@ Or download the signed, notarized universal DMG for Apple Silicon and Intel.
 Requires **macOS 12 or later**, **Git**, and **tmux**. Homebrew installs tmux with
 the app. Install and sign in to the agent CLI you want to use. Install and
 authenticate `gh` to show pull request and CI status.
+
+**Windows 10/11 (beta):** there is no download yet; build and install it from
+source as described in [Windows (beta)](#windows-beta). It needs
+[Git for Windows](https://git-scm.com/download/win) (agents run through Git
+Bash) and no tmux.
 
 ## Features
 
@@ -77,6 +82,26 @@ make setup && make app && open dist/openOrchestra.app
 
 View or rebind shortcuts in **Settings → Shortcuts** (`⌘,`).
 [Development setup and contribution guide](CONTRIBUTING.md#development-setup)
+
+### Windows (beta)
+
+The app also builds natively on Windows 10/11, with no admin rights and no
+Visual Studio: rustup with the GNU toolchain as its default (`rustup default
+stable-x86_64-pc-windows-gnu`) and [WinLibs](https://winlibs.com) GCC (POSIX
+threads, MSVCRT) in `~\tools\mingw64` or `$env:OO_MINGW`. From PowerShell:
+
+```powershell
+.\make setup     # check the toolchain
+.\make run       # build and run the debug app
+.\make install   # release build, installed per user with a Start menu entry
+```
+
+Browser tabs use Edge WebView2 and notifications are Windows toasts. Agents
+launch through Git Bash. There is no tmux on Windows: the app bundles
+`oo-session.exe`, which keeps agents and shells running after you quit, and
+their tabs reattach when you reopen the app. Closing a tab ends its session.
+⌘ shortcuts are Alt in the app and Ctrl in the editor (**Settings →
+Shortcuts**, `Alt+,`).
 
 ## Community
 

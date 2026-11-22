@@ -33,7 +33,7 @@ impl SidebarSection {
             Self::Projects => "PROJECTS",
             Self::Archived => "ARCHIVED",
             Self::PortsTask => "THIS TASK",
-            Self::PortsOther => "OTHER ON THIS MAC",
+            Self::PortsOther => crate::platform::CURRENT.ports_elsewhere,
         }
     }
 

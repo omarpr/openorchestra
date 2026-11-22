@@ -4,7 +4,6 @@
 
 use std::io;
 use std::path::Path;
-use std::process::Command;
 
 /// Captured output of a finished command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,7 +36,7 @@ pub struct SystemRunner;
 
 impl CommandRunner for SystemRunner {
     fn run(&self, cwd: Option<&Path>, program: &str, args: &[&str]) -> io::Result<CommandOutput> {
-        let mut cmd = Command::new(program);
+        let mut cmd = os_compat::process::command(program);
         cmd.args(args);
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
