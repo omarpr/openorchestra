@@ -253,6 +253,11 @@ impl AgentRuntime for OpenCodeRuntime {
 fn is_legacy_cli(program: &Path) -> bool {
     type Probes = Mutex<HashMap<(PathBuf, Option<SystemTime>), bool>>;
     static PROBES: OnceLock<Probes> = OnceLock::new();
+    // What `prepare_launch` runs: on Windows PATH finds npm's extensionless
+    // sh wrapper first, which Windows cannot start, so the probe failed and
+    // OpenCode 1.x lost its event stream. Keyed by that file, so an upgrade
+    // of the binary itself is probed again.
+    let program = &os_compat::Os::CURRENT.direct_launcher(program);
     let modified = fs::metadata(program).and_then(|m| m.modified()).ok();
     let key = (program.to_path_buf(), modified);
     let probes = PROBES.get_or_init(Default::default);
