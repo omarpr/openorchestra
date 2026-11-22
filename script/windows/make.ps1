@@ -19,10 +19,10 @@
     install    dist, then install per user (%LOCALAPPDATA%\Programs\openOrchestra) + Start menu shortcut
     uninstall  remove what install (and the app's notification registration) added
 
-  The toolchain is per user and needs no admin: rustup with the GNU host
-  (x86_64-pc-windows-gnu) and WinLibs GCC, MSVCRT build (Rust's GNU target
-  links msvcrt). WinLibs is found on PATH, in $env:OO_MINGW, or in
-  ~\tools\mingw64.
+  The toolchain is per user and needs no admin: rustup with the GNU
+  toolchain as its default (rustup default stable-x86_64-pc-windows-gnu)
+  and WinLibs GCC, MSVCRT build (Rust's GNU target links msvcrt). WinLibs
+  is found on PATH, in $env:OO_MINGW, or in ~\tools\mingw64.
 #>
 param(
     [Parameter(Position = 0)] [string] $Target = "help",
@@ -122,16 +122,19 @@ function Invoke-Doctor([switch] $Strict) {
     Write-Sec "Build - needed for make build / run / dist"
     $cargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
     if (Test-Path (Join-Path $cargoBin "rustup.exe")) {
-        $hostTriple = (& (Join-Path $cargoBin "rustup.exe") show 2>$null | Select-String "Default host:").ToString() -replace ".*:\s*", ""
-        if ($hostTriple -like "*windows-gnu*") { Write-Ok "rustup     host $hostTriple" }
+        # The compiler a build will use: the active toolchain, which
+        # `rustup set default-host` alone does not change.
+        $hostLine = try { & (Join-Path $cargoBin "rustc.exe") -vV 2>$null | Select-String "^host:" } catch { $null }
+        $hostTriple = if ($hostLine) { "$hostLine" -replace "^host:\s*", "" } else { "not set" }
+        if ($hostTriple -like "*windows-gnu*") { Write-Ok "rustc      $hostTriple" }
         else {
-            Write-Bad "rustup     host is $hostTriple; the GNU host builds without Visual Studio:"
-            Write-Host "               rustup set default-host x86_64-pc-windows-gnu"
+            Write-Bad "rustc      toolchain is $hostTriple; the GNU one builds without Visual Studio:"
+            Write-Host "               rustup default stable-x86_64-pc-windows-gnu"
             $missing = $true
         }
     } else {
         Write-Bad "rustup     install per user (no admin):"
-        Write-Host "               winget install --id Rustlang.Rustup   (then: rustup set default-host x86_64-pc-windows-gnu)"
+        Write-Host "               winget install --id Rustlang.Rustup   (then: rustup default stable-x86_64-pc-windows-gnu)"
         $missing = $true
     }
     $mingw = Find-MinGW

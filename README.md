@@ -81,8 +81,8 @@ View or rebind shortcuts in **Settings → Shortcuts** (`⌘,`).
 ### Windows (experimental)
 
 The app also builds natively on Windows 10/11, with no admin rights and no
-Visual Studio: rustup with the GNU host (`rustup set default-host
-x86_64-pc-windows-gnu`) and [WinLibs](https://winlibs.com) GCC (POSIX
+Visual Studio: rustup with the GNU toolchain as its default (`rustup default
+stable-x86_64-pc-windows-gnu`) and [WinLibs](https://winlibs.com) GCC (POSIX
 threads, MSVCRT) in `~\tools\mingw64` or `$env:OO_MINGW`. From PowerShell:
 
 ```powershell
