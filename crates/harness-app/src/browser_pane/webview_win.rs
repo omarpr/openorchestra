@@ -182,8 +182,10 @@ fn with_environment(page: &Rc<Inner>) -> anyhow::Result<()> {
                 waiting.push(Rc::downgrade(page));
                 Ok(false)
             }
-            Env::Failed(why) => Err(anyhow!("{why}")),
-            Env::Idle => {
+            // A failure is tried again by the next page (the pane's Retry
+            // makes one): the profile folder may only have been busy. A
+            // missing loader fails again at once (`loader` keeps its answer).
+            Env::Failed(_) | Env::Idle => {
                 *env = Env::Pending(vec![Rc::downgrade(page)]);
                 Ok(true)
             }
