@@ -1240,7 +1240,11 @@ mod tests {
     /// an agent session counts as running, then as missing once the agent
     /// exits back to the session's shell. Ignored by default because it
     /// changes TMUX_TMPDIR for the whole test process; run it alone with
-    /// `cargo test live_tmux_missing_agent -- --ignored`.
+    /// `cargo test live_tmux_missing_agent -- --ignored`. Real tmux only:
+    /// on Windows the client is oo-session, which TMUX_TMPDIR doesn't
+    /// isolate, and the stand-in agent is a `#!` script
+    /// (`oo_session_round_trip` covers oo-session).
+    #[cfg(not(windows))]
     #[test]
     #[ignore]
     fn live_tmux_missing_agent_round_trip() {
