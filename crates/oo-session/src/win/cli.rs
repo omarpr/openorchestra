@@ -514,6 +514,8 @@ fn kill(ctx: &Ctx, session: &str) -> i32 {
     while ctx.live(session) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
+    // A later command in this sequence must ask again, not reuse its INFO.
+    ctx.forget(session);
     // The host answers before it terminates anything: still listed after
     // the wait means the kill failed.
     if ctx.live(session) {
