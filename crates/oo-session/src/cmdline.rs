@@ -134,6 +134,14 @@ mod tests {
     }
 
     #[test]
+    fn a_literal_starting_with_a_dash_follows_a_double_dash() {
+        let cmd = parse(&s(&["send-keys", "-t", "x", "-l", "--", "-n example"])).unwrap();
+        assert_eq!(cmd.value('t'), Some("x"));
+        assert!(cmd.has('l'));
+        assert_eq!(cmd.args, s(&["-n example"]));
+    }
+
+    #[test]
     fn splits_on_bare_semicolons_only() {
         let parts = split(&s(&["a", "x;y", ";", "b", ";", ";", "c", ";"]));
         assert_eq!(parts, vec![s(&["a", "x;y"]), s(&["b"]), s(&["c"])]);

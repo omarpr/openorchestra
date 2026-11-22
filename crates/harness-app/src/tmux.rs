@@ -627,8 +627,10 @@ const SEND_KEYS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3)
 /// skipped if the text did not go through, so a half-delivered line is never
 /// submitted (and Enter alone never submits what the user was typing).
 pub fn send_keys(session: &str, command: &str) -> bool {
+    // `--`: a line starting with `-` is text, not more flags (tmux and
+    // oo-session both stop parsing flags there).
     let typed = run_bounded(
-        &["send-keys", "-t", session, "-l", command],
+        &["send-keys", "-t", session, "-l", "--", command],
         SEND_KEYS_TIMEOUT,
     )
     .is_some_and(|o| o.status.success());
