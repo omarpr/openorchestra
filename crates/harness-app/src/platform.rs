@@ -452,8 +452,20 @@ fn windows_env_defaults() {
                 std::env::set_var("SHELL", bash);
             }
         }
+        // Git for Windows aliases node, python & co. to `winpty <name>.exe`
+        // when TERM is xterm-like, for mintty, which is not a console. The
+        // app's terminals are ConPTY consoles, where winpty only gets in the
+        // way: a backgrounded `node server.js &` is stopped by it. Bash
+        // imports this exported function, so `winpty X` just runs X.
+        if std::env::var_os(WINPTY_PASSTHROUGH.0).is_none() {
+            std::env::set_var(WINPTY_PASSTHROUGH.0, WINPTY_PASSTHROUGH.1);
+        }
     }
 }
+
+/// An exported bash function (`name%%` is bash's encoding) that runs its
+/// arguments: see `windows_env_defaults`.
+const WINPTY_PASSTHROUGH: (&str, &str) = ("BASH_FUNC_winpty%%", "() {  \"$@\"\n}");
 
 #[cfg(test)]
 mod tests {
