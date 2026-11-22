@@ -149,6 +149,8 @@ pub(crate) fn write_atomic_private(path: &Path, bytes: &[u8]) -> io::Result<()> 
             .open(&tmp)?;
         // Enforce 0600 even if the temp file pre-existed with other bits.
         f.set_permissions(fs::Permissions::from_mode(0o600))?;
+        // Windows has no modes: an owner-only ACL, before any bytes land.
+        os_compat::fs::restrict_to_user(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?;
         fs::rename(&tmp, path)

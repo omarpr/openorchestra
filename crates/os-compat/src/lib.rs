@@ -165,6 +165,112 @@ pub mod fs {
     #[cfg(unix)]
     pub use std::os::unix::fs::{symlink, DirBuilderExt, OpenOptionsExt, PermissionsExt};
 
+    /// Let only this user (and SYSTEM) read or write the *file* at `path`:
+    /// on Windows, what mode 0600 does on Unix, where this is a no-op (the
+    /// mode does it). A Windows file otherwise inherits its folder's access,
+    /// and a folder outside the user's profile (`HOME` pointed elsewhere)
+    /// can let every local user read it. Files only: on a folder Windows
+    /// would rewrite the access of everything inside.
+    #[cfg(unix)]
+    pub fn restrict_to_user(_path: &std::path::Path) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    pub fn restrict_to_user(path: &std::path::Path) -> std::io::Result<()> {
+        use std::io;
+        use std::os::windows::ffi::OsStrExt;
+        use std::ptr::{null, null_mut};
+        use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE};
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+            SetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT,
+        };
+        use windows_sys::Win32::Security::{
+            GetSecurityDescriptorDacl, GetTokenInformation, TokenUser, ACL,
+            DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+            TOKEN_QUERY, TOKEN_USER,
+        };
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+        fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
+            s.encode_wide().chain(Some(0)).collect()
+        }
+        // SAFETY: plain Win32 calls on buffers we own; every allocation the
+        // system hands back is freed before return.
+        unsafe {
+            let mut token: HANDLE = null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut len = 0u32;
+            GetTokenInformation(token, TokenUser, null_mut(), 0, &mut len);
+            let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+            let ok = GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), len, &mut len);
+            CloseHandle(token);
+            if ok == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let user = &*(buf.as_ptr() as *const TOKEN_USER);
+            let mut sid_text: *mut u16 = null_mut();
+            if ConvertSidToStringSidW(user.User.Sid, &mut sid_text) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut n = 0;
+            while *sid_text.add(n) != 0 {
+                n += 1;
+            }
+            let sid = String::from_utf16_lossy(std::slice::from_raw_parts(sid_text, n));
+            LocalFree(sid_text.cast());
+
+            // Protected (no inherited entries), full access for SYSTEM and
+            // this user, nothing for anyone else.
+            let sddl = format!("D:P(A;;FA;;;SY)(A;;FA;;;{sid})");
+            let mut sd: PSECURITY_DESCRIPTOR = null_mut();
+            if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide(std::ffi::OsStr::new(&sddl)).as_ptr(),
+                SDDL_REVISION_1,
+                &mut sd,
+                null_mut(),
+            ) == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            let (mut present, mut defaulted) = (0, 0);
+            let mut dacl: *mut ACL = null_mut();
+            let got = GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted);
+            let rc = if got == 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                match SetNamedSecurityInfoW(
+                    wide(path.as_os_str()).as_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                    null_mut(),
+                    null_mut(),
+                    dacl,
+                    null(),
+                ) {
+                    0 => Ok(()),
+                    err => Err(io::Error::from_raw_os_error(err as i32)),
+                }
+            };
+            LocalFree(sd);
+            rc
+        }
+    }
+
+    #[cfg(all(test, windows))]
+    #[test]
+    fn a_restricted_file_stays_usable_by_its_user() {
+        let path = std::env::temp_dir().join(format!("os-compat-restrict-{}", std::process::id()));
+        std::fs::write(&path, b"x").unwrap();
+        restrict_to_user(&path).unwrap();
+        std::fs::write(&path, b"y").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"y");
+        std::fs::remove_file(&path).unwrap();
+    }
+
     #[cfg(not(unix))]
     pub use shim::*;
 
