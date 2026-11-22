@@ -33,7 +33,7 @@ use windows_sys::Win32::System::JobObjects::{
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
-    InitializeProcThreadAttributeList, ResumeThread, UpdateProcThreadAttribute,
+    InitializeProcThreadAttributeList, ResumeThread, TerminateProcess, UpdateProcThreadAttribute,
     WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
     EXTENDED_STARTUPINFO_PRESENT, INFINITE, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
     PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES, STARTUPINFOEXW,
@@ -274,9 +274,11 @@ fn spawn(argv: &[String], cwd: Option<&str>, env: &[String], cols: u16, rows: u1
         }
 
         // Kill-on-close job: the program and everything it starts end with
-        // the host, never outliving the only way to reach them.
+        // the host, never outliving the only way to reach them. The program
+        // runs only once it is in the job: without it, kill-session could
+        // not end it and nothing would clean up after a crashed host.
         let job = CreateJobObjectW(null(), null());
-        if !job.is_null() {
+        let in_job = !job.is_null() && {
             let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
             info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
             SetInformationJobObject(
@@ -284,10 +286,20 @@ fn spawn(argv: &[String], cwd: Option<&str>, env: &[String], cols: u16, rows: u1
                 JobObjectExtendedLimitInformation,
                 &info as *const _ as *const c_void,
                 std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            );
-            AssignProcessToJobObject(job, pi.hProcess);
+            ) != 0
+                && AssignProcessToJobObject(job, pi.hProcess) != 0
+        };
+        if !in_job || ResumeThread(pi.hThread) == u32::MAX {
+            let e = io::Error::last_os_error();
+            TerminateProcess(pi.hProcess, 1);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            if !job.is_null() {
+                CloseHandle(job);
+            }
+            let _ = fail(hpc);
+            return Err(e);
         }
-        ResumeThread(pi.hThread);
         CloseHandle(pi.hThread);
         Ok(Child {
             process: pi.hProcess,
