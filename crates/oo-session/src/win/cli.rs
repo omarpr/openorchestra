@@ -236,6 +236,17 @@ impl<'a> Ctx<'a> {
             "pane_current_command" => {
                 procs::foreground_in(self.procs.get_or_init(procs::snapshot), info.pid, &info.members)
             }
+            // oo-session's own: every process the session started, comma-
+            // separated. Windows parent chains break (an MSYS fork exits after
+            // starting a native program), the job does not; Ports uses this to
+            // tell which servers a session started.
+            "pane_job_pids" => Some(
+                info.members
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
             "session_attached" => Some(info.clients.to_string()),
             "pane_width" | "window_width" | "client_width" => Some(info.size.0.to_string()),
             "pane_height" | "window_height" | "client_height" => Some(info.size.1.to_string()),

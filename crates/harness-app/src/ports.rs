@@ -357,12 +357,38 @@ pub fn parse_lsof_cwd(out: &str) -> std::collections::HashMap<u32, PathBuf> {
     cwds
 }
 
+/// Hang a session's job members whose parent chain is broken back on the
+/// session's pane, so [`classify`] counts them as the session's. On Windows a
+/// server started from Git Bash has a dead parent (the MSYS fork that ran it
+/// exits, and `node` goes through `winpty`), yet it stays in the session's job.
+/// Members whose parent is another member keep their real parent.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn adopt_job_orphans(procs: &mut [ProcPath], pane: u32, members: &[u32]) {
+    for p in procs.iter_mut() {
+        if p.pid == pane || !members.contains(&p.pid) {
+            continue;
+        }
+        if !p.parent.is_some_and(|parent| members.contains(&parent)) {
+            p.parent = Some(pane);
+        }
+    }
+}
+
 /// Executables under these belong to macOS itself (AirPlay receiver,
 /// rapportd, …), never to something the user would share.
 const SYSTEM_PREFIXES: &[&str] = &["/System/", "/usr/libexec/"];
 
+/// The file name in a process path: `node` from `/usr/local/bin/node`, and
+/// `node.exe` from `C:\Program Files\nodejs\node.exe` (Windows paths use `\`,
+/// which left the whole path as the row's name).
 fn basename(path: &str) -> &str {
-    path.rsplit('/').next().unwrap_or(path)
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+/// The name an agent CLI is known by: `claude.exe` on Windows is `claude`.
+fn program_name(name: &str) -> String {
+    let lower = name.to_ascii_lowercase();
+    lower.strip_suffix(".exe").map(str::to_string).unwrap_or(lower)
 }
 
 /// Split listeners into the selected task's and everything else's.
@@ -427,7 +453,7 @@ pub fn classify(s: &PortsSample, scopes: &[Scope]) -> PortsView {
         };
         // An agent CLI's own listener (Claude Code's IDE bridge, …) is never the
         // user's app, in this task or any other session.
-        if agents.contains(name.to_ascii_lowercase().as_str()) {
+        if agents.contains(program_name(&name).as_str()) {
             continue;
         }
         let member_of = |label: &str| (scopes.len() > 1).then(|| label.to_string());
@@ -445,7 +471,10 @@ pub fn classify(s: &PortsSample, scopes: &[Scope]) -> PortsView {
             });
             continue;
         }
-        if pid == s.app_pid || SYSTEM_PREFIXES.iter().any(|p| path.starts_with(p)) {
+        if pid == s.app_pid
+            || SYSTEM_PREFIXES.iter().any(|p| path.starts_with(p))
+            || crate::platform::is_system_process(path)
+        {
             continue;
         }
         // Container metadata only for a port an engine holds: a native server
@@ -672,7 +701,7 @@ pub fn sample(has_tmux: bool) -> Option<PortsSample> {
         .collect();
     let mut sys = sysinfo::System::new();
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-    let procs = sys
+    let mut procs: Vec<ProcPath> = sys
         .processes()
         .iter()
         .map(|(pid, p)| ProcPath {
@@ -684,6 +713,11 @@ pub fn sample(has_tmux: bool) -> Option<PortsSample> {
                 .unwrap_or_else(|| p.name().to_string_lossy().into_owned()),
         })
         .collect();
+    if has_tmux {
+        for (pane, members) in crate::tmux::session_jobs() {
+            adopt_job_orphans(&mut procs, pane, &members);
+        }
+    }
     Some(PortsSample {
         app_pid: std::process::id(),
         listeners,
@@ -1983,5 +2017,42 @@ quiet-1\tbusybox\t\t\t\t\n";
             members,
             vec![(3000, Some("web".into())), (4000, Some("api".into()))]
         );
+    }
+
+    #[test]
+    fn a_server_with_a_dead_parent_is_still_its_sessions() {
+        // Git Bash: bash (pane) -> [exited MSYS fork 32] -> winpty -> agent
+        // -> node. The chain breaks at the dead fork; the job still holds all.
+        let mut procs = vec![
+            p(10, 0, r"C:\Program Files\Git\usr\bin\bash.exe"),
+            p(40, 32, r"C:\Program Files\Git\usr\bin\winpty.exe"),
+            p(41, 40, r"C:\Program Files\Git\usr\bin\winpty-agent.exe"),
+            p(42, 41, r"C:\Program Files\nodejs\node.exe"),
+            p(50, 0, r"C:\elsewhere\node.exe"),
+        ];
+        adopt_job_orphans(&mut procs, 10, &[10, 40, 41, 42]);
+        let parent = |pid: u32| procs.iter().find(|p| p.pid == pid).unwrap().parent;
+        assert_eq!(parent(40), Some(10), "the orphan hangs on the pane");
+        assert_eq!(parent(42), Some(41), "a member keeps its real parent");
+        assert_eq!(parent(50), None, "a process outside the job is untouched");
+        let s = PortsSample {
+            app_pid: 1,
+            listeners: vec![l(42, "*", 5178)],
+            procs,
+            session_panes: vec![("harness_main-qa_1".into(), 10)],
+            containers: vec![],
+            cwds: Default::default(),
+        };
+        let v = classify(&s, &[scope("harness_main-qa_", "qa")]);
+        assert_eq!(ports(&v.task), vec![5178]);
+        assert_eq!(v.task[0].name, "node.exe", "named by file, not full path");
+    }
+
+    #[test]
+    fn an_agent_exe_listener_is_hidden_like_the_bare_name() {
+        assert_eq!(basename(r"C:\Users\me\.local\bin\claude.exe"), "claude.exe");
+        assert_eq!(basename("/usr/local/bin/claude"), "claude");
+        assert_eq!(program_name("Claude.EXE"), "claude");
+        assert_eq!(program_name("node"), "node");
     }
 }

@@ -379,6 +379,48 @@ pub fn refresh_system_path() {
     }
 }
 
+/// Whether a listening process belongs to the OS itself rather than to
+/// anything the user would open or share (Ports hides these). macOS's own
+/// paths are checked in `ports.rs` for every OS; this adds Windows': anything
+/// under `%SystemRoot%`, and the core services whose executable path a normal
+/// user can't read (they show up by name only).
+pub fn is_system_process(path: &str) -> bool {
+    match OS {
+        Os::Mac | Os::Linux => false,
+        Os::Windows => {
+            const BY_NAME: &[&str] = &[
+                "system", "idle", "svchost.exe", "lsass.exe", "wininit.exe", "winlogon.exe",
+                "services.exe", "spoolsv.exe", "smss.exe", "csrss.exe", "registry",
+            ];
+            let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+            let lower = path.to_ascii_lowercase();
+            let under_root = lower.starts_with(&format!("{}\\", root.to_ascii_lowercase()));
+            let unreadable_core = !std::path::Path::new(path).is_absolute() && BY_NAME.contains(&lower.as_str());
+            under_root || unreadable_core
+        }
+    }
+}
+
+#[cfg(test)]
+mod system_process_tests {
+    #[test]
+    fn windows_services_are_the_os_s_and_user_servers_are_not() {
+        let is = super::is_system_process;
+        match super::OS {
+            super::Os::Windows => {
+                let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+                assert!(is(&format!(r"{root}\System32\svchost.exe")));
+                assert!(is(&format!(r"{}\system32\spoolsv.exe", root.to_uppercase())));
+                assert!(is("svchost.exe"), "a service shown by name only");
+                assert!(is("System"));
+                assert!(!is(r"C:\Program Files\nodejs\node.exe"));
+                assert!(!is("mysqld.exe"), "a database the user may want to see");
+            }
+            super::Os::Mac | super::Os::Linux => assert!(!is("/usr/bin/node")),
+        }
+    }
+}
+
 /// The OS's own curl, by absolute path so nothing earlier on PATH can stand
 /// in for it. Windows 10 (1803) and later ship one in System32.
 pub fn system_curl() -> std::path::PathBuf {

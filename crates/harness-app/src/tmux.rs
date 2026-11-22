@@ -376,6 +376,29 @@ pub fn list_session_panes() -> Result<Vec<(String, u32)>, ()> {
     ))
 }
 
+/// `(pane_pid, every process in the pane's job)` per session. Only oo-session
+/// (Windows) knows `#{pane_job_pids}`; tmux leaves it empty, so this is empty.
+#[cfg_attr(not(windows), allow(dead_code))] // only the Windows Ports sample asks
+pub fn session_jobs() -> Vec<(u32, Vec<u32>)> {
+    match run_bounded(
+        &["list-panes", "-a", "-F", "#{pane_pid} #{pane_job_pids}"],
+        LIST_TIMEOUT,
+    ) {
+        Some(o) if o.status.success() => parse_session_jobs(&String::from_utf8_lossy(&o.stdout)),
+        _ => Vec::new(),
+    }
+}
+
+fn parse_session_jobs(out: &str) -> Vec<(u32, Vec<u32>)> {
+    out.lines()
+        .filter_map(|l| {
+            let (pane, pids) = l.trim().split_once(' ')?;
+            let members: Vec<u32> = pids.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+            Some((pane.parse().ok()?, members)).filter(|(_, m)| !m.is_empty())
+        })
+        .collect()
+}
+
 fn panes_from_listing(out: Option<std::process::Output>) -> Result<Vec<(String, u32)>, ()> {
     match out {
         Some(output) if output.status.success() => Ok(parse_session_panes(
@@ -733,6 +756,14 @@ mod tests {
             panes_from_listing(Some(rows)).unwrap(),
             vec![("harness_wt_1".to_string(), 4321)]
         );
+    }
+
+    #[test]
+    fn session_jobs_pair_each_pane_with_its_processes() {
+        // oo-session fills the list; tmux leaves it empty, and that pane is
+        // dropped rather than reported with no processes.
+        let jobs = parse_session_jobs("38128 38128,90388,85784,94080\n4321 \njunk\n");
+        assert_eq!(jobs, vec![(38128, vec![38128, 90388, 85784, 94080])]);
     }
 
     #[test]
