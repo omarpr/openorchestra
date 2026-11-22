@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::io;
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -383,7 +383,26 @@ fn job_members(job: HANDLE) -> Vec<u32> {
         .collect()
 }
 
-type Outbox = mpsc::Sender<(u8, Vec<u8>)>;
+/// A connection's outgoing messages, which its writer thread drains.
+/// `queued` counts the bytes still waiting, so a client that stops reading
+/// is cut off ([`MAX_BACKLOG`]) instead of growing the host without bound.
+#[derive(Clone)]
+struct Outbox {
+    tx: mpsc::Sender<(u8, Vec<u8>)>,
+    queued: Arc<AtomicUsize>,
+    conn: Arc<Pipe>,
+}
+
+impl Outbox {
+    fn send(&self, kind: u8, payload: Vec<u8>) -> bool {
+        self.queued.fetch_add(payload.len(), Ordering::Relaxed);
+        self.tx.send((kind, payload)).is_ok()
+    }
+}
+
+/// Output an attached client may fall behind by before it is disconnected.
+/// It can reattach, and gets a fresh redraw.
+const MAX_BACKLOG: usize = 16 << 20;
 
 struct Screen {
     parser: vt100::Parser,
@@ -505,10 +524,18 @@ impl Shared {
 /// One client connection, until it closes.
 fn serve(conn: Arc<Pipe>, shared: Arc<Shared>) {
     let (tx, rx) = mpsc::channel::<(u8, Vec<u8>)>();
+    let out = Outbox {
+        tx,
+        queued: Arc::new(AtomicUsize::new(0)),
+        conn: conn.clone(),
+    };
     let writer_conn = conn.clone();
+    let queued = out.queued.clone();
     let writer = std::thread::spawn(move || {
         for (kind, payload) in rx {
-            if writer_conn.send(kind, &payload).is_err() {
+            let sent = writer_conn.send(kind, &payload).is_ok();
+            queued.fetch_sub(payload.len(), Ordering::Relaxed);
+            if !sent {
                 break;
             }
         }
@@ -526,8 +553,8 @@ fn serve(conn: Arc<Pipe>, shared: Arc<Shared>) {
                 // Under the lock, so nothing printed in between is lost or
                 // sent twice.
                 let snapshot = redraw(&mut screen.parser);
-                let _ = tx.send((msg::OUTPUT, snapshot));
-                screen.clients.push((id, tx.clone()));
+                let _ = out.send(msg::OUTPUT, snapshot);
+                screen.clients.push((id, out.clone()));
             }
             msg::INPUT => shared.write_input(&payload),
             msg::RESIZE => {
@@ -537,7 +564,7 @@ fn serve(conn: Arc<Pipe>, shared: Arc<Shared>) {
                 }
             }
             msg::INFO => {
-                let _ = tx.send((msg::INFO_REPLY, shared.info()));
+                let _ = out.send(msg::INFO_REPLY, shared.info());
             }
             msg::SET_OPTION => {
                 let text = String::from_utf8_lossy(&payload);
@@ -547,7 +574,7 @@ fn serve(conn: Arc<Pipe>, shared: Arc<Shared>) {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .insert(k.to_string(), v.to_string());
-                let _ = tx.send((msg::OK, Vec::new()));
+                let _ = out.send(msg::OK, Vec::new());
             }
             msg::KILL => {
                 // Answered first and directly: the host exits right after.
@@ -555,7 +582,7 @@ fn serve(conn: Arc<Pipe>, shared: Arc<Shared>) {
                 shared.kill();
             }
             msg::PING => {
-                let _ = tx.send((msg::OK, Vec::new()));
+                let _ = out.send(msg::OK, Vec::new());
             }
             msg::CAPTURE => {
                 let screen = shared.screen.lock().unwrap_or_else(|e| e.into_inner());
@@ -564,7 +591,7 @@ fn serve(conn: Arc<Pipe>, shared: Arc<Shared>) {
                 } else {
                     screen.parser.screen().contents().into_bytes()
                 };
-                let _ = tx.send((msg::OUTPUT, text));
+                let _ = out.send(msg::OUTPUT, text);
             }
             _ => {}
         }
@@ -575,7 +602,7 @@ fn serve(conn: Arc<Pipe>, shared: Arc<Shared>) {
         .unwrap_or_else(|e| e.into_inner())
         .clients
         .retain(|(i, _)| *i != id);
-    drop(tx);
+    drop(out);
     let _ = writer.join();
 }
 
@@ -675,7 +702,15 @@ pub fn run(args: HostArgs) -> i32 {
                 screen.parser.process(bytes);
                 screen
                     .clients
-                    .retain(|(_, tx)| tx.send((msg::OUTPUT, bytes.to_vec())).is_ok());
+                    .retain(|(_, out)| {
+                        if out.queued.load(Ordering::Relaxed) > MAX_BACKLOG {
+                            // Stopped reading: let it go rather than hold
+                            // its backlog (the client can reattach).
+                            out.conn.disconnect();
+                            return false;
+                        }
+                        out.send(msg::OUTPUT, bytes.to_vec())
+                    });
             }
             unsafe { CloseHandle(output) };
         })
@@ -723,8 +758,8 @@ pub fn run(args: HostArgs) -> i32 {
     }
     {
         let mut screen = shared.screen.lock().unwrap_or_else(|e| e.into_inner());
-        for (_, tx) in screen.clients.drain(..) {
-            let _ = tx.send((msg::EXIT, code.to_le_bytes().to_vec()));
+        for (_, out) in screen.clients.drain(..) {
+            let _ = out.send(msg::EXIT, code.to_le_bytes().to_vec());
         }
     }
     // Let the writers deliver the exit before the pipes close with us.

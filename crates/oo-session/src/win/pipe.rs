@@ -35,7 +35,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WIN32_FIND_DATAW,
 };
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeServerProcessId, WaitNamedPipeW,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeServerProcessId,
+    WaitNamedPipeW,
     PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES,
     PIPE_WAIT,
 };
@@ -43,7 +44,7 @@ use windows_sys::Win32::System::Threading::{
     CreateEventW, GetCurrentProcess, OpenProcess, OpenProcessToken,
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
-use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
+use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 
 const GENERIC_READ: u32 = 0x8000_0000;
 const GENERIC_WRITE: u32 = 0x4000_0000;
@@ -309,6 +310,16 @@ impl Pipe {
                 return Err(err);
             }
             unsafe { WaitNamedPipeW(name.as_ptr(), 100) };
+        }
+    }
+
+    /// End a server-side connection: its pending reads and writes fail
+    /// (the threads blocked in them see an error and finish), and so does
+    /// the client's next one.
+    pub fn disconnect(&self) {
+        unsafe {
+            CancelIoEx(self.handle, null());
+            DisconnectNamedPipe(self.handle);
         }
     }
 
