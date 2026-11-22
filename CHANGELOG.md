@@ -45,6 +45,9 @@ Unreleased is empty.
 - A task's setup says so when it couldn't be typed into its shell tab,
   instead of reporting "setup finished", and waits at most 4 seconds for
   that shell to appear, however slowly tmux answers.
+- An agent tab's status and notifications come only from that agent: a
+  test suite or another agent CLI run inside a Codex tab no longer has it
+  announced as "pi finished" or shown as Grok.
 
 ### Security
 

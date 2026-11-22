@@ -139,23 +139,29 @@ impl HarnessWorkspace {
             .find(|tab| tab.id == tab_id && tab.agent.is_some())
     }
 
-    /// An evicted pane may still have live tmux tabs in its persisted record.
-    fn has_agent_tab(&self, root: &Path, tab_id: u64) -> bool {
-        let Some(key) = self.pane_key_for_path(root) else {
-            return false;
-        };
+    /// The agent of tab `tab_id` under `root`, if it is an agent tab. An
+    /// evicted pane may still have live tmux tabs in its persisted record.
+    fn agent_tab_kind(&self, root: &Path, tab_id: u64) -> Option<AgentKind> {
+        let key = self.pane_key_for_path(root)?;
         if let Some(pane) = self.panes.get(&key) {
             return pane
                 .tabs
                 .iter()
-                .any(|tab| tab.id == tab_id && tab.agent.is_some());
+                .find(|tab| tab.id == tab_id)
+                .and_then(|tab| tab.agent.clone());
         }
-        self.has_tmux
-            && self.panes_state.worktrees.get(&key).is_some_and(|pane| {
-                pane.tabs.iter().any(|tab| {
-                    tab.id == tab_id
-                        && matches!(tab.kind, crate::panes_state::TabRecordKind::Agent(_))
-                })
+        if !self.has_tmux {
+            return None;
+        }
+        self.panes_state
+            .worktrees
+            .get(&key)?
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .and_then(|tab| match &tab.kind {
+                crate::panes_state::TabRecordKind::Agent(kind) => Some(kind.clone()),
+                _ => None,
             })
     }
 
@@ -279,7 +285,15 @@ impl HarnessWorkspace {
         cx: &mut Context<Self>,
     ) {
         if let Some(id) = signal.tab_id {
-            if !self.has_agent_tab(&signal.worktree_root, id) {
+            let tab_kind = self.agent_tab_kind(&signal.worktree_root, id);
+            if !tab_owns_signal(tab_kind.as_ref(), &signal.kind) {
+                if let Some(kind) = tab_kind {
+                    log::info!(
+                        "ignoring a {} status for {} tab {id}: written by something running in it",
+                        signal.kind,
+                        kind
+                    );
+                }
                 return;
             }
         } else if signal.state == AgentState::Unknown {
@@ -641,6 +655,33 @@ pub(crate) fn alert_nav_id(target: &str, kind: &AgentKind, tab_id: Option<u64>) 
             kind.as_str()
         ),
         None => format!("{target}{ALERT_AGENT_SEP}{}", kind.as_str()),
+    }
+}
+
+/// Whether a status for a tab of `tab` (None: not an agent tab) is that
+/// tab's agent's. Every agent stamps its own kind, so another kind came from
+/// something running inside the tab, such as a test suite whose shims inherit
+/// the tab's HARNESS_* variables or a second agent CLI the agent started; its
+/// state isn't the tab's and must not be announced under the tab.
+fn tab_owns_signal(tab: Option<&AgentKind>, signal: &AgentKind) -> bool {
+    tab == Some(signal)
+}
+
+#[cfg(test)]
+mod tab_signal_tests {
+    use super::tab_owns_signal;
+    use agent_runtime::AgentKind;
+
+    #[test]
+    fn only_the_tabs_own_agent_drives_it() {
+        assert!(tab_owns_signal(Some(&AgentKind::Codex), &AgentKind::Codex));
+        let custom = AgentKind::Other("aider".into());
+        assert!(tab_owns_signal(Some(&custom), &AgentKind::Other("aider".into())));
+        // pi's and Grok's test shims in a Codex tab, and a tab that is gone
+        // or not an agent's.
+        assert!(!tab_owns_signal(Some(&AgentKind::Codex), &AgentKind::Pi));
+        assert!(!tab_owns_signal(Some(&AgentKind::Codex), &AgentKind::Grok));
+        assert!(!tab_owns_signal(None, &AgentKind::Codex));
     }
 }
 
