@@ -300,7 +300,9 @@ impl HarnessWorkspace {
         cx.spawn(async move |view, cx| {
             let crate::preflight::Probe { checks, agents } = cx
                 .background_spawn(async move {
-                    crate::preflight::probe_all(crate::preflight::version_on_path)
+                    let mut probe = crate::preflight::probe_all(crate::preflight::version_on_path);
+                    crate::preflight::diagnose(&mut probe.agents);
+                    probe
                 })
                 .await;
             view.update(cx, |ws, cx| {

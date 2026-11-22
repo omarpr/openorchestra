@@ -163,8 +163,16 @@ impl HarnessWorkspace {
                         div()
                             .flex_none()
                             .w(px(12.0))
-                            .text_color(if installed { hx.green } else { hx.tx2 })
-                            .child(if installed { "✓" } else { "·" }),
+                            .text_color(match (installed, &a.broken) {
+                                (true, _) => hx.green,
+                                (false, Some(_)) => hx.amber,
+                                (false, None) => hx.tx2,
+                            })
+                            .child(match (installed, &a.broken) {
+                                (true, _) => "✓",
+                                (false, Some(_)) => "!",
+                                (false, None) => "·",
+                            }),
                     )
                     .child(
                         div()
@@ -184,14 +192,27 @@ impl HarnessWorkspace {
                             .whitespace_nowrap()
                             .overflow_hidden()
                             .text_ellipsis()
-                            .child(match &a.found {
-                                Some(v) => format!("{} {v}", a.program),
-                                None => format!("{} — not installed", a.program),
+                            .child(match (&a.found, &a.broken) {
+                                (Some(v), _) => format!("{} {v}", a.program),
+                                (None, Some(_)) => format!("{} — installed, but won't start", a.program),
+                                (None, None) => format!("{} — not installed", a.program),
                             }),
                     ),
             );
-            if !installed {
-                line = line.child(fix_lines(a.program, a.fix, cx));
+            match (installed, &a.broken) {
+                (true, _) => {}
+                (false, Some(broken)) => {
+                    line = line
+                        .child(
+                            div()
+                                .pl(px(24.0))
+                                .text_xs()
+                                .text_color(hx.tx2)
+                                .child(broken.error.clone()),
+                        )
+                        .child(fix_lines(a.program, broken.fix, cx));
+                }
+                (false, None) => line = line.child(fix_lines(a.program, a.fix, cx)),
             }
             line
         };

@@ -100,7 +100,9 @@ impl HarnessWorkspace {
                     // Usually pressed right after an install, whose new PATH
                     // entry this process would otherwise never see.
                     crate::platform::refresh_path();
-                    crate::preflight::probe_all(crate::preflight::version_on_path)
+                    let mut probe = crate::preflight::probe_all(crate::preflight::version_on_path);
+                    crate::preflight::diagnose(&mut probe.agents);
+                    probe
                 })
                 .await;
             view.update(cx, |ws, cx| {

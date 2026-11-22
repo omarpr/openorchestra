@@ -93,7 +93,21 @@ pub struct AgentCheck {
     pub found: Option<String>,
     /// How to install it here.
     pub fix: Fix,
+    /// Installed, but its version check fails: why, and what fixes that
+    /// instead of installing it again. Filled by [`diagnose`].
+    pub broken: Option<Broken>,
 }
+
+/// An agent CLI that is on PATH but fails to run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Broken {
+    /// The line of its output that says why.
+    pub error: String,
+    pub fix: Fix,
+}
+
+/// The oldest Node.js the npm-installed agents start on (pi needs 20).
+pub const MIN_NODE: u32 = 20;
 
 /// What the requirements screen shows: the requirement rows, and every agent
 /// CLI for the Agents tab.
@@ -113,6 +127,7 @@ pub fn probe_all(lookup: impl Fn(&str, &str) -> Option<String>) -> Probe {
             label: a.label,
             found: lookup(a.program, "--version"),
             fix: a.fix,
+            broken: None,
         })
         .collect();
     // Any one agent is enough — they are peers, and the harness is useful with
@@ -206,20 +221,7 @@ pub fn version_on_path(bin: &str, flag: &str) -> Option<String> {
     } else {
         bin.to_string()
     };
-    let bin = resolved.as_str();
-    use crate::platform::{OS, Os};
-    let out = std::process::Command::new(bin)
-        .arg(flag)
-        .output()
-        .or_else(|e| match OS {
-            // std finds `bin.exe` on PATH but not the `bin.cmd` launcher npm
-            // installs agent CLIs as (`claude.cmd`), so try that too.
-            Os::Windows if e.kind() == std::io::ErrorKind::NotFound => {
-                std::process::Command::new(format!("{bin}.cmd")).arg(flag).output()
-            }
-            Os::Windows | Os::Mac | Os::Linux => Err(e),
-        })
-        .ok()?;
+    let out = run_version(resolved.as_str(), flag)?;
     if !out.status.success() {
         return None;
     }
@@ -232,6 +234,87 @@ pub fn version_on_path(bin: &str, flag: &str) -> Option<String> {
         .find(|t| t.chars().next().is_some_and(|c| c.is_ascii_digit()))
         .unwrap_or(line);
     Some(trimmed.to_string())
+}
+
+/// `<bin> <flag>`'s output, or `None` when `bin` is not on PATH at all.
+fn run_version(bin: &str, flag: &str) -> Option<std::process::Output> {
+    use crate::platform::{OS, Os};
+    std::process::Command::new(bin)
+        .arg(flag)
+        .output()
+        .or_else(|e| match OS {
+            // std finds `bin.exe` on PATH but not the `bin.cmd` launcher npm
+            // installs agent CLIs as (`claude.cmd`), so try that too.
+            Os::Windows if e.kind() == std::io::ErrorKind::NotFound => {
+                std::process::Command::new(format!("{bin}.cmd")).arg(flag).output()
+            }
+            Os::Windows | Os::Mac | Os::Linux => Err(e),
+        })
+        .ok()
+}
+
+/// Tell "not installed" from "installed but failing" for each agent the
+/// probe did not find. A CLI whose `--version` fails is on PATH all the same,
+/// and installing it again changes nothing: pi on Node 16 failed this way.
+pub fn diagnose(agents: &mut [AgentCheck]) {
+    if agents.iter().all(|a| a.found.is_some()) {
+        return;
+    }
+    diagnose_with(agents, failure_on_path, node_major());
+}
+
+fn diagnose_with(
+    agents: &mut [AgentCheck],
+    failure: impl Fn(&str) -> Option<String>,
+    node: Option<u32>,
+) {
+    for a in agents.iter_mut().filter(|a| a.found.is_none()) {
+        let Some(error) = failure(a.program) else {
+            continue;
+        };
+        let old_node = node.filter(|&major| major < MIN_NODE);
+        a.broken = Some(match old_node {
+            Some(major) if installs_with_npm(a.fix) => Broken {
+                error: format!("needs Node.js {MIN_NODE} or newer, this is Node {major}: {error}"),
+                fix: crate::platform::CURRENT.install.node,
+            },
+            _ => Broken { error, fix: a.fix },
+        });
+    }
+}
+
+fn installs_with_npm(fix: Fix) -> bool {
+    matches!(fix, Fix::Run(commands) if commands.iter().any(|c| c.starts_with("npm ")))
+}
+
+/// Why `bin --version` failed, when `bin` is on PATH and did fail.
+fn failure_on_path(bin: &str) -> Option<String> {
+    let out = run_version(bin, "--version")?;
+    if out.status.success() {
+        return None;
+    }
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    Some(error_line(&text).unwrap_or_else(|| format!("`{bin} --version` failed ({})", out.status)))
+}
+
+/// The line that names the error ("SyntaxError: …"), else the first one.
+fn error_line(text: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let named = lines.iter().find(|l| {
+        l.split_once(':')
+            .is_some_and(|(kind, _)| kind.ends_with("Error") && !kind.contains(' '))
+    });
+    named.or(lines.first()).map(|l| l.to_string())
+}
+
+/// The major version of the `node` on PATH.
+fn node_major() -> Option<u32> {
+    let v = version_on_path("node", "--version")?;
+    v.trim_start_matches('v').split('.').next()?.parse().ok()
 }
 
 #[cfg(test)]
@@ -325,6 +408,41 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_that_fails_to_start_on_old_node_asks_for_newer_node() {
+        let mut agents = probe_all(|bin, _| (bin == "codex").then(|| "0.171.0".into())).agents;
+        // pi is on PATH but crashes; grok is simply absent.
+        let failure = |bin: &str| (bin == "pi").then(|| "SyntaxError: Invalid regular expression flags".into());
+        diagnose_with(&mut agents, failure, Some(16));
+        let pi = agents.iter().find(|a| a.program == "pi").unwrap();
+        let broken = pi.broken.as_ref().expect("pi is installed but broken");
+        assert_eq!(broken.fix, crate::platform::CURRENT.install.node);
+        assert!(broken.error.contains("Node.js 20") && broken.error.contains("Node 16"), "{}", broken.error);
+        assert!(broken.error.ends_with("Invalid regular expression flags"), "{}", broken.error);
+        for a in agents.iter().filter(|a| a.program != "pi") {
+            assert_eq!(a.broken, None, "{} is found or absent, not broken", a.program);
+        }
+    }
+
+    #[test]
+    fn an_agent_that_fails_on_new_enough_node_keeps_its_own_fix() {
+        let mut agents = probe_all(|_, _| None).agents;
+        diagnose_with(&mut agents, |bin| (bin == "pi").then(|| "boom".into()), Some(22));
+        let pi = agents.iter().find(|a| a.program == "pi").unwrap();
+        assert_eq!(pi.broken, Some(Broken { error: "boom".into(), fix: pi.fix }));
+    }
+
+    #[test]
+    fn the_error_line_is_the_one_that_names_the_error() {
+        let node = "file:///C:/x/pi.js:3\nconst r = /a/v;\n          ^\n\nSyntaxError: Invalid regular expression flags\n    at foo (node:internal)\n";
+        assert_eq!(
+            error_line(node).as_deref(),
+            Some("SyntaxError: Invalid regular expression flags")
+        );
+        assert_eq!(error_line("\n  usage: x [opts]\n").as_deref(), Some("usage: x [opts]"));
+        assert_eq!(error_line("\n\n"), None);
+    }
+
+    #[test]
     fn any_single_agent_satisfies_the_agent_check() {
         for agent in AGENTS {
             let checks = with(&["git", "tmux", agent]);
@@ -413,6 +531,7 @@ mod tests {
                 ("sessions", i.sessions),
                 ("gh", i.gh),
                 ("rustup", i.rustup_then_analyzer),
+                ("node", i.node),
             ] {
                 fixes.push((format!("{os:?} {name}"), fix));
             }

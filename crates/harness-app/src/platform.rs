@@ -120,6 +120,9 @@ pub struct Install {
     /// rust-analyzer on a machine without rustup: rustup first, then the
     /// component (with rustup present it is only the component).
     pub rustup_then_analyzer: Fix,
+    /// A newer Node.js, for an npm-installed agent that is installed but
+    /// fails to start on the Node it has (`preflight::MIN_NODE`).
+    pub node: Fix,
 }
 
 /// How to get a missing tool.
@@ -240,6 +243,7 @@ const MAC: Profile = Profile {
         sessions: Fix::Run(&["brew install tmux"]),
         gh: Fix::Run(&["brew install gh", "gh auth login"]),
         rustup_then_analyzer: Fix::Run(&[RUSTUP_SH, ADD_ANALYZER]),
+        node: Fix::Advice("install Node.js 20 or newer: brew upgrade node, or nodejs.org"),
     },
     upgrade_hint: "Download the new version from GitHub and replace the app in Applications.",
     about_kind: "A native macOS app",
@@ -277,6 +281,8 @@ const WINDOWS: Profile = Profile {
         ),
         gh: Fix::Run(&["winget install --id GitHub.cli", "gh auth login"]),
         rustup_then_analyzer: Fix::Run(&["winget install --id Rustlang.Rustup", ADD_ANALYZER]),
+        // `install` upgrades an older Node it finds, and installs one if none.
+        node: Fix::Run(&["winget install --id OpenJS.NodeJS.LTS"]),
     },
     upgrade_hint: "Download the new version from GitHub, or rebuild it from source with \
                    `make install`.",
@@ -312,6 +318,7 @@ const LINUX: Profile = Profile {
         sessions: Fix::Advice("install tmux with your package manager"),
         gh: Fix::Advice("install gh with your package manager, then run gh auth login"),
         rustup_then_analyzer: Fix::Run(&[RUSTUP_SH, ADD_ANALYZER]),
+        node: Fix::Advice("install Node.js 20 or newer from nodejs.org or your package manager"),
     },
     upgrade_hint: "Download the new version from GitHub.",
     about_kind: "A native app",
