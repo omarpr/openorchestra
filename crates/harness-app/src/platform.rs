@@ -379,6 +379,18 @@ pub fn refresh_system_path() {
     }
 }
 
+/// The OS's own curl, by absolute path so nothing earlier on PATH can stand
+/// in for it. Windows 10 (1803) and later ship one in System32.
+pub fn system_curl() -> std::path::PathBuf {
+    match OS {
+        Os::Mac | Os::Linux => "/usr/bin/curl".into(),
+        Os::Windows => std::env::var_os("SystemRoot")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| r"C:\Windows".into())
+            .join(r"System32\curl.exe"),
+    }
+}
+
 fn windows_env_defaults() {
     use std::path::PathBuf;
     // SAFETY: called first thing in main, single-threaded.

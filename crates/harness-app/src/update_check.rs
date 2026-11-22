@@ -76,7 +76,7 @@ pub fn parse_latest(json: &[u8]) -> Result<Release, String> {
 
 /// Ask GitHub for the latest release. Blocking: run it off the main thread.
 pub fn fetch_latest() -> Result<Release, String> {
-    let out = Command::new("/usr/bin/curl")
+    let out = Command::new(crate::platform::system_curl())
         .args([
             // Must come first: ignore ~/.curlrc, which could add headers to
             // stdout (`include`) and break parsing, or change the request.
@@ -387,6 +387,14 @@ mod tests {
         };
         assert!(link.is_some(), "the repository link is clickable");
         assert_eq!(range.location + range.length, text.length());
+    }
+
+    /// The check runs the OS's own curl; a path that isn't there fails as
+    /// "Could not run curl", which is how this broke on Windows.
+    #[test]
+    fn the_system_curl_exists() {
+        let curl = crate::platform::system_curl();
+        assert!(curl.is_absolute() && curl.is_file(), "{}", curl.display());
     }
 
     #[test]
