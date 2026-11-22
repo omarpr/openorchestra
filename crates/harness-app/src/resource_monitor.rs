@@ -198,6 +198,8 @@ fn is_shell(comm: &str) -> bool {
 
 /// Parse `ps -axo pid=,ppid=,comm=` output into [`ProcInfo`]s, normalizing the
 /// command to a lowercased basename without a leading login-shell `-`.
+/// Windows has no `ps -o` and reads processes with sysinfo instead.
+#[cfg_attr(windows, allow(dead_code))]
 pub fn parse_ps(output: &str) -> Vec<ProcInfo> {
     output
         .lines()
