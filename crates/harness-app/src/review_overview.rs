@@ -997,11 +997,10 @@ fn untracked_diff_usable(status: ExitStatus, bytes: &[u8]) -> bool {
 }
 
 fn stop_child(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    // The subprocess was created as the leader of its own process group.
-    unsafe {
-        libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
-    }
+    // Its whole tree, while the child is still there to find it by: on Unix
+    // the process group it leads, on Windows (`taskkill /T`) what a `.cmd`
+    // launcher started, which holds the output pipes the readers wait on.
+    os_compat::process::kill_tree(child.id());
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -1535,5 +1534,44 @@ Open both files.
         drop(cancel);
         assert_eq!(job.join().unwrap().as_deref(), Some("Overview cancelled."));
         assert!(!ReviewRun::new().worker_flag().load(Ordering::Relaxed));
+    }
+
+    /// A launcher (npm's `.cmd`) whose child holds the output pipes: the
+    /// readers wait for every holder, so cancelling must end the child too.
+    #[test]
+    fn a_cancelled_cli_takes_the_process_it_launched_with_it() {
+        let cancel = ReviewRun::new();
+        let temp = tempfile::tempdir().unwrap();
+        let ready = temp.path().join("ready");
+        let child_ready = ready.clone();
+        let worker = RunControl {
+            cancelled: cancel.worker_flag(),
+            deadline: Instant::now() + Duration::from_secs(30),
+        };
+        let job = std::thread::spawn(move || {
+            worker
+                .capture(
+                    // Not `exec`: `sleep` is the launcher's child.
+                    Command::new("sh")
+                        .args(["-c", ": > \"$1\" && sleep 20; true", "mock-cli"])
+                        .arg(child_ready),
+                    None,
+                    100,
+                )
+                .err()
+        });
+        let start = Instant::now();
+        while !ready.exists() && start.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready.exists(), "mock CLI did not start");
+        let cancelled_at = Instant::now();
+        drop(cancel);
+        assert_eq!(job.join().unwrap().as_deref(), Some("Overview cancelled."));
+        assert!(
+            cancelled_at.elapsed() < Duration::from_secs(10),
+            "cancelling waited {:?} for the launched process",
+            cancelled_at.elapsed()
+        );
     }
 }
