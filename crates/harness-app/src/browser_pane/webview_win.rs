@@ -950,16 +950,16 @@ impl Inner {
             }
         }
         let image = sprite.and(punch.sprite.as_ref()).map(|s| s.image.clone());
-        self.apply_region(next.as_ref(), image.as_deref());
-        *self.mask.borrow_mut() = next;
+        // Remembered only once applied, so a failed cut is tried again.
+        if self.apply_region(next.as_ref(), image.as_deref()) {
+            *self.mask.borrow_mut() = next;
+        }
     }
 
-    fn apply_region(&self, mask: Option<&PageMask>, image: Option<&gpui::RenderImage>) {
+    /// Cuts the host to `mask`; whether Windows took it.
+    fn apply_region(&self, mask: Option<&PageMask>, image: Option<&gpui::RenderImage>) -> bool {
         let Some(mask) = mask else {
-            unsafe {
-                SetWindowRgn(self.host, None, true);
-            }
-            return;
+            return unsafe { SetWindowRgn(self.host, None, true) } != 0;
         };
         let scale = self.scale.get();
         let px = |v: f32| (v * scale).round() as i32;
@@ -988,8 +988,12 @@ impl Inner {
                 CombineRgn(Some(region), Some(region), Some(cut), RGN_DIFF);
                 let _ = DeleteObject(cut.into());
             }
-            // The system owns the region from here.
-            SetWindowRgn(self.host, Some(region), true);
+            // The system owns the region only if it took it.
+            if SetWindowRgn(self.host, Some(region), true) == 0 {
+                let _ = DeleteObject(region.into());
+                return false;
+            }
+            true
         }
     }
 }
