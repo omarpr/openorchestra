@@ -578,19 +578,47 @@ pub fn kill_session(name: &str) {
 /// block indefinitely (one `send-keys` sat for minutes waiting on the server
 /// and, being called on the UI thread, froze the whole app), so anything that
 /// talks to tmux on a path the user is waiting on goes through here. On
-/// timeout the client is killed and `None` returned. Output must be small: it
-/// is read only after exit, so a client filling its pipe would time out.
+/// timeout the client is killed and `None` returned.
 pub fn run_bounded(args: &[&str], timeout: std::time::Duration) -> Option<std::process::Output> {
+    let mut command = Command::new(program());
+    command.args(args);
+    no_window(&mut command);
+    let out = run_command_bounded(command, timeout);
+    if out.is_none() {
+        log::warn!(
+            "tmux {} timed out after {timeout:?}",
+            args.first().unwrap_or(&"")
+        );
+    }
+    out
+}
+
+/// [`run_bounded`] for any command. Stdout and stderr are read while it
+/// runs: a listing bigger than the pipe (`session_jobs` grows with every
+/// process in every session, and a Windows pipe holds 4 KiB) would
+/// otherwise block the client until the deadline.
+fn run_command_bounded(
+    mut command: Command,
+    timeout: std::time::Duration,
+) -> Option<std::process::Output> {
     use std::io::Read;
     use std::process::Stdio;
-    let mut command = Command::new(program());
     command
-        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    no_window(&mut command);
     let mut child = command.spawn().ok()?;
+    let read_all = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+    let stdout = read_all(child.stdout.take().map(|p| Box::new(p) as _));
+    let stderr = read_all(child.stderr.take().map(|p| Box::new(p) as _));
     let deadline = std::time::Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
@@ -599,28 +627,18 @@ pub fn run_bounded(args: &[&str], timeout: std::time::Duration) -> Option<std::p
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
             _ => {
+                // The readers are left to finish at EOF; joining them could
+                // outlast the deadline if anything else holds the pipes.
                 let _ = child.kill();
                 let _ = child.wait();
-                log::warn!(
-                    "tmux {} timed out after {timeout:?}",
-                    args.first().unwrap_or(&"")
-                );
                 return None;
             }
         }
     };
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    if let Some(mut out) = child.stdout.take() {
-        let _ = out.read_to_end(&mut stdout);
-    }
-    if let Some(mut err) = child.stderr.take() {
-        let _ = err.read_to_end(&mut stderr);
-    }
     Some(std::process::Output {
         status,
-        stdout,
-        stderr,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
     })
 }
 
@@ -1152,6 +1170,19 @@ mod tests {
 
     // Needs real tmux (`wait-for`); oo-session has no such command.
     #[cfg(not(windows))]
+    #[cfg(unix)]
+    #[test]
+    fn run_bounded_reads_output_bigger_than_the_pipe() {
+        // 1 MiB, far past any pipe buffer: the client must not stall on it.
+        let mut command = Command::new("sh");
+        command.args(["-c", "head -c 1048576 /dev/zero; echo done >&2"]);
+        let out = run_command_bounded(command, std::time::Duration::from_secs(5))
+            .expect("a client writing a large listing timed out");
+        assert!(out.status.success());
+        assert_eq!(out.stdout.len(), 1 << 20);
+        assert_eq!(out.stderr, b"done\n");
+    }
+
     #[test]
     fn run_bounded_gives_up_on_a_hung_client() {
         if !has_tmux() {
