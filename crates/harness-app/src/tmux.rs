@@ -642,20 +642,30 @@ pub fn send_keys(session: &str, command: &str) -> bool {
         .is_some_and(|o| o.status.success())
 }
 
-/// [`send_keys`] to a session a new tab is still creating: wait (up to 4s)
-/// for it to exist, then a moment more for its shell to draw a prompt, or the
-/// line vanishes into a missing session. Blocks; run it off the UI thread.
+/// [`send_keys`] to a session a new tab is still creating: wait (up to 4s,
+/// listings included) for it to exist, then a moment more for its shell to
+/// draw a prompt, or the line vanishes into a missing session. Whether the
+/// line was typed. Blocks; run it off the UI thread.
 ///
 /// One line only: rapid multi-line dumps race fish/zsh and leave later
 /// commands unexecuted in the typeahead buffer.
 pub fn send_keys_when_live(session: &str, command: &str) -> bool {
-    for _ in 0..40 {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let live = loop {
         if is_live(session, &live_sessions()) {
-            break;
+            break true;
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        if Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    if live {
+        std::thread::sleep(Duration::from_millis(400));
+    } else {
+        log::warn!("{session} was not listed within 4s; trying to type into it anyway");
     }
-    std::thread::sleep(std::time::Duration::from_millis(400));
     send_keys(session, command)
 }
 

@@ -449,13 +449,16 @@ impl HarnessWorkspace {
 
         cx.spawn_in(window, async move |view, cx| {
             // The shell tab creates its tmux session asynchronously.
-            cx.background_spawn(async move {
-                crate::tmux::send_keys_when_live(&session, &invoke);
-            })
-            .await;
+            let typed = cx
+                .background_spawn(async move { crate::tmux::send_keys_when_live(&session, &invoke) })
+                .await;
 
             let _ = view.update(cx, |ws, cx| {
-                ws.set_note("setup finished (see shell)".into());
+                if typed {
+                    ws.set_note("setup finished (see shell)".into());
+                } else {
+                    ws.set_error_note("setup didn't start: couldn't type into its shell tab".into());
+                }
                 cx.notify();
             });
         })

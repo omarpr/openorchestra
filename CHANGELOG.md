@@ -42,6 +42,9 @@ Unreleased is empty.
   (pi).
 - The app menu's tooltip no longer covers About, and **Add a device** fits
   smaller windows, so Done stays visible.
+- A task's setup says so when it couldn't be typed into its shell tab,
+  instead of reporting "setup finished", and waits at most 4 seconds for
+  that shell to appear, however slowly tmux answers.
 
 ## 1.4.0 - 2026-11-20
 
