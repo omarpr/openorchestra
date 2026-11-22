@@ -46,6 +46,11 @@ Unreleased is empty.
   instead of reporting "setup finished", and waits at most 4 seconds for
   that shell to appear, however slowly tmux answers.
 
+### Security
+
+- `url` is updated to 2.5.9 (RUSTSEC-2026-0592: a stack overflow in
+  `Url::origin()` on nested `blob:` URLs).
+
 ## 1.4.0 - 2026-11-20
 
 ### Added
