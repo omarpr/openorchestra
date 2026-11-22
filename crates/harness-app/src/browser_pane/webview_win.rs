@@ -484,11 +484,25 @@ impl Inner {
         }
     }
 
+    /// The docked inspector `generation` asked for won't come. Unless a newer
+    /// request (or a close) replaced it, the page gets the whole host back
+    /// and the inspector reads as closed.
+    fn inspector_failed(&self, generation: u64) {
+        if self.inspector_generation.get() == generation
+            && self.inspector_side.get().is_some()
+            && self.inspector.borrow().is_none()
+        {
+            self.inspector_side.set(None);
+            self.layout();
+        }
+    }
+
     fn create_inspector(self: &Rc<Self>, port: u16, target: &str, generation: u64) {
         let Some(env) = ENV.with(|e| match &*e.borrow() {
             Env::Ready(env) => Some(env.clone()),
             _ => None,
         }) else {
+            self.inspector_failed(generation);
             return;
         };
         let url = format!(
@@ -497,19 +511,30 @@ impl Inner {
         let me = Rc::downgrade(self);
         let handler = CreateCoreWebView2ControllerCompletedHandler::create(Box::new(
             move |result, controller| {
-                let Some(controller) = controller else {
-                    return Ok(());
-                };
-                let live = me.upgrade().filter(|me| {
-                    result.is_ok()
-                        && me.inspector_generation.get() == generation
-                        && me.inspector_side.get().is_some()
-                });
-                let Some(me) = live else {
-                    unsafe {
-                        let _ = controller.Close();
+                let Some(me) = me.upgrade() else {
+                    if let Some(controller) = controller {
+                        unsafe {
+                            let _ = controller.Close();
+                        }
                     }
                     return Ok(());
+                };
+                let current = me.inspector_generation.get() == generation
+                    && me.inspector_side.get().is_some();
+                let controller = match controller {
+                    Some(controller) if result.is_ok() && current => controller,
+                    other => {
+                        if let Some(controller) = other {
+                            unsafe {
+                                let _ = controller.Close();
+                            }
+                        }
+                        if result.is_err() || current {
+                            log::warn!("browser: the inspector didn't open: {result:?}");
+                        }
+                        me.inspector_failed(generation);
+                        return Ok(());
+                    }
                 };
                 unsafe {
                     let _ = controller.SetIsVisible(me.visible.get());
@@ -563,7 +588,7 @@ impl Inner {
         ));
         if let Err(e) = unsafe { env.CreateCoreWebView2Controller(self.host, &handler) } {
             log::warn!("browser: could not open the inspector: {e}");
-            self.inspector_side.set(None);
+            self.inspector_failed(generation);
         }
     }
 
