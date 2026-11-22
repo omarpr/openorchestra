@@ -104,7 +104,12 @@ impl LockGuard {
             .mode(0o600)
             .open(path)?;
         // std's portable advisory lock: flock on Unix, LockFileEx on Windows.
-        f.lock()?;
+        // std calls flock once, so a signal while we wait is retried here.
+        while let Err(e) = f.lock() {
+            if e.kind() != io::ErrorKind::Interrupted {
+                return Err(e);
+            }
+        }
         Ok(LockGuard(f))
     }
 }
