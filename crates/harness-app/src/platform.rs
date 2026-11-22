@@ -347,6 +347,24 @@ pub fn prepare_environment() {
     }
 }
 
+/// Git for Windows' bash, where its installer puts it (for everyone, or
+/// per user); `None` off Windows. Looked up again when needed: Git may be
+/// installed while the app runs, after startup found no `SHELL` to set.
+pub fn git_bash() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    match OS {
+        Os::Windows => [
+            std::env::var_os("ProgramFiles").map(|p| PathBuf::from(p).join(r"Git\bin\bash.exe")),
+            std::env::var_os("LOCALAPPDATA")
+                .map(|p| PathBuf::from(p).join(r"Programs\Git\bin\bash.exe")),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|p| p.is_file()),
+        Os::Mac | Os::Linux => None,
+    }
+}
+
 /// Pick up `PATH` changes made since the app started, so a tool installed
 /// while it runs is found by the requirements screen's Re-check, by an agent
 /// tab, and by new terminals. Spawns a shell on Windows: call it off the UI
@@ -434,7 +452,6 @@ pub fn system_curl() -> std::path::PathBuf {
 }
 
 fn windows_env_defaults() {
-    use std::path::PathBuf;
     // SAFETY: called first thing in main, single-threaded.
     unsafe {
         if std::env::var_os("HOME").is_none()
@@ -442,15 +459,10 @@ fn windows_env_defaults() {
         {
             std::env::set_var("HOME", profile);
         }
-        if std::env::var_os("SHELL").is_none() {
-            let candidates = [
-                std::env::var_os("ProgramFiles").map(|p| PathBuf::from(p).join(r"Git\bin\bash.exe")),
-                std::env::var_os("LOCALAPPDATA")
-                    .map(|p| PathBuf::from(p).join(r"Programs\Git\bin\bash.exe")),
-            ];
-            if let Some(bash) = candidates.into_iter().flatten().find(|p| p.is_file()) {
-                std::env::set_var("SHELL", bash);
-            }
+        if std::env::var_os("SHELL").is_none()
+            && let Some(bash) = git_bash()
+        {
+            std::env::set_var("SHELL", bash);
         }
         // Git for Windows aliases node, python & co. to `winpty <name>.exe`
         // when TERM is xterm-like, for mintty, which is not a console. The

@@ -85,7 +85,12 @@ fn merge(inherited: Option<&OsStr>, from_shell: &str) -> Option<OsString> {
 /// chatty profile can outrun a 64 KiB pipe buffer we are not draining, and the
 /// deadlock would be at startup, before any window exists to explain it.
 fn ask_login_shell(script: &str) -> Option<String> {
-    let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty())?;
+    // Windows: no SHELL when Git wasn't installed at startup; Git Bash if it
+    // is now (its rc files are what this probe reads).
+    let shell = std::env::var("SHELL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| crate::platform::git_bash().map(|p| p.to_string_lossy().into_owned()))?;
     // Its own file per probe (a Re-check can overlap another), removed when
     // this returns, however it returns.
     let out = tempfile::Builder::new()
