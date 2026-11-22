@@ -573,12 +573,32 @@ impl Inner {
                     if let Ok(webview) = controller.CoreWebView2() {
                         // A remote frontend starts in screencast mode (a
                         // mirror of the page beside the panels); the page
-                        // is right there, so that setting starts off.
-                        let _ = webview.AddScriptToExecuteOnDocumentCreated(
-                            w!("try{for(const k of ['screencast-enabled','screencastEnabled'])localStorage.setItem(k,'false')}catch(e){}"),
-                            None,
+                        // is right there, so that setting starts off. The
+                        // script is registered asynchronously: navigate once
+                        // it is (or, if it can't be, without it rather than
+                        // leaving the inspector blank).
+                        let weak = Rc::downgrade(&me);
+                        let (frontend, address) = (webview.clone(), url.clone());
+                        let navigate = webview2_com::AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(
+                            Box::new(move |result, _id| {
+                                if let Err(e) = result {
+                                    log::info!("browser: inspector setup script not registered ({e})");
+                                }
+                                if weak.upgrade().is_some_and(|me| me.inspector_generation.get() == generation) {
+                                    let _ = frontend.Navigate(&HSTRING::from(address.as_str()));
+                                }
+                                Ok(())
+                            }),
                         );
-                        let _ = webview.Navigate(&HSTRING::from(url.as_str()));
+                        if webview
+                            .AddScriptToExecuteOnDocumentCreated(
+                                w!("try{for(const k of ['screencast-enabled','screencastEnabled'])localStorage.setItem(k,'false')}catch(e){}"),
+                                &navigate,
+                            )
+                            .is_err()
+                        {
+                            let _ = webview.Navigate(&HSTRING::from(url.as_str()));
+                        }
                     }
                 }
                 *me.inspector.borrow_mut() = Some(controller);
