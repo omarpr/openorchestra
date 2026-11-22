@@ -351,6 +351,9 @@ struct Inner {
     /// The URL each main-frame navigation went to, by WebView2's id, so a
     /// failure can name it.
     nav_urls: RefCell<Vec<(u64, String)>>,
+    /// The newest main-frame navigation started: only its completion ends
+    /// the loading state (an older one can complete after it started).
+    loading_nav: Cell<u64>,
     can_back: Cell<bool>,
     can_forward: Cell<bool>,
     /// The region last applied ([`PageMask`]), to skip unchanged recuts.
@@ -774,6 +777,7 @@ impl Inner {
                     }
                     let mut id = 0u64;
                     let _ = args.NavigationId(&mut id);
+                    me.loading_nav.set(id);
                     me.navigation.borrow_mut().started(Some(id as usize));
                     {
                         let mut urls = me.nav_urls.borrow_mut();
@@ -811,7 +815,11 @@ impl Inner {
                     let (Some(me), Some(args)) = (me.upgrade(), args) else {
                         return Ok(());
                     };
-                    (me.events.on_loading)(false);
+                    let mut id = 0u64;
+                    let _ = args.NavigationId(&mut id);
+                    if id == me.loading_nav.get() {
+                        (me.events.on_loading)(false);
+                    }
                     me.refresh_history();
                     let mut ok = windows::core::BOOL(1);
                     let _ = args.IsSuccess(&mut ok);
@@ -823,8 +831,6 @@ impl Inner {
                     let Some(reason) = failure_reason(status) else {
                         return Ok(());
                     };
-                    let mut id = 0u64;
-                    let _ = args.NavigationId(&mut id);
                     let tagged = me.navigation.borrow().failure(Some(id as usize));
                     if let Some(number) = tagged {
                         let url = me
@@ -1310,6 +1316,7 @@ impl NativeWebView {
             pane_focused: Cell::new(false),
             navigation: RefCell::new(Navigations::default()),
             nav_urls: RefCell::new(Vec::new()),
+            loading_nav: Cell::new(0),
             can_back: Cell::new(false),
             can_forward: Cell::new(false),
             mask: RefCell::new(None),
