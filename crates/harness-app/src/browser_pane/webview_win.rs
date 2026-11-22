@@ -117,9 +117,16 @@ fn loader() -> Result<CreateEnvironment, String> {
     static LOADER: OnceLock<Result<usize, String>> = OnceLock::new();
     LOADER
         .get_or_init(|| unsafe {
-            let dll = LoadLibraryW(w!("WebView2Loader.dll")).map_err(|e| {
-                format!("WebView2Loader.dll is missing next to the app ({e})")
-            })?;
+            // By full path, from beside the exe only (where build.rs and
+            // `make dist` put it): by bare name, the DLL search order would
+            // take a copy from the working folder or PATH.
+            let path = std::env::current_exe()
+                .ok()
+                .and_then(|exe| Some(exe.parent()?.join("WebView2Loader.dll")))
+                .filter(|p| p.is_file())
+                .ok_or_else(|| "WebView2Loader.dll is missing next to the app".to_string())?;
+            let dll = LoadLibraryW(&HSTRING::from(path.as_os_str()))
+                .map_err(|e| format!("could not load {} ({e})", path.display()))?;
             GetProcAddress(dll, s!("CreateCoreWebView2EnvironmentWithOptions"))
                 .map(|f| f as usize)
                 .ok_or_else(|| "WebView2Loader.dll has no CreateCoreWebView2EnvironmentWithOptions".into())
