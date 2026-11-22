@@ -445,7 +445,12 @@ impl Shared {
             return;
         }
         if let Some(hpc) = *self.hpc.lock().unwrap_or_else(|e| e.into_inner()) {
-            unsafe { (conpty().resize)(hpc, COORD { X: cols as i16, Y: rows as i16 }) };
+            let hr = unsafe { (conpty().resize)(hpc, COORD { X: cols as i16, Y: rows as i16 }) };
+            // Refused: keep the old size, so the model matches the console
+            // and a later request for this size tries again.
+            if hr < 0 {
+                return;
+            }
         }
         screen.parser.screen_mut().set_size(rows, cols);
         screen.cols = cols;
