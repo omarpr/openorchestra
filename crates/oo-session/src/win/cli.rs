@@ -155,6 +155,9 @@ struct Ctx<'a> {
     label: &'a str,
     /// `-C`: `attach-session` runs a control-mode client.
     control: bool,
+    /// `(pid, name)` of the session a control client is attached to, so its
+    /// `%<pid>` targets resolve without asking every session.
+    attached: Option<(u32, &'a str)>,
     infos: RefCell<HashMap<String, Option<std::rc::Rc<Info>>>>,
     procs: OnceCell<Vec<Proc>>,
 }
@@ -164,6 +167,7 @@ impl<'a> Ctx<'a> {
         Self {
             label,
             control: false,
+            attached: None,
             infos: RefCell::new(HashMap::new()),
             procs: OnceCell::new(),
         }
@@ -178,6 +182,9 @@ impl<'a> Ctx<'a> {
         let t = t.split_once(':').map_or(t, |(session, _)| session);
         let id = t.strip_prefix('%').or_else(|| t.strip_prefix('$'));
         if let Some(pid) = id.and_then(|n| n.parse::<u32>().ok()) {
+            if let Some((_, session)) = self.attached.filter(|&(attached, _)| attached == pid) {
+                return session.to_string();
+            }
             let found = self
                 .sessions()
                 .into_iter()
@@ -356,8 +363,13 @@ fn exec(ctx: &Ctx, cmd: &Command) -> i32 {
                 return 1;
             };
             let label = ctx.label;
+            let attached = Some((info.pid, target.as_str()));
             control::attach(label, &target, info.pid, info.size, &|cmd| {
-                exec(&Ctx::new(label), cmd)
+                // Fresh per command (no stale cursor or job), but knowing
+                // which session `%<pid>` most often names.
+                let mut ctx = Ctx::new(label);
+                ctx.attached = attached;
+                exec(&ctx, cmd)
             })
         }
         "kill-session" => match ctx.target(cmd) {
