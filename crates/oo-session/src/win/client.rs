@@ -211,18 +211,20 @@ pub fn attach(label: &str, name: &str) -> i32 {
         });
     }
 
-    loop {
+    let status = loop {
         match conn.recv() {
             Ok(Some((msg::OUTPUT, bytes))) => {
+                // Our output is gone (a closed pipe reading it): an error,
+                // not a detach.
                 if !write_all(console.output, &bytes) {
-                    break;
+                    break 1;
                 }
             }
-            Ok(Some((msg::EXIT, _))) => break,
+            Ok(Some((msg::EXIT, _))) => break 0,
             Ok(Some(_)) => {}
-            _ => break,
+            _ => break 0,
         }
-    }
+    };
     drop(console);
-    0
+    status
 }
