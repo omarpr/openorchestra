@@ -617,7 +617,7 @@ fn dead_agents(candidates: Vec<(AgentTarget, String)>, has_tmux: bool) -> Vec<Ag
 /// A `pid ppid comm` snapshot of every process, for agent-liveness checks.
 /// Empty on any error — callers treat that as "no evidence" and don't act on it.
 pub(crate) fn ps_snapshot() -> String {
-    std::process::Command::new("ps")
+    os_compat::process::command("ps")
         .args(["-axo", "pid=,ppid=,comm="])
         .output()
         .ok()

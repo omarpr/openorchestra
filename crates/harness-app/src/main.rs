@@ -14,6 +14,12 @@
 // linker message. `-Wl,-no_compact_unwind` is NOT a fix: without the compact
 // index, panics abort ("failed to initiate panic, error 5").
 #![cfg_attr(debug_assertions, allow(linker_messages))]
+// Windows release builds are windowed programs: as console programs they open
+// a console window beside the app (Windows Terminal, when it is the default
+// terminal) for as long as the app runs. Every process the app starts then
+// needs `os_compat::process::no_window`, or it opens a window of its own.
+// Debug builds stay console programs so `make run` shows the log.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app_assets;
 mod browser_pane;

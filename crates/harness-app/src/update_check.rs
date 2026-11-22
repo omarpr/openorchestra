@@ -6,7 +6,6 @@
 //! doesn't grow an HTTP client (zed's stays blocked, see workspace_host.rs).
 
 use std::path::Path;
-use std::process::Command;
 
 use gpui::{App, ClipboardItem, PromptLevel, Window};
 
@@ -76,7 +75,7 @@ pub fn parse_latest(json: &[u8]) -> Result<Release, String> {
 
 /// Ask GitHub for the latest release. Blocking: run it off the main thread.
 pub fn fetch_latest() -> Result<Release, String> {
-    let out = Command::new(crate::platform::system_curl())
+    let out = os_compat::process::command(crate::platform::system_curl())
         .args([
             // Must come first: ignore ~/.curlrc, which could add headers to
             // stdout (`include`) and break parsing, or change the request.

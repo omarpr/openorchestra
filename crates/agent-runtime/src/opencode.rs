@@ -267,7 +267,7 @@ fn is_legacy_cli(program: &Path) -> bool {
 
 /// `opencode --version`, or empty when it cannot be run.
 fn cli_version(program: &Path) -> String {
-    std::process::Command::new(program)
+    os_compat::process::command(program)
         .arg("--version")
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

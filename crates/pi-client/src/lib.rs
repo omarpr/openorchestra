@@ -35,7 +35,7 @@ pub use settle::{AgentState, SettleTracker};
 
 use std::io::{BufReader, Write};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
@@ -59,7 +59,7 @@ impl PiRpc {
         worktree_root: impl AsRef<Path>,
         extra_args: &[&str],
     ) -> std::io::Result<PiRpc> {
-        let mut command = Command::new(program);
+        let mut command = os_compat::process::command(program);
         command
             .arg("--mode")
             .arg("rpc")

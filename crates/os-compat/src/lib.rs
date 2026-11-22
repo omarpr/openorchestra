@@ -297,12 +297,34 @@ pub mod process {
         }
         #[cfg(windows)]
         {
-            let _ = std::process::Command::new("taskkill")
+            let _ = no_window(&mut std::process::Command::new("taskkill"))
                 .args(["/T", "/F", "/PID", &pid.to_string()])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status();
         }
+    }
+
+    /// Start `command` without a console window of its own. The Windows app
+    /// is a windowed program with no console, so every console program it
+    /// runs (git, gh, curl, an agent's `--version`) would otherwise open a
+    /// window for as long as it runs. A no-op elsewhere.
+    pub fn no_window(command: &mut std::process::Command) -> &mut std::process::Command {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        command
+    }
+
+    /// [`no_window`]: `std::process::Command::new(program)` that never opens a
+    /// console window.
+    pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+        let mut command = std::process::Command::new(program);
+        no_window(&mut command);
+        command
     }
 
     #[cfg(unix)]

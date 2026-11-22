@@ -3207,6 +3207,7 @@ name = "forge"
 version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
+ "os-compat",
  "serde",
  "serde_json",
 ]
@@ -7897,6 +7898,7 @@ name = "pi-client"
 version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
+ "os-compat",
  "serde",
  "serde_json",
 ]
@@ -13395,6 +13397,7 @@ dependencies = [
 name = "worktrees"
 version = "0.1.0"
 dependencies = [
+ "os-compat",
  "serde",
  "serde_json",
  "sha2",

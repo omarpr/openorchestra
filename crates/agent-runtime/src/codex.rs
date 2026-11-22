@@ -21,7 +21,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use serde_json::{json, Value};
 
@@ -290,7 +290,7 @@ impl AgentRuntime for CodexRuntime {
         // arguments and are passed through by the caller.
         if command.program.file_name() == Some(PROGRAM.as_ref())
             && !command.args.iter().any(|arg| arg == NO_DAEMON)
-            && Command::new(probe_program(&command.program))
+            && os_compat::process::command(probe_program(&command.program))
                 .args([NO_DAEMON, "--version"])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())

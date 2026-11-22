@@ -8,7 +8,6 @@
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
-use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
@@ -114,7 +113,7 @@ pub fn local_networks() -> Vec<LocalNet> {
             _ => None,
         })
         .collect();
-    let default = Command::new("route")
+    let default = os_compat::process::command("route")
         .args(["-n", "get", "default"])
         .output()
         .ok()
@@ -124,7 +123,7 @@ pub fn local_networks() -> Vec<LocalNet> {
 
 /// The router `iface`'s DHCP lease names (`ipconfig getoption IFACE router`).
 fn interface_router(iface: &str) -> Option<Ipv4Addr> {
-    let out = Command::new("ipconfig")
+    let out = os_compat::process::command("ipconfig")
         .args(["getoption", iface, "router"])
         .output()
         .ok()

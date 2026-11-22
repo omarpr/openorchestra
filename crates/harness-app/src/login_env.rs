@@ -89,7 +89,7 @@ fn ask_login_shell(script: &str) -> Option<String> {
     let out_path = std::env::temp_dir().join(format!("openorchestra-path-{}", std::process::id()));
     let out = std::fs::File::create(&out_path).ok()?;
 
-    let mut child = std::process::Command::new(&shell)
+    let mut child = os_compat::process::command(&shell)
         .args(["-l", "-i", "-c", script])
         .stdin(std::process::Stdio::null())
         .stdout(out)
