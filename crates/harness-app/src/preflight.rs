@@ -249,6 +249,11 @@ fn version_from(stdout: &[u8], stderr: &[u8]) -> String {
 
 /// `<bin> <flag>`'s output, or `None` when `bin` is not on PATH at all.
 fn run_version(bin: &str, flag: &str) -> Option<std::process::Output> {
+    spawn_version(bin, flag).ok()
+}
+
+/// `bin flag`'s output, or why it could not be started.
+fn spawn_version(bin: &str, flag: &str) -> std::io::Result<std::process::Output> {
     use crate::platform::{OS, Os};
     os_compat::process::command(bin)
         .arg(flag)
@@ -261,7 +266,6 @@ fn run_version(bin: &str, flag: &str) -> Option<std::process::Output> {
             }
             Os::Windows | Os::Mac | Os::Linux => Err(e),
         })
-        .ok()
 }
 
 /// Tell "not installed" from "installed but failing" for each agent the
@@ -300,7 +304,20 @@ fn installs_with_npm(fix: Fix) -> bool {
 
 /// Why `bin --version` failed, when `bin` is on PATH and did fail.
 fn failure_on_path(bin: &str) -> Option<String> {
-    let out = run_version(bin, "--version")?;
+    failure_of(bin, spawn_version(bin, "--version"))
+}
+
+/// What a `bin --version` run says about a `bin` the probe didn't find:
+/// nothing when it isn't there at all (not found) or ran fine, else why it
+/// won't start. Only "not found" means not installed: a CLI the system
+/// refuses to start (no permission, a bad binary) is installed, and
+/// reinstalling it would not help.
+fn failure_of(bin: &str, run: std::io::Result<std::process::Output>) -> Option<String> {
+    let out = match run {
+        Ok(out) => out,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => return Some(format!("can't start `{bin}`: {e}")),
+    };
     if out.status.success() {
         return None;
     }
@@ -335,6 +352,17 @@ mod tests {
     fn with(present: &[&str]) -> Vec<Check> {
         let present: Vec<String> = present.iter().map(|s| s.to_string()).collect();
         probe(move |bin, _flag| present.iter().any(|p| p == bin).then(|| "1.0".to_string()))
+    }
+
+    #[test]
+    fn only_a_missing_cli_counts_as_not_installed() {
+        use std::io::{Error, ErrorKind};
+        assert_eq!(failure_of("pi", Err(Error::from(ErrorKind::NotFound))), None);
+        let refused = failure_of("pi", Err(Error::from(ErrorKind::PermissionDenied)));
+        assert!(
+            refused.as_deref().is_some_and(|e| e.starts_with("can't start `pi`")),
+            "{refused:?}"
+        );
     }
 
     #[test]
