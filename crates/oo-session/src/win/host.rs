@@ -562,6 +562,23 @@ fn serve(conn: Arc<Pipe>, shared: Arc<Shared>) {
 
 /// Run a session host. Returns only on failure to start; otherwise the
 /// process exits when the program does.
+/// The next listening instance. A failure (pipe instances or memory
+/// running out) is retried with backoff rather than ending the accept loop:
+/// the program would keep running with no way to attach or control it.
+fn listen_retrying(path: &str, security: &Security, name: &str) -> Pipe {
+    let mut wait = Duration::from_millis(100);
+    loop {
+        match Pipe::listen(path, false, security) {
+            Ok(p) => return p,
+            Err(e) => {
+                log(name, &format!("listen: {e}; retrying in {wait:?}"));
+                std::thread::sleep(wait);
+                wait = (wait * 2).min(Duration::from_secs(5));
+            }
+        }
+    }
+}
+
 pub fn run(args: HostArgs) -> i32 {
     let name = args.name.clone();
     let cwd = args
@@ -654,23 +671,13 @@ pub fn run(args: HostArgs) -> i32 {
                 if let Err(e) = instance.accept() {
                     log(&name, &format!("accept: {e}"));
                     std::thread::sleep(Duration::from_millis(100));
-                    match Pipe::listen(&path, false, &security) {
-                        Ok(p) => instance = p,
-                        Err(_) => return,
-                    }
+                    instance = listen_retrying(&path, &security, &name);
                     continue;
                 }
-                let next = Pipe::listen(&path, false, &security);
                 let conn = Arc::new(instance);
                 let shared = shared.clone();
                 std::thread::spawn(move || serve(conn, shared));
-                match next {
-                    Ok(p) => instance = p,
-                    Err(e) => {
-                        log(&name, &format!("listen: {e}"));
-                        return;
-                    }
-                }
+                instance = listen_retrying(&path, &security, &name);
             }
         });
     }
