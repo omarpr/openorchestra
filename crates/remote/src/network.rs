@@ -102,33 +102,80 @@ pub fn parse_default_route(out: &str) -> Option<(String, Ipv4Addr)> {
 
 /// This Mac's networks now. Blocking (`route`): keep it off request paths.
 pub fn local_networks() -> Vec<LocalNet> {
-    let addrs: Vec<IfaceAddr> = if_addrs::get_if_addrs()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|i| match i.addr {
+    let ifaces = if_addrs::get_if_addrs().unwrap_or_default();
+    let routes = Routes::read();
+    let addrs: Vec<IfaceAddr> = ifaces
+        .iter()
+        .filter_map(|i| match &i.addr {
             if_addrs::IfAddr::V4(v4) if v4.ip.is_private() && !v4.ip.is_loopback() => {
-                let router = interface_router(&i.name);
-                Some((i.name, v4.ip, v4.prefixlen, router))
+                Some((i.name.clone(), v4.ip, v4.prefixlen, routes.router(i)))
             }
             _ => None,
         })
         .collect();
-    let default = os_compat::process::command("route")
-        .args(["-n", "get", "default"])
-        .output()
-        .ok()
-        .and_then(|o| parse_default_route(&String::from_utf8_lossy(&o.stdout)));
-    networks_from(&addrs, default.as_ref().map(|(i, _)| i.as_str()))
+    networks_from(&addrs, routes.default_iface(&ifaces).as_deref())
 }
 
-/// The router `iface`'s DHCP lease names (`ipconfig getoption IFACE router`).
-fn interface_router(iface: &str) -> Option<Ipv4Addr> {
-    let out = os_compat::process::command("ipconfig")
-        .args(["getoption", iface, "router"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())?;
-    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+/// Routers and the default route, from the system's own tools.
+#[cfg(not(windows))]
+struct Routes;
+
+#[cfg(not(windows))]
+impl Routes {
+    fn read() -> Self {
+        Routes
+    }
+
+    /// The router `iface`'s DHCP lease names (`ipconfig getoption IFACE router`).
+    fn router(&self, iface: &if_addrs::Interface) -> Option<Ipv4Addr> {
+        let out = os_compat::process::command("ipconfig")
+            .args(["getoption", &iface.name, "router"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())?;
+        String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+    }
+
+    fn default_iface(&self, _ifaces: &[if_addrs::Interface]) -> Option<String> {
+        let out = os_compat::process::command("route")
+            .args(["-n", "get", "default"])
+            .output()
+            .ok()?;
+        parse_default_route(&String::from_utf8_lossy(&out.stdout)).map(|(iface, _)| iface)
+    }
+}
+
+/// Windows has neither `ipconfig getoption` nor `route -n get`: each
+/// adapter's gateway and the default route's interface come from the IP
+/// Helper API, matched to interfaces by index. Without them every key was
+/// a bare subnet, which any network with the same addressing matched.
+#[cfg(windows)]
+struct Routes {
+    gateways: Vec<(u32, Ipv4Addr)>,
+    default: Option<u32>,
+}
+
+#[cfg(windows)]
+impl Routes {
+    fn read() -> Self {
+        Routes {
+            gateways: os_compat::net::ipv4_gateways(),
+            default: os_compat::net::default_route_index(),
+        }
+    }
+
+    fn router(&self, iface: &if_addrs::Interface) -> Option<Ipv4Addr> {
+        let index = iface.index?;
+        self.gateways.iter().find(|(i, _)| *i == index).map(|(_, ip)| *ip)
+    }
+
+    fn default_iface(&self, ifaces: &[if_addrs::Interface]) -> Option<String> {
+        let index = self.default?;
+        ifaces
+            .iter()
+            .find(|i| i.index == Some(index) && matches!(i.addr, if_addrs::IfAddr::V4(_)))
+            .map(|i| i.name.clone())
+    }
 }
 
 /// `next` with routers a failed lookup lost filled back in from `prev` (same

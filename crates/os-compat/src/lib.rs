@@ -527,6 +527,92 @@ pub mod net {
         }
         None
     }
+
+    /// Each adapter that is up and has an IPv4 gateway, as `(IPv4 interface
+    /// index, gateway)`: what macOS's `ipconfig getoption IFACE router`
+    /// answers. The index is `if_addrs::Interface::index` for its addresses.
+    pub fn ipv4_gateways() -> Vec<(u32, Ipv4Addr)> {
+        use windows_sys::Win32::NetworkManagement::IpHelper::{
+            GetAdaptersAddresses, GAA_FLAG_INCLUDE_GATEWAYS, GAA_FLAG_SKIP_ANYCAST,
+            GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST, GAA_FLAG_SKIP_UNICAST,
+            IP_ADAPTER_ADDRESSES_LH, IP_ADAPTER_GATEWAY_ADDRESS_LH,
+        };
+        use windows_sys::Win32::NetworkManagement::Ndis::IfOperStatusUp;
+        let flags = GAA_FLAG_INCLUDE_GATEWAYS
+            | GAA_FLAG_SKIP_UNICAST
+            | GAA_FLAG_SKIP_ANYCAST
+            | GAA_FLAG_SKIP_MULTICAST
+            | GAA_FLAG_SKIP_DNS_SERVER;
+        // 15 KB is Microsoft's suggested first try; the OS says if it isn't.
+        let mut size = 15 * 1024u32;
+        for _ in 0..4 {
+            let mut buf = vec![0u64; (size as usize).div_ceil(8).max(1)];
+            let first = buf.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
+            // SAFETY: `buf` is at least `size` bytes, 8-byte aligned; the OS
+            // updates `size` when it needs more.
+            let rc = unsafe {
+                GetAdaptersAddresses(AF_INET as u32, flags, std::ptr::null(), first, &mut size)
+            };
+            match rc {
+                0 => {}
+                111 /* ERROR_BUFFER_OVERFLOW */ => continue,
+                _ => return Vec::new(), // ERROR_NO_DATA: no adapters.
+            }
+            let mut out = Vec::new();
+            // SAFETY: a linked list the OS wrote into `buf`, which outlives
+            // the walk; every pointer in it is null or points into `buf`.
+            unsafe {
+                let mut adapter = first as *const IP_ADAPTER_ADDRESSES_LH;
+                while let Some(a) = adapter.as_ref() {
+                    let mut gateway = a.FirstGatewayAddress as *const IP_ADAPTER_GATEWAY_ADDRESS_LH;
+                    if a.OperStatus != IfOperStatusUp {
+                        gateway = std::ptr::null();
+                    }
+                    while let Some(g) = gateway.as_ref() {
+                        if let Some(ip) = ipv4_of(&g.Address) {
+                            out.push((a.Anonymous1.Anonymous.IfIndex, ip));
+                            break;
+                        }
+                        gateway = g.Next;
+                    }
+                    adapter = a.Next;
+                }
+            }
+            return out;
+        }
+        Vec::new()
+    }
+
+    /// The IPv4 interface index the default route leaves through: macOS's
+    /// `route -n get default`.
+    pub fn default_route_index() -> Option<u32> {
+        use windows_sys::Win32::NetworkManagement::IpHelper::GetBestInterface;
+        // TEST-NET-1 (192.0.2.1) is on no local network, so its best route
+        // is the default one. Nothing is sent.
+        let dest = u32::from_ne_bytes([192, 0, 2, 1]);
+        let mut index = 0u32;
+        // SAFETY: `index` is a valid out pointer.
+        (unsafe { GetBestInterface(dest, &mut index) } == 0).then_some(index)
+    }
+
+    /// The IPv4 address in a `SOCKET_ADDRESS`, if it holds one.
+    ///
+    /// # Safety
+    /// `addr.lpSockaddr` must be null or point to `iSockaddrLength` bytes.
+    unsafe fn ipv4_of(
+        addr: &windows_sys::Win32::Networking::WinSock::SOCKET_ADDRESS,
+    ) -> Option<Ipv4Addr> {
+        use windows_sys::Win32::Networking::WinSock::SOCKADDR_IN;
+        let sa = addr.lpSockaddr.as_ref()?;
+        if sa.sa_family != AF_INET
+            || (addr.iSockaddrLength as usize) < std::mem::size_of::<SOCKADDR_IN>()
+        {
+            return None;
+        }
+        let sin = &*(addr.lpSockaddr as *const SOCKADDR_IN);
+        let ip = Ipv4Addr::from(sin.sin_addr.S_un.S_addr.to_ne_bytes());
+        (!ip.is_unspecified()).then_some(ip)
+    }
 }
 
 /// Keep the system from idle-sleeping (Windows; macOS uses `caffeinate`).
