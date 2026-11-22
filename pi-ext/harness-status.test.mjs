@@ -9,6 +9,12 @@
 // while a stale fork keeps the test green.
 
 process.env.HARNESS_STATUS_SETTLE_MS = "50";
+// Run inside an openOrchestra agent tab, these name that tab and its
+// worktree: the extension would write this test's states into the real
+// worktree's .harness as that tab's (announced as "pi" in the app).
+for (const k of ["HARNESS_MANAGED", "HARNESS_AGENT", "HARNESS_AGENT_TAB_ID", "HARNESS_AGENT_WORKTREE", "HARNESS_REMOTE_SESSION", "TMUX_PANE"]) {
+	delete process.env[k];
+}
 
 import fs from "node:fs";
 import os from "node:os";

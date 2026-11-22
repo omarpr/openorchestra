@@ -1087,12 +1087,16 @@ fn grok_preserves_other_hooks_in_its_file_and_stays_idempotent() {
 fn grok_shim_maps_task_complete_to_idle_and_stamps_grok() {
     let shim = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shims/grok-status.mjs");
     // Node builds the file URL: a Windows path is not `file://` + its text.
+    // The path goes in through the environment, not argv: with the shim as
+    // process.argv[1], its "run as a hook" guard fires on import, and with
+    // the HARNESS_* variables of an agent tab (a suite run inside one) it
+    // wrote this test's state into that tab's real worktree.
     let check = std::process::Command::new("node")
         .arg("--input-type=module")
         .arg("-e")
         .arg(
             r#"import { pathToFileURL } from "node:url";
-const { classify } = await import(pathToFileURL(process.argv[1]).href);
+const { classify } = await import(pathToFileURL(process.env.GROK_SHIM).href);
 const cases = [
   [{hook_event_name:"Notification", notification_type:"task_complete"}, "idle"],
   [{hook_event_name:"Notification", notification_type:"permission_prompt"}, "waiting"],
@@ -1107,7 +1111,11 @@ for (const [payload, want] of cases) {
   }
 }"#,
         )
-        .arg(&shim)
+        .env("GROK_SHIM", &shim)
+        .env_remove("HARNESS_MANAGED")
+        .env_remove("HARNESS_AGENT_TAB_ID")
+        .env_remove("HARNESS_AGENT_WORKTREE")
+        .env_remove("HARNESS_REMOTE_SESSION")
         .output();
     match check {
         Ok(out) => assert!(
