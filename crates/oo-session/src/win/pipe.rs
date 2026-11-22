@@ -3,8 +3,10 @@
 //! The pipe name is the session registry: `\\.\pipe\oo-session@<user>@<label>@<session>`
 //! exists exactly while that session's host is alive, so listing sessions is
 //! listing pipes. The pipe's DACL admits only this user (and SYSTEM), it
-//! rejects remote clients, and the host claims the name with
-//! `FILE_FLAG_FIRST_PIPE_INSTANCE` so nobody can squat on it.
+//! rejects remote clients, the host claims the name with
+//! `FILE_FLAG_FIRST_PIPE_INSTANCE`, and a client talks only to a server
+//! running as its own user ([`Pipe::connect`]), so a name squatted by
+//! another user is refused.
 //!
 //! Handles are overlapped so one thread can block reading while another
 //! writes: synchronous I/O on a single handle is serialized by Windows, which
@@ -33,10 +35,14 @@ use windows_sys::Win32::Storage::FileSystem::{
     SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WIN32_FIND_DATAW,
 };
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, WaitNamedPipeW, PIPE_READMODE_BYTE,
-    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeServerProcessId, WaitNamedPipeW,
+    PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES,
+    PIPE_WAIT,
 };
-use windows_sys::Win32::System::Threading::{CreateEventW, GetCurrentProcess, OpenProcessToken};
+use windows_sys::Win32::System::Threading::{
+    CreateEventW, GetCurrentProcess, OpenProcess, OpenProcessToken,
+    PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
 
 const GENERIC_READ: u32 = 0x8000_0000;
@@ -102,9 +108,14 @@ pub fn list(label: &str) -> Vec<String> {
 
 /// This process's user SID as a string (`S-1-5-21-…`).
 fn user_sid() -> Option<String> {
+    process_user_sid(unsafe { GetCurrentProcess() })
+}
+
+/// The user SID of `process`'s token, as a string.
+fn process_user_sid(process: HANDLE) -> Option<String> {
     unsafe {
         let mut token: HANDLE = null_mut();
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+        if OpenProcessToken(process, TOKEN_QUERY, &mut token) == 0 {
             return None;
         }
         let mut len = 0u32;
@@ -286,16 +297,45 @@ impl Pipe {
                 )
             };
             if handle != INVALID_HANDLE_VALUE {
-                return Ok(Self {
+                let pipe = Self {
                     handle,
                     write_lock: Mutex::new(()),
-                });
+                };
+                pipe.check_server()?;
+                return Ok(pipe);
             }
             let err = io::Error::last_os_error();
             if err.raw_os_error() != Some(ERROR_PIPE_BUSY as i32) || Instant::now() >= deadline {
                 return Err(err);
             }
             unsafe { WaitNamedPipeW(name.as_ptr(), 100) };
+        }
+    }
+
+    /// Refuse a pipe that another user's process serves. The name is
+    /// predictable and `FILE_FLAG_FIRST_PIPE_INSTANCE` only protects a host
+    /// that got there first: on a shared PC another user can create the
+    /// name before ours does, and would then receive this user's keystrokes.
+    fn check_server(&self) -> io::Result<()> {
+        let mut pid = 0u32;
+        let server = unsafe {
+            if GetNamedPipeServerProcessId(self.handle, &mut pid) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if process.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let sid = process_user_sid(process);
+            CloseHandle(process);
+            sid
+        };
+        match (server, user_sid()) {
+            (Some(server), Some(me)) if server == me => Ok(()),
+            _ => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the session's pipe is served by another user",
+            )),
         }
     }
 
