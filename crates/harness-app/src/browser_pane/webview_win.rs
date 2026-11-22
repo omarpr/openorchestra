@@ -394,21 +394,24 @@ fn debug_port() -> Option<u16> {
     std::fs::read_to_string(file).ok()?.lines().next()?.trim().parse().ok()
 }
 
-/// The page's and the docked inspector's rects in a `w` × `h` host.
+/// The page's and the docked inspector's rects in a `w` × `h` host: 40%
+/// to the inspector, at least 320 wide (180 tall at the bottom), but never
+/// more than half, so a narrow host still shows the page.
 fn split(w: i32, h: i32, side: Option<DockSide>) -> (RECT, Option<RECT>) {
     let rect = |left, top, right, bottom| RECT { left, top, right, bottom };
+    let width = || (w * 2 / 5).max(w.min(320)).min(w / 2);
     match side {
         None => (rect(0, 0, w, h), None),
         Some(DockSide::Bottom) => {
-            let ih = (h * 2 / 5).max(h.min(180));
+            let ih = (h * 2 / 5).max(h.min(180)).min(h / 2);
             (rect(0, 0, w, h - ih), Some(rect(0, h - ih, w, h)))
         }
         Some(DockSide::Left) => {
-            let iw = (w * 2 / 5).max(w.min(320));
+            let iw = width();
             (rect(iw, 0, w, h), Some(rect(0, 0, iw, h)))
         }
         Some(DockSide::Right) => {
-            let iw = (w * 2 / 5).max(w.min(320));
+            let iw = width();
             (rect(0, 0, w - iw, h), Some(rect(w - iw, 0, w, h)))
         }
     }
@@ -1588,5 +1591,27 @@ impl Drop for NativeWebView {
         self.inner.webview.borrow_mut().take();
         let me = Rc::as_ptr(&self.inner);
         PAGES.with(|pages| pages.borrow_mut().retain(|p| p.strong_count() > 0 && p.as_ptr() != me));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_docked_inspector_leaves_the_page_visible() {
+        // Wide: 40%, or the 320 minimum, as before.
+        let (page, inspector) = split(1000, 800, Some(DockSide::Right));
+        assert_eq!((page.right, inspector.unwrap().left), (600, 600));
+        let (page, _) = split(700, 800, Some(DockSide::Left));
+        assert_eq!(page.left, 320);
+        // Narrow: half each, never a zero-width page.
+        for side in [DockSide::Left, DockSide::Right] {
+            let (page, inspector) = split(300, 800, Some(side));
+            assert_eq!(page.right - page.left, 150, "{side:?}");
+            assert_eq!(inspector.map(|r| r.right - r.left), Some(150), "{side:?}");
+        }
+        let (page, inspector) = split(800, 300, Some(DockSide::Bottom));
+        assert_eq!((page.bottom, inspector.unwrap().top), (150, 150));
     }
 }
