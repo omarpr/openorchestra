@@ -1397,12 +1397,36 @@ quiet-1\tbusybox\t\t\t\t\n";
         assert!(s.listeners.is_empty());
     }
 
+    /// The POSIX shell the next test drives.
+    #[cfg(unix)]
+    fn posix_sh() -> String {
+        "sh".into()
+    }
+
+    /// Windows has no `sh` of its own: use Git Bash, as the app does —
+    /// `$SHELL` (the app sets it at startup, CI sets it too) or Git for
+    /// Windows' default install. Missing, the test says so, rather than
+    /// failing as a command that "did not finish in time".
+    #[cfg(windows)]
+    fn posix_sh() -> String {
+        let default = std::env::var_os("ProgramFiles")
+            .map(|p| std::path::PathBuf::from(p).join(r"Git\bin\bash.exe"));
+        std::env::var_os("SHELL")
+            .map(std::path::PathBuf::from)
+            .or(default)
+            .filter(|p| p.is_file())
+            .expect("this test needs Git Bash: install Git for Windows or set SHELL to its bash.exe")
+            .to_string_lossy()
+            .into_owned()
+    }
+
     #[test]
     fn run_bounded_does_not_wait_on_a_helper_holding_stdout() {
+        let sh = posix_sh();
         // The shell exits at once; its background sleep keeps stdout open.
         let t0 = std::time::Instant::now();
         let out = run_bounded(
-            "sh",
+            &sh,
             &["-c", "sleep 3 & echo hi"],
             std::time::Duration::from_millis(300),
         );
@@ -1414,7 +1438,7 @@ quiet-1\tbusybox\t\t\t\t\n";
         assert!(out.is_none(), "output never completed within the deadline");
         // A command that finishes in time still returns its output and code.
         let ok = run_bounded(
-            "sh",
+            &sh,
             &["-c", "echo hi; echo oops >&2; exit 3"],
             std::time::Duration::from_secs(2),
         )
