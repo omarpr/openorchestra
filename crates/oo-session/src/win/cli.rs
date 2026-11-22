@@ -594,10 +594,7 @@ fn new_session(ctx: &Ctx, cmd: &Command) -> i32 {
         if let Some(status) = exited() {
             eprintln!(
                 "oo-session: session {name} did not start (exit {status}); see {}",
-                std::env::temp_dir()
-                    .join("oo-session")
-                    .join(format!("{name}.log"))
-                    .display()
+                host::log_path(&name).display()
             );
             break false;
         }

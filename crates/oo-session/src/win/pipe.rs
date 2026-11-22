@@ -54,7 +54,7 @@ fn from_wide(buf: &[u16]) -> String {
 
 /// Keep a name component free of the `@` separator and of `\`, which pipe
 /// names cannot contain.
-fn component(s: &str) -> String {
+pub fn component(s: &str) -> String {
     s.chars()
         .map(|c| if c == '@' || c == '\\' || c == '/' { '_' } else { c })
         .collect()

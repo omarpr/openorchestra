@@ -60,17 +60,24 @@ pub struct HostArgs {
     pub command: Vec<String>,
 }
 
-/// Append a line to the session's log (`%TEMP%\oo-session\<name>.log`).
+/// The session's log, `%TEMP%\oo-session\<name>.log`. The name goes
+/// through the pipe-name filter, so separators in it cannot point the file
+/// outside that folder.
+pub fn log_path(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir()
+        .join("oo-session")
+        .join(format!("{}.log", pipe::component(name)))
+}
+
+/// Append a line to the session's log ([`log_path`]).
 /// The host has no console or stdio; this is where its errors go.
 pub fn log(name: &str, line: &str) {
     use std::io::Write;
-    let dir = std::env::temp_dir().join("oo-session");
-    let _ = std::fs::create_dir_all(&dir);
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join(format!("{name}.log")))
-    {
+    let path = log_path(name);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(f, "{line}");
     }
 }
@@ -714,4 +721,18 @@ pub fn run(args: HostArgs) -> i32 {
     // hangs up on a pane's processes).
     shared.kill();
     std::process::exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::log_path;
+
+    #[test]
+    fn a_session_log_stays_in_the_log_folder_whatever_the_name() {
+        let dir = std::env::temp_dir().join("oo-session");
+        for name in [r"..\..\evil", "../../evil", r"a\b", "a/b", "plain"] {
+            assert_eq!(log_path(name).parent(), Some(dir.as_path()), "{name}");
+        }
+        assert_eq!(log_path("plain").file_name().unwrap(), "plain.log");
+    }
 }
