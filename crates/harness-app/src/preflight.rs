@@ -225,28 +225,39 @@ pub fn version_on_path(bin: &str, flag: &str) -> Option<String> {
     if !out.status.success() {
         return None;
     }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let line = text.lines().next().unwrap_or("").trim();
+    Some(version_from(&out.stdout, &out.stderr))
+}
+
+/// The version a `--version` run printed. Most tools print it on stdout; pi
+/// prints it on stderr, which left its column blank.
+fn version_from(stdout: &[u8], stderr: &[u8]) -> String {
+    let first_line = |bytes: &[u8]| {
+        String::from_utf8_lossy(bytes)
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .map(str::to_string)
+    };
+    let line = first_line(stdout).or_else(|| first_line(stderr)).unwrap_or_default();
     // Keep the version, drop the program's own name: "git version 2.43" and
     // "tmux 3.4" become "2.43" and "3.4", so the column stays scannable.
-    let trimmed = line
-        .split_whitespace()
+    line.split_whitespace()
         .find(|t| t.chars().next().is_some_and(|c| c.is_ascii_digit()))
-        .unwrap_or(line);
-    Some(trimmed.to_string())
+        .unwrap_or(&line)
+        .to_string()
 }
 
 /// `<bin> <flag>`'s output, or `None` when `bin` is not on PATH at all.
 fn run_version(bin: &str, flag: &str) -> Option<std::process::Output> {
     use crate::platform::{OS, Os};
-    std::process::Command::new(bin)
+    os_compat::process::command(bin)
         .arg(flag)
         .output()
         .or_else(|e| match OS {
             // std finds `bin.exe` on PATH but not the `bin.cmd` launcher npm
             // installs agent CLIs as (`claude.cmd`), so try that too.
             Os::Windows if e.kind() == std::io::ErrorKind::NotFound => {
-                std::process::Command::new(format!("{bin}.cmd")).arg(flag).output()
+                os_compat::process::command(format!("{bin}.cmd")).arg(flag).output()
             }
             Os::Windows | Os::Mac | Os::Linux => Err(e),
         })
@@ -429,6 +440,15 @@ mod tests {
         diagnose_with(&mut agents, |bin| (bin == "pi").then(|| "boom".into()), Some(22));
         let pi = agents.iter().find(|a| a.program == "pi").unwrap();
         assert_eq!(pi.broken, Some(Broken { error: "boom".into(), fix: pi.fix }));
+    }
+
+    #[test]
+    fn a_version_printed_on_stderr_still_shows() {
+        assert_eq!(version_from(b"git version 2.43.0\n", b""), "2.43.0");
+        // pi writes its version to stderr only.
+        assert_eq!(version_from(b"", b"0.73.1\n"), "0.73.1");
+        assert_eq!(version_from(b"\n", b"tmux 3.4\n"), "3.4");
+        assert_eq!(version_from(b"", b""), "");
     }
 
     #[test]
