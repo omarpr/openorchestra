@@ -333,6 +333,8 @@ struct Inner {
     events: NativeEvents,
     /// What to do once the controller exists.
     pending_url: RefCell<Option<String>>,
+    /// The controller failed to start: `load` (Reload, Retry) starts one.
+    start_failed: Cell<bool>,
     focus_when_ready: Cell<bool>,
     visible: Cell<bool>,
     /// The host's size in device pixels.
@@ -591,7 +593,9 @@ impl Inner {
         }
     }
 
+    /// The page's controller could not be started.
     fn fail(&self, why: &str) {
+        self.start_failed.set(true);
         let navigation = self.navigation.borrow().current();
         (self.events.on_failed)(self.pending_url.borrow().clone(), why.to_string(), navigation);
     }
@@ -1237,6 +1241,7 @@ impl NativeWebView {
             webview: RefCell::new(None),
             events,
             pending_url: RefCell::new((!url.is_empty()).then(|| url.to_string())),
+            start_failed: Cell::new(false),
             focus_when_ready: Cell::new(false),
             visible: Cell::new(false),
             size: Cell::new((0, 0)),
@@ -1376,6 +1381,15 @@ impl NativeWebView {
 
     pub(crate) fn load(&self, url: &str) {
         self.inner.navigation.borrow_mut().begin(None);
+        if self.inner.start_failed.replace(false) {
+            // No controller and none coming: start one for this address
+            // (`attach` loads it), rather than parking it for nobody.
+            *self.inner.pending_url.borrow_mut() = (!url.is_empty()).then(|| url.to_string());
+            if let Err(e) = with_environment(&self.inner) {
+                self.inner.fail(&e.to_string());
+            }
+            return;
+        }
         self.inner.navigate(url);
     }
 
