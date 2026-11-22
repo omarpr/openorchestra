@@ -269,12 +269,23 @@ pub mod process {
         }
         #[cfg(windows)]
         {
-            use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+            use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE, WAIT_TIMEOUT};
             use windows_sys::Win32::System::Threading::{
-                GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+                GetExitCodeProcess, OpenProcess, WaitForSingleObject,
+                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
             };
-            // SAFETY: plain Win32 calls; the handle is closed before return.
+            // A process object is signaled once the process has exited. Its
+            // exit code can't tell for sure: a process may exit with 259,
+            // which is also STILL_ACTIVE. That is the fallback only for a
+            // process we may query but not wait on.
+            // SAFETY: plain Win32 calls; each handle is closed before return.
             unsafe {
+                let h = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+                if !h.is_null() {
+                    let running = WaitForSingleObject(h, 0) == WAIT_TIMEOUT;
+                    CloseHandle(h);
+                    return running;
+                }
                 let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
                 if h.is_null() {
                     return false;
