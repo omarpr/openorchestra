@@ -45,8 +45,9 @@ pub fn snapshot() -> Vec<Proc> {
 }
 
 fn strip_exe(name: &str) -> String {
-    match name.len().checked_sub(4) {
-        Some(i) if name[i..].eq_ignore_ascii_case(".exe") => name[..i].to_string(),
+    // `get`, not slicing: the last four bytes can start mid-character.
+    match name.len().checked_sub(4).and_then(|i| Some((i, name.get(i..)?))) {
+        Some((i, ext)) if ext.eq_ignore_ascii_case(".exe") => name[..i].to_string(),
         _ => name.to_string(),
     }
 }
@@ -136,6 +137,9 @@ mod tests {
         assert_eq!(foreground(&idle, 10).as_deref(), Some("bash"));
         assert_eq!(foreground(&idle, 99), None);
         assert_eq!(strip_exe("Claude.EXE"), "Claude");
+        // Six bytes, no extension: byte 2 is inside the first character.
+        assert_eq!(strip_exe("工具"), "工具");
+        assert_eq!(strip_exe("工具.exe"), "工具");
     }
 
     #[test]
