@@ -1284,7 +1284,9 @@ impl NativeWebView {
     /// Places the page at `bounds` (gpui window coordinates, logical).
     pub(crate) fn set_frame(&self, bounds: Bounds<Pixels>, window: &Window) {
         let scale = window.scale_factor();
-        self.inner.scale.set(scale);
+        // The window moved to a display with another scale: the same logical
+        // frame is a different device-pixel one.
+        let rescaled = self.inner.scale.replace(scale) != scale;
         let (x, y) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
         let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
         let px = |v: f32| (v * scale).round() as i32;
@@ -1300,7 +1302,7 @@ impl NativeWebView {
                 let _ = controller.NotifyParentWindowPositionChanged();
             }
         }
-        let moved = self.inner.page.get() != Some((x, y, w, h));
+        let moved = rescaled || self.inner.page.get() != Some((x, y, w, h));
         if moved {
             unsafe {
                 let _ = SetWindowPos(
