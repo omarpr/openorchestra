@@ -265,8 +265,19 @@ function Invoke-Check {
 
 function Invoke-Test {
     Use-Toolchain
+    # As in CI and the app: SHELL is Git Bash, and some tests spawn Unix tools
+    # (sleep, cat) that Windows lacks. Git's usr\bin goes last on PATH so it
+    # never shadows Windows' own commands.
+    $bash = Get-GitBash
+    if ($bash) {
+        $env:SHELL = $bash
+        $env:PATH = "$env:PATH;$(Join-Path (Split-Path (Split-Path $bash)) 'usr\bin')"
+    } else {
+        Write-Warn "Git Bash not found: tests that need sh, sleep or cat will fail"
+    }
     Push-Location $Root
-    try { Invoke-Native cargo @("test") } finally { Pop-Location }
+    # Every failure, not just the first crate's, as CI reports them.
+    try { Invoke-Native cargo @("test", "--no-fail-fast") } finally { Pop-Location }
 }
 
 # A multi-size .ico (PNG-compressed entries, Vista+) from the 1024px PNG.
