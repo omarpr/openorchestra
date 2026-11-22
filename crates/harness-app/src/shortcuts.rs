@@ -299,13 +299,10 @@ pub fn page_edit(chord: &Chord) -> Option<PageEdit> {
     page_edit_with(chord, crate::platform::CURRENT.command_key)
 }
 
-/// [`page_edit`] where the editing keys are ⌘ (`command_key`) or Ctrl.
+/// [`page_edit`]: ⌘ editing chords everywhere (a catalog binding rebound
+/// onto one), and off macOS (`!command_key`) the Ctrl ones the page uses.
 fn page_edit_with(chord: &Chord, command_key: bool) -> Option<PageEdit> {
-    let primary = if command_key {
-        chord.cmd && !chord.ctrl
-    } else {
-        chord.ctrl && !chord.cmd
-    };
+    let primary = (chord.cmd && !chord.ctrl) || (!command_key && chord.ctrl && !chord.cmd);
     if !primary || chord.alt {
         return None;
     }
@@ -990,7 +987,8 @@ mod tests {
         let parse = |k: &str| Chord::parse(k).unwrap();
         assert_eq!(page_edit_with(&parse("ctrl-v"), false), Some(PageEdit::Paste));
         assert_eq!(page_edit_with(&parse("ctrl-shift-z"), false), Some(PageEdit::Redo));
-        assert_eq!(page_edit_with(&parse("cmd-v"), false), None);
+        assert_eq!(page_edit_with(&parse("cmd-v"), false), Some(PageEdit::Paste));
+        assert_eq!(page_edit_with(&parse("ctrl-cmd-v"), false), None);
         assert_eq!(page_edit_with(&parse("alt-v"), false), None);
         assert_eq!(page_edit_with(&parse("ctrl-alt-v"), false), None);
         // macOS keeps ⌘, and Ctrl+V is not an edit there.
