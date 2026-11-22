@@ -615,7 +615,9 @@ pub fn run(args: HostArgs) -> i32 {
     let child = match spawn(&argv, cwd.as_deref(), &args.env, cols, rows) {
         Ok(c) => c,
         Err(e) => {
-            log(&name, &format!("cannot start {argv:?}: {e}"));
+            // The program only: arguments can carry secrets.
+            let program = argv.first().map(String::as_str).unwrap_or("");
+            log(&name, &format!("cannot start {program:?}: {e}"));
             return 4;
         }
     };
