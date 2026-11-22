@@ -176,21 +176,21 @@ fn with_environment(page: &Rc<Inner>) -> anyhow::Result<()> {
                 let e = e.clone();
                 drop(env);
                 create_controller(&e, page);
-                Ok(false)
+                false
             }
             Env::Pending(waiting) => {
                 waiting.push(Rc::downgrade(page));
-                Ok(false)
+                false
             }
             // A failure is tried again by the next page (the pane's Retry
             // makes one): the profile folder may only have been busy. A
             // missing loader fails again at once (`loader` keeps its answer).
             Env::Failed(_) | Env::Idle => {
                 *env = Env::Pending(vec![Rc::downgrade(page)]);
-                Ok(true)
+                true
             }
         }
-    })?;
+    });
     if !start {
         return Ok(());
     }
