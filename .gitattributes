@@ -1,0 +1,4 @@
+# The phone web client's build (`pnpm build` runs Biome's format check)
+# expects LF; a Windows checkout with core.autocrlf would hand it CRLF and
+# fail every file.
+web/remote/** text=auto eol=lf

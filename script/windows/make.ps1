@@ -95,7 +95,24 @@ function Get-NodeMajor {
     return [int]($v.Split('.')[0])
 }
 
-function Test-WebTools { (Get-NodeMajor) -ge 20 -and ((Test-Cmd pnpm) -or (Test-Cmd corepack)) }
+# The pnpm the web client pins (`packageManager` in web\remote\package.json).
+function Get-PinnedPnpm {
+    $pkg = Get-Content (Join-Path $Root "web\remote\package.json") -Raw | ConvertFrom-Json
+    if ($pkg.packageManager -match '^pnpm@') { return $pkg.packageManager -replace '\+.*$', '' }
+    return "pnpm"
+}
+
+# How to run pnpm: itself, through corepack, or (Node 25+ ships no corepack)
+# the pinned version through npx. npx.cmd, not npx: a .ps1 shim can be
+# blocked by the execution policy.
+function Get-PnpmCommand {
+    if (Test-Cmd pnpm) { return @("pnpm") }
+    if (Test-Cmd corepack) { return @("corepack", "pnpm") }
+    if (Test-Cmd npx.cmd) { return @("npx.cmd", "-y", (Get-PinnedPnpm)) }
+    return $null
+}
+
+function Test-WebTools { (Get-NodeMajor) -ge 20 -and [bool](Get-PnpmCommand) }
 
 # ---- setup / doctor -----------------------------------------------------------
 
@@ -159,7 +176,8 @@ function Invoke-Doctor([switch] $Strict) {
     elseif ($major -gt 0) { Write-Warn "node       v$major is too old, need >= 20: winget upgrade --id OpenJS.NodeJS.LTS" }
     else { Write-Warn "node       need >= 20: winget install --id OpenJS.NodeJS.LTS" }
     if (Test-Cmd pnpm) { Write-Ok "pnpm       $(& pnpm --version)" }
-    elseif (Test-Cmd corepack) { Write-Warn "pnpm       not enabled: corepack enable pnpm" }
+    elseif (Test-Cmd corepack) { Write-Ok "pnpm       through corepack" }
+    elseif (Test-Cmd npx.cmd) { Write-Ok "pnpm       through npx ($(Get-PinnedPnpm))" }
     else { Write-Warn "pnpm       npm install -g pnpm" }
 
     Write-Sec "Optional"
@@ -183,9 +201,10 @@ function Invoke-Doctor([switch] $Strict) {
 function Invoke-Web {
     if ((Get-NodeMajor) -lt 20) { throw "make web needs node >= 20 (found $(if (Test-Cmd node) { & node --version } else { 'none' }))" }
     $web = Join-Path $Root "web\remote"
+    $pnpm = Get-PnpmCommand
+    if (-not $pnpm) { throw "make web needs pnpm: npm install -g pnpm" }
     foreach ($step in @(@("install", "--frozen-lockfile"), @("build"))) {
-        if (Test-Cmd pnpm) { Invoke-Native pnpm (@("-C", $web) + $step) }
-        else { Invoke-Native corepack (@("pnpm", "-C", $web) + $step) }
+        Invoke-Native $pnpm[0] (@($pnpm | Select-Object -Skip 1) + @("-C", $web) + $step)
     }
 }
 
