@@ -1588,7 +1588,7 @@ quiet-1\tbusybox\t\t\t\t\n";
         let script = dir.path().join("helper.py");
         std::fs::write(
             &script,
-            "import os, sys, time\nos.setpgrp()\ntime.sleep(0.8)\ntry:\n    print('late', flush=True)\n    r = 'open'\nexcept BrokenPipeError:\n    r = 'closed'\nopen(sys.argv[1], 'w').write(r)\n",
+            "import os, sys, time\nos.setpgrp()\ntime.sleep(0.8)\ntry:\n    print('late', flush=True)\n    r = 'open'\nexcept BrokenPipeError:\n    r = 'closed'\nopen(sys.argv[1] + '.tmp', 'w').write(r)\nos.replace(sys.argv[1] + '.tmp', sys.argv[1])\n",
         )
         .unwrap();
         let cmd = format!(
@@ -1596,6 +1596,8 @@ quiet-1\tbusybox\t\t\t\t\n";
             script.display(),
             mark.display()
         );
+        // The mark is renamed into place whole: polling for a file that
+        // `open(..., 'w')` had created but not yet written read "".
         let out = run_bounded("sh", &["-c", &cmd], std::time::Duration::from_millis(300));
         assert!(out.is_none());
         for _ in 0..40 {
