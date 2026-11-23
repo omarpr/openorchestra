@@ -4,7 +4,8 @@
 //! and the stream isn't `Send`, so neither belongs on the UI thread. One
 //! named thread per window starts and drops streams on request and reports
 //! back with the generation it was asked for; frames go from the stream's
-//! callback queue straight into a [`FrameSlot`], with one wake per burst.
+//! callback queue straight into a [`FrameSlot`], with one wake per burst,
+//! already turned upright for the device's orientation.
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -15,7 +16,7 @@ use objc2_io_surface::IOSurfaceRef;
 
 use super::convert::{PixelConverter, SendPixelBuffer};
 use super::sim_display::{ScreenEvent, ScreenStream};
-use super::{FrameSlot, StreamError};
+use super::{FrameSlot, StreamError, quarter_for};
 
 /// Where a stream's frames land; the UI takes from it on a [`StreamMsg::Frame`].
 pub(crate) type Frames = Arc<FrameSlot<SendPixelBuffer>>;
@@ -110,6 +111,9 @@ unsafe impl Send for Picture {}
 struct Converting {
     converter: PixelConverter,
     picture: Option<Picture>,
+    /// The device's `uiOrientation`, as last reported: frames are turned
+    /// upright by it.
+    orientation: u32,
     logged_error: bool,
 }
 
@@ -123,6 +127,7 @@ fn start(
     let state = Mutex::new(Converting {
         converter,
         picture: None,
+        orientation: 1,
         logged_error: false,
     });
     ScreenStream::start(udid, move |event| {
@@ -130,8 +135,8 @@ fn start(
         match event {
             ScreenEvent::Surface(surface) => state.picture = Some(Picture(surface)),
             ScreenEvent::Frame => {}
-            // Not drawn upright yet (the Device controls plan's Task 3).
-            ScreenEvent::Orientation(_) => return,
+            // Redrawn turned at once, in case no frame follows the turn.
+            ScreenEvent::Orientation(o) => state.orientation = o,
             ScreenEvent::Gone => {
                 state.picture = None;
                 let _ = to_ui.unbounded_send(StreamMsg::Gone(generation));
@@ -141,12 +146,15 @@ fn start(
         let Converting {
             converter,
             picture,
+            orientation,
             logged_error,
         } = &mut *state;
         let Some(Picture(surface)) = picture.as_ref() else {
             return;
         };
-        match converter.convert(surface) {
+        // The surface stays portrait when the device turns (see "Spike
+        // findings" in the Device controls design).
+        match converter.convert(surface, quarter_for(*orientation)) {
             Ok(buffer) => {
                 if frames.put(SendPixelBuffer(buffer)) {
                     let _ = to_ui.unbounded_send(StreamMsg::Frame(generation));
@@ -159,4 +167,113 @@ fn start(
             Err(_) => {}
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use objc2_core_video::{
+        CVPixelBuffer, CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
+        CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
+        CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+    };
+
+    use super::*;
+    use crate::devices::controls::{Control, ControlOutcome, rotate, run_public};
+
+    /// A coarse grid of luma samples, row by row.
+    const GRID: usize = 32;
+
+    fn frame_grid(buffer: &CVPixelBuffer) -> (usize, usize, Vec<f64>) {
+        let (w, h) = (CVPixelBufferGetWidth(buffer), CVPixelBufferGetHeight(buffer));
+        let flags = CVPixelBufferLockFlags::ReadOnly;
+        // SAFETY: a live buffer, locked for the reads and unlocked after.
+        assert_eq!(unsafe { CVPixelBufferLockBaseAddress(buffer, flags) }, 0);
+        let luma = CVPixelBufferGetBaseAddressOfPlane(buffer, 0).cast::<u8>();
+        let stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0);
+        let mut grid = Vec::new();
+        for gy in 0..GRID {
+            for gx in 0..GRID {
+                let (x, y) = ((2 * gx + 1) * w / (2 * GRID), (2 * gy + 1) * h / (2 * GRID));
+                // SAFETY: (x, y) is inside plane 0, a byte per pixel.
+                grid.push(f64::from(unsafe { *luma.add(y * stride + x) }));
+            }
+        }
+        // SAFETY: as above.
+        assert_eq!(unsafe { CVPixelBufferUnlockBaseAddress(buffer, flags) }, 0);
+        (w, h, grid)
+    }
+
+    fn png_grid(png: &[u8]) -> (usize, usize, Vec<f64>) {
+        let image = image::load_from_memory(png).unwrap().to_luma8();
+        let (w, h) = (image.width() as usize, image.height() as usize);
+        let mut grid = Vec::new();
+        for gy in 0..GRID {
+            for gx in 0..GRID {
+                let (x, y) = ((2 * gx + 1) * w / (2 * GRID), (2 * gy + 1) * h / (2 * GRID));
+                grid.push(f64::from(image.get_pixel(x as u32, y as u32)[0]));
+            }
+        }
+        (w, h, grid)
+    }
+
+    fn mean_diff(a: &[f64], b: impl Iterator<Item = f64>) -> f64 {
+        a.iter().zip(b).map(|(x, y)| (x - y).abs()).sum::<f64>() / a.len() as f64
+    }
+
+    /// Manual, on a simulator created and booted for the purpose (never
+    /// anyone else's): `OO_TEST_SIM_UDID=<udid> cargo test
+    /// turned_frames_match -- --ignored --nocapture`. Turns it in Safari and
+    /// checks each streamed frame is upright: the size of `simctl io
+    /// screenshot` (already upright) and its picture, far closer to it than
+    /// to the same picture upside down (what the opposite quarter turn
+    /// would draw).
+    #[test]
+    #[ignore]
+    fn turned_frames_match_the_screenshot() {
+        let udid = std::env::var("OO_TEST_SIM_UDID").expect("set OO_TEST_SIM_UDID");
+        let set = ["devicectl", "device", "orientation", "set", "--device", &udid, "portrait"];
+        let ran = crate::ports::run_bounded("xcrun", &set, Duration::from_secs(5)).unwrap();
+        assert_eq!(ran.code, Some(0), "{}", ran.stderr);
+        crate::devices::simctl::simctl(&["launch", &udid, "com.apple.mobilesafari"]).unwrap();
+        std::thread::sleep(Duration::from_secs(3));
+
+        let frames: Frames = Arc::new(FrameSlot::new());
+        let (to_ui, _from_worker) = futures::channel::mpsc::unbounded();
+        let stream = start(1, &udid, frames.clone(), to_ui).unwrap();
+        let (mut sizes, mut seen) = (Vec::new(), Vec::new());
+        for turn in 0..4 {
+            if turn > 0 {
+                rotate(&udid).unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(2000));
+            let frame = frames.take().expect("a frame since the turn");
+            let (fw, fh, frame) = frame_grid(&frame.0);
+            let png = match run_public(&udid, Control::Screenshot) {
+                Ok(ControlOutcome::Png(png)) => png,
+                other => panic!("no screenshot: {other:?}"),
+            };
+            let (sw, sh, shot) = png_grid(&png);
+            let get = ["devicectl", "device", "orientation", "get", "--device", &udid, "-j", "-"];
+            let got = crate::ports::run_bounded("xcrun", &get, Duration::from_secs(5)).unwrap();
+            let json: serde_json::Value = serde_json::from_str(&got.stdout).unwrap_or_default();
+            let device = json["result"]["deviceOrientation"].as_str().unwrap_or("?").to_string();
+            let upright = mean_diff(&frame, shot.iter().copied());
+            let upside_down = mean_diff(&frame, shot.iter().rev().copied());
+            eprintln!(
+                "turn {turn} ({device}): frame {fw}×{fh}, screenshot {sw}×{sh}, \
+                 luma diff {upright:.1} (upside down {upside_down:.1})"
+            );
+            assert_eq!((fw, fh), (sw, sh), "turn {turn}");
+            assert!(upright < 12.0 && upright * 3.0 < upside_down, "turn {turn}");
+            sizes.push((fw, fh));
+            seen.push(device);
+        }
+        drop(stream);
+        // Safari turns to both landscapes (and refuses upside down).
+        assert!(sizes.iter().any(|&(w, h)| w > h), "{sizes:?}");
+        assert!(seen.iter().any(|o| o == "landscapeRight"), "{seen:?}");
+        assert!(seen.iter().any(|o| o == "landscapeLeft"), "{seen:?}");
+    }
 }

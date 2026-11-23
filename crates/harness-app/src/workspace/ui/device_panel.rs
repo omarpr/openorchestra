@@ -1,7 +1,7 @@
 //! The tools panel's Device tab: a view of a booted iOS simulator, picked
 //! from the Mac's simulators. A shut-down one can be booted from the picker,
-//! and the bar under the picture (`device_controls`) shuts the shown one
-//! down.
+//! and the bar under the picture (`device_controls`) drives the shown one or
+//! shuts it down.
 //!
 //! What runs is decided by `devices::tab_state::DeviceTab`; this file feeds
 //! it (device lists, visibility, stream events, the picker) and carries out
@@ -285,6 +285,7 @@ impl HarnessWorkspace {
         self.run_device_commands(cmds, cx);
         if appeared {
             self.refresh_devices(cx);
+            self.check_device_rotate(cx);
         }
     }
 
@@ -391,6 +392,11 @@ impl HarnessWorkspace {
     pub(crate) fn run_device_commands(&mut self, cmds: Vec<Command>, cx: &mut Context<Self>) {
         let mut queue = VecDeque::from(cmds);
         while let Some(cmd) = queue.pop_front() {
+            if let Command::StartStream(udid) | Command::StartScreenshots(udid) = &cmd {
+                // For the appearance button: the device may have changed,
+                // or been switched by someone else while the tab was away.
+                self.read_device_appearance(udid.clone(), cx);
+            }
             match cmd {
                 Command::StartStream(udid) => {
                     let generation = self.next_device_generation(cx);

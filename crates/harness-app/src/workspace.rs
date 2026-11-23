@@ -965,6 +965,14 @@ pub struct HarnessWorkspace {
     /// A Device tab control (boot and shutdown included) is running; one at
     /// a time, and the buttons wait.
     device_control_in_flight: bool,
+    /// This Xcode's `devicectl` can rotate a simulator (asked off the UI
+    /// thread when the tab appears); Rotate is offered only then.
+    device_can_rotate: bool,
+    /// That question is being asked; one ask at a time.
+    device_rotate_asking: bool,
+    /// The last known appearance of a device, read when it starts showing
+    /// and after each switch: the appearance button names the other one.
+    device_appearance: Option<(String, crate::devices::controls::Appearance)>,
     /// The thread that owns the live stream; started on the first stream.
     #[cfg(target_os = "macos")]
     device_worker: Option<crate::devices::worker::StreamWorker>,

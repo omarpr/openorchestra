@@ -15,6 +15,18 @@ const OWN: &[(&str, &[u8])] = &[
         "icons/oo/devices.svg",
         include_bytes!("../icons/devices.svg"),
     ),
+    // The Device tab's bar.
+    ("icons/oo/moon.svg", include_bytes!("../icons/moon.svg")),
+    ("icons/oo/sun.svg", include_bytes!("../icons/sun.svg")),
+    (
+        "icons/oo/text_smaller.svg",
+        include_bytes!("../icons/text_smaller.svg"),
+    ),
+    (
+        "icons/oo/text_bigger.svg",
+        include_bytes!("../icons/text_bigger.svg"),
+    ),
+    ("icons/oo/camera.svg", include_bytes!("../icons/camera.svg")),
     (
         "icons/oo/agents/claudecode.svg",
         include_bytes!("../icons/agents/claudecode.svg"),

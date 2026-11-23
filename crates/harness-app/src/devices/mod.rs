@@ -54,8 +54,8 @@ pub(crate) fn choose_device<'a>(
 
 /// How far clockwise to turn the (always portrait) simulator surface so its
 /// picture is upright.
-// Drawn by the bar's upright picture (the Device controls plan's Task 3).
-#[allow(dead_code)]
+// Only the macOS stream turns frames.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Quarter {
     None,
@@ -68,7 +68,7 @@ pub(crate) enum Quarter {
 /// spike: 1 portrait, 3 landscape with the UI's top at the surface's left
 /// edge, 4 with it at the right edge, 2 upside down (never seen on an
 /// iPhone; presumed). Anything else is drawn as it comes.
-#[allow(dead_code)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn quarter_for(ui_orientation: u32) -> Quarter {
     match ui_orientation {
         3 => Quarter::Cw90,

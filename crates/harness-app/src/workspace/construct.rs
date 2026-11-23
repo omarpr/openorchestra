@@ -305,6 +305,9 @@ impl HarnessWorkspace {
             device_boot_offer: None,
             device_shutdown_confirm: None,
             device_control_in_flight: false,
+            device_can_rotate: false,
+            device_rotate_asking: false,
+            device_appearance: None,
             #[cfg(target_os = "macos")]
             device_worker: None,
             #[cfg(target_os = "macos")]

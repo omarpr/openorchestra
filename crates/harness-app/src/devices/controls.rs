@@ -3,10 +3,6 @@
 //! through `simctl`, booting or shutting a device down, and Rotate through
 //! `devicectl`.
 
-// Only boot and shutdown are wired in so far; the bar (Task 3) calls the
-// rest.
-#![allow(dead_code)]
-
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -224,7 +220,9 @@ fn str_args(args: &[String]) -> Vec<&str> {
     args.iter().map(String::as_str).collect()
 }
 
-fn read_appearance(udid: &str) -> Result<Appearance, String> {
+/// `udid`'s appearance now. Blocks for up to 5 s: call it off the main
+/// thread.
+pub(crate) fn read_appearance(udid: &str) -> Result<Appearance, String> {
     let out = simctl(&str_args(&appearance_args(udid, None)))?;
     parse_appearance(&out).ok_or_else(|| "this device has no appearance setting".to_string())
 }
