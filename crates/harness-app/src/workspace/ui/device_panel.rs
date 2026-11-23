@@ -22,7 +22,7 @@ use super::device_controls::error_line;
 use crate::devices::simctl::{DeviceList, ListError};
 use crate::devices::tab_state::{Command, DeviceTab, DeviceView};
 use crate::devices::chrome::{
-    ChromeSpec, OverlayCache, OverlayKey, Placement, Rect, frame_around, place,
+    ChromeSpec, OverlayCache, OverlayKey, Painted, Rect, frame_around, painted, place,
 };
 use crate::devices::{DeviceInfo, Quarter, StreamError};
 
@@ -254,20 +254,18 @@ fn bounds_of(r: Rect) -> gpui::Bounds<Pixels> {
     gpui::Bounds::new(gpui::point(px(r.x), px(r.y)), gpui::size(px(r.w), px(r.h)))
 }
 
-/// What the overlay for a picture placed at `placement` must be, at
-/// `scale` device pixels per pixel. None when there is nothing to draw.
+/// What the overlay must be for a picture painted as `painted`, framed or
+/// not. None when there is nothing to draw.
 pub(crate) fn overlay_for(
     spec: Option<&ChromeSpec>,
     device_type: &str,
-    placement: Placement,
+    framed: bool,
+    painted: Painted,
     turn: Quarter,
-    scale: f32,
     fill: [u8; 4],
 ) -> Option<OverlayKey> {
-    let framed = placement.frame.is_some();
     spec.filter(|s| framed || s.mask.is_some())?;
-    let at = placement.frame.unwrap_or(placement.screen);
-    let size_px = ((at.w * scale).round() as u32, (at.h * scale).round() as u32);
+    let size_px = painted.overlay_px;
     (size_px.0 > 0 && size_px.1 > 0).then(|| OverlayKey {
         device_type: device_type.to_string(),
         size_px,
@@ -485,7 +483,10 @@ impl Render for DeviceScreen {
             |_, _, _| {},
             move |bounds, (), window, cx| {
                 let placement = place(rect_of(bounds), picture.size(), geometry, turn);
-                let screen = bounds_of(placement.screen);
+                // On the device-pixel grid: the picture exactly in the
+                // overlay's hole.
+                let painted = painted(placement, geometry, turn, window.scale_factor());
+                let screen = bounds_of(painted.picture);
                 match picture {
                     #[cfg(target_os = "macos")]
                     Picture::Live(buffer) => window.paint_surface(screen, buffer),
@@ -494,14 +495,8 @@ impl Render for DeviceScreen {
                         let _ = window.paint_image(screen, screen, corners, shot, 0, false);
                     }
                 }
-                let key = overlay_for(
-                    spec.as_deref(),
-                    &device_type,
-                    placement,
-                    turn,
-                    window.scale_factor(),
-                    fill,
-                )
+                let framed = placement.frame.is_some();
+                let key = overlay_for(spec.as_deref(), &device_type, framed, painted, turn, fill)
                 .filter(|k| k.framed || !mask_failed);
                 let Some(key) = key else {
                     return;
@@ -510,12 +505,12 @@ impl Render for DeviceScreen {
                 // (stretched), so the picture is never shown unclipped. A
                 // framed one goes round the screen, an unframed one on it.
                 if let Some((drawn, image)) = overlays.closest(&key) {
-                    let at = if drawn.framed {
-                        placement.frame.or_else(|| {
-                            frame_geometry.map(|g| frame_around(placement.screen, g, turn))
-                        })
-                    } else {
-                        Some(placement.screen)
+                    let at = match (drawn.framed, framed) {
+                        (true, true) => Some(painted.overlay),
+                        (true, false) => {
+                            frame_geometry.map(|g| frame_around(painted.picture, g, turn))
+                        }
+                        (false, _) => Some(painted.picture),
                     };
                     if let Some(at) = at.map(bounds_of) {
                         let image = image.clone();
@@ -1149,7 +1144,7 @@ mod tests {
         shot_turn, sync_shown,
     };
     use crate::devices::Quarter;
-    use crate::devices::chrome::{ChromeSpec, Placement, Rect};
+    use crate::devices::chrome::{ChromeSpec, FrameGeometry, Insets, Placement, Rect, painted};
     use crate::devices::DeviceInfo;
     use crate::devices::simctl::DeviceList;
     use crate::devices::tab_state::{Command, DeviceTab};
@@ -1396,7 +1391,15 @@ mod tests {
         let screen = Rect { x: 0.0, y: 0.0, w: 201.0, h: 437.0 };
         let bare = Placement { frame: None, screen };
         let fill = [1, 2, 3, 255];
-        let key = |p, turn, scale, fill| overlay_for(Some(&spec), "iPhone-18-Pro", p, turn, scale, fill);
+        let g = FrameGeometry {
+            screen_pt: (402.0, 874.0),
+            sizing: Insets { left: 18.0, top: 18.0, right: 18.0, bottom: 18.0 },
+        };
+        let key = |p: Placement, turn, scale, fill| {
+            let framed = p.frame.is_some();
+            let laid = painted(p, framed.then_some(g), turn, scale);
+            overlay_for(Some(&spec), "iPhone-18-Pro", framed, laid, turn, fill)
+        };
         let one = key(bare, Quarter::None, 2.0, fill).unwrap();
         // The same picture, painted again (a new frame): the same overlay.
         assert_eq!(key(bare, Quarter::None, 2.0, fill), Some(one.clone()));
@@ -1414,9 +1417,10 @@ mod tests {
         assert!(framed.framed);
         assert_eq!(framed.size_px, (438, 910));
         // No chrome, no mask, or nothing to cover: no overlay.
-        assert_eq!(overlay_for(None, "x", bare, Quarter::None, 2.0, fill), None);
+        let laid = painted(bare, None, Quarter::None, 2.0);
+        assert_eq!(overlay_for(None, "x", false, laid, Quarter::None, fill), None);
         let no_mask = ChromeSpec { mask: None, ..spec.clone() };
-        assert_eq!(overlay_for(Some(&no_mask), "x", bare, Quarter::None, 2.0, fill), None);
+        assert_eq!(overlay_for(Some(&no_mask), "x", false, laid, Quarter::None, fill), None);
         let empty = Placement { frame: None, screen: Rect { w: 0.0, ..screen } };
         assert_eq!(key(empty, Quarter::None, 2.0, fill), None);
     }

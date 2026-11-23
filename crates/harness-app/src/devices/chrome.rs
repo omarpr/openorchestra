@@ -408,7 +408,7 @@ pub(crate) mod render {
         CGPDFBox, CGPDFDocument, CGPDFPage,
     };
 
-    use super::{ChromeSpec, FrameArt, OverlayKey, Quarter, Rect, screen_rect_in_frame, turned_size};
+    use super::{ChromeSpec, FrameArt, OverlayKey, PxRect, Quarter, Rect, hole_px, turned_size};
 
     /// A page of a PDF, and its size in points. The document is kept with
     /// its page, which it owns.
@@ -521,15 +521,6 @@ pub(crate) mod render {
         }
     }
 
-    /// Whole pixels for a rect, so neighbouring pieces meet without a seam.
-    fn snapped(r: Rect) -> (usize, usize, usize, usize) {
-        let x0 = r.x.round().max(0.0) as usize;
-        let y0 = r.y.round().max(0.0) as usize;
-        let x1 = (r.x + r.w).round().max(0.0) as usize;
-        let y1 = (r.y + r.h).round().max(0.0) as usize;
-        (x0, y0, x1.max(x0), y1.max(y0))
-    }
-
     /// How long an edge piece is drawn before its middle line is taken.
     const STRIP: usize = 64;
 
@@ -612,8 +603,8 @@ pub(crate) mod render {
 
     /// Cut `mask` (stretched over `hole`) out of `canvas`'s pixels: each is
     /// kept by (1 − the mask's alpha). No mask cuts the whole rect.
-    fn cut(pixels: &mut [u8], width: usize, hole: Rect, mask: Option<&Pdf>) -> Option<()> {
-        let (x0, y0, x1, y1) = snapped(hole);
+    fn cut(pixels: &mut [u8], width: usize, hole: PxRect, mask: Option<&Pdf>) -> Option<()> {
+        let (x0, y0, x1, y1) = (hole.x0 as usize, hole.y0 as usize, hole.x1 as usize, hole.y1 as usize);
         let (hw, hh) = (x1 - x0, y1 - y0);
         if hw == 0 || hh == 0 {
             return Some(());
@@ -670,12 +661,17 @@ pub(crate) mod render {
         let hole = if key.framed {
             let art = spec.frame.as_ref()?;
             let geometry = spec.geometry()?;
-            let screen = screen_rect_in_frame(whole, geometry, Quarter::None);
+            let screen = hole_px((pw as u32, ph as u32), geometry, Quarter::None);
             // The screen's square corners reach past the frame's rounded
-            // body: the panel's colour covers them there, under the frame.
-            let (x0, y0, x1, y1) = snapped(screen);
-            let snapped = Rect { x: x0 as f32, y: y0 as f32, w: (x1 - x0) as f32, h: (y1 - y0) as f32 };
-            canvas.fill(snapped, key.fill);
+            // body: the panel's colour covers them there, under the frame
+            // (a pixel wider all round, under the frame or on the panel).
+            let under = Rect {
+                x: (screen.x0 - 1).max(0) as f32,
+                y: (screen.y0 - 1).max(0) as f32,
+                w: (screen.x1 - screen.x0 + 2) as f32,
+                h: (screen.y1 - screen.y0 + 2) as f32,
+            };
+            canvas.fill(under, key.fill);
             let frame_pt = geometry.frame_pt(Quarter::None);
             let composite = art
                 .composite
@@ -693,7 +689,7 @@ pub(crate) mod render {
         } else {
             mask.as_ref()?;
             canvas.fill(whole, key.fill);
-            whole
+            PxRect { x0: 0, y0: 0, x1: pw as i64, y1: ph as i64 }
         };
         let mut pixels = canvas.into_pixels();
         cut(&mut pixels, pw, hole, mask.as_ref())?;
@@ -705,6 +701,109 @@ pub(crate) mod render {
             Quarter::Cw180 => image::imageops::rotate180(&upright),
             Quarter::Cw270 => image::imageops::rotate270(&upright),
         })
+    }
+}
+
+/// gpui's rounding of a logical edge to device pixels (its
+/// `round_half_toward_zero`), so what is drawn here lands where gpui puts it.
+pub(crate) fn device_px(logical: f32, scale: f32) -> i64 {
+    let x = logical * scale;
+    (x.abs() - 0.5).ceil().copysign(x) as i64
+}
+
+/// A rectangle of whole device pixels, [x0, x1) × [y0, y1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PxRect {
+    pub x0: i64,
+    pub y0: i64,
+    pub x1: i64,
+    pub y1: i64,
+}
+
+impl PxRect {
+    pub(crate) fn size(self) -> (u32, u32) {
+        ((self.x1 - self.x0).max(0) as u32, (self.y1 - self.y0).max(0) as u32)
+    }
+}
+
+/// Where gpui draws `r`: each edge snapped on its own.
+pub(crate) fn snap(r: Rect, scale: f32) -> PxRect {
+    let (x0, y0) = (device_px(r.x, scale), device_px(r.y, scale));
+    PxRect {
+        x0,
+        y0,
+        x1: device_px(r.x + r.w, scale).max(x0),
+        y1: device_px(r.y + r.h, scale).max(y0),
+    }
+}
+
+/// What is painted where, in logical pixels: the picture, and the overlay
+/// with its size in device pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Painted {
+    pub picture: Rect,
+    pub overlay: Rect,
+    pub overlay_px: (u32, u32),
+}
+
+/// Lay `placement` out for painting at `scale`, on gpui's device-pixel
+/// grid, so the picture fills exactly the overlay's hole. The overlay is
+/// drawn at its own size (its snapped rect), and the picture at the hole
+/// inside it, both from the same whole numbers; laid out separately, they
+/// could miss by a pixel and leave a picture column showing past the
+/// frame's rounded corner.
+pub(crate) fn painted(
+    placement: Placement,
+    geometry: Option<FrameGeometry>,
+    turn: Quarter,
+    scale: f32,
+) -> Painted {
+    let logical = |r: PxRect| Rect {
+        x: r.x0 as f32 / scale,
+        y: r.y0 as f32 / scale,
+        w: (r.x1 - r.x0) as f32 / scale,
+        h: (r.y1 - r.y0) as f32 / scale,
+    };
+    match (placement.frame, geometry) {
+        (Some(frame), Some(geometry)) if scale > 0.0 => {
+            let od = snap(frame, scale);
+            let overlay_px = od.size();
+            let hole = hole_px(overlay_px, geometry, turn);
+            let picture = PxRect {
+                x0: od.x0 + hole.x0,
+                y0: od.y0 + hole.y0,
+                x1: od.x0 + hole.x1,
+                y1: od.y0 + hole.y1,
+            };
+            Painted { picture: logical(picture), overlay: logical(od), overlay_px }
+        }
+        _ => {
+            let sd = snap(placement.screen, scale.max(f32::MIN_POSITIVE));
+            let at = logical(sd);
+            Painted { picture: at, overlay: at, overlay_px: sd.size() }
+        }
+    }
+}
+
+/// The screen's hole in an overlay of `size_px` (turned by `turn`), in its
+/// pixels. The renderer works out the hole portrait and turns the image,
+/// so this does the same: one source for both.
+pub(crate) fn hole_px(size_px: (u32, u32), geometry: FrameGeometry, turn: Quarter) -> PxRect {
+    let (pw, ph) = match turn {
+        Quarter::Cw90 | Quarter::Cw270 => (size_px.1 as i64, size_px.0 as i64),
+        Quarter::None | Quarter::Cw180 => (size_px.0 as i64, size_px.1 as i64),
+    };
+    let whole = Rect { x: 0.0, y: 0.0, w: pw as f32, h: ph as f32 };
+    let r = screen_rect_in_frame(whole, geometry, Quarter::None);
+    let edge = |v: f32, max: i64| (v.round() as i64).clamp(0, max);
+    let (x0, y0) = (edge(r.x, pw), edge(r.y, ph));
+    let (x1, y1) = (edge(r.x + r.w, pw).max(x0), edge(r.y + r.h, ph).max(y0));
+    // Where `image::imageops::rotate*` moves that rect.
+    match turn {
+        Quarter::None => PxRect { x0, y0, x1, y1 },
+        Quarter::Cw90 => PxRect { x0: ph - y1, y0: x0, x1: ph - y0, y1: x1 },
+        Quarter::Cw180 => PxRect { x0: pw - x1, y0: ph - y1, x1: pw - x0, y1: ph - y0 },
+        Quarter::Cw270 => PxRect { x0: y0, y0: pw - x1, x1: y1, y1: pw - x0 },
     }
 }
 
@@ -1054,6 +1153,44 @@ mod tests {
             }
             out.save(dir.join(format!("{name}.png"))).unwrap();
         }
+        // `OO_FRAME_PANEL=<logical width>`: also paint it the way the
+        // Device tab does (layout, device-pixel snapping, a light picture
+        // under the overlay) on a dark panel, at an awkward origin.
+        if let Some(width) = std::env::var("OO_FRAME_PANEL").ok().and_then(|w| w.parse::<f32>().ok()) {
+            let scale: f32 = std::env::var("OO_FRAME_SCALE").ok().and_then(|s| s.parse().ok()).unwrap_or(2.0);
+            let panel = [47u8, 51, 64, 255];
+            let light = [248u8, 246, 255, 255];
+            let (fw, fh) = geometry.frame_pt(Quarter::None);
+            let container = Rect { x: 8.25, y: 3.4, w: width, h: width * fh / fw + 9.3 };
+            let placement = place(container, (0.0, 0.0), Some(geometry), Quarter::None);
+            let p = painted(placement, Some(geometry), Quarter::None, scale);
+            let key = OverlayKey {
+                device_type: device_type.clone(),
+                size_px: p.overlay_px,
+                turn: Quarter::None,
+                framed: true,
+                fill: panel,
+            };
+            let overlay = render::overlay(&spec, &key).expect("an overlay");
+            let all = snap(container, scale);
+            let (od, pd) = (snap(p.overlay, scale), snap(p.picture, scale));
+            let (w, h) = ((all.x1 + 4) as u32, (all.y1 + 4) as u32);
+            let mut out = image::RgbaImage::from_pixel(w, h, image::Rgba(panel));
+            for (x, y, px) in out.enumerate_pixels_mut() {
+                let (x, y) = (x as i64, y as i64);
+                if x >= pd.x0 && x < pd.x1 && y >= pd.y0 && y < pd.y1 {
+                    *px = image::Rgba(light);
+                }
+                if x >= od.x0 && x < od.x1 && y >= od.y0 && y < od.y1 {
+                    let o = overlay.get_pixel((x - od.x0) as u32, (y - od.y0) as u32).0;
+                    let a = f32::from(o[3]) / 255.0;
+                    let under = px.0;
+                    let mix = |top: u8, bottom: u8| (f32::from(top) * a + f32::from(bottom) * (1.0 - a)) as u8;
+                    *px = image::Rgba([mix(o[2], under[0]), mix(o[1], under[1]), mix(o[0], under[2]), 255]);
+                }
+            }
+            out.save(dir.join("panel.png")).unwrap();
+        }
     }
 
     fn key(turn: Quarter, framed: bool, w: u32) -> OverlayKey {
@@ -1217,5 +1354,152 @@ mod tests {
             }
             assert!(gaps.is_empty(), "scale {scale}: {} gap pixels, e.g. {:?}", gaps.len(), &gaps[..gaps.len().min(5)]);
         }
+    }
+
+    /// A rounded rect filling `w` × `h` with corners of `r`, as PDF path ops.
+    #[cfg(target_os = "macos")]
+    fn rounded_rect(w: f32, h: f32, r: f32) -> String {
+        let k = r * 0.5523;
+        format!(
+            "{r} 0 m {} 0 l {} 0 {w} {} {w} {r} c {w} {} l {w} {} {} {h} {} {h} c {r} {h} l {} {h} 0 {} 0 {} c \
+             0 {r} l 0 {k2} {k2} 0 {r} 0 c f",
+            w - r, w - r + k, r - k, h - r, h - r + k, w - r + k, w - r, r - k, h - r + k, h - r,
+            k2 = r - k,
+        )
+    }
+
+    /// Synthetic nine-slice art shaped like a phone (corners round off
+    /// outside a 110-pt radius, so a screen's square corners reach past the
+    /// body, as on the real ones) and a rounded mask, in `dir`.
+    #[cfg(target_os = "macos")]
+    fn phone_like(dir: &Path) -> ChromeSpec {
+        let grey = "0.3 g";
+        // TL as drawn in PDF space (y up): its body is the quarter disc
+        // centred on its inner corner (110, 0).
+        let k = 110.0 * 0.5523;
+        let tl = format!("{grey} 0 0 m 110 0 l 110 110 l {} 110 0 {k} 0 0 c f", 110.0 - k);
+        for (name, flip) in [
+            ("TL", "1 0 0 1 0 0 cm"),
+            ("TR", "-1 0 0 1 110 0 cm"),
+            ("BL", "1 0 0 -1 0 110 cm"),
+            ("BR", "-1 0 0 -1 110 110 cm"),
+        ] {
+            write_pdf(&dir.join(format!("{name}.pdf")), (110.0, 110.0), &format!("{flip} {tl}"));
+        }
+        for side in ["Left", "Right"] {
+            write_pdf(&dir.join(format!("{side}.pdf")), (110.0, 1.0), &format!("{grey} 0 0 110 1 re f"));
+        }
+        for side in ["Top", "Base"] {
+            write_pdf(&dir.join(format!("{side}.pdf")), (1.0, 110.0), &format!("{grey} 0 0 1 110 re f"));
+        }
+        write_pdf(&dir.join("mask.pdf"), (402.0, 874.0), &format!("0 g {}", rounded_rect(402.0, 874.0, 55.0)));
+        let name = |n: &str| n.to_string();
+        ChromeSpec {
+            screen_pt: Some((402.0, 874.0)),
+            mask: Some(dir.join("mask.pdf")),
+            frame: Some(FrameArt {
+                dir: dir.to_path_buf(),
+                pieces: NineSlice {
+                    top_left: name("TL"),
+                    top: name("Top"),
+                    top_right: name("TR"),
+                    right: name("Right"),
+                    bottom_right: name("BR"),
+                    bottom: name("Base"),
+                    bottom_left: name("BL"),
+                    left: name("Left"),
+                },
+                composite: None,
+                sizing: Insets { left: 18.0, top: 18.0, right: 18.0, bottom: 18.0 },
+            }),
+        }
+    }
+
+    /// The picture never shows outside the rounded screen: painted the way
+    /// gpui paints (each rect snapped to device pixels, the overlay over
+    /// the picture), every picture pixel is either in the overlay's hole or
+    /// under an opaque overlay pixel. Run at the user's size (a frame about
+    /// 712 px wide at 2×, and at 1.5×), at awkward origins, portrait and
+    /// turned. The old layout left a picture column showing just past the
+    /// frame's rounded corner: light ticks at the screen's sides, beside
+    /// the corner regions.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_picture_never_shows_past_the_rounded_screen() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = phone_like(dir.path());
+        let geometry = spec.geometry().unwrap();
+        let mut leaks = Vec::new();
+        for (scale, width) in [(2.0, 356.0), (1.5, 356.0), (2.0, 357.3), (1.5, 349.7)] {
+            for (ox, oy) in [(0.0, 0.0), (8.25, 3.4), (11.3, 7.75), (4.6, 0.5)] {
+                for turn in [Quarter::None, Quarter::Cw90] {
+                    let (fw, fh) = geometry.frame_pt(turn);
+                    let container = if turn == Quarter::None {
+                        Rect { x: ox, y: oy, w: width, h: width * fh / fw + 40.0 }
+                    } else {
+                        Rect { x: ox, y: oy, w: width * fw / fh, h: width + 0.37 }
+                    };
+                    let placement = place(container, (0.0, 0.0), Some(geometry), turn);
+                    let p = painted(placement, Some(geometry), turn, scale);
+                    let key = OverlayKey {
+                        device_type: "x".into(),
+                        size_px: p.overlay_px,
+                        turn,
+                        framed: true,
+                        fill: [10, 20, 30, 255],
+                    };
+                    let overlay = render::overlay(&spec, &key).unwrap();
+                    let (od, pd) = (snap(p.overlay, scale), snap(p.picture, scale));
+                    let hole = hole_px(p.overlay_px, geometry, turn);
+                    let (ow, oh) = overlay.dimensions();
+                    for y in pd.y0..pd.y1 {
+                        for x in pd.x0..pd.x1 {
+                            // gpui stretches the sprite over its snapped rect.
+                            let ix = ((x - od.x0) as f32 + 0.5) * ow as f32 / od.size().0 as f32;
+                            let iy = ((y - od.y0) as f32 + 0.5) * oh as f32 / od.size().1 as f32;
+                            let (ix, iy) = (ix as i64, iy as i64);
+                            let in_hole = ix >= hole.x0 && ix < hole.x1 && iy >= hole.y0 && iy < hole.y1;
+                            let covered = ix >= 0
+                                && iy >= 0
+                                && ix < ow as i64
+                                && iy < oh as i64
+                                && overlay.get_pixel(ix as u32, iy as u32).0[3] == 255;
+                            if !in_hole && !covered {
+                                leaks.push((scale, width, ox, oy, turn, x - pd.x0, y - pd.y0));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(leaks.is_empty(), "{} leaking pixels, e.g. {:?}", leaks.len(), &leaks[..leaks.len().min(6)]);
+    }
+
+    #[test]
+    fn the_picture_sits_exactly_in_the_overlays_hole() {
+        let g = FrameGeometry {
+            screen_pt: (402.0, 874.0),
+            sizing: Insets { left: 18.0, top: 18.0, right: 18.0, bottom: 18.0 },
+        };
+        for scale in [1.0, 1.5, 2.0, 3.0] {
+            for (ox, oy) in [(0.0, 0.0), (8.25, 3.4), (11.3, 7.75)] {
+                for turn in [Quarter::None, Quarter::Cw90, Quarter::Cw180, Quarter::Cw270] {
+                    let container = Rect { x: ox, y: oy, w: 357.3, h: 731.9 };
+                    let p = painted(place(container, (0.0, 0.0), Some(g), turn), Some(g), turn, scale);
+                    let od = snap(p.overlay, scale);
+                    // Drawn at its own size: no stretching.
+                    assert_eq!(od.size(), p.overlay_px, "{scale} {turn:?}");
+                    let hole = hole_px(p.overlay_px, g, turn);
+                    let pd = snap(p.picture, scale);
+                    let at = PxRect { x0: od.x0 + hole.x0, y0: od.y0 + hole.y0, x1: od.x0 + hole.x1, y1: od.y0 + hole.y1 };
+                    assert_eq!(pd, at, "{scale} {ox},{oy} {turn:?}");
+                }
+            }
+        }
+        // Without a frame the picture and its overlay are one rect.
+        let screen = Rect { x: 3.3, y: 1.7, w: 201.25, h: 437.6 };
+        let p = painted(Placement { frame: None, screen }, None, Quarter::None, 2.0);
+        assert_eq!(snap(p.picture, 2.0), snap(p.overlay, 2.0));
+        assert_eq!(snap(p.overlay, 2.0).size(), p.overlay_px);
     }
 }
