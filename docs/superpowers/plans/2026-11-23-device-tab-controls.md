@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A bottom bar in the Device tab with Rotate, Home, Dark/Light, Text size − / +, and Screenshot, acting only on the watched simulator, only on a click.
+**Goal:** A bottom bar in the Device tab with Rotate, Home, Dark/Light, Text size − / +, Screenshot and Shut down, Boot from the picker, an interactive picture (tap, swipe, scroll, type), and Apple's device frame with rounded screen corners. Everything acts only on the watched simulator, only on a user action.
 
 **Architecture:** A pure-where-possible `devices::controls` module that runs public `simctl` commands (appearance, content size, screenshot) with timeouts. A macOS-only `devices::hid` module sends Rotate and Home through SimulatorKit's private HID path, found by a spike and loaded defensively like `sim_display`. A new `workspace/ui/device_controls.rs` draws the bar and dispatches clicks off the main thread, one control at a time. If the spike shows the surface stays portrait, the picture is rotated when drawn.
 
@@ -125,9 +125,120 @@ Behaviour:
 
 ---
 
-### Task 4: Verify in a real build
+### Task 4: Boot and Shut down from the tab
 
-Same isolation as the Device tab's Task 7: the `/tmp/oo-dt` scratch bundle with the HOME/TMUX wrapper, your own "OO device test" simulator, and the user's devices and apps untouched. Window captures and clicks need macOS Screen Recording and Accessibility for the host app. If they're missing, do the non-visual checks and list the rest for the user to check by eye.
+Added by the spec's Amendments §3. It doesn't depend on Task 0.
+
+**Files:**
+- Modify: `crates/harness-app/src/devices/simctl.rs` (list every device in the default set, not just booted ones)
+- Modify: `crates/harness-app/src/devices/controls.rs` (`boot`, `shutdown`)
+- Modify: `crates/harness-app/src/workspace/ui/device_panel.rs` (picker groups) and `crates/harness-app/src/workspace/ui/device_controls.rs` (Shut down button and confirm), or create the latter if Task 3 hasn't yet
+- Modify: `CHANGELOG.md`
+
+**Interfaces:**
+- Produces:
+  - `pub(crate) struct DeviceList { pub booted: Vec<DeviceInfo>, pub shut_down: Vec<DeviceInfo> }`
+  - `pub(crate) fn parse_devices(json: &str) -> Result<DeviceList, String>`: available devices only (`isAvailable: true`); `state == "Booted"` goes to booted, `"Shutdown"` to shut_down, and other states (Booting, Shutting Down, Creating) to neither. Each group sorted like `parse_booted`.
+  - `pub(crate) fn list_devices() -> Result<DeviceList, ListError>`: `xcrun simctl list devices -j` (one call; replaces `list_booted` in the poll, and the state machine still gets `booted`)
+  - `pub(crate) fn boot(udid: &str) -> Result<(), String>` and `pub(crate) fn shutdown(udid: &str) -> Result<(), String>`: bounded at 60 s, since boot can take a while; off the main thread
+- Behaviour:
+  - The picker shows "Running" then "Shut down" groups. Choosing a shut-down device shows `Boot <name>` in place of the picture.
+  - Clicking Boot runs `boot`, makes that device the user's pick, and lets the normal poll take it live.
+  - The bottom bar's **Shut down** (tooltip `Shut down`) opens a confirm reusing the app's existing prompt pattern (`workspace/ui/dialogs.rs`): title `Shut down <name>?`, body `An agent may be using it.`, buttons `Shut down` / `Cancel`.
+  - While a boot or shutdown runs, the bar shows it's busy and other controls wait.
+- CHANGELOG `### Added`: `- Boot and shut down simulators from the Device tab.`
+
+- [ ] **Step 1: Write the failing tests:**
+  - `parses_booted_and_shut_down_groups`
+  - `unavailable_and_transitional_devices_are_left_out`
+  - `boot_and_shutdown_args`
+  - `the_picker_offers_boot_for_a_shut_down_pick`: pure, a `fn picker_action(list: &DeviceList, pick: &str) -> PickAction { Watch, Boot }`
+- [ ] **Step 2:** `cargo test parse_devices picker_action` → FAIL.
+- [ ] **Step 3:** Implement.
+- [ ] **Step 4:** Full `cargo test` → PASS, and clippy is clean. Manual: on your own "OO device test", shut down from the bar and boot from the picker. The live view comes back.
+- [ ] **Step 5:** Commit: `feat(app): boot and shut down simulators from the Device tab` (with the CHANGELOG line).
+
+---
+
+### Task 5: Click, drag, scroll and type on the picture
+
+Added by the spec's Amendments §1. It depends on Task 0's findings for touch, scroll and keyboard, and on Task 2's `hid` module.
+
+**Files:**
+- Modify: `crates/harness-app/src/devices/hid.rs` (touch, scroll, key senders)
+- Modify: `crates/harness-app/src/workspace/ui/device_panel.rs` (`DeviceScreen` mouse/scroll/key handlers, focus)
+- Modify: `CHANGELOG.md`
+
+**Interfaces:**
+- Produces in `hid.rs`:
+  - `pub(crate) enum TouchPhase { Down, Move, Up }`
+  - `pub(crate) fn touch(udid: &str, phase: TouchPhase, x: f64, y: f64) -> Result<(), StreamError>`, in the device coordinate space the findings name
+  - `pub(crate) fn scroll(udid: &str, dx: f64, dy: f64) -> Result<(), StreamError>`, or none if the findings say a swipe is the fallback (then the UI turns scroll into a short swipe)
+  - `pub(crate) fn key(udid: &str, key: KeyInput) -> Result<(), StreamError>`, where `KeyInput` covers text characters, Return, Delete, Tab, arrows and Esc
+  - All are sent on one dedicated input thread, in order. Events are never dropped, and moves are coalesced only between a Down and its Up.
+- Produces in the UI: `pub(crate) fn view_to_device(point: Point<Pixels>, view: Bounds<Pixels>, surface: (u32, u32), rotation: Quarter, frame_inset: Edges<Pixels>) -> Option<(f64, f64)>` (pure). It returns None outside the screen area, and accounts for object-fit contain, the drawn rotation and the frame.
+- Behaviour:
+  - Mouse down on the picture → Down, drag → Move, up → Up. A right click or a click outside the screen does nothing.
+  - Scroll-wheel and trackpad deltas → `scroll`.
+  - Clicking the picture focuses it, and while it's focused, typing goes to the device. Esc stays with the app; Esc to the device is Shift-Esc. Clicking elsewhere unfocuses it.
+  - ⌘-chords stay with the app, except ⌘V, which pastes the Mac clipboard as typed text.
+  - The focus ring shows when the picture has focus.
+  - If `hid_available()` is false, the picture stays watch-only and the tooltip says `This Xcode's simulator input isn't supported`.
+- CHANGELOG `### Added`: `- Click, drag, scroll and type on the Device tab's live view to use the simulator directly.`
+
+- [ ] **Step 1: Write the failing tests:**
+  - `view_to_device_maps_corners_and_centre`
+  - `points_outside_the_screen_are_ignored`
+  - `rotation_maps_points_into_device_space` (each Quarter)
+  - `the_frame_inset_is_subtracted`
+  - `cmd_chords_stay_with_the_app_except_paste` (pure key routing)
+- [ ] **Step 2:** `cargo test view_to_device key_routing` → FAIL.
+- [ ] **Step 3:** Implement from the findings.
+- [ ] **Step 4:** Full `cargo test` → PASS, and clippy is clean. Manual on your own device:
+  - tap Settings → General opens
+  - drag scrolls the list
+  - type into Safari's address bar, then Return loads the page
+- [ ] **Step 5:** Commit: `feat(app): use the simulator from the Device tab` (with the CHANGELOG line).
+
+---
+
+### Task 6: Device frame and rounded screen
+
+Added by the spec's Amendments §2. It doesn't depend on Task 0.
+
+**Files:**
+- Create: `crates/harness-app/src/devices/chrome.rs` (parsing is all-platform; rendering the PDF to an image is macOS-only)
+- Modify: `crates/harness-app/src/workspace/ui/device_panel.rs` (draw the frame around the picture, apply the mask) and `crates/harness-app/src/workspace/ui/device_controls.rs` (a `Show frame` toggle)
+- Modify: `crates/harness-app/src/workspace/prefs.rs` (`device_frame: bool`, `#[serde(default = "yes")]`, on by default)
+- Modify: `CHANGELOG.md`
+
+**Interfaces:**
+- Produces:
+  - `pub(crate) fn chrome_for(device_type_id: &str) -> Option<ChromeSpec>`. It reads the device type's `profile.plist` (`/Library/Developer/CoreSimulator/Profiles/DeviceTypes/<name>.simdevicetype/Contents/Resources/profile.plist` — find the bundle via `simctl list devicetypes -j`'s `bundlePath`), takes `chromeIdentifier` and `framebufferMask`, then reads `/Library/Developer/DeviceKit/Chrome/<id-suffix>.devicechrome/Contents/Resources/chrome.json`.
+  - `pub(crate) struct ChromeSpec` holds the nine-slice image names, the screen inset or offsets from `chrome.json`, and the mask PDF path. Parse only what drawing needs, and record the JSON keys you rely on in a comment, citing `phone11`.
+  - macOS: `pub(crate) fn render_pdf(path: &Path, size_px: (u32, u32)) -> Option<Arc<RenderImage>>` via CoreGraphics (`CGPDFDocument`), cached per (path, size).
+- Behaviour:
+  - The frame is drawn around the picture when `device_frame` is on and a `ChromeSpec` exists. The picture is always clipped by the mask, so corners are rounded, whether the frame is on or off.
+  - The frame scales with the picture, and `view_to_device` (Task 5) gets the frame inset.
+  - Missing chrome or an unreadable PDF falls back to the rounded screen only, without an error.
+  - The PDFs are read from the user's Xcode install at run time and never copied into the repo or the app bundle.
+- CHANGELOG `### Added`: `- The Device tab draws the iPhone's frame and rounded screen (toggle with Show frame).`
+
+- [ ] **Step 1: Write the failing tests:**
+  - `parses_phone11_chrome_json`, using a trimmed copy of the real `chrome.json` structure, keys only with no Apple artwork, in `devices/testdata/`
+  - `profile_names_chrome_and_mask`
+  - `missing_chrome_falls_back_to_rounded_screen`
+  - `device_frame_defaults_on_and_survives_a_save_load_cycle`
+- [ ] **Step 2:** `cargo test chrome device_frame` → FAIL.
+- [ ] **Step 3:** Implement.
+- [ ] **Step 4:** Full `cargo test` → PASS, and clippy is clean.
+- [ ] **Step 5:** Commit: `feat(app): device frame and rounded screen in the Device tab` (with the CHANGELOG line).
+
+---
+
+### Task 7: Verify in a real build
+
+Same isolation as the Device tab plan's Task 7: the `/tmp/oo-dt` scratch bundle with the HOME/TMUX wrapper, your own "OO device test" simulator, and the user's devices and apps untouched. Window captures and clicks need macOS Screen Recording and Accessibility for the host app. If they're missing, do the non-visual checks and list the rest for the user to check by eye.
 
 - [ ] **Step 1:** Rebuild and refresh the scratch bundle. Open the Device tab on the test device.
 - [ ] **Step 2:** Rotate ×4: the picture turns and stays upright, then returns to portrait. Home from Settings: the home screen shows.
