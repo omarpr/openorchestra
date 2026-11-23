@@ -182,10 +182,17 @@ subprocess like the `simctl` controls, not a private HID send.
   - Unknown device: exit 1, stderr `ERROR: The specified device was not
     found. (Name: …) (com.apple.dt.CoreDeviceError error 1000 (0x3E8))`.
   - Bad argument: exit 64.
-  - An Xcode without the subcommand would print `Error: Unknown option …` /
-    unknown subcommand, exit 64.
-  - Feature check (hide Rotate if it fails):
-    `xcrun devicectl help device orientation rotate` exits 0.
+  - An Xcode without the subcommand would give `Error: Unknown option …`,
+    exit 64 (seen with a misspelled subcommand).
+  - **Feature check (hide Rotate if it fails):** look for the line
+    `USAGE: devicectl device orientation rotate` in the output of
+    `xcrun devicectl device orientation rotate --help` (1 match here).
+    **Exit codes don't work for this:** `devicectl help <anything>` and
+    `devicectl device <bogus> --help` both exit 0 and print the parent's help
+    (checked with `orientationx`).
+  - An alternative check uses a dummy UDID:
+    `… rotate --device 00000000-0000-0000-0000-000000000000 right`. It exits
+    1 (device not found) when the subcommand exists and 64 when it doesn't.
 - **Who serves it:** `devicectl` talks to `CoreDeviceService`
   (`/Library/Developer/PrivateFrameworks/CoreDevice.framework/…/XPCServices/CoreDeviceService.xpc`),
   a launchd-owned per-user process (ppid 1). It started at 18:42, before the
@@ -292,13 +299,18 @@ The total size is 0x20 + count·0xA0.
 - `0x33`, the value SimulatorKit's own `SimDeviceScreen.buttonTarget`
   returns (0x15 for productFamily 3) and idb's "hardware" target, was
   **accepted and ignored** for buttons.
-- **An unknown target crashes the guest's `backboardd`**: tried 0x34 and
-  0x35. `SimulatorHID -[SimHIDVirtualServiceManager serviceForIndigoHIDData:]`
-  throws an uncaught NSException (crash reports
-  `~/Library/Logs/DiagnosticReports/backboardd-*.ips` name this device's
-  UDID). SpringBoard restarts, the framebuffer IOSurface is **replaced** (ID
-  19 → 689), and open HID clients get `machPortInvalid`. **Only ever send
-  0x32.**
+- **Wheel events at target 0x35 crashed the guest's `backboardd`.**
+  `SimulatorHID -[SimHIDVirtualServiceManager serviceForIndigoHIDData:]`
+  threw an uncaught NSException; two crash reports
+  (`~/Library/Logs/DiagnosticReports/backboardd-*.ips`) name this device's
+  UDID. Afterwards the open HID client got `machPortInvalid` /
+  `machPortNotConnected`, and a new client worked once the guest recovered.
+  0x34 was sent after the port was already dead, so it is unattributed.
+  Button events at 0x15, 0x0, 0x2 and 0x34 left no crash report, but the
+  sweep was muddied by Lock. **Only ever send 0x32.**
+- **Unknown:** whether a backboardd restart replaces the framebuffer
+  IOSurface. The ID read afterwards (689, not 19) is confounded by a device
+  reboot done earlier, before it was last read.
 
 **Home** (verified: Settings in front, luminance 245 → home screen 139, and
 the screenshot shows the home screen):
@@ -315,7 +327,8 @@ IndigoHIDMessage *IndigoHIDMessageForButton(uint32_t keyCode, uint32_t op, uint3
   is needed.
 - The layout is 192 bytes, count 1: `+0x30` keyCode, `+0x34` op,
   `+0x38` target.
-- `keyCode 1` (Lock) at 0x32 locks the device (seen, not used).
+- `keyCode 1` (Lock) at 0x32 locked the device: luminance fell to 72. Only
+  the luminance was checked, no screenshot. Not needed.
 - SimulatorKit's own chrome mapping, from the disassembly: consumer page
   0x0C usage 0x30 → keyCode 1, 0x40 → keyCode 0 (0x191 on a TV-type
   client), 0x95 → 0xBB8.
@@ -331,9 +344,9 @@ IndigoHIDMessage *IndigoHIDMessageForMouseNSEvent(CGPoint *p, CGPoint *p2 /* NUL
 ```
 
 - **Coordinates:** the function stores `*p / size`, a 0…1 ratio.
-  SimulatorKit itself passes the ratio with `size = {1, 1}`. Passing device
-  pixels with `size = {1206, 2622}`, or points with `{402, 874}`, is
-  equivalent.
+  SimulatorKit itself passes the ratio with `size = {1, 1}`. Only that form
+  was run. From the disassembly, device pixels with `size = {1206, 2622}`
+  (or points with `{402, 874}`) should be equivalent; that wasn't run.
 - **Coordinates are in the portrait surface's space at every
   orientation.** Verified in landscapeRight: a drag along the surface's x
   axis scrolled Safari vertically. To map a click at (u, v) in the
@@ -341,7 +354,8 @@ IndigoHIDMessage *IndigoHIDMessageForMouseNSEvent(CGPoint *p, CGPoint *p2 /* NUL
   - `uiOrientation` 1: (u, v).
   - 3: (v, 1 − u).
   - 4: (1 − v, u).
-  - The 3 case was verified by the drag; 4 is the mirror of it.
+  - For 3, the drag verified the axis mapping. The axis directions come from
+    the surface dump. 4 is the mirror of 3; not run.
 - **A one-finger message is 384 bytes, count 2**, and starts with
   `u32 0xB` at +0x20.
 - **Throttle:** a *move* (type 6) built within 16 ms (0xF423FF ns) of the
@@ -381,11 +395,21 @@ IndigoHIDMessage *IndigoHIDMessageForScrollEvent(uint32_t, double dx, double dy,
 
 - It builds a wheel event (type 6, 192 bytes). At 0x32 it was accepted and
   had no effect on Settings (screenshot unchanged); 0x33 behaved the same.
-  0x34 and 0x35 crashed backboardd.
-- SimulatorKit uses wheel and pointer events only for the iPad pointer
-  service (`IndigoHIDMessageToCreatePointerService`, not tried).
+  At 0x35 it crashed backboardd (see above).
+- In the disassembly, SimulatorKit builds wheel events only on its
+  pointer/trackpad capture path (`IndigoHIDMessageForScrollEventFromHIDEventRef`
+  with a pointer target). That path presumably needs
+  `IndigoHIDMessageToCreatePointerService` first. Not tried.
 - **Map trackpad/wheel scroll to a synthesised drag** (down, moves at
   ≥16 ms intervals, up) in the opposite direction of the content motion.
+
+### Public Home fallback
+
+`xcrun simctl launch <UDID> com.apple.springboard` brought the home screen
+forward from Settings. It was seen twice: once by screenshot, and once by
+luminance (245 → 139). It **foregrounds SpringBoard rather than pressing a
+button**: no button semantics, and no effect on lock or Siri. Use it when
+SimulatorKit or the 0x32 HID path is unavailable.
 
 ### Hardened runtime
 
@@ -417,9 +441,10 @@ it either. Both are expected, not verified.
 ### Consequences for the plan
 
 - **Rotate:** `devicectl` subprocess (5 s timeout, `--device <UDID>`,
-  `right` = clockwise). Hide it when
-  `xcrun devicectl help device orientation rotate` fails.
-- **Home:** private HID (`ForButton(0, 1/2, 0x32)`).
+  `right` = clockwise). Hide it when the `--help` output lacks the
+  `USAGE: devicectl device orientation rotate` line.
+- **Home:** private HID (`ForButton(0, 1/2, 0x32)`). Fallback:
+  `simctl launch <UDID> com.apple.springboard`.
 - **Tap, swipe, keyboard:** private HID as above.
 - **Scroll:** synthesised swipe.
 - **Load check for the private part:** the class, `initWithDevice:error:`,
@@ -429,5 +454,6 @@ it either. Both are expected, not verified.
 - **Upright picture:** rotate the drawn surface from `uiOrientation`
   (3 → 90° CW, 4 → 90° CCW, 2 → 180° unverified) and map input back with
   the formulas above.
-- **Survive a backboardd restart:** handle a replaced surface (the existing
-  `surfacesChanged` path) and recreate the HID client on error.
+- **Survive a backboardd restart:** recreate the HID client on error.
+  Whether the surface is replaced too is not established, so keep the
+  existing `surfacesChanged` handling.
