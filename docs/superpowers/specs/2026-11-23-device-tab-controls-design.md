@@ -142,3 +142,292 @@ These widen the scope above. Where they conflict with earlier sections, they win
 
 Consequence for the "no work while hidden" rule: unchanged. Input, boot and
 shutdown only happen on a click while the tab is on screen.
+
+## Spike findings (2026-11-23)
+
+Measured on Xcode 27.2 (27B52), macOS 27 (Darwin 27.3), Apple Silicon, iOS
+27.2 runtime, with a throwaway Objective-C spike on a simulator created for
+the purpose (`simctl create "OO device test" "iPhone 18 Pro"`, booted
+headless with `simctl boot`, deleted afterwards). Results were judged with
+`simctl io screenshot` PNGs, raw framebuffer dumps and
+`screenProperties.uiOrientation`. **Result: everything works from outside
+Device Hub**: Rotate through a public CLI, and Home, tap, swipe and keyboard
+through SimulatorKit's legacy HID client. Scroll has no working direct
+message, so a swipe is the fallback. All of it also works under the hardened
+runtime.
+
+**Deviation from the Constraints section:** a public CLI for rotation
+*does* exist. It is `devicectl` (CoreDevice), not `simctl`. So Rotate is a
+subprocess like the `simctl` controls, not a private HID send.
+
+### Rotate: `xcrun devicectl device orientation …` (public)
+
+- `xcrun devicectl device orientation rotate --device <UDID> right`. `right`
+  turns the device **clockwise** (portrait → landscapeRight →
+  portraitUpsideDown → landscapeLeft → portrait); `left` is
+  counter-clockwise. Also `l` / `r`.
+- `xcrun devicectl device orientation set --device <UDID> <o>`. Values for
+  `<o>`: `portrait`, `portraitUpsideDown`, `landscapeLeft`, `landscapeRight`,
+  `faceUp`, `faceDown` (or `p`, `pu`, `ll`, `lr`, `fu`, `fd`).
+- `xcrun devicectl device orientation get --device <UDID> -j -` prints JSON
+  with `result.deviceOrientation` (e.g. `"landscapeRight"`, or `"unknown"`
+  just after boot), `result.deviceOrientationNonFlat` and
+  `result.deviceIsOrientationLocked`.
+- **Always address the device by UDID.** `--device` also accepts names, and
+  "iPhone 18 Pro" is ambiguous on this Mac (`devicectl list devices` shows
+  the simulators next to physical devices).
+- **Speed:** a call takes 70–140 ms wall time. It ran four times in a row with
+  no settling time needed. `uiOrientation` updated within about 0.15 s.
+- **Errors:**
+  - Unknown device: exit 1, stderr `ERROR: The specified device was not
+    found. (Name: …) (com.apple.dt.CoreDeviceError error 1000 (0x3E8))`.
+  - Bad argument: exit 64.
+  - An Xcode without the subcommand would print `Error: Unknown option …` /
+    unknown subcommand, exit 64.
+  - Feature check (hide Rotate if it fails):
+    `xcrun devicectl help device orientation rotate` exits 0.
+- **Who serves it:** `devicectl` talks to `CoreDeviceService`
+  (`/Library/Developer/PrivateFrameworks/CoreDevice.framework/…/XPCServices/CoreDeviceService.xpc`),
+  a launchd-owned per-user process (ppid 1). It started at 18:42, before the
+  running Device Hub (21:21), so it does not belong to Device Hub. Device Hub
+  drives rotation through the same CoreDevice stack: DeviceKit's
+  `RotateControlProvider` uses CoreDevice `OrientationControl`, and the guest
+  runs `com.apple.coredevice.*` daemons. SimulatorKit has no rotation call,
+  only `SimDisplayView.deviceRotation`, which is a view property.
+- **The 180° step:** Safari on this iPhone refuses portraitUpsideDown. The
+  device orientation becomes `portraitUpsideDown`, but `uiOrientation` stays
+  at its previous value (3), and on a `set portraitUpsideDown` from portrait
+  it stays at 1. So two of the four clicks change the picture and the other
+  two don't. That is iOS behaviour, not a failure. `faceUp` also leaves
+  `uiOrientation` at 1.
+
+### What rotation does to the screen and surface (decides "upright picture")
+
+| Device orientation (devicectl) | `screenProperties.uiOrientation` | Content in the raw (portrait) surface | Draw the surface rotated by |
+|---|---|---|---|
+| portrait | 1 | upright | 0 |
+| landscapeRight (after one `right`) | 3 | UI top is at the surface's **left** edge | 90° **clockwise** |
+| landscapeLeft | 4 | UI top is at the surface's **right** edge | 90° counter-clockwise |
+| portraitUpsideDown | 2, **never observed** (Safari, Settings and the home screen are all portrait-only on iPhone) | presumably upside down | presumably 180°, unverified |
+
+- **The surface stays portrait.** It was 1206×2622, same IOSurface ID 19,
+  through every rotation. `surfacesChanged` did **not** fire, and
+  `screenProperties.pixelSize` stayed 1206×2622. So the tab **must rotate
+  the drawn picture itself** from `uiOrientation`. The rotation sense was
+  checked by dumping the framebuffer in both landscapes and by eye.
+- `simctl io screenshot` is already upright: 2622×1206 in landscape. Copy
+  the screenshot PNG as it comes; don't rotate it.
+- **`propertiesChanged` fires on rotation**, once per `uiOrientation` change,
+  about 0.15 s after the `devicectl` call. It runs **on the callback queue
+  passed to register** (a labelled serial queue, not the main thread, which
+  settles the earlier spike's open question). Its argument is a
+  `ROCKImmutableProxy` whose `uiOrientation` (`I`) is already the new value.
+  Nothing fires when `uiOrientation` doesn't change (e.g. the refused 180°
+  step). Use it to re-fit, or read `screenProperties.uiOrientation`.
+
+### Home and the other HID input: `SimDeviceLegacyHIDClient` (SimulatorKit, private)
+
+**Loading.** `dlopen` CoreSimulator as `sim_display` does, plus
+`/Applications/Xcode.app/Contents/SharedFrameworks/SimulatorKit.framework/SimulatorKit`
+(`RTLD_NOW`). Derive the Xcode path from `xcode-select -p`.
+
+- **Class:** `NSClassFromString("SimulatorKit.SimDeviceLegacyHIDClient")`.
+  The mangled `_TtC12SimulatorKit24SimDeviceLegacyHIDClient` gives the same
+  class. Its superclass is NSObject, and it's a real class, not a ROCK proxy.
+- **C functions** come from `dlsym(RTLD_DEFAULT, …)` after the `dlopen`.
+  Every builder `calloc`s and returns an `IndigoHIDMessage *`.
+
+**Calls.**
+
+| What | Selector or symbol | Types |
+|---|---|---|
+| make a client | `alloc` then `initWithDevice:error:` (SimDevice from the `sim_display` chain) | `@32@0:8@16^@24`. Took 2–24 ms |
+| send | `sendWithMessage:freeWhenDone:completionQueue:completion:` | `v44@0:8^{IndigoHIDMessageStruct=…}16B24@28@?36` (msg ptr, BOOL, `dispatch_queue_t` or nil, block or nil) |
+| completion block | `void (^)(NSError *)` | signature `v16@?0@"NSError"8` |
+| alt init | `initWithDevice:sessionResetQueue:error:sessionResetHandler:` | `@48@0:8@16@24^@32@?40` (not used) |
+
+**Send semantics.**
+
+- The send is effectively synchronous. It calls `mach_msg_send` on the
+  caller's thread and returns in under 0.1 ms. It doesn't block and doesn't
+  throw.
+- `freeWhenDone: YES` hands ownership of the message to the client, which
+  `free`s it. **Never pass a NULL message.**
+- `completionQueue: nil, completion: nil` works (fire and forget; the event
+  was delivered).
+- `completionQueue: nil` *with* a completion → the completion is **never
+  called** (the event is still delivered). Pass both or neither.
+- With both, the completion runs on that queue with `nil` on success, or an
+  `NSError` whose description reads
+  `SimulatorKit.SimDeviceLegacyHIDClient.HIDError.machPortInvalid` /
+  `.machPortNotConnected` when the guest's HID port died (see backboardd
+  below).
+- After such an error that client stays dead. A **new** client works once
+  the guest restarts. Create a client per action, or recreate it on error;
+  init is cheap.
+
+**Message layout** (`IndigoHIDMessageStruct`; the builders fill all of it,
+and the client fills the Mach header):
+
+| Offset | Field |
+|---|---|
+| 0x00 | `mach_msg_header_t` (0x18 bytes) |
+| 0x18 | `u32` event stride = 0xA0 |
+| 0x1C | `u8` event count |
+| 0x20 + n·0xA0 | the events |
+
+Each event starts with:
+
+| Offset (within the event) | Field |
+|---|---|
+| +0 | `u32` type: 2 button/key, 0xB digitizer, 6 wheel |
+| +4 | `u64` timestamp |
+| +0x10 | payload (from 0x30 for event 0) |
+
+The total size is 0x20 + count·0xA0.
+
+**Target: use `0x32` for everything.** It was found by a sweep:
+
+- `0x32` reached the Home button, Lock, touch and keyboard.
+- `0x33`, the value SimulatorKit's own `SimDeviceScreen.buttonTarget`
+  returns (0x15 for productFamily 3) and idb's "hardware" target, was
+  **accepted and ignored** for buttons.
+- **An unknown target crashes the guest's `backboardd`**: tried 0x34 and
+  0x35. `SimulatorHID -[SimHIDVirtualServiceManager serviceForIndigoHIDData:]`
+  throws an uncaught NSException (crash reports
+  `~/Library/Logs/DiagnosticReports/backboardd-*.ips` name this device's
+  UDID). SpringBoard restarts, the framebuffer IOSurface is **replaced** (ID
+  19 → 689), and open HID clients get `machPortInvalid`. **Only ever send
+  0x32.**
+
+**Home** (verified: Settings in front, luminance 245 → home screen 139, and
+the screenshot shows the home screen):
+
+```c
+typedef struct IndigoHIDMessage IndigoHIDMessage;
+IndigoHIDMessage *IndigoHIDMessageForButton(uint32_t keyCode, uint32_t op, uint32_t target);
+// keyCode: 0 = Home, 1 = Lock/power, 0xBB8 = side button
+// op: 1 = down, 2 = up
+// Home: send ForButton(0, 1, 0x32), then ForButton(0, 2, 0x32)
+```
+
+- Down and up can go back-to-back (0 ms apart worked). No session warm-up
+  is needed.
+- The layout is 192 bytes, count 1: `+0x30` keyCode, `+0x34` op,
+  `+0x38` target.
+- `keyCode 1` (Lock) at 0x32 locks the device (seen, not used).
+- SimulatorKit's own chrome mapping, from the disassembly: consumer page
+  0x0C usage 0x30 → keyCode 1, 0x40 → keyCode 0 (0x191 on a TV-type
+  client), 0x95 → 0xBB8.
+
+**Tap and drag** (verified: tapping the Settings icon opened Settings; a
+drag from (0.5, 0.75) to (0.5, 0.3) over 300 ms scrolled the Settings
+list; tapping Safari's address bar focused it):
+
+```c
+IndigoHIDMessage *IndigoHIDMessageForMouseNSEvent(CGPoint *p, CGPoint *p2 /* NULL = one finger */,
+    uint32_t target /* 0x32 */, NSEventType type, CGSize size, uint32_t edge /* 0 */);
+// type: 1 = LeftMouseDown (touch down), 6 = LeftMouseDragged (move), 2 = LeftMouseUp (touch up)
+```
+
+- **Coordinates:** the function stores `*p / size`, a 0…1 ratio.
+  SimulatorKit itself passes the ratio with `size = {1, 1}`. Passing device
+  pixels with `size = {1206, 2622}`, or points with `{402, 874}`, is
+  equivalent.
+- **Coordinates are in the portrait surface's space at every
+  orientation.** Verified in landscapeRight: a drag along the surface's x
+  axis scrolled Safari vertically. To map a click at (u, v) in the
+  *upright drawn picture* (0…1) back to the surface ratio (sx, sy):
+  - `uiOrientation` 1: (u, v).
+  - 3: (v, 1 − u).
+  - 4: (1 − v, u).
+  - The 3 case was verified by the drag; 4 is the mirror of it.
+- **A one-finger message is 384 bytes, count 2**, and starts with
+  `u32 0xB` at +0x20.
+- **Throttle:** a *move* (type 6) built within 16 ms (0xF423FF ns) of the
+  previous one returns **NULL** (the builder frees its buffer). Down and up
+  always build. Measured: 15 moves 4 ms apart → 12 NULL. Coalesce moves to
+  at most one per 16 ms (60 Hz), skip NULLs, and always send the up at the
+  last position.
+- Timing used: tap down→up 100 ms apart; drag moves 20 ms apart.
+
+**Keyboard** (verified: typed `Hello OO 42` into Safari's address bar,
+three Deletes left `Hello OO`, then `example.com` + Return loaded the page):
+
+```c
+IndigoHIDMessage *IndigoHIDMessageForKeyboardArbitrary(uint32_t hidUsage, uint32_t op /* 1 down, 2 up */);
+```
+
+- The arguments are USB HID keyboard usages:
+  - `a`–`z` = 0x04–0x1D, `1`–`9` = 0x1E–0x26, `0` = 0x27.
+  - Return 0x28, Delete (backspace) 0x2A, Tab 0x2B, Space 0x2C.
+  - `.` 0x37, `/` 0x38, `;` 0x33.
+  - Left Shift 0xE1. Send Shift down, the key down and up, then Shift up.
+- **The builder hard-codes target 0x64 at +0x38, which the guest ignores.
+  Overwrite the `u32` at offset 0x38 with 0x32 before sending**, otherwise
+  nothing is typed.
+- Layout: `+0x30` 0x2710 (keyboard source), `+0x34` op, `+0x38` target,
+  `+0x3C` usage, `+0x40` keyboard type (204 here, from
+  `IndigoHIDGetKeyboardType`).
+- **Side effect:** the first key makes iOS treat a hardware keyboard as
+  attached, so the on-screen keyboard hides while focus stays in the field.
+  That is expected for typing from the Mac.
+
+**Scroll: no working direct message; use a swipe.**
+
+```c
+IndigoHIDMessage *IndigoHIDMessageForScrollEvent(uint32_t, double dx, double dy, double dz, uint32_t target);
+```
+
+- It builds a wheel event (type 6, 192 bytes). At 0x32 it was accepted and
+  had no effect on Settings (screenshot unchanged); 0x33 behaved the same.
+  0x34 and 0x35 crashed backboardd.
+- SimulatorKit uses wheel and pointer events only for the iPad pointer
+  service (`IndigoHIDMessageToCreatePointerService`, not tried).
+- **Map trackpad/wheel scroll to a synthesised drag** (down, moves at
+  ≥16 ms intervals, up) in the opposite direction of the content motion.
+
+### Hardened runtime
+
+A copy signed with `codesign --force --options runtime --entitlements
+crates/harness-app/resources/openOrchestra.entitlements --sign -`
+(`flags=0x10002(adhoc,runtime)`) repeated every check:
+
+- loading SimulatorKit;
+- Home (245 → 139);
+- tap;
+- drag;
+- typing `Hardened`;
+- four `devicectl … rotate right` spawned from the hardened process with
+  `NSTask` (exit 0, 130–140 ms each; `uiOrientation` went 3, 3, 4, 1).
+
+No new entitlement is needed.
+
+### Device Hub
+
+Device Hub (`com.apple.dt.Devices`, pid 95107) **was running the whole
+time**, the user's own, so the "Device Hub closed" case **was not tested**.
+The rules forbid quitting it. Device Hub was not driven, and whether it was
+showing this device is unknown. Everything above works with it running.
+`CoreDeviceService` predates Device Hub, so Rotate should not need Device
+Hub. The legacy HID port is owned by the simulator (`SimDevice.io` port
+`com.apple.CoreSimulator.HID.LegacyHID`), so the HID input should not need
+it either. Both are expected, not verified.
+
+### Consequences for the plan
+
+- **Rotate:** `devicectl` subprocess (5 s timeout, `--device <UDID>`,
+  `right` = clockwise). Hide it when
+  `xcrun devicectl help device orientation rotate` fails.
+- **Home:** private HID (`ForButton(0, 1/2, 0x32)`).
+- **Tap, swipe, keyboard:** private HID as above.
+- **Scroll:** synthesised swipe.
+- **Load check for the private part:** the class, `initWithDevice:error:`,
+  the send selector and the four symbols (`IndigoHIDMessageForButton`,
+  `…ForMouseNSEvent`, `…ForKeyboardArbitrary`, plus `…ForScrollEvent` if
+  ever used). If any is missing, hide Home and keep the picture watch-only.
+- **Upright picture:** rotate the drawn surface from `uiOrientation`
+  (3 → 90° CW, 4 → 90° CCW, 2 → 180° unverified) and map input back with
+  the formulas above.
+- **Survive a backboardd restart:** handle a replaced surface (the existing
+  `surfacesChanged` path) and recreate the HID client on error.
