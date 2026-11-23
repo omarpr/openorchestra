@@ -35,8 +35,12 @@ use crate::devices::input::{
     key_action,
 };
 
-/// How long after its last scroll a synthesised swipe lifts its finger.
-const SWIPE_IDLE: Duration = Duration::from_millis(120);
+/// How long after its last scroll a wheel's synthesised swipe lifts its
+/// finger (a wheel says nothing when it stops).
+pub(crate) const SWIPE_IDLE: Duration = Duration::from_millis(120);
+/// The same for a trackpad gesture, which ends itself: only in case its end
+/// never comes (the pointer left the picture, say).
+pub(crate) const GESTURE_IDLE: Duration = Duration::from_millis(600);
 /// A wheel's line, in view pixels.
 const SCROLL_LINE: Pixels = px(20.0);
 /// The focus ring's width, and its gap from the device.
@@ -99,21 +103,57 @@ fn kept_on(point: Point<Pixels>, screen: Bounds<Pixels>) -> Point<Pixels> {
     )
 }
 
+/// Where a trackpad gesture is, as far as its swipe goes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Gesture {
+    /// None, or a wheel (which has no phases).
+    #[default]
+    Free,
+    /// Fingers on the trackpad.
+    Touching,
+    /// They lifted: what follows until the next gesture is the Mac's
+    /// momentum.
+    Tail,
+}
+
 /// The finger a scroll drags, in view pixels: down where the pointer is on
-/// the first delta, then moved by each delta. It lifts when the scroll
-/// ends, or at the screen's edge (the next delta starts another).
+/// the first delta that moves, then moved by each delta. It lifts when the
+/// gesture ends, or at the screen's edge (the next delta starts another),
+/// or once the scroll goes quiet ([`Swipe::lift_after`]). A delta of
+/// nothing never touches the device (a resting or lifting hand isn't a
+/// tap), and the momentum after a trackpad gesture is left to iOS, which
+/// flings the lifted finger itself.
 #[derive(Debug, Default)]
 pub(crate) struct Swipe {
     at: Option<Point<Pixels>>,
+    gesture: Gesture,
 }
 
 impl Swipe {
+    /// One scroll event: `step` its gesture phase, `precise` whether its
+    /// delta came in pixels (a trackpad or Magic Mouse, whose momentum does
+    /// too) rather than a wheel's lines.
     pub(crate) fn scroll(
         &mut self,
         pointer: Point<Pixels>,
         delta: Point<Pixels>,
+        step: GestureStep,
+        precise: bool,
         screen: Bounds<Pixels>,
     ) -> Vec<(TouchPhase, Point<Pixels>)> {
+        match step {
+            GestureStep::Started => self.gesture = Gesture::Touching,
+            GestureStep::Ended | GestureStep::Cancelled => {
+                self.gesture = Gesture::Tail;
+                return self.end().into_iter().collect();
+            }
+            GestureStep::Moved if self.gesture == Gesture::Tail && precise => return Vec::new(),
+            GestureStep::Moved if self.gesture == Gesture::Tail => self.gesture = Gesture::Free,
+            GestureStep::Moved => {}
+        }
+        if delta == Point::default() {
+            return Vec::new();
+        }
         let mut out = Vec::new();
         let from = match self.at {
             Some(at) => at,
@@ -138,6 +178,34 @@ impl Swipe {
     /// The scroll is over: lift the finger, if one is down.
     pub(crate) fn end(&mut self) -> Option<(TouchPhase, Point<Pixels>)> {
         self.at.take().map(|at| (TouchPhase::Up, at))
+    }
+
+    /// With a finger down, how long without scrolling before it lifts.
+    pub(crate) fn lift_after(&self) -> Option<Duration> {
+        self.at?;
+        Some(if self.gesture == Gesture::Touching { GESTURE_IDLE } else { SWIPE_IDLE })
+    }
+}
+
+/// What a mouse press on the picture's element does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Press {
+    /// Touch the device there, and take the keyboard.
+    Touch,
+    /// Give the keyboard back: the press was beside the screen (the frame,
+    /// the panel), or the picture takes no input.
+    Unfocus,
+    /// Not the left button: nothing.
+    Ignore,
+}
+
+/// `left`: the left button; `on_screen`: inside the screen as painted;
+/// `takes_input`: the picture can take input now.
+pub(crate) fn press_action(left: bool, on_screen: bool, takes_input: bool) -> Press {
+    match (left, on_screen && takes_input) {
+        (false, _) => Press::Ignore,
+        (true, true) => Press::Touch,
+        (true, false) => Press::Unfocus,
     }
 }
 
@@ -349,10 +417,12 @@ impl DeviceScreen {
             HelperEvent::Ready(serial) if current(serial) => {
                 log::debug!("device: input ready");
                 self.input.failed = false;
-                if let Some((_, retry)) = &mut self.input.retry {
-                    retry.ready();
-                }
                 cx.notify();
+            }
+            HelperEvent::Worked(serial) if current(serial) => {
+                if let Some((_, retry)) = &mut self.input.retry {
+                    retry.worked();
+                }
             }
             HelperEvent::Failed(serial, why) if current(serial) => {
                 log::info!("device: simulator input stopped: {why}");
@@ -386,25 +456,28 @@ impl DeviceScreen {
         }
     }
 
-    fn mouse_down(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        // None while the picture takes no input: then it doesn't take the
-        // keyboard either (gpui would focus it on its own).
-        let Some(hit) = self.input.hit.get() else {
-            window.prevent_default();
-            return;
-        };
-        if !self.input.focus.is_focused(window) {
-            self.input.previous_focus = window.focused(cx);
-            window.focus(&self.input.focus, cx);
+    /// Any press on the picture's element, in the capture phase (before
+    /// gpui's own focus-on-click, which this stands in for).
+    fn mouse_pressed(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.prevent_default();
+        let hit = self.input.hit.get();
+        let on_screen =
+            hit.is_some_and(|hit| view_to_device(event.position, hit.screen, hit.turn).is_some());
+        let action = press_action(event.button == MouseButton::Left, on_screen, hit.is_some());
+        match (action, hit) {
+            (Press::Touch, Some(hit)) => {
+                if !self.input.focus.is_focused(window) {
+                    self.input.previous_focus = window.focused(cx);
+                    window.focus(&self.input.focus, cx);
+                }
+                self.lift_all();
+                self.send_touch(TouchPhase::Down, event.position, hit);
+                self.input.touching.set(self.input.helper.is_some());
+                self.input.touch_at = event.position;
+            }
+            (Press::Unfocus, _) => self.unfocus(window, cx),
+            _ => {}
         }
-        // On the frame: focus only.
-        if view_to_device(position, hit.screen, hit.turn).is_none() {
-            return;
-        }
-        self.lift_all();
-        self.send_touch(TouchPhase::Down, position, hit);
-        self.input.touching.set(self.input.helper.is_some());
-        self.input.touch_at = position;
     }
 
     fn drag_to(&mut self, position: Point<Pixels>) {
@@ -431,21 +504,20 @@ impl DeviceScreen {
         if self.input.touching.get() {
             return;
         }
+        let precise = matches!(event.delta, gpui::ScrollDelta::Pixels(_));
         let delta = event.delta.pixel_delta(SCROLL_LINE);
-        for (phase, at) in self.input.swipe.scroll(event.position, delta, hit.screen) {
+        let swiped = self.input.swipe.scroll(event.position, delta, event.touch_phase, precise, hit.screen);
+        for (phase, at) in swiped {
             self.send_touch(phase, at, hit);
         }
-        if event.touch_phase == GestureStep::Ended {
-            if let Some((phase, at)) = self.input.swipe.end() {
-                self.send_touch(phase, at, hit);
-            }
+        // Lift the finger once the scrolling stops.
+        let Some(quiet) = self.input.swipe.lift_after() else {
             return;
-        }
-        // A wheel has no end: lift once the scrolling stops.
+        };
         self.input.swipe_ticket += 1;
         let ticket = self.input.swipe_ticket;
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(SWIPE_IDLE).await;
+            cx.background_executor().timer(quiet).await;
             let _ = this.update(cx, |screen, _| {
                 if screen.input.swipe_ticket == ticket
                     && let (Some((phase, at)), Some(hit)) =
@@ -524,24 +596,26 @@ impl DeviceScreen {
         self.input.hit.set(None);
     }
 
-    /// The picture's element, taking input: `picture` is its canvas.
-    pub(crate) fn input_element(&self, picture: AnyElement, cx: &mut Context<Self>) -> AnyElement {
+    /// The picture's element, taking input: `picture` is its canvas, and
+    /// `mappable` false when it can't take input as drawn.
+    pub(crate) fn input_element(
+        &self,
+        picture: AnyElement,
+        mappable: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let watch_only = self.watch_only() || self.input.target.is_some() && !mappable;
         div()
             .id("device-screen")
             .size_full()
             .track_focus(&self.input.focus)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|screen, e: &MouseDownEvent, window, cx| {
-                    screen.mouse_down(e.position, window, cx)
-                }),
-            )
+            .capture_any_mouse_down(cx.listener(Self::mouse_pressed))
             .on_mouse_down_out(cx.listener(|screen, _: &MouseDownEvent, window, cx| {
                 screen.unfocus(window, cx)
             }))
             .on_scroll(cx.listener(|screen, e: &ScrollEvent, _, cx| screen.scrolled(e, cx)))
             .on_key_down(cx.listener(Self::key_down))
-            .when(self.watch_only(), |d| d.tooltip(tip(UNAVAILABLE_TIP)))
+            .when(watch_only, |d| d.tooltip(tip(UNAVAILABLE_TIP)))
             .child(picture)
             .into_any_element()
     }
@@ -552,7 +626,7 @@ mod tests {
     use super::*;
     use crate::devices::Quarter;
     use crate::devices::input::TouchPhase;
-    use gpui::{Bounds, point, px, size};
+    use gpui::{Bounds, TouchPhase as Step, point, px, size};
 
     fn screen() -> Bounds<gpui::Pixels> {
         Bounds::new(point(px(10.0), px(20.0)), size(px(100.0), px(200.0)))
@@ -613,18 +687,23 @@ mod tests {
         }
     }
 
+    fn d(y: f32) -> gpui::Point<gpui::Pixels> {
+        gpui::point(px(0.0), px(y))
+    }
+
     #[test]
     fn a_scroll_drags_one_finger_and_lifts_it_when_done() {
         let s = screen();
         let mut swipe = Swipe::default();
+        let wheel = |swipe: &mut Swipe, y| swipe.scroll(at(60.0, 120.0), d(y), Step::Moved, false, s);
         // The first delta puts the finger down where the pointer is.
-        let first = swipe.scroll(at(60.0, 120.0), gpui::point(px(0.0), px(-20.0)), s);
+        let first = wheel(&mut swipe, -20.0);
         assert_eq!(first.len(), 2, "{first:?}");
         assert!(matches!(first[0], (TouchPhase::Down, _)));
         assert!(matches!(first[1], (TouchPhase::Move, _)));
         close(view_to_device(first[1].1, s, Quarter::None), (0.5, 0.4));
         // Then it follows the deltas, and lifts at the screen's edge.
-        let next = swipe.scroll(at(60.0, 120.0), gpui::point(px(0.0), px(-500.0)), s);
+        let next = wheel(&mut swipe, -500.0);
         let [(TouchPhase::Move, p), (TouchPhase::Up, q)] = next[..] else {
             panic!("{next:?}");
         };
@@ -632,12 +711,85 @@ mod tests {
         assert_eq!(p, q);
         assert!(swipe.end().is_none());
         // The next delta puts another finger down, which the end lifts.
-        let again = swipe.scroll(at(60.0, 120.0), gpui::point(px(0.0), px(30.0)), s);
+        let again = wheel(&mut swipe, 30.0);
         assert!(matches!(again[..], [(TouchPhase::Down, _), (TouchPhase::Move, _)]), "{again:?}");
         let up = swipe.end().unwrap();
         assert_eq!(up.0, TouchPhase::Up);
         close(view_to_device(up.1, s, Quarter::None), (0.5, 0.65));
         // A scroll that starts off the screen (on the frame) touches nothing.
-        assert!(swipe.scroll(at(0.0, 0.0), gpui::point(px(0.0), px(30.0)), s).is_empty());
+        assert!(swipe.scroll(at(0.0, 0.0), d(30.0), Step::Moved, false, s).is_empty());
+    }
+
+    #[test]
+    fn a_resting_trackpad_puts_no_finger_down() {
+        let s = screen();
+        let mut swipe = Swipe::default();
+        // Two fingers resting (MayBegin/Began) come as Started with no delta:
+        // nothing touches the device, or the rest would be a tap.
+        assert!(swipe.scroll(at(60.0, 120.0), d(0.0), Step::Started, true, s).is_empty());
+        assert!(swipe.scroll(at(60.0, 120.0), d(0.0), Step::Moved, true, s).is_empty());
+        assert!(swipe.end().is_none());
+        assert_eq!(swipe.lift_after(), None);
+    }
+
+    #[test]
+    fn ending_a_scroll_only_lifts() {
+        let s = screen();
+        let mut swipe = Swipe::default();
+        // Lifting the fingers without moving: no tap either.
+        assert!(swipe.scroll(at(60.0, 120.0), d(0.0), Step::Started, true, s).is_empty());
+        assert!(swipe.scroll(at(60.0, 120.0), d(0.0), Step::Ended, true, s).is_empty());
+        // After a drag, the end lifts the finger where it is, and only that.
+        swipe.scroll(at(60.0, 120.0), d(0.0), Step::Started, true, s);
+        let dragged = swipe.scroll(at(60.0, 120.0), d(-20.0), Step::Moved, true, s);
+        let up = swipe.scroll(at(60.0, 120.0), d(0.0), Step::Ended, true, s);
+        assert_eq!(up, [(TouchPhase::Up, dragged[1].1)]);
+    }
+
+    #[test]
+    fn an_end_after_an_idle_lift_does_nothing() {
+        let s = screen();
+        let mut swipe = Swipe::default();
+        swipe.scroll(at(60.0, 120.0), d(-20.0), Step::Moved, false, s);
+        assert!(swipe.end().is_some());
+        assert!(swipe.scroll(at(60.0, 120.0), d(0.0), Step::Ended, true, s).is_empty());
+    }
+
+    #[test]
+    fn momentum_after_the_end_is_ignored() {
+        let s = screen();
+        let mut swipe = Swipe::default();
+        swipe.scroll(at(60.0, 120.0), d(0.0), Step::Started, true, s);
+        assert_eq!(swipe.scroll(at(60.0, 120.0), d(-10.0), Step::Moved, true, s).len(), 2);
+        // While the fingers are on the trackpad, no early lift.
+        assert_eq!(swipe.lift_after(), Some(GESTURE_IDLE));
+        assert_eq!(swipe.scroll(at(60.0, 120.0), d(0.0), Step::Ended, true, s).len(), 1);
+        // The momentum that follows is the Mac's, not a second swipe: iOS
+        // flings the lifted finger on its own.
+        for _ in 0..5 {
+            assert!(swipe.scroll(at(60.0, 120.0), d(-30.0), Step::Moved, true, s).is_empty());
+        }
+        // A wheel is no momentum, and a new gesture ends the tail.
+        let wheel = swipe.scroll(at(60.0, 120.0), d(-10.0), Step::Moved, false, s);
+        assert_eq!(wheel.len(), 2, "{wheel:?}");
+        assert_eq!(swipe.lift_after(), Some(SWIPE_IDLE));
+        swipe.end();
+        swipe.scroll(at(60.0, 120.0), d(0.0), Step::Ended, true, s);
+        swipe.scroll(at(60.0, 120.0), d(0.0), Step::Started, true, s);
+        assert_eq!(swipe.scroll(at(60.0, 120.0), d(-10.0), Step::Moved, true, s).len(), 2);
+    }
+
+    #[test]
+    fn only_a_left_click_on_the_screen_takes_the_keyboard() {
+        // A left click on the screen, with input: a touch (and focus).
+        assert_eq!(press_action(true, true, true), Press::Touch);
+        // On the frame or the panel beside it, or a watch-only picture:
+        // the keyboard goes back.
+        assert_eq!(press_action(true, false, true), Press::Unfocus);
+        assert_eq!(press_action(true, true, false), Press::Unfocus);
+        // Any other button does nothing at all (gpui would focus it).
+        for (on, input) in [(true, true), (false, true), (true, false), (false, false)] {
+            assert_eq!(press_action(false, on, input), Press::Ignore);
+        }
     }
 }

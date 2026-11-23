@@ -11,7 +11,9 @@
 //   down x y | move x y | up x y   a finger; x and y are 0...1 ratios of the portrait screen,
 //                                  top-left origin
 //   key <usage> down|up            a USB HID keyboard usage (page 7)
-//   home                           the Home button, pressed and released
+//   home [deadline]                the Home button, pressed and released; with a deadline (ms
+//                                  since the Unix epoch) only if read before it, else answered
+//                                  "ok home late" and left unpressed
 //   quit                           (or end of input)
 // stdout: "ready" once the device and its HID are found, then one line per command,
 //         "ok <command>" or "err <command>: <why>".
@@ -39,7 +41,8 @@ struct Device {
   let keyboard: any HIDKeyboard
   let button: any HIDButton
 
-  func run(_ words: [String]) throws {
+  /// Runs one command; what to add to its "ok", if anything.
+  func run(_ words: [String]) throws -> String? {
     func ratio(_ i: Int) throws -> Double {
       guard i < words.count, let v = Double(words[i]), v.isFinite else {
         throw CommandError(description: "expected \(words[0]) x y")
@@ -60,12 +63,20 @@ struct Device {
       }
       try keyboard.send(key: HIDKeyboardUsageCode(rawValue: usage), state: words[2] == "down" ? .down : .up)
     case "home":
+      if words.count > 1 {
+        guard let deadline = Double(words[1]) else {
+          throw CommandError(description: "expected home [deadline]")
+        }
+        // The app has given up on it (and brought SpringBoard forward).
+        if Date().timeIntervalSince1970 * 1000 > deadline { return "late" }
+      }
       // Consumer page, Menu.
       try button.sendCustomButton(usagePage: 0x0C, usageCode: 0x40, state: .down)
       try button.sendCustomButton(usagePage: 0x0C, usageCode: 0x40, state: .up)
     default:
       throw CommandError(description: "unknown command")
     }
+    return nil
   }
 }
 
@@ -104,8 +115,8 @@ struct Device {
       guard let command = words.first else { continue }
       if command == "quit" { break }
       do {
-        try device.run(words)
-        print("ok \(command)")
+        let note = try device.run(words)
+        print(note.map { "ok \(command) \($0)" } ?? "ok \(command)")
       } catch {
         print("err \(command): \(oneLine(error))")
       }

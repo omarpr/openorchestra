@@ -37,6 +37,14 @@ pub(crate) const MAX_STARTS: u32 = 3;
 pub(crate) const RETRY_AFTER: Duration = Duration::from_secs(2);
 /// The most characters one paste types.
 pub(crate) const MAX_PASTE: usize = 2000;
+/// How long the bar's Home waits for the helper's answer before bringing
+/// SpringBoard forward instead.
+pub(crate) const HOME_WAIT: Duration = Duration::from_secs(5);
+/// A Home line's deadline, from when it is sent: a helper that reads it
+/// later (still starting, say) answers "late" and leaves it unpressed.
+/// Well inside [`HOME_WAIT`], so a press always answers in time and Home
+/// never happens twice.
+pub(crate) const HOME_DEADLINE: Duration = Duration::from_secs(3);
 /// How long a stopped helper gets to exit before it is killed.
 const EXIT_GRACE: Duration = Duration::from_secs(1);
 /// USB HID usages (keyboard page).
@@ -58,7 +66,14 @@ pub(crate) enum Line {
     Touch(TouchPhase, f64, f64),
     /// A USB HID keyboard usage, down or up.
     Key(u16, bool),
-    Home,
+    /// Press Home, unless the helper reads this after `deadline_ms` (ms
+    /// since the Unix epoch).
+    Home { deadline_ms: u64 },
+}
+
+/// `at` in ms since the Unix epoch, the helper's clock for deadlines.
+pub(crate) fn epoch_ms(at: std::time::SystemTime) -> u64 {
+    at.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
 impl Line {
@@ -76,7 +91,15 @@ impl Line {
                 format!("{verb} {:.6} {:.6}", ratio(*x), ratio(*y))
             }
             Line::Key(usage, down) => format!("key {usage} {}", if *down { "down" } else { "up" }),
-            Line::Home => "home".to_string(),
+            Line::Home { deadline_ms } => format!("home {deadline_ms}"),
+        }
+    }
+
+    /// Home, due within [`HOME_DEADLINE`] from now.
+    pub(crate) fn home_now() -> Line {
+        let deadline = std::time::SystemTime::now() + HOME_DEADLINE;
+        Line::Home {
+            deadline_ms: epoch_ms(deadline),
         }
     }
 
@@ -127,6 +150,8 @@ pub(crate) fn parse_reply(line: &str) -> Option<Reply> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum HelperEvent {
     Ready(u64),
+    /// Its first command went: it works with this Xcode and device.
+    Worked(u64),
     /// It exited, couldn't start, complained on stderr, or a command failed.
     Failed(u64, String),
 }
@@ -197,15 +222,16 @@ impl InputHelper {
         }
     }
 
-    /// Presses Home. The receiver gets the helper's answer, or hangs up if
-    /// the helper ends first.
+    /// Presses Home, if the helper gets to it within [`HOME_DEADLINE`]. The
+    /// receiver gets the helper's answer (an error when it was late), or
+    /// hangs up if the helper ends first.
     pub(crate) fn home(&self) -> Receiver<Result<(), String>> {
         let (tx, rx) = mpsc::channel();
         self.home_waiters
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push_back(tx);
-        self.send(Line::Home);
+        self.send(Line::home_now());
         rx
     }
 }
@@ -298,12 +324,23 @@ fn read_replies(
             let _ = waiter.send(answer);
         }
     };
+    let mut worked = false;
     for line in stdout.lines().map_while(Result::ok) {
-        match parse_reply(&line) {
+        let reply = parse_reply(&line);
+        if let Some(Reply::Ok(verb)) = &reply
+            && verb != "home late"
+            && !std::mem::replace(&mut worked, true)
+        {
+            let _ = events.unbounded_send(HelperEvent::Worked(serial));
+        }
+        match reply {
             Some(Reply::Ready) => {
                 let _ = events.unbounded_send(HelperEvent::Ready(serial));
             }
             Some(Reply::Ok(verb)) if verb == "home" => answer_home(Ok(())),
+            Some(Reply::Ok(verb)) if verb == "home late" => {
+                answer_home(Err("the input helper got to Home too late".into()))
+            }
             Some(Reply::Ok(_)) => {}
             Some(Reply::Err(why)) => {
                 if why.starts_with("home:") {
@@ -393,8 +430,10 @@ impl Retry {
         self.last_failure = Some(now);
     }
 
-    /// One came up: it works with this Xcode after all.
-    pub(crate) fn ready(&mut self) {
+    /// One answered a command: it works with this Xcode after all. (Coming
+    /// up isn't enough: one that came up and failed each time would be
+    /// restarted for ever.)
+    pub(crate) fn worked(&mut self) {
         *self = Retry::default();
     }
 
@@ -620,7 +659,6 @@ mod tests {
         assert_eq!(Line::Touch(TouchPhase::Up, 0.125, 0.875).encode(), "up 0.125000 0.875000");
         assert_eq!(Line::Key(0x04, true).encode(), "key 4 down");
         assert_eq!(Line::Key(0xE1, false).encode(), "key 225 up");
-        assert_eq!(Line::Home.encode(), "home");
         // Off the screen or not a number: kept on it.
         assert_eq!(Line::Touch(TouchPhase::Move, -0.5, 1.5).encode(), "move 0.000000 1.000000");
         assert_eq!(Line::Touch(TouchPhase::Up, f64::NAN, 0.5).encode(), "up 0.500000 0.500000");
@@ -685,10 +723,52 @@ mod tests {
         }
         assert!(retry.gave_up());
         assert!(!retry.may_start(later(1_000_000)));
-        // One that came up counts as working again.
-        retry.ready();
+        // One that answered a command counts as working again.
+        retry.worked();
         assert!(!retry.gave_up());
         assert!(retry.may_start(later(1_000_000)));
+    }
+
+    #[test]
+    fn a_late_home_is_left_unpressed() {
+        // The helper presses Home only before the line's deadline (ms since
+        // the epoch), and that falls well inside the bar's wait: a Home
+        // given up on (SpringBoard brought forward instead) never presses
+        // later, when a slow helper comes up.
+        assert_eq!(Line::Home { deadline_ms: 1234 }.encode(), "home 1234");
+        assert!(HOME_DEADLINE + Duration::from_secs(1) <= HOME_WAIT);
+        let before = epoch_ms(std::time::SystemTime::now());
+        let Line::Home { deadline_ms } = Line::home_now() else {
+            panic!();
+        };
+        let ahead = deadline_ms - before;
+        assert!(ahead >= HOME_DEADLINE.as_millis() as u64 && ahead < HOME_DEADLINE.as_millis() as u64 + 1000);
+    }
+
+    #[test]
+    fn the_replies_say_ready_working_failed_and_answer_home() {
+        let (events, mut rx) = futures::channel::mpsc::unbounded();
+        let waiters = HomeWaiters::default();
+        let (on_time, late) = (mpsc::channel(), mpsc::channel());
+        waiters.lock().unwrap().extend([on_time.0, late.0]);
+        let out = "ready\nok down\nok up\nok home\nok home late\nerr key: no keyboard\n";
+        read_replies(std::io::Cursor::new(out), 3, events, waiters.clone());
+        assert_eq!(on_time.1.try_recv(), Ok(Ok(())));
+        assert!(late.1.try_recv().unwrap().is_err());
+        let mut got = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            got.push(event);
+        }
+        assert_eq!(
+            got,
+            [
+                HelperEvent::Ready(3),
+                // Once, for the first command that went.
+                HelperEvent::Worked(3),
+                HelperEvent::Failed(3, "key: no keyboard".into()),
+                HelperEvent::Failed(3, "oo-device-input stopped".into()),
+            ]
+        );
     }
 
     #[test]

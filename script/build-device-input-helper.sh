@@ -17,6 +17,8 @@ shift
 if (($# == 0)); then
   set -- "$(uname -m)"
 fi
+# Gone until this build makes it: whatever fails below, no stale helper stays.
+rm -f "$output"
 
 skip() {
   rm -f "$output"
@@ -58,9 +60,9 @@ for arch in "${archs[@]}"; do
     -framework CoreDevice -framework CoreDeviceUtilities -framework UniversalHID \
     -o "$tmp/oo-device-input-$arch" "$SRC/main.swift" >"$tmp/log-$arch" 2>&1; then
     # A renamed private symbol shows up here, undefined at link: name the first.
-    why="$(grep -A1 'Undefined symbols' "$tmp/log-$arch" | sed -n '2s/^ *//p')"
+    why="$({ grep -A1 'Undefined symbols' "$tmp/log-$arch" || true; } | sed -n '2s/^ *//p')"
     why="${why:-$(grep -m1 'error' "$tmp/log-$arch" || true)}"
-    skip "this Xcode's CoreDevice doesn't match the helper: ${why:-swiftc failed}"
+    skip "it failed to build against this Xcode: ${why:-swiftc failed}"
   fi
 done
 

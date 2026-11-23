@@ -537,7 +537,7 @@ impl Render for DeviceScreen {
         )
         .size_full()
         .into_any_element();
-        self.input_element(canvas, cx)
+        self.input_element(canvas, mappable, cx)
     }
 }
 
