@@ -1,19 +1,27 @@
-//! The Device tab's test controls that need only public `simctl`: appearance,
-//! text size and a PNG screenshot, and booting or shutting a device down.
-//! Rotate and Home (private HID) are offered only when the caller says that
-//! path is available.
+//! The Device tab's test controls that need only public tools: appearance,
+//! text size and a PNG screenshot through `simctl`, booting or shutting a
+//! device down, and Rotate through `devicectl`. Home goes through the private
+//! HID path (`hid`, macOS only).
 
 // Only boot and shutdown are wired in so far; the bar (Task 3) calls the
 // rest.
 #![allow(dead_code)]
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use super::simctl::{failure_text, shot_path_ext, simctl, simctl_ran, simctl_within};
 use super::tab_state::DeviceView;
+use crate::ports::{Ran, RunFailed, run_bounded_why};
 
 /// Booting can take a while (a first boot of a new device most of all).
 const POWER_TIMEOUT: Duration = Duration::from_secs(60);
+/// A `devicectl` rotate took 70-140 ms in the spike.
+const DEVICECTL_TIMEOUT: Duration = Duration::from_secs(5);
+/// The line `devicectl device orientation rotate --help` prints when the
+/// subcommand exists. Its exit code says nothing: a missing subcommand
+/// prints its parent's help and exits 0 too.
+const ROTATE_USAGE: &str = "USAGE: devicectl device orientation rotate";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Control {
@@ -85,8 +93,71 @@ pub(crate) fn shutdown(udid: &str) -> Result<(), String> {
     simctl_within(&shutdown_args(udid), POWER_TIMEOUT).map(drop)
 }
 
-/// The controls to offer for what the tab shows. Rotate and Home go through
-/// the private HID path, so only when `hid` says it is there.
+/// Turns the device 90° clockwise (`right`), addressed by UDID: `--device`
+/// also takes names, and those can be ambiguous.
+pub(crate) fn rotate_args(udid: &str) -> [&str; 7] {
+    ["devicectl", "device", "orientation", "rotate", "--device", udid, "right"]
+}
+
+/// Turns booted simulator `udid` 90° clockwise. Blocks for up to 5 s: call
+/// it off the main thread.
+pub(crate) fn rotate(udid: &str) -> Result<(), String> {
+    let ran = run_bounded_why("xcrun", &rotate_args(udid), DEVICECTL_TIMEOUT).map_err(|why| {
+        match why {
+            RunFailed::Spawn => "xcrun devicectl could not start".to_string(),
+            RunFailed::TimedOut => {
+                format!("devicectl timed out after {} s", DEVICECTL_TIMEOUT.as_secs())
+            }
+        }
+    })?;
+    if ran.code == Some(0) {
+        Ok(())
+    } else {
+        Err(devicectl_failure(&ran))
+    }
+}
+
+/// Whether this Xcode's `devicectl` can rotate a simulator. Asked once per
+/// process, and it blocks (up to 5 s): call it off the main thread. A run
+/// that didn't finish isn't remembered, so a slow first start of `xcrun`
+/// doesn't hide Rotate for good.
+pub(crate) fn rotate_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    if let Some(&available) = AVAILABLE.get() {
+        return available;
+    }
+    let help = ["devicectl", "device", "orientation", "rotate", "--help"];
+    match run_bounded_why("xcrun", &help, DEVICECTL_TIMEOUT) {
+        Ok(ran) => *AVAILABLE
+            .get_or_init(|| lists_rotate_usage(&ran.stdout) || lists_rotate_usage(&ran.stderr)),
+        Err(RunFailed::Spawn) => *AVAILABLE.get_or_init(|| false),
+        Err(RunFailed::TimedOut) => false,
+    }
+}
+
+/// Whether `--help` output shows the rotate subcommand's own usage line.
+fn lists_rotate_usage(help: &str) -> bool {
+    help.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix(ROTATE_USAGE)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+    })
+}
+
+/// What a failed `devicectl` run says, trimmed; never empty. Its errors
+/// open with "ERROR: ", which is dropped.
+fn devicectl_failure(ran: &Ran) -> String {
+    let stderr = ran.stderr.trim();
+    let stderr = stderr.strip_prefix("ERROR: ").unwrap_or(stderr);
+    match ran.code {
+        _ if !stderr.is_empty() => stderr.to_string(),
+        Some(code) => format!("devicectl failed with exit code {code}"),
+        None => "devicectl was stopped by a signal".to_string(),
+    }
+}
+
+/// The controls to offer for what the tab shows. Rotate and Home only when
+/// the caller's `hid` says so.
 pub(crate) fn available_controls(view: &DeviceView, hid: bool) -> Vec<Control> {
     if !matches!(view, DeviceView::Live { .. } | DeviceView::Reduced { .. }) {
         return Vec::new();
@@ -132,8 +203,8 @@ fn read_appearance(udid: &str) -> Result<Appearance, String> {
     parse_appearance(&out).ok_or_else(|| "this device has no appearance setting".to_string())
 }
 
-/// Runs a control that needs only public `simctl`. `Rotate` and `Home` are
-/// not among them.
+/// Runs a control that needs only public tools. `Home` is not among them
+/// (see `hid::press_home`).
 pub(crate) fn run_public(udid: &str, control: Control) -> Result<ControlOutcome, String> {
     match control {
         Control::ToggleAppearance => {
@@ -153,7 +224,8 @@ pub(crate) fn run_public(udid: &str, control: Control) -> Result<ControlOutcome,
             }
         }
         Control::Screenshot => screenshot_png(udid).map(ControlOutcome::Png),
-        Control::Rotate | Control::Home => Err("this control needs the device input path".into()),
+        Control::Rotate => rotate(udid).map(|()| ControlOutcome::Done),
+        Control::Home => Err("this control needs the device input path".into()),
     }
 }
 
@@ -212,6 +284,40 @@ mod tests {
     fn boot_and_shutdown_args() {
         assert_eq!(boot_args("U"), ["boot", "U"]);
         assert_eq!(shutdown_args("U"), ["shutdown", "U"]);
+    }
+
+    fn ran(code: Option<i32>, stderr: &str) -> Ran {
+        Ran { code, stdout: String::new(), stderr: stderr.into() }
+    }
+
+    #[test]
+    fn rotate_turns_clockwise_by_udid() {
+        assert_eq!(
+            rotate_args("U"),
+            ["devicectl", "device", "orientation", "rotate", "--device", "U", "right"]
+        );
+    }
+
+    #[test]
+    fn rotate_is_there_when_its_help_shows_its_usage() {
+        // Captured from Xcode 27.2: `… orientation rotate --help`, and
+        // `… orientation rotatex --help` standing in for an Xcode without the
+        // subcommand (it prints the parent's help, exit 0).
+        assert!(lists_rotate_usage(include_str!("testdata/devicectl_rotate_help.txt")));
+        assert!(!lists_rotate_usage(include_str!("testdata/devicectl_missing_rotate_help.txt")));
+        assert!(!lists_rotate_usage(""));
+        assert!(!lists_rotate_usage("USAGE: devicectl device orientation rotatex --device <x>"));
+    }
+
+    #[test]
+    fn devicectl_failure_says_why() {
+        // Captured: an unknown UDID, exit 1.
+        let not_found = "ERROR: The specified device was not found. (Name: X) \
+            (com.apple.dt.CoreDeviceError error 1000 (0x3E8))\n       DeviceName = X\n";
+        let text = devicectl_failure(&ran(Some(1), not_found));
+        assert!(text.starts_with("The specified device was not found."), "{text}");
+        assert_eq!(devicectl_failure(&ran(Some(64), "")), "devicectl failed with exit code 64");
+        assert_eq!(devicectl_failure(&ran(None, " \n")), "devicectl was stopped by a signal");
     }
 
     #[test]

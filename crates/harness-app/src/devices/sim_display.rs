@@ -1,6 +1,7 @@
 //! A booted simulator's screen, live, through Apple's private CoreSimulator
 //! API (macOS only). Watch-only: it registers for the screen's callbacks and
-//! nothing else; it never boots, resizes, rotates or sends input.
+//! nothing else; it never boots, resizes, rotates or sends input. (The
+//! simulator lookup, [`booted_device`], is shared with `hid`, which does.)
 //!
 //! The call chain was measured in the Device tab spike (see "Spike findings"
 //! in docs/superpowers/specs/2026-11-22-device-tab-ios-design.md):
@@ -64,6 +65,12 @@ pub(crate) enum ScreenEvent {
     Surface(CFRetained<IOSurfaceRef>),
     /// New pixels in the current surface.
     Frame,
+    /// The UI's orientation (`screenProperties.uiOrientation`; see
+    /// [`super::quarter_for`]): once when the stream starts, then on each
+    /// change. The surface itself stays portrait whatever the orientation.
+    // Read by the upright picture (the Device controls plan's Task 3).
+    #[allow(dead_code)]
+    Orientation(u32),
     /// The device shut down or the display went away.
     Gone,
 }
@@ -110,7 +117,7 @@ pub(crate) fn developer_dir() -> Result<PathBuf, StreamError> {
 }
 
 /// `dlopen`s CoreSimulator, once per process.
-fn load_core_simulator() -> Result<(), StreamError> {
+pub(super) fn load_core_simulator() -> Result<(), StreamError> {
     static LOADED: OnceLock<Result<(), StreamError>> = OnceLock::new();
     LOADED
         .get_or_init(|| {
@@ -169,6 +176,23 @@ impl Shared {
         }
     }
 
+    /// The properties callback's argument, a proxy for the screen's new
+    /// `SimScreenProperties`. It fires once per `uiOrientation` change.
+    fn properties_changed(&self, properties: *mut AnyObject) {
+        if self.stopped.load(Ordering::Acquire) {
+            return;
+        }
+        // SAFETY: an object (or nil) the callback holds for its duration.
+        let Some(properties) = (unsafe { properties.as_ref() }) else {
+            return;
+        };
+        match ui_orientation(properties) {
+            Ok(Some(orientation)) => self.deliver(ScreenEvent::Orientation(orientation)),
+            Ok(None) => {}
+            Err(e) => log::warn!("device: reading the screen orientation failed: {e:?}"),
+        }
+    }
+
     /// `picture` is the surfaces callback's first argument: the full
     /// rectangular framebuffer (the second is the same picture with the
     /// device's rounded-corner mask). Nil when the device shut down.
@@ -189,7 +213,8 @@ impl Shared {
 impl ScreenStream {
     /// Starts watching the main screen of the booted simulator `udid`.
     /// `on_event` runs on a private serial dispatch queue, never on the main
-    /// thread. The first `Surface` arrives just after this returns.
+    /// thread. The starting `Orientation`, then the first `Surface`, arrive
+    /// just after this returns.
     pub(crate) fn start(
         udid: &str,
         on_event: impl Fn(ScreenEvent) + Send + Sync + 'static,
@@ -206,6 +231,17 @@ impl ScreenStream {
             let queue =
                 DispatchQueue::new("openOrchestra.device-screen", DispatchQueueAttr::SERIAL);
             let registration = NSUUID::new();
+            // The properties callback fires only on a change, so the
+            // orientation the device is already in is read here. Queued
+            // ahead of registering, so it arrives first.
+            match screen_orientation(&screen) {
+                Ok(Some(orientation)) => {
+                    let shared = Arc::clone(&shared);
+                    queue.exec_async(move || shared.emit(ScreenEvent::Orientation(orientation)));
+                }
+                Ok(None) => {}
+                Err(e) => log::warn!("device: reading the screen orientation failed: {e:?}"),
+            }
             register(&screen, &registration, &queue, &shared)?;
             Ok(ScreenStream {
                 screen,
@@ -240,8 +276,12 @@ impl Drop for ScreenStream {
     }
 }
 
-/// The main display's descriptor (the `SimScreen`) of booted device `udid`.
-fn find_main_screen(developer_dir: &Path, udid: &str) -> Result<Retained<AnyObject>, StreamError> {
+/// The `SimDevice` for `udid`, if it is booted; `DeviceNotFound` if it isn't
+/// (or isn't a device at all). Needs [`load_core_simulator`] first.
+pub(super) fn booted_device(
+    developer_dir: &Path,
+    udid: &str,
+) -> Result<Retained<AnyObject>, StreamError> {
     let context_class = NSClassFromString(&NSString::from_str("SimServiceContext"))
         .ok_or(StreamError::Unsupported("SimServiceContext"))?;
     let shared_context = sel!(sharedServiceContextForDeveloperDir:error:);
@@ -296,6 +336,12 @@ fn find_main_screen(developer_dir: &Path, udid: &str) -> Result<Retained<AnyObje
     if catching(|| unsafe { state(Retained::as_ptr(&device), sel!(state)) })? != BOOTED {
         return Err(StreamError::DeviceNotFound);
     }
+    Ok(device)
+}
+
+/// The main display's descriptor (the `SimScreen`) of booted device `udid`.
+fn find_main_screen(developer_dir: &Path, udid: &str) -> Result<Retained<AnyObject>, StreamError> {
+    let device = booted_device(developer_dir, udid)?;
 
     require(&device, sel!(io), "-[SimDevice io]")?;
     let io = send_object(&device, sel!(io))?
@@ -400,9 +446,14 @@ fn register(
             },
         )
     };
-    // Ignored: a resize is expected to arrive as new surfaces too. Unverified,
-    // since the spike saw neither callback fire during toggles or animation.
-    let properties = RcBlock::with_encoding::<_, _, _, PropertiesEncoding>(|_: *mut AnyObject| {});
+    // Fires on rotation (the Device controls spike); a resize is expected to
+    // arrive as new surfaces too.
+    let properties = {
+        let shared = Arc::clone(shared);
+        RcBlock::with_encoding::<_, _, _, PropertiesEncoding>(move |p: *mut AnyObject| {
+            shared.properties_changed(p)
+        })
+    };
 
     type Register = unsafe extern "C-unwind" fn(
         *const AnyObject,
@@ -429,8 +480,32 @@ fn register(
     })
 }
 
+/// `uiOrientation` of a `SimScreenProperties` (a ROCK proxy), or `None` if
+/// it has none.
+fn ui_orientation(properties: &AnyObject) -> Result<Option<u32>, StreamError> {
+    if !responds(properties, sel!(uiOrientation))? {
+        return Ok(None);
+    }
+    type Orientation = unsafe extern "C-unwind" fn(*const AnyObject, Sel) -> u32;
+    // SAFETY: `uiOrientation` is `I` (unsigned int), checked above.
+    let get = unsafe { msg_send_fn::<Orientation>() };
+    catching(|| unsafe { get(properties, sel!(uiOrientation)) }).map(Some)
+}
+
+/// The screen's current `screenProperties.uiOrientation`, or `None` if it
+/// can't say.
+fn screen_orientation(screen: &AnyObject) -> Result<Option<u32>, StreamError> {
+    if !responds(screen, sel!(screenProperties))? {
+        return Ok(None);
+    }
+    match send_object(screen, sel!(screenProperties))? {
+        Some(properties) => ui_orientation(&properties),
+        None => Ok(None),
+    }
+}
+
 /// Runs `f`, turning an Objective-C exception into `Failed`.
-fn catching<R>(f: impl FnOnce() -> R) -> Result<R, StreamError> {
+pub(super) fn catching<R>(f: impl FnOnce() -> R) -> Result<R, StreamError> {
     exception::catch(AssertUnwindSafe(f)).map_err(|e| {
         StreamError::Failed(match e {
             Some(e) => format!("Objective-C exception: {e}"),
@@ -439,7 +514,7 @@ fn catching<R>(f: impl FnOnce() -> R) -> Result<R, StreamError> {
     })
 }
 
-fn ns_error(e: Retained<NSError>) -> StreamError {
+pub(super) fn ns_error(e: Retained<NSError>) -> StreamError {
     StreamError::Failed(e.localizedDescription().to_string())
 }
 
@@ -450,7 +525,7 @@ fn ns_error(e: Retained<NSError>) -> StreamError {
 /// `F` must be an `unsafe extern "C-unwind" fn` whose arguments (receiver,
 /// selector, then the method's) and return type match the method it is
 /// called for.
-unsafe fn msg_send_fn<F: Copy>() -> F {
+pub(super) unsafe fn msg_send_fn<F: Copy>() -> F {
     type Raw = unsafe extern "C-unwind" fn();
     let raw: Raw = objc2::ffi::objc_msgSend;
     assert_eq!(size_of::<F>(), size_of::<Raw>());
@@ -565,6 +640,7 @@ mod tests {
     enum Seen {
         Surface { width: usize, height: usize },
         Frame,
+        Orientation(u32),
         Gone,
     }
 
@@ -608,6 +684,7 @@ mod tests {
                     height: s.height(),
                 },
                 ScreenEvent::Frame => Seen::Frame,
+                ScreenEvent::Orientation(o) => Seen::Orientation(o),
                 ScreenEvent::Gone => Seen::Gone,
             };
             // SAFETY: no preconditions.
@@ -618,8 +695,12 @@ mod tests {
 
         let (first, on_main) = collect(&rx, Duration::from_secs(1));
         assert!(
-            matches!(first.first(), Some(Seen::Surface { width, height }) if *width > 0 && *height > 0),
-            "first event should be the surface: {first:?}"
+            matches!(first.first(), Some(Seen::Orientation(1..=4))),
+            "first event should be the starting orientation: {first:?}"
+        );
+        assert!(
+            matches!(first.get(1), Some(Seen::Surface { width, height }) if *width > 0 && *height > 0),
+            "then the surface: {first:?}"
         );
         let mut surfaces = first
             .iter()

@@ -130,6 +130,8 @@ fn start(
         match event {
             ScreenEvent::Surface(surface) => state.picture = Some(Picture(surface)),
             ScreenEvent::Frame => {}
+            // Not drawn upright yet (the Device controls plan's Task 3).
+            ScreenEvent::Orientation(_) => return,
             ScreenEvent::Gone => {
                 state.picture = None;
                 let _ = to_ui.unbounded_send(StreamMsg::Gone(generation));

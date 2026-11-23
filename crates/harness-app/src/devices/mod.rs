@@ -5,6 +5,8 @@ pub(crate) mod controls;
 #[cfg(target_os = "macos")]
 pub(crate) mod convert;
 #[cfg(target_os = "macos")]
+pub(crate) mod hid;
+#[cfg(target_os = "macos")]
 pub(crate) mod sim_display;
 pub(crate) mod simctl;
 pub(crate) mod tab_state;
@@ -48,6 +50,32 @@ pub(crate) fn choose_device<'a>(
         .and_then(find)
         .or_else(|| current.and_then(find))
         .or_else(|| booted.first())
+}
+
+/// How far clockwise to turn the (always portrait) simulator surface so its
+/// picture is upright.
+// Drawn by the bar's upright picture (the Device controls plan's Task 3).
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Quarter {
+    None,
+    Cw90,
+    Cw180,
+    Cw270,
+}
+
+/// The turn for a `screenProperties.uiOrientation`, from the Device controls
+/// spike: 1 portrait, 3 landscape with the UI's top at the surface's left
+/// edge, 4 with it at the right edge, 2 upside down (never seen on an
+/// iPhone; presumed). Anything else is drawn as it comes.
+#[allow(dead_code)]
+pub(crate) fn quarter_for(ui_orientation: u32) -> Quarter {
+    match ui_orientation {
+        3 => Quarter::Cw90,
+        2 => Quarter::Cw180,
+        4 => Quarter::Cw270,
+        _ => Quarter::None,
+    }
 }
 
 /// Holds the newest frame. A capture thread `put`s; the UI `take`s. A `put`
@@ -186,6 +214,21 @@ mod tests {
     #[test]
     fn choose_with_nothing_booted_is_none() {
         assert!(choose_device(&[], Some("a"), Some("a")).is_none());
+    }
+
+    #[test]
+    fn quarter_turns_follow_the_ui_orientation() {
+        assert_eq!(quarter_for(1), Quarter::None);
+        assert_eq!(quarter_for(3), Quarter::Cw90);
+        assert_eq!(quarter_for(4), Quarter::Cw270);
+        assert_eq!(quarter_for(2), Quarter::Cw180);
+    }
+
+    #[test]
+    fn an_unknown_orientation_is_drawn_as_it_comes() {
+        for o in [0, 5, 6, u32::MAX] {
+            assert_eq!(quarter_for(o), Quarter::None, "{o}");
+        }
     }
 
     #[test]
