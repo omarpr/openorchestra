@@ -27,6 +27,7 @@ mod chat_pane;
 mod conductor;
 mod curated_languages;
 mod data;
+mod devices;
 mod diff_review;
 mod diff_watch;
 mod git_watch;

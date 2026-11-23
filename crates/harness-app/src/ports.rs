@@ -891,7 +891,7 @@ fn accepted(cmd: &str, ran: Ran) -> Option<String> {
 /// own thread and stop the whole tree with `taskkill /T` on timeout.
 #[cfg(windows)]
 #[allow(dead_code)] // only tests run commands on Windows
-fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration) -> Option<Ran> {
+pub(crate) fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration) -> Option<Ran> {
     use std::io::Read;
     use std::os::windows::process::CommandExt;
     use std::process::Stdio;
@@ -941,7 +941,7 @@ fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration) -> Option
 }
 
 #[cfg(unix)]
-fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration) -> Option<Ran> {
+pub(crate) fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration) -> Option<Ran> {
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
     let mut child = std::process::Command::new(cmd)
