@@ -36,6 +36,22 @@ pub(crate) enum ToolTab {
     #[default]
     Review,
     Ports,
+    /// Watch-only iOS Simulator view (macOS). Never written to `tool_tab` on
+    /// disk: older builds reject unknown enum values and would reset every
+    /// pref, so it is stored as `tool_tab: "review"` plus `device_tab: true`.
+    Device,
+}
+
+impl ToolTab {
+    /// Reads `prefs.json`'s value leniently: a tab this build doesn't know (a
+    /// newer build's) is Review, rather than failing the whole prefs file.
+    pub(crate) fn deserialize_lenient<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::Deserialize as _;
+        Ok(serde_json::Value::deserialize(d)
+            .ok()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default())
+    }
 }
 
 /// Sub-tab inside the Files tools surface: tree vs. project search.
@@ -156,8 +172,16 @@ pub(crate) struct Prefs {
     #[serde(default)]
     pub(crate) diff_location: DiffLocation,
     /// Active tab inside the tools panel. Absent in older prefs → Review.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "ToolTab::deserialize_lenient")]
     pub(crate) tool_tab: ToolTab,
+    /// On-disk stand-in for `tool_tab == Device` (see `ToolTab::Device`). Only
+    /// meaningful in the file: `save_prefs_to` sets it and `sanitized` folds it
+    /// back into `tool_tab`, so in memory it is always false.
+    #[serde(default)]
+    pub(crate) device_tab: bool,
+    /// The simulator the Device tab last watched.
+    #[serde(default)]
+    pub(crate) device_udid: Option<String>,
     /// Row order in the Ports tool tab. Absent in older prefs → port ascending.
     #[serde(default)]
     pub(crate) ports_sort: crate::ports::PortSort,
@@ -225,6 +249,8 @@ impl Default for Prefs {
             diff_width: 380.0,
             diff_location: DiffLocation::Dock,
             tool_tab: ToolTab::default(),
+            device_tab: false,
+            device_udid: None,
             ports_sort: Default::default(),
             diff_view: DiffView::default(),
             diff_list_width: 280.0,
@@ -250,6 +276,16 @@ impl Prefs {
         // sanity for a hand-edited or cross-monitor prefs file.
         self.diff_width = self.diff_width.clamp(220.0, MAX_PANEL_W);
         self.diff_list_width = self.diff_list_width.clamp(160.0, 560.0);
+        // The Device tab is macOS-only; elsewhere the file's flag means Review.
+        let device_tab = std::mem::take(&mut self.device_tab);
+        #[cfg(target_os = "macos")]
+        if device_tab {
+            self.tool_tab = ToolTab::Device;
+        }
+        #[cfg(not(target_os = "macos"))]
+        if device_tab || self.tool_tab == ToolTab::Device {
+            self.tool_tab = ToolTab::Review;
+        }
         self
     }
 }
@@ -290,7 +326,13 @@ pub(crate) fn save_prefs_to(path: &Path, prefs: &Prefs) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(json) = serde_json::to_string_pretty(prefs) {
+    // Older builds reject an unknown `tool_tab` and would reset every pref.
+    let mut on_disk = prefs.clone();
+    if on_disk.tool_tab == ToolTab::Device {
+        on_disk.tool_tab = ToolTab::Review;
+        on_disk.device_tab = true;
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&on_disk) {
         // Private and atomic: prefs carry the agent launch overrides.
         if let Err(e) = crate::state_files::write_private(path, json.as_bytes()) {
             log::warn!("could not save prefs to {}: {e}", path.display());

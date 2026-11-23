@@ -1226,6 +1226,80 @@ diff --git a/y.rs b/y.rs\n@@ -1,1 +1,2 @@\n other\n+new\n",
         assert_eq!(load_prefs(&path).tool_tab, ToolTab::Ports);
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_device_tool_tab_survives_a_save_load_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        let prefs = Prefs {
+            tool_tab: ToolTab::Device,
+            ..Prefs::default()
+        };
+        save_prefs_to(&path, &prefs);
+        let json = std::fs::read_to_string(&path).unwrap();
+        assert!(json.contains(r#""tool_tab": "review""#), "{json}");
+        assert!(json.contains(r#""device_tab": true"#), "{json}");
+        assert_eq!(load_prefs(&path).tool_tab, ToolTab::Device);
+    }
+
+    #[test]
+    fn a_build_without_the_device_tab_still_reads_the_file() {
+        // Dev and release builds share prefs.json; an older build must not
+        // choke on (and so reset) a file written with the Device tab active.
+        #[derive(Debug, serde::Deserialize)]
+        #[serde(rename_all = "lowercase")]
+        enum OldToolTab {
+            Files,
+            Git,
+            Review,
+            Ports,
+        }
+        #[allow(dead_code)]
+        #[derive(Debug, serde::Deserialize)]
+        struct OldPrefs {
+            tool_tab: OldToolTab,
+            sidebar_width: f32,
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        let prefs = Prefs {
+            tool_tab: ToolTab::Device,
+            sidebar_width: 333.0,
+            ..Prefs::default()
+        };
+        save_prefs_to(&path, &prefs);
+        let old: OldPrefs =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(old.sidebar_width, 333.0);
+        assert!(matches!(old.tool_tab, OldToolTab::Review));
+    }
+
+    #[test]
+    fn an_unknown_tool_tab_loads_as_review_and_keeps_other_prefs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        std::fs::write(
+            &path,
+            r#"{"dark":true,"tool_tab":"telescope","sidebar_width":301.0,"diff_width":340.0,"sidebar_open":true,"diff_open":true}"#,
+        )
+        .unwrap();
+        let prefs = load_prefs(&path);
+        assert_eq!(prefs.tool_tab, ToolTab::Review);
+        assert_eq!(prefs.sidebar_width, 301.0);
+    }
+
+    #[test]
+    fn the_device_udid_survives_a_save_load_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        let prefs = Prefs {
+            device_udid: Some("ABCD-1234".to_string()),
+            ..Prefs::default()
+        };
+        save_prefs_to(&path, &prefs);
+        assert_eq!(load_prefs(&path).device_udid.as_deref(), Some("ABCD-1234"));
+    }
+
     #[test]
     fn a_prefs_file_without_a_tool_tab_loads_as_review() {
         let dir = tempfile::tempdir().unwrap();

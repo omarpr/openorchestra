@@ -58,6 +58,7 @@ impl HarnessWorkspace {
                 window.focus(&self.diff_surface_focus, cx);
             }
             ToolTab::Ports => self.refresh_ports(cx),
+            ToolTab::Device => {}
         }
         self.save_prefs(cx);
         cx.notify();
@@ -155,7 +156,7 @@ impl HarnessWorkspace {
                     });
                 }
             }
-            ToolTab::Review | ToolTab::Ports => {}
+            ToolTab::Review | ToolTab::Ports | ToolTab::Device => {}
         }
     }
 

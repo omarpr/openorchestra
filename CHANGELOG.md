@@ -12,6 +12,10 @@ Unreleased is empty.
 
 ## Unreleased
 
+### Fixed
+
+- An unknown tools-panel tab in prefs.json no longer resets every setting.
+
 ## 1.5.0 - 2026-11-22
 
 ### Added

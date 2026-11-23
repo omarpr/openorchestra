@@ -67,6 +67,7 @@ impl HarnessWorkspace {
                 ToolTab::Git => "Git".to_string(),
                 ToolTab::Review => "Review".to_string(),
                 ToolTab::Ports => crate::ports::tab_label(ports, self.ports_visible()),
+                ToolTab::Device => "Device".to_string(),
             };
             strip = strip.child(
                 div()
@@ -267,6 +268,8 @@ impl HarnessWorkspace {
                 self.render_diff_surface(hx, Some(width), false, cx)
             }
             ToolTab::Ports => self.render_ports_panel(hx, cx),
+            // Placeholder until the Device panel lands.
+            ToolTab::Device => div().into_any_element(),
             ToolTab::Files if self.files_sub_tab == FilesSubTab::Search => {
                 self.render_project_search_panel(hx, cx)
             }
@@ -442,6 +445,7 @@ impl ToolTab {
             ToolTab::Git => "git",
             ToolTab::Review => "review",
             ToolTab::Ports => "ports",
+            ToolTab::Device => "device",
         }
     }
 }
