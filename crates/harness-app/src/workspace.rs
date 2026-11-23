@@ -942,6 +942,9 @@ pub struct HarnessWorkspace {
     /// The first device list has landed (before that the tab shows nothing
     /// rather than "No simulator running").
     device_listed: bool,
+    /// A Reduced-mode screenshot is being taken. One at a time across
+    /// loops: a loop started while a stopped one's shot lands waits for it.
+    device_shot_in_flight: bool,
     /// The simulator picker's menu, and the last press on its button (the
     /// open menu's outside handler leaves that press to the button).
     device_menu_open: bool,

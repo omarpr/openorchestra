@@ -296,6 +296,7 @@ impl HarnessWorkspace {
             device_live: None,
             device_listing: false,
             device_listed: false,
+            device_shot_in_flight: false,
             device_menu_open: false,
             device_menu_press: None,
             #[cfg(target_os = "macos")]
@@ -832,16 +833,14 @@ impl HarnessWorkspace {
         // Booted simulators for the Device tool tab. Lists only while that tab
         // is on screen (`device_visible`: the window not minimised or hidden
         // either); `sync_device_visibility` lists at once when it appears.
+        // Each tick also re-checks visibility (`device_poll`): gpui misses ⌘H
+        // or minimise over an already covered window.
         cx.spawn_in(window, async move |view, cx| {
             loop {
                 cx.background_executor()
                     .timer(crate::workspace::ui::device_panel::DEVICE_POLL)
                     .await;
-                let polled = view.update_in(cx, |ws, window, cx| {
-                    if ws.device_visible(window) {
-                        ws.refresh_devices(cx);
-                    }
-                });
+                let polled = view.update_in(cx, |ws, window, cx| ws.device_poll(window, cx));
                 if polled.is_err() {
                     break;
                 }

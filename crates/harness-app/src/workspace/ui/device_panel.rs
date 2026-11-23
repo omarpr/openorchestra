@@ -23,6 +23,9 @@ use crate::devices::tab_state::{Command, DeviceTab, DeviceView};
 pub(crate) const DEVICE_POLL: Duration = Duration::from_secs(3);
 /// The pause after a failed screenshot before the next try.
 const SHOT_RETRY: Duration = Duration::from_millis(500);
+/// How often a new screenshot loop looks again while a stopped loop's last
+/// shot is still landing.
+const SHOT_WAIT: Duration = Duration::from_millis(100);
 const REDUCED_NOTE: &str =
     "Reduced frame rate — this Xcode's simulator display API isn't supported";
 
@@ -41,6 +44,45 @@ pub(crate) fn sync_shown(tab: &mut DeviceTab, shown: &mut bool, now: bool) -> Ve
     }
     *shown = now;
     if now { tab.on_shown() } else { tab.on_hidden() }
+}
+
+/// What one tick of the device-list poll does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PollTick {
+    /// Re-check visibility. gpui reports visibility from occlusion alone, so
+    /// ⌘H or minimise over an already covered window (Hidden → Hidden)
+    /// fires no callback; the poll catches it within one tick.
+    pub reconcile: bool,
+    pub list: bool,
+}
+
+/// `tab_shown`: the panel is open on the Device tab; `visible`: that, and
+/// the window isn't minimised or hidden.
+pub(crate) fn poll_tick(tab_shown: bool, visible: bool) -> PollTick {
+    PollTick {
+        reconcile: tab_shown,
+        list: tab_shown && visible,
+    }
+}
+
+/// Whether a screenshot loop may take its next shot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Shoot {
+    Go,
+    /// A stopped loop's shot is still landing; one in flight at a time.
+    Wait,
+    /// This loop's generation stopped.
+    Stop,
+}
+
+pub(crate) fn may_shoot(live: Option<u64>, generation: u64, in_flight: bool) -> Shoot {
+    if live != Some(generation) {
+        Shoot::Stop
+    } else if in_flight {
+        Shoot::Wait
+    } else {
+        Shoot::Go
+    }
 }
 
 /// The user picked `udid` in the menu: watch it and remember it. A device
@@ -171,6 +213,18 @@ impl HarnessWorkspace {
         let cmds = sync_shown(&mut self.device_tab, &mut self.device_shown, now);
         self.run_device_commands(cmds, cx);
         if appeared {
+            self.refresh_devices(cx);
+        }
+    }
+
+    /// One tick of the 3 s poll: catch a visibility change gpui didn't
+    /// report, then list if the tab is on screen.
+    pub(crate) fn device_poll(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let tick = poll_tick(self.device_tab_shown(), self.device_visible(window));
+        if tick.reconcile {
+            self.sync_device_visibility(window, cx);
+        }
+        if tick.list {
             self.refresh_devices(cx);
         }
     }
@@ -331,13 +385,29 @@ impl HarnessWorkspace {
 
     /// Reduced mode: one `simctl` screenshot in flight at a time, the next
     /// as soon as the last lands (about 2 a second), until this generation
-    /// stops.
+    /// stops. A loop started while a stopped one's shot is still landing
+    /// waits for it (`device_shot_in_flight`).
     fn start_device_screenshots(&mut self, generation: u64, udid: String, cx: &mut Context<Self>) {
         let svg = cx.svg_renderer();
         let dir = std::env::temp_dir().join("openorchestra-device");
         cx.spawn(async move |view, cx| {
             let mut logged = false;
             loop {
+                let step = view.update(cx, |ws, _| {
+                    let step = may_shoot(ws.device_live, generation, ws.device_shot_in_flight);
+                    if step == Shoot::Go {
+                        ws.device_shot_in_flight = true;
+                    }
+                    step
+                });
+                match step {
+                    Ok(Shoot::Go) => {}
+                    Ok(Shoot::Wait) => {
+                        cx.background_executor().timer(SHOT_WAIT).await;
+                        continue;
+                    }
+                    Ok(Shoot::Stop) | Err(_) => break,
+                }
                 let shot = {
                     let (udid, dir, svg) = (udid.clone(), dir.clone(), svg.clone());
                     cx.background_spawn(async move { take_shot(&udid, &dir, svg) })
@@ -372,6 +442,7 @@ impl HarnessWorkspace {
         shot: Result<Arc<RenderImage>, String>,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.device_shot_in_flight = false;
         if self.device_live != Some(generation) {
             return false;
         }
@@ -568,7 +639,7 @@ fn device_empty(hx: &HarnessTheme, title: String, detail: Option<&'static str>) 
 
 #[cfg(test)]
 mod tests {
-    use super::{pick_device, sync_shown};
+    use super::{PollTick, Shoot, may_shoot, pick_device, poll_tick, sync_shown};
     use crate::devices::DeviceInfo;
     use crate::devices::tab_state::{Command, DeviceTab};
     use crate::workspace::{Prefs, ToolTab, load_prefs, save_prefs_to};
@@ -675,5 +746,45 @@ mod tests {
         // A device that isn't booted (a stale menu) is not remembered.
         assert!(pick_device(&mut tab, &mut prefs, "gone").is_empty());
         assert_eq!(prefs.device_udid.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn device_poll_reconciles_a_hide_the_window_never_reported() {
+        // ⌘H or minimise over an already covered window is Hidden → Hidden in
+        // gpui: no visibility callback, so the poll must notice it.
+        assert_eq!(
+            poll_tick(true, false),
+            PollTick {
+                reconcile: true,
+                list: false
+            }
+        );
+        assert_eq!(
+            poll_tick(true, true),
+            PollTick {
+                reconcile: true,
+                list: true
+            }
+        );
+        // Another tool tab or the panel closed: nothing to do (render and
+        // set_tool_tab already reconciled that).
+        assert_eq!(
+            poll_tick(false, false),
+            PollTick {
+                reconcile: false,
+                list: false
+            }
+        );
+    }
+
+    #[test]
+    fn device_screenshots_wait_for_the_shot_already_in_flight() {
+        // The current loop, nothing in flight: shoot.
+        assert_eq!(may_shoot(Some(2), 2, false), Shoot::Go);
+        // A stopped loop's shot still landing: the new loop waits for it.
+        assert_eq!(may_shoot(Some(2), 2, true), Shoot::Wait);
+        // An old generation ends, whether or not a shot is in flight.
+        assert_eq!(may_shoot(Some(2), 1, false), Shoot::Stop);
+        assert_eq!(may_shoot(None, 1, true), Shoot::Stop);
     }
 }
