@@ -7,6 +7,7 @@
 #[cfg(target_os = "macos")]
 pub(crate) mod sim_display;
 pub(crate) mod simctl;
+pub(crate) mod tab_state;
 
 use std::sync::Mutex;
 
