@@ -1,17 +1,98 @@
-//! `xcrun simctl` wrappers and the parsing of its JSON.
+//! `simctl` wrappers and the parsing of its JSON, and how the Xcode tools
+//! (`simctl`, `devicectl`) are run: straight from where `xcrun --find`
+//! says they are, found once, rather than through `xcrun`, which looks
+//! them up on every run (most of a control's time when its cache is cold).
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::Value;
 
 use super::DeviceInfo;
-use crate::ports::{Ran, RunFailed, run_bounded, run_bounded_why};
+use crate::ports::{Ran, RunFailed, run_bounded_why};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 const RUNTIME_PREFIX: &str = "com.apple.CoreSimulator.SimRuntime.";
 const TYPE_PREFIX: &str = "com.apple.CoreSimulator.SimDeviceType.";
+
+/// The Xcode tools the Device tab runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Xcode {
+    Simctl,
+    Devicectl,
+}
+
+impl Xcode {
+    fn name(self) -> &'static str {
+        match self {
+            Xcode::Simctl => "simctl",
+            Xcode::Devicectl => "devicectl",
+        }
+    }
+}
+
+/// How to run an Xcode tool: its own path, or `xcrun <tool>`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Tool {
+    pub program: String,
+    /// The tool's name, first among the args, when run through xcrun.
+    pub via_xcrun: Option<&'static str>,
+}
+
+impl Tool {
+    pub(crate) fn program(&self) -> &str {
+        &self.program
+    }
+
+    /// The whole argument list for running it with `args`.
+    pub(crate) fn args<'a>(&self, args: &[&'a str]) -> Vec<&'a str> {
+        self.via_xcrun.into_iter().chain(args.iter().copied()).collect()
+    }
+}
+
+/// The tool for what `xcrun --find <tool>` said (None: it didn't finish):
+/// the absolute path it printed, else through xcrun.
+pub(crate) fn tool_from_find(tool: Xcode, found: Option<&Ran>) -> Tool {
+    let path = found
+        .filter(|ran| ran.code == Some(0))
+        .map(|ran| ran.stdout.trim())
+        .filter(|path| Path::new(path).is_absolute());
+    match path {
+        Some(path) => Tool { program: path.to_string(), via_xcrun: None },
+        None => Tool { program: "xcrun".to_string(), via_xcrun: Some(tool.name()) },
+    }
+}
+
+/// How to run `tool`, found once per run (blocks the first time, up to
+/// 5 s: off the main thread). A lookup that didn't finish isn't kept, so
+/// the next run looks again.
+pub(crate) fn xcode_tool(tool: Xcode) -> Tool {
+    static FOUND: [OnceLock<Tool>; 2] = [OnceLock::new(), OnceLock::new()];
+    let slot = &FOUND[tool as usize];
+    if let Some(found) = slot.get() {
+        return found.clone();
+    }
+    match run_bounded_why("xcrun", &["--find", tool.name()], TIMEOUT) {
+        Ok(ran) => slot.get_or_init(|| tool_from_find(tool, Some(&ran))).clone(),
+        Err(RunFailed::Spawn) => slot.get_or_init(|| tool_from_find(tool, None)).clone(),
+        Err(RunFailed::TimedOut) => tool_from_find(tool, None),
+    }
+}
+
+/// Finds both tools now, so the first control or list needn't (call it
+/// off the main thread, when the tab shows).
+pub(crate) fn find_xcode_tools() {
+    xcode_tool(Xcode::Simctl);
+    xcode_tool(Xcode::Devicectl);
+}
+
+/// Runs `tool` with `args`, bounded by `timeout`.
+pub(crate) fn run_xcode(tool: Xcode, args: &[&str], timeout: Duration) -> Result<Ran, RunFailed> {
+    let tool = xcode_tool(tool);
+    run_bounded_why(tool.program(), &tool.args(args), timeout)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ListError {
@@ -82,13 +163,9 @@ pub(crate) fn parse_devices(json: &str) -> Result<DeviceList, String> {
     Ok(out)
 }
 
-/// Every simulator in the default set, via `xcrun simctl list devices -j`.
+/// Every simulator in the default set, via `simctl list devices -j`.
 pub(crate) fn list_devices() -> Result<DeviceList, ListError> {
-    list_outcome(run_bounded_why(
-        "xcrun",
-        &["simctl", "list", "devices", "-j"],
-        TIMEOUT,
-    ))
+    list_outcome(run_xcode(Xcode::Simctl, &["list", "devices", "-j"], TIMEOUT))
 }
 
 /// What a `simctl list` run means for the tab.
@@ -130,7 +207,7 @@ pub(crate) fn shot_path_ext(dir: &Path, udid: &str, ext: &str) -> PathBuf {
     dir.join(format!("{udid}-{}-{n}.{ext}", std::process::id()))
 }
 
-/// `xcrun simctl <args>` run to the end, whatever its exit code. Err only
+/// `simctl <args>` run to the end, whatever its exit code. Err only
 /// when it could not run or ran past the timeout.
 pub(crate) fn simctl_ran(args: &[&str]) -> Result<Ran, String> {
     simctl_ran_within(args, TIMEOUT)
@@ -138,15 +215,13 @@ pub(crate) fn simctl_ran(args: &[&str]) -> Result<Ran, String> {
 
 /// [`simctl_ran`] with its own time limit.
 fn simctl_ran_within(args: &[&str], timeout: Duration) -> Result<Ran, String> {
-    let mut full = vec!["simctl"];
-    full.extend_from_slice(args);
-    run_bounded_why("xcrun", &full, timeout).map_err(|why| match why {
-        RunFailed::Spawn => "xcrun simctl could not start".to_string(),
+    run_xcode(Xcode::Simctl, args, timeout).map_err(|why| match why {
+        RunFailed::Spawn => "simctl could not start".to_string(),
         RunFailed::TimedOut => format!("simctl timed out after {} s", timeout.as_secs()),
     })
 }
 
-/// `xcrun simctl <args>`: its stdout, or what stderr says (or a sentence
+/// `simctl <args>`: its stdout, or what stderr says (or a sentence
 /// about the exit code) when it fails.
 pub(crate) fn simctl(args: &[&str]) -> Result<String, String> {
     simctl_within(args, TIMEOUT)
@@ -189,12 +264,8 @@ pub(crate) fn failure_text(ran: &Ran) -> String {
 pub(crate) fn screenshot_jpeg(udid: &str, dir: &Path) -> Result<Vec<u8>, String> {
     let path = shot_path(dir, udid);
     let path_str = path.to_string_lossy();
-    let ran = run_bounded(
-        "xcrun",
-        &["simctl", "io", udid, "screenshot", "--type=jpeg", &path_str],
-        TIMEOUT,
-    )
-    .ok_or_else(|| "simctl screenshot timed out or could not start".to_string())?;
+    let ran = run_xcode(Xcode::Simctl, &["io", udid, "screenshot", "--type=jpeg", &path_str], TIMEOUT)
+        .map_err(|_| "simctl screenshot timed out or could not start".to_string())?;
     if ran.code != Some(0) {
         let _ = std::fs::remove_file(&path);
         return Err(ran.stderr.trim().to_string());
@@ -208,6 +279,26 @@ pub(crate) fn screenshot_jpeg(udid: &str, dir: &Path) -> Result<Vec<u8>, String>
 mod tests {
     use super::{ListError, Ran, RunFailed, failure_text, list_outcome, shot_path};
     use std::path::Path;
+
+    #[test]
+    fn xcode_tools_run_directly_once_found() {
+        use super::{Tool, Xcode, tool_from_find};
+        let found = |code, stdout: &str| Ran { code: Some(code), stdout: stdout.into(), stderr: String::new() };
+        // `xcrun --find simctl` found it: run it straight, without xcrun
+        // (which costs a lookup on every run).
+        let direct = tool_from_find(Xcode::Simctl, Some(&found(0, "/X/usr/bin/simctl\n")));
+        assert_eq!(direct, Tool { program: "/X/usr/bin/simctl".into(), via_xcrun: None });
+        assert_eq!(direct.args(&["list", "devices"]), ["list", "devices"]);
+        let devicectl = tool_from_find(Xcode::Devicectl, Some(&found(0, "/X/usr/bin/devicectl")));
+        assert_eq!(devicectl.program(), "/X/usr/bin/devicectl");
+        // Not found, nothing said, a path that isn't one, or no answer:
+        // through xcrun, as before.
+        for ran in [Some(found(1, "")), Some(found(0, "  \n")), Some(found(0, "simctl")), None] {
+            let tool = tool_from_find(Xcode::Simctl, ran.as_ref());
+            assert_eq!(tool, Tool { program: "xcrun".into(), via_xcrun: Some("simctl") }, "{ran:?}");
+            assert_eq!(tool.args(&["list"]), ["simctl", "list"]);
+        }
+    }
 
     fn exited(code: i32, stderr: &str) -> Result<Ran, RunFailed> {
         Ok(Ran {

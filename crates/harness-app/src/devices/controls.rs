@@ -7,9 +7,11 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use super::simctl::{failure_text, shot_path_ext, simctl, simctl_ran, simctl_within};
+use super::simctl::{
+    Xcode, failure_text, run_xcode, shot_path_ext, simctl, simctl_ran, simctl_within,
+};
 use super::tab_state::DeviceView;
-use crate::ports::{Ran, RunFailed, run_bounded_why};
+use crate::ports::{Ran, RunFailed};
 
 /// Booting can take a while (a first boot of a new device most of all).
 const POWER_TIMEOUT: Duration = Duration::from_secs(60);
@@ -93,16 +95,16 @@ pub(crate) fn shutdown(udid: &str) -> Result<(), String> {
 
 /// Turns the device 90° clockwise (`right`), addressed by UDID: `--device`
 /// also takes names, and those can be ambiguous.
-pub(crate) fn rotate_args(udid: &str) -> [&str; 7] {
-    ["devicectl", "device", "orientation", "rotate", "--device", udid, "right"]
+pub(crate) fn rotate_args(udid: &str) -> [&str; 6] {
+    ["device", "orientation", "rotate", "--device", udid, "right"]
 }
 
 /// Turns booted simulator `udid` 90° clockwise. Blocks for up to 5 s: call
 /// it off the main thread.
 pub(crate) fn rotate(udid: &str) -> Result<(), String> {
-    let ran = run_bounded_why("xcrun", &rotate_args(udid), DEVICECTL_TIMEOUT).map_err(|why| {
+    let ran = run_xcode(Xcode::Devicectl, &rotate_args(udid), DEVICECTL_TIMEOUT).map_err(|why| {
         match why {
-            RunFailed::Spawn => "xcrun devicectl could not start".to_string(),
+            RunFailed::Spawn => "devicectl could not start".to_string(),
             RunFailed::TimedOut => {
                 format!("devicectl timed out after {} s", DEVICECTL_TIMEOUT.as_secs())
             }
@@ -124,8 +126,8 @@ pub(crate) fn rotate_available() -> bool {
     if let Some(&available) = AVAILABLE.get() {
         return available;
     }
-    let help = ["devicectl", "device", "orientation", "rotate", "--help"];
-    match run_bounded_why("xcrun", &help, DEVICECTL_TIMEOUT) {
+    let help = ["device", "orientation", "rotate", "--help"];
+    match run_xcode(Xcode::Devicectl, &help, DEVICECTL_TIMEOUT) {
         Ok(ran) => *AVAILABLE
             .get_or_init(|| lists_rotate_usage(&ran.stdout) || lists_rotate_usage(&ran.stderr)),
         Err(RunFailed::Spawn) => *AVAILABLE.get_or_init(|| false),
@@ -228,14 +230,40 @@ pub(crate) fn read_appearance(udid: &str) -> Result<Appearance, String> {
     parse_appearance(&out).ok_or_else(|| "this device has no appearance setting".to_string())
 }
 
-/// Runs a control. Blocks (each tool run is bounded): call it off the main
-/// thread.
-pub(crate) fn run_public(udid: &str, control: Control) -> Result<ControlOutcome, String> {
+/// What the Dark/Light toggle does, given the appearance the tab already
+/// knows the device has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TogglePlan {
+    /// One call: set this (the other one).
+    Set(Appearance),
+    /// Not known yet: read it, then set the other.
+    ReadFirst,
+}
+
+pub(crate) fn toggle_plan(known: Option<Appearance>) -> TogglePlan {
+    known.map_or(TogglePlan::ReadFirst, |a| TogglePlan::Set(opposite(a)))
+}
+
+fn opposite(appearance: Appearance) -> Appearance {
+    match appearance {
+        Appearance::Light => Appearance::Dark,
+        Appearance::Dark => Appearance::Light,
+    }
+}
+
+/// Runs a control. `appearance`: what the tab knows the device's is, for
+/// the toggle (None reads it first). Blocks (each tool run is bounded):
+/// call it off the main thread.
+pub(crate) fn run_public(
+    udid: &str,
+    control: Control,
+    appearance: Option<Appearance>,
+) -> Result<ControlOutcome, String> {
     match control {
         Control::ToggleAppearance => {
-            let next = match read_appearance(udid)? {
-                Appearance::Light => Appearance::Dark,
-                Appearance::Dark => Appearance::Light,
+            let next = match toggle_plan(appearance) {
+                TogglePlan::Set(next) => next,
+                TogglePlan::ReadFirst => opposite(read_appearance(udid)?),
             };
             simctl(&str_args(&appearance_args(udid, Some(next))))?;
             Ok(ControlOutcome::Appearance(next))
@@ -270,6 +298,15 @@ fn screenshot_png(udid: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_toggle_sets_the_opposite_of_what_the_tab_knows() {
+        // Known: one call, setting the other.
+        assert_eq!(toggle_plan(Some(Appearance::Light)), TogglePlan::Set(Appearance::Dark));
+        assert_eq!(toggle_plan(Some(Appearance::Dark)), TogglePlan::Set(Appearance::Light));
+        // Not read yet: read first.
+        assert_eq!(toggle_plan(None), TogglePlan::ReadFirst);
+    }
 
     fn live() -> DeviceView {
         DeviceView::Live { udid: "U".into() }
@@ -319,7 +356,7 @@ mod tests {
     fn rotate_turns_clockwise_by_udid() {
         assert_eq!(
             rotate_args("U"),
-            ["devicectl", "device", "orientation", "rotate", "--device", "U", "right"]
+            ["device", "orientation", "rotate", "--device", "U", "right"]
         );
     }
 
@@ -459,7 +496,7 @@ mod tests {
     const NO_DEVICE: &str = "00000000-0000-0000-0000-000000000000";
 
     fn png(udid: &str) -> Vec<u8> {
-        match run_public(udid, Control::Screenshot) {
+        match run_public(udid, Control::Screenshot, None) {
             Ok(ControlOutcome::Png(bytes)) => bytes,
             other => panic!("screenshot: {other:?}"),
         }
@@ -516,7 +553,7 @@ mod tests {
         assert_eq!(start, 1, "portrait");
         let mut seen = Vec::new();
         for turn in 1..=4 {
-            assert_eq!(run_public(&udid, Control::Rotate), Ok(ControlOutcome::Done));
+            assert_eq!(run_public(&udid, Control::Rotate, None), Ok(ControlOutcome::Done));
             std::thread::sleep(Duration::from_millis(1500));
             let now: Vec<u32> = rx.try_iter().collect();
             eprintln!("turn {turn}: {now:?}");
@@ -541,14 +578,14 @@ mod tests {
         for _ in 0..2 {
             launch(&udid, "com.apple.Preferences");
             let settings = brightness(&png(&udid));
-            assert_eq!(run_public(&udid, Control::Home), Ok(ControlOutcome::Done));
+            assert_eq!(run_public(&udid, Control::Home, None), Ok(ControlOutcome::Done));
             std::thread::sleep(Duration::from_secs(1));
             let home = brightness(&png(&udid));
             eprintln!("brightness: Settings {settings:.0}, after Home {home:.0}");
             assert!(settings - home > 50.0, "Home left Settings in front");
         }
         assert_eq!(
-            run_public(NO_DEVICE, Control::Home),
+            run_public(NO_DEVICE, Control::Home, None),
             Err("The specified device was not found.".to_string())
         );
     }
@@ -560,24 +597,104 @@ mod tests {
     fn public_controls_on_a_live_device() {
         let udid = std::env::var("OO_TEST_SIM_UDID").expect("OO_TEST_SIM_UDID");
         let start = read_appearance(&udid).unwrap();
-        let other = run_public(&udid, Control::ToggleAppearance).unwrap();
+        // Not known: read, then set the other. Known: set the other at once.
+        let other = run_public(&udid, Control::ToggleAppearance, None).unwrap();
         assert_ne!(other, ControlOutcome::Appearance(start));
-        let back = run_public(&udid, Control::ToggleAppearance).unwrap();
+        let ControlOutcome::Appearance(now) = other else { panic!("{other:?}") };
+        let back = run_public(&udid, Control::ToggleAppearance, Some(now)).unwrap();
         assert_eq!(back, ControlOutcome::Appearance(start));
         assert_eq!(read_appearance(&udid).unwrap(), start);
 
         assert!(matches!(
-            run_public(&udid, Control::TextBigger),
+            run_public(&udid, Control::TextBigger, None),
             Ok(ControlOutcome::Done | ControlOutcome::AtLimit)
         ));
         assert!(matches!(
-            run_public(&udid, Control::TextSmaller),
+            run_public(&udid, Control::TextSmaller, None),
             Ok(ControlOutcome::Done | ControlOutcome::AtLimit)
         ));
 
-        let ControlOutcome::Png(bytes) = run_public(&udid, Control::Screenshot).unwrap() else {
+        let ControlOutcome::Png(bytes) = run_public(&udid, Control::Screenshot, None).unwrap() else {
             panic!("not a PNG outcome");
         };
         assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    /// Manual timing, on a simulator created and booted for the purpose
+    /// (never anyone else's): `OO_TEST_SIM_UDID=<udid> cargo test
+    /// control_timings -- --ignored --nocapture`. How long each control's
+    /// run takes, start to done (what a click waits for, after the click
+    /// itself), median of five; and Home through the input helper, warm and
+    /// from cold.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn control_timings() {
+        use std::time::Instant;
+        let udid = std::env::var("OO_TEST_SIM_UDID").expect("set OO_TEST_SIM_UDID");
+        let median = |mut ms: Vec<f64>| {
+            ms.sort_by(f64::total_cmp);
+            ms[ms.len() / 2]
+        };
+        let time = |f: &mut dyn FnMut()| {
+            let t = Instant::now();
+            f();
+            t.elapsed().as_secs_f64() * 1000.0
+        };
+        let run = |control| run_public(&udid, control, None).map(drop).unwrap();
+        let mut rows: Vec<(&str, f64)> = Vec::new();
+        let mut each = |name: &'static str, f: &mut dyn FnMut()| {
+            let ms: Vec<f64> = (0..5).map(|_| time(f)).collect();
+            rows.push((name, median(ms)));
+        };
+        each("list devices", &mut || drop(super::super::simctl::list_devices().unwrap()));
+        each("Rotate", &mut || run(Control::Rotate));
+        each("Home (SpringBoard)", &mut || run(Control::Home));
+        // As the bar runs it: with the appearance known after the first.
+        let mut known = None;
+        each("Dark/Light toggle", &mut || {
+            if let Ok(ControlOutcome::Appearance(now)) =
+                run_public(&udid, Control::ToggleAppearance, known)
+            {
+                known = Some(now);
+            }
+        });
+        each("Larger text", &mut || run(Control::TextBigger));
+        each("Smaller text", &mut || run(Control::TextSmaller));
+        each("Copy screenshot", &mut || run(Control::Screenshot));
+        // Home through the input helper, if it was built.
+        if crate::devices::input::helper_path().is_some() {
+            use crate::devices::input::{HelperEvent, InputHelper};
+            let wait_ready = |rx: &mut futures::channel::mpsc::UnboundedReceiver<HelperEvent>| {
+                let t = Instant::now();
+                while t.elapsed() < Duration::from_secs(10) {
+                    if let Ok(HelperEvent::Ready(_)) = rx.try_recv() {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                panic!("helper never ready");
+            };
+            let (events, mut rx) = futures::channel::mpsc::unbounded();
+            let warm = InputHelper::spawn(&udid, 1, events).unwrap();
+            wait_ready(&mut rx);
+            each("Home (helper, running)", &mut || {
+                warm.home().recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+            });
+            drop(warm);
+            let mut late = 0;
+            each("Home (helper, started for it)", &mut || {
+                let (events, _rx) = futures::channel::mpsc::unbounded();
+                let cold = InputHelper::spawn(&udid, 2, events).unwrap();
+                if !matches!(cold.home().recv_timeout(Duration::from_secs(5)), Ok(Ok(()))) {
+                    late += 1;
+                }
+            });
+            eprintln!("cold helper Home: {late} of 5 too late (not pressed)");
+        }
+        eprintln!("| Control | ms (median of 5) |\n|---|---|");
+        for (name, ms) in rows {
+            eprintln!("| {name} | {ms:.0} |");
+        }
     }
 }

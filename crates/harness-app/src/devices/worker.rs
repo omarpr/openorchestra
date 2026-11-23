@@ -253,7 +253,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2000));
             let frame = frames.take().expect("a frame since the turn");
             let (fw, fh, frame) = frame_grid(&frame.0.0);
-            let png = match run_public(&udid, Control::Screenshot) {
+            let png = match run_public(&udid, Control::Screenshot, None) {
                 Ok(ControlOutcome::Png(png)) => png,
                 other => panic!("no screenshot: {other:?}"),
             };

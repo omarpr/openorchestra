@@ -207,10 +207,21 @@ impl Swipe {
 }
 
 /// Whether a helper's failure hands the keyboard back: only the current
-/// helper's (an old one's comes in late), and only while the picture has it
-/// (keys would go nowhere, with no ring to say so).
-pub(crate) fn give_back_keyboard(current: bool, has_keyboard: bool) -> bool {
-    current && has_keyboard
+/// helper's (an old one's comes in late), and only if the picture took the
+/// keyboard (keys would go nowhere, with no ring to say so). `took_it`:
+/// clicked for a device, which focus-out doesn't undo (see
+/// [`settle_needed`]); handing back checks the window's real focus.
+pub(crate) fn give_back_keyboard(current: bool, took_it: bool) -> bool {
+    current && took_it
+}
+
+/// Whether a change of device must check the keyboard: whenever the
+/// picture was clicked for one. Not only while it has focus by focus-in
+/// and focus-out's count: deactivating the window (to Xcode or
+/// Simulator.app, the usual way a device gets shut down) fires focus-out
+/// while gpui keeps the picture focused, and gives it back on return.
+pub(crate) fn settle_needed(keyboard_for: Option<&str>) -> bool {
+    keyboard_for.is_some()
 }
 
 /// Whether the picture keeps the keyboard when the device input goes to
@@ -221,6 +232,14 @@ pub(crate) fn give_back_keyboard(current: bool, has_keyboard: bool) -> bool {
 /// which nobody clicked), nor none (the tab hidden: keys would go nowhere).
 pub(crate) fn keep_keyboard(given_for: Option<&str>, now: Option<&str>) -> bool {
     now.is_some() && now == given_for
+}
+
+/// Whether the bar's Home goes through the input helper: only one already
+/// up for the device shown. Starting one just for Home is slower than
+/// bringing SpringBoard forward (a cold start measured 0.3 to 2.4 s,
+/// against about 0.1 s), so then SpringBoard it is.
+pub(crate) fn home_through_helper(shown: bool, helper_up: bool) -> bool {
+    shown && helper_up
 }
 
 /// What a mouse press on the picture's element does.
@@ -259,6 +278,8 @@ pub(crate) struct ScreenInput {
     helper: Option<InputHelper>,
     /// Numbers each helper start; events from older ones are dropped.
     serial: u64,
+    /// The current helper came up (and hasn't failed since).
+    ready: bool,
     /// The current helper failed (and none has come up since).
     failed: bool,
     /// Failed starts, for the device they were for.
@@ -277,9 +298,8 @@ pub(crate) struct ScreenInput {
     pub(crate) focus: FocusHandle,
     /// What had the keyboard before the picture took it.
     previous_focus: Option<FocusHandle>,
-    /// The picture has the keyboard (kept by `focus_watch`), and the
-    /// device it was clicked for.
-    has_keyboard: bool,
+    /// The device the picture was clicked for, while it may still hold the
+    /// keyboard (cleared when it hands it back).
     keyboard_for: Option<String>,
     /// The window it's drawn in, to hand the keyboard back from outside a
     /// render (it may not be drawn at all then).
@@ -302,6 +322,7 @@ impl ScreenInput {
             target: None,
             helper: None,
             serial: 0,
+            ready: false,
             failed: false,
             retry: None,
             events,
@@ -312,7 +333,6 @@ impl ScreenInput {
             swipe_ticket: 0,
             focus: cx.focus_handle(),
             previous_focus: None,
-            has_keyboard: false,
             keyboard_for: None,
             window: None,
             focus_watch: Vec::new(),
@@ -393,7 +413,7 @@ impl DeviceScreen {
         self.stop_input();
         self.input.failed = false;
         self.input.target = udid;
-        if self.input.has_keyboard {
+        if settle_needed(self.input.keyboard_for.as_deref()) {
             self.settle_keyboard(false, cx);
         }
         cx.notify();
@@ -423,6 +443,7 @@ impl DeviceScreen {
     fn stop_input(&mut self) {
         self.lift_all();
         self.input.helper = None;
+        self.input.ready = false;
     }
 
     /// Lifts the mouse's finger and the scroll's, if down. Never starts a
@@ -487,6 +508,7 @@ impl DeviceScreen {
         match event {
             HelperEvent::Ready(serial) if current(serial) => {
                 log::debug!("device: input ready");
+                self.input.ready = true;
                 self.input.failed = false;
                 cx.notify();
             }
@@ -497,7 +519,7 @@ impl DeviceScreen {
             }
             HelperEvent::Failed(serial, why) => {
                 let current = current(serial);
-                if give_back_keyboard(current, self.input.has_keyboard) {
+                if give_back_keyboard(current, self.input.keyboard_for.is_some()) {
                     self.settle_keyboard(true, cx);
                 }
                 if !current {
@@ -505,6 +527,7 @@ impl DeviceScreen {
                 }
                 log::info!("device: simulator input stopped: {why}");
                 self.input.helper = None;
+                self.input.ready = false;
                 self.input.touching.set(false);
                 self.input.swipe = Swipe::default();
                 self.input.failed = true;
@@ -518,13 +541,14 @@ impl DeviceScreen {
     }
 
     /// Home through the helper, for the bar: the receiver gets its answer.
-    /// None when input can't go to `udid` (the bar then brings SpringBoard
-    /// forward instead).
+    /// None unless a helper is up for `udid` ([`home_through_helper`]): the
+    /// bar then brings SpringBoard forward instead, and starts none.
     pub(crate) fn press_home(&mut self, udid: &str) -> Option<Receiver<Result<(), String>>> {
-        if self.input.target.as_deref() != Some(udid) {
+        let shown = self.input.target.as_deref() == Some(udid);
+        if !home_through_helper(shown, self.input.ready) {
             return None;
         }
-        self.helper().map(InputHelper::home)
+        self.input.helper.as_ref().map(InputHelper::home)
     }
 
     fn send_touch(&mut self, phase: TouchPhase, at: Point<Pixels>, hit: Hit) {
@@ -640,6 +664,7 @@ impl DeviceScreen {
         if !self.input.focus.is_focused(window) {
             return;
         }
+        self.input.keyboard_for = None;
         match self.input.previous_focus.take() {
             Some(previous) => window.focus(&previous, cx),
             None => window.blur(cx),
@@ -658,14 +683,8 @@ impl DeviceScreen {
             // The ring follows the keyboard, wherever it goes.
             let focus = self.input.focus.clone();
             self.input.focus_watch = vec![
-                cx.on_focus_in(&focus, window, |screen: &mut Self, _, cx| {
-                    screen.input.has_keyboard = true;
-                    cx.notify();
-                }),
-                cx.on_focus_out(&focus, window, |screen: &mut Self, _, _, cx| {
-                    screen.input.has_keyboard = false;
-                    cx.notify();
-                }),
+                cx.on_focus_in(&focus, window, |_, _, cx| cx.notify()),
+                cx.on_focus_out(&focus, window, |_, _, _, cx| cx.notify()),
             ];
         }
         self.input.window = Some(window.window_handle());
@@ -896,6 +915,30 @@ mod tests {
         // A wheel's line is well past it, and goes at once.
         let mut wheel = Swipe::default();
         assert_eq!(wheel.scroll(at(60.0, 120.0), d(-1.0), Step::Moved, false, s).len(), 2);
+    }
+
+    #[test]
+    fn home_goes_through_a_helper_only_if_one_is_up() {
+        // Up and for this device: its button press (about a millisecond).
+        assert!(home_through_helper(true, true));
+        // Starting one just for Home is slower than SpringBoard (0.3 to
+        // 2.4 s from cold, against about 0.1 s), and none for another device.
+        assert!(!home_through_helper(true, false));
+        assert!(!home_through_helper(false, true));
+    }
+
+    #[test]
+    fn an_inactive_window_still_settles_the_keyboard() {
+        // Clicked for A, then the user went to Xcode or Simulator.app: the
+        // window's deactivation fired focus-out (has_keyboard false), but
+        // gpui still holds the picture focused, and gives it back on
+        // return. The tab moving to B meanwhile must still hand it back.
+        assert!(settle_needed(Some("a")));
+        assert!(!keep_keyboard(Some("a"), Some("b")));
+        // A failing helper likewise, focused or not by focus-out's count.
+        assert!(give_back_keyboard(true, Some("a").is_some()));
+        // Never clicked for any device: nothing to settle.
+        assert!(!settle_needed(None));
     }
 
     #[test]

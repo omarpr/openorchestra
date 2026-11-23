@@ -963,8 +963,13 @@ pub struct HarnessWorkspace {
     /// picture on screen when Shut down was clicked.
     device_shutdown_confirm: Option<crate::devices::DeviceInfo>,
     /// A Device tab control (boot and shutdown included) is running; one at
-    /// a time, and the buttons wait.
+    /// a time, and clicks wait. Which bar control it is (drawn pressed), and
+    /// whether it has run long enough to dim the bar and say so
+    /// (`device_control_ticket` numbers the runs for that check).
     device_control_in_flight: bool,
+    device_control_running: Option<crate::devices::controls::Control>,
+    device_control_slow: bool,
+    device_control_ticket: u64,
     /// This Xcode's `devicectl` can rotate a simulator (asked off the UI
     /// thread when the tab appears); Rotate is offered only then.
     device_can_rotate: bool,

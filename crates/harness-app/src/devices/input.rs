@@ -158,15 +158,52 @@ pub(crate) enum HelperEvent {
 
 /// The Home presses waiting for the helper's answer, oldest first.
 type HomeWaiters = Arc<Mutex<VecDeque<Sender<Result<(), String>>>>>;
-/// The helper's process once started, until it is reaped (by its writer
-/// thread or after its handle drops, whichever first).
-type SharedChild = Arc<Mutex<Option<Child>>>;
+/// What the handle and its writer thread share.
+#[derive(Default)]
+struct Shared {
+    /// The helper's process once started, until it is reaped (by the
+    /// writer thread, or after the handle drops if the writer is stuck).
+    child: Mutex<Option<Child>>,
+    /// Since when the writer has been on its current line (None between
+    /// batches).
+    writing_since: Mutex<Option<Instant>>,
+    /// The writer thread is done with the helper (and reaps it itself).
+    done: std::sync::atomic::AtomicBool,
+    /// The handle is gone: a helper not started yet isn't.
+    dropped: std::sync::atomic::AtomicBool,
+}
+
+/// How long one write may block before the helper counts as no longer
+/// reading (hung): only then does a dropped handle's reaper take over.
+pub(crate) const WRITE_STUCK: Duration = Duration::from_secs(1);
+
+/// What the reaper of a dropped handle does next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReaperStep {
+    /// The writer finished: it reaps the helper.
+    Leave,
+    /// The writer is still writing a healthy helper's last lines (or
+    /// between them): leave it be.
+    Wait,
+    /// Stuck in one write too long: reap the helper (its grace, then kill).
+    Reap,
+}
+
+/// `done`: the writer finished; `writing_for`: how long it has been in its
+/// current write.
+pub(crate) fn reaper_step(done: bool, writing_for: Option<Duration>) -> ReaperStep {
+    match writing_for {
+        _ if done => ReaperStep::Leave,
+        Some(blocked) if blocked > WRITE_STUCK => ReaperStep::Reap,
+        _ => ReaperStep::Wait,
+    }
+}
 
 /// A running `oo-device-input` for one simulator.
 pub(crate) struct InputHelper {
     lines: Sender<Line>,
     home_waiters: HomeWaiters,
-    child: SharedChild,
+    shared: Arc<Shared>,
 }
 
 impl InputHelper {
@@ -192,24 +229,24 @@ impl InputHelper {
     ) -> Result<InputHelper, String> {
         let (lines, rx) = mpsc::channel();
         let home_waiters = HomeWaiters::default();
-        let child = SharedChild::default();
+        let shared = Arc::new(Shared::default());
         let (path, udid) = (path.to_path_buf(), udid.to_string());
-        let (waiters, shared) = (home_waiters.clone(), child.clone());
+        let (waiters, writer) = (home_waiters.clone(), shared.clone());
         std::thread::Builder::new()
             .name("oo-device-input".into())
-            .spawn(move || run(&path, &udid, serial, rx, events, waiters, shared))
+            .spawn(move || run(&path, &udid, serial, rx, events, waiters, writer))
             .map_err(|e| format!("starting the input thread: {e}"))?;
         Ok(InputHelper {
             lines,
             home_waiters,
-            child,
+            shared,
         })
     }
 
     /// The helper's process id, once started and until reaped.
     #[cfg(all(test, target_os = "macos"))]
     fn pid(&self) -> Option<u32> {
-        self.child.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(Child::id)
+        self.shared.child.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(Child::id)
     }
 
     fn send(&self, line: Line) {
@@ -259,14 +296,24 @@ impl InputHelper {
 }
 
 impl Drop for InputHelper {
-    /// The writer thread ends the helper once it sees the handle go, but a
-    /// helper that stopped reading (hung) can block it in a write for good:
-    /// this reaps it too, after the same grace.
+    /// The writer thread writes what is still queued (a lift, the last
+    /// keys), then ends the helper once it sees the handle go. But a helper
+    /// that stopped reading (hung) can block it in a write for good: once
+    /// that has lasted [`WRITE_STUCK`], this reaps it instead.
     fn drop(&mut self) {
-        let child = self.child.clone();
+        let shared = self.shared.clone();
+        shared.dropped.store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = std::thread::Builder::new()
             .name("oo-device-input-reap".into())
-            .spawn(move || reap(&child));
+            .spawn(move || loop {
+                let done = shared.done.load(std::sync::atomic::Ordering::SeqCst);
+                let since = *shared.writing_since.lock().unwrap_or_else(|e| e.into_inner());
+                match reaper_step(done, since.map(|at| at.elapsed())) {
+                    ReaperStep::Leave => return,
+                    ReaperStep::Reap => return reap(&shared),
+                    ReaperStep::Wait => std::thread::sleep(Duration::from_millis(50)),
+                }
+            });
     }
 }
 
@@ -279,11 +326,29 @@ fn run(
     lines: Receiver<Line>,
     events: UnboundedSender<HelperEvent>,
     home_waiters: HomeWaiters,
-    shared: SharedChild,
+    shared: Arc<Shared>,
+) {
+    run_helper(path, udid, serial, lines, events, home_waiters, &shared);
+    shared.done.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn run_helper(
+    path: &Path,
+    udid: &str,
+    serial: u64,
+    lines: Receiver<Line>,
+    events: UnboundedSender<HelperEvent>,
+    home_waiters: HomeWaiters,
+    shared: &Shared,
 ) {
     let fail = |why: String| {
         let _ = events.unbounded_send(HelperEvent::Failed(serial, why));
     };
+    // Dropped before it started (a device switch straight after a click):
+    // start nothing.
+    if shared.dropped.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     let mut child = match Command::new(path)
         .arg(udid)
         .stdin(Stdio::piped())
@@ -295,9 +360,9 @@ fn run(
         Err(e) => return fail(format!("starting {}: {e}", path.display())),
     };
     let pipes = (child.stdin.take(), child.stdout.take(), child.stderr.take());
-    *shared.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
+    *shared.child.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
     let (Some(stdin), Some(stdout), Some(stderr)) = pipes else {
-        reap(&shared);
+        reap(shared);
         return fail(format!("{HELPER} has no pipes"));
     };
     let replies = {
@@ -318,25 +383,32 @@ fn run(
             })
     };
     if replies.is_err() || complaints.is_err() {
-        reap(&shared);
+        reap(shared);
         return fail("starting the input reader threads failed".into());
     }
-    write_lines(stdin, &lines);
-    reap(&shared);
+    write_lines(stdin, &lines, &shared.writing_since);
+    reap(shared);
 }
 
 /// Writes each batch of waiting lines, coalesced, until the sender is
-/// dropped or the helper's stdin closes. Dropping `stdin` at the end tells
-/// the helper to finish.
-fn write_lines(stdin: ChildStdin, lines: &Receiver<Line>) {
+/// dropped or the helper's stdin closes, noting in `writing_since` when
+/// the line being written began. Dropping `stdin` at the end tells the helper to finish.
+fn write_lines(stdin: ChildStdin, lines: &Receiver<Line>, writing_since: &Mutex<Option<Instant>>) {
     let mut stdin = std::io::BufWriter::new(stdin);
+    let mark = |at: Option<Instant>| *writing_since.lock().unwrap_or_else(|e| e.into_inner()) = at;
     while let Ok(first) = lines.recv() {
         let mut batch = vec![first];
         batch.extend(lines.try_iter());
+        // Marked again for each line: a long paste a healthy helper reads
+        // keeps moving, and only a write that blocks stands still.
         let wrote = coalesce(batch)
             .iter()
-            .try_for_each(|line| writeln!(stdin, "{}", line.encode()))
+            .try_for_each(|line| {
+                mark(Some(Instant::now()));
+                writeln!(stdin, "{}", line.encode())
+            })
             .and_then(|()| stdin.flush());
+        mark(None);
         if wrote.is_err() {
             return;
         }
@@ -394,8 +466,8 @@ fn read_replies(
 /// Waits a moment for the helper to finish (its last sends leave in that
 /// time), then kills it. Whoever reaps it takes it out of `shared`, so it
 /// is never killed (nor its pid reused) twice.
-fn reap(shared: &SharedChild) {
-    let lock = || shared.lock().unwrap_or_else(|e| e.into_inner());
+fn reap(shared: &Shared) {
+    let lock = || shared.child.lock().unwrap_or_else(|e| e.into_inner());
     let deadline = Instant::now() + EXIT_GRACE;
     while Instant::now() < deadline {
         {
@@ -836,6 +908,34 @@ mod tests {
                 PathBuf::from("/r/target/debug/oo-device-input"),
             ]
         );
+    }
+
+    #[test]
+    fn the_drop_reaper_lets_a_healthy_tail_out() {
+        // The writer drained and finished: it reaps the helper itself
+        // (after the helper's own short wait for the last sends).
+        assert_eq!(reaper_step(true, None), ReaperStep::Leave);
+        assert_eq!(reaper_step(true, Some(Duration::from_secs(9))), ReaperStep::Leave);
+        // Still writing a healthy helper's tail (a lift, the last keys),
+        // or between writes: wait.
+        assert_eq!(reaper_step(false, None), ReaperStep::Wait);
+        assert_eq!(reaper_step(false, Some(Duration::from_millis(500))), ReaperStep::Wait);
+        // Stuck in one write past WRITE_STUCK: the helper stopped reading.
+        // Now its grace starts, then the kill.
+        assert_eq!(reaper_step(false, Some(WRITE_STUCK + Duration::from_millis(1))), ReaperStep::Reap);
+    }
+
+    #[test]
+    fn a_handle_dropped_before_its_helper_starts_starts_none() {
+        let shared = Arc::new(Shared::default());
+        shared.dropped.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (events, _rx) = futures::channel::mpsc::unbounded();
+        let (_tx, rx) = mpsc::channel();
+        run(Path::new("/bin/sleep"), "30", 1, rx, events, HomeWaiters::default(), shared.clone());
+        // Nothing was started, so nothing is left to reap, and the reaper
+        // sees the writer done.
+        assert!(shared.child.lock().unwrap().is_none());
+        assert!(shared.done.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     /// A helper that stops reading its stdin (hung) while a long paste

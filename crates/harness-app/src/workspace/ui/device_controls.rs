@@ -5,12 +5,38 @@
 //!
 //! A control acts only on the device on screen when it was clicked, only on
 //! a click, and off the UI thread. One runs at a time
-//! (`device_control_in_flight`); the buttons wait meanwhile.
+//! (`device_control_in_flight`); clicks meanwhile are ignored. The clicked
+//! button shows pressed at once, and the bar dims and says "Working…" only
+//! for a control that is still running after [`SLOW_CONTROL`]: most take
+//! about a tenth of a second.
 
 use super::super::*;
 use crate::devices::DeviceInfo;
 use crate::devices::controls::{Appearance, Control, ControlOutcome};
 use crate::devices::tab_state::{DeviceTab, DeviceView};
+
+/// How long a control runs before the bar dims and says "Working…".
+pub(crate) const SLOW_CONTROL: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// How the bar looks while a control runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BarLook {
+    /// The buttons dimmed.
+    pub dimmed: bool,
+    /// "Working…" shown.
+    pub working: bool,
+}
+
+/// `in_flight`: a control runs; `slow`: for [`SLOW_CONTROL`] already.
+pub(crate) fn bar_look(in_flight: bool, slow: bool) -> BarLook {
+    let long = in_flight && slow;
+    BarLook { dimmed: long, working: long }
+}
+
+/// Whether `control`'s button shows pressed: it is the one running.
+pub(crate) fn button_pressed(running: Option<Control>, control: Control) -> bool {
+    running == Some(control)
+}
 
 /// The device whose picture the tab shows (live or screenshots), which is
 /// the one the bar's controls act on. None while nothing is shown.
@@ -112,7 +138,7 @@ impl HarnessWorkspace {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let target = self.device_bar_target()?;
-        let busy = self.device_control_in_flight;
+        let look = bar_look(self.device_control_in_flight, self.device_control_slow);
         let appearance = self
             .device_appearance
             .as_ref()
@@ -125,12 +151,11 @@ impl HarnessWorkspace {
         let buttons: Vec<AnyElement> = controls
             .into_iter()
             .map(|control| {
-                let look = control_look(control, appearance);
+                let button = control_look(control, appearance);
                 self.device_bar_button(
                     hx,
-                    look.id,
-                    look.icon,
-                    look.tooltip,
+                    button,
+                    button_pressed(self.device_control_running, control),
                     move |ws, _, cx| ws.run_device_control(control, cx),
                     cx,
                 )
@@ -148,7 +173,7 @@ impl HarnessWorkspace {
                 .border_color(hx.border)
                 .children(buttons)
                 .child(div().flex_1())
-                .when(busy, |d| {
+                .when(look.working, |d| {
                     d.child(div().flex_none().text_xs().text_color(hx.tx2).child("Working…"))
                 })
                 // Not a device control: it works while one runs.
@@ -162,9 +187,12 @@ impl HarnessWorkspace {
                 ))
                 .child(self.device_bar_button(
                     hx,
-                    "device-shut-down",
-                    "icons/power.svg",
-                    "Shut down",
+                    ControlLook {
+                        id: "device-shut-down",
+                        icon: "icons/power.svg",
+                        tooltip: "Shut down",
+                    },
+                    false,
                     |ws, _, cx| ws.ask_shut_down(cx),
                     cx,
                 ))
@@ -182,7 +210,7 @@ impl HarnessWorkspace {
         ) else {
             return;
         };
-        // Home presses the device's button when its input helper can;
+        // Home presses the device's button when its input helper is up;
         // otherwise (or if it doesn't answer in time) SpringBoard is brought
         // forward. A helper that gets to the press only after that leaves
         // it unpressed (its deadline), so Home never happens twice.
@@ -190,8 +218,13 @@ impl HarnessWorkspace {
             Control::Home => self.device_screen.update(cx, |screen, _| screen.press_home(&udid)),
             _ => None,
         };
-        self.device_control_in_flight = true;
-        cx.notify();
+        // The toggle sets the other appearance at once when it's known.
+        let appearance = self
+            .device_appearance
+            .as_ref()
+            .filter(|(known_for, _)| *known_for == udid)
+            .map(|&(_, a)| a);
+        self.begin_device_control(Some(control), cx);
         cx.spawn(async move |view, cx| {
             let result = {
                 let udid = udid.clone();
@@ -203,12 +236,12 @@ impl HarnessWorkspace {
                             Err(_) => log::info!("device: no answer to Home from the input helper"),
                         }
                     }
-                    crate::devices::controls::run_public(&udid, control)
+                    crate::devices::controls::run_public(&udid, control, appearance)
                 })
                 .await
             };
             let _ = view.update(cx, |ws, cx| {
-                ws.device_control_in_flight = false;
+                ws.end_device_control();
                 ws.device_control_done(udid, result, cx);
                 cx.notify();
             });
@@ -290,19 +323,47 @@ impl HarnessWorkspace {
         .detach();
     }
 
-    /// One icon button in the bar, with its tooltip. While a control runs it
-    /// is dimmed and ignores clicks.
+    /// One icon button in the bar, with its tooltip; `pressed` while it is
+    /// the control running. While a control runs, clicks do nothing (the
+    /// handlers check); the bar dims only once it runs long ([`bar_look`]).
     fn device_bar_button(
         &self,
         hx: &HarnessTheme,
-        id: &'static str,
-        icon: &'static str,
-        tooltip: &'static str,
+        look: ControlLook,
+        pressed: bool,
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let look = ControlLook { id, icon, tooltip };
-        bar_button(hx, look, !self.device_control_in_flight, false, on_click, cx)
+        let dimmed = bar_look(self.device_control_in_flight, self.device_control_slow).dimmed;
+        bar_button(hx, look, !dimmed, pressed, on_click, cx)
+    }
+
+    /// A control (or boot, or shutdown) starts: one at a time. `running`:
+    /// the bar control, drawn pressed meanwhile. If it is still running
+    /// after [`SLOW_CONTROL`], the bar dims and says so.
+    fn begin_device_control(&mut self, running: Option<Control>, cx: &mut Context<Self>) {
+        self.device_control_in_flight = true;
+        self.device_control_running = running;
+        self.device_control_slow = false;
+        self.device_control_ticket += 1;
+        let ticket = self.device_control_ticket;
+        cx.notify();
+        cx.spawn(async move |view, cx| {
+            cx.background_executor().timer(SLOW_CONTROL).await;
+            let _ = view.update(cx, |ws, cx| {
+                if ws.device_control_in_flight && ws.device_control_ticket == ticket {
+                    ws.device_control_slow = true;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn end_device_control(&mut self) {
+        self.device_control_in_flight = false;
+        self.device_control_running = None;
+        self.device_control_slow = false;
     }
 
     /// Show frame: draw the iPhone's frame around the picture or not, and
@@ -361,12 +422,11 @@ impl HarnessWorkspace {
         cx: &mut Context<Self>,
         run: impl FnOnce() -> Result<(), String> + Send + 'static,
     ) {
-        self.device_control_in_flight = true;
-        cx.notify();
+        self.begin_device_control(None, cx);
         cx.spawn(async move |view, cx| {
             let result = cx.background_spawn(async move { run() }).await;
             let _ = view.update(cx, |ws, cx| {
-                ws.device_control_in_flight = false;
+                ws.end_device_control();
                 if let Err(e) = result {
                     log::info!("device: {e}");
                     ws.set_error_note(error_line(&e));
@@ -410,6 +470,9 @@ fn bar_button(
         .when(enabled, |d| {
             d.cursor_pointer()
                 .hover(|d| d.bg(hx.surface_hover))
+                // Pressed the moment the mouse goes down, not when the
+                // control is done.
+                .active(|d| d.bg(hx.surface2))
                 .on_click(cx.listener(move |ws, _, window, cx| on_click(ws, window, cx)))
         })
         .into_any_element()
@@ -421,6 +484,27 @@ mod tests {
     use crate::devices::DeviceInfo;
     use crate::devices::controls::{Appearance, Control, ControlOutcome};
     use crate::devices::tab_state::{DeviceTab, DeviceView};
+
+    #[test]
+    fn a_short_control_neither_dims_the_bar_nor_says_working() {
+        use super::{BarLook, bar_look};
+        let quiet = BarLook { dimmed: false, working: false };
+        assert_eq!(bar_look(false, false), quiet);
+        // Running, but not for long yet: the bar stays as it is (clicks on
+        // it are ignored meanwhile).
+        assert_eq!(bar_look(true, false), quiet);
+        // Still running after a moment: dimmed, and says so.
+        assert_eq!(bar_look(true, true), BarLook { dimmed: true, working: true });
+        assert!(super::SLOW_CONTROL <= std::time::Duration::from_millis(300));
+    }
+
+    #[test]
+    fn the_running_controls_button_shows_pressed() {
+        use super::button_pressed;
+        assert!(button_pressed(Some(Control::Home), Control::Home));
+        assert!(!button_pressed(Some(Control::Home), Control::Rotate));
+        assert!(!button_pressed(None, Control::Home));
+    }
 
     fn dev(udid: &str) -> DeviceInfo {
         DeviceInfo {

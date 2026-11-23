@@ -589,6 +589,9 @@ impl HarnessWorkspace {
         let cmds = sync_shown(&mut self.device_tab, &mut self.device_shown, now);
         self.run_device_commands(cmds, cx);
         if appeared {
+            // Where simctl and devicectl are, found once and off the UI
+            // thread, so no control pays for the lookup.
+            cx.background_spawn(async { crate::devices::simctl::find_xcode_tools() }).detach();
             self.refresh_devices(cx);
             self.check_device_rotate(cx);
         }
