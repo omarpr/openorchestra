@@ -56,6 +56,9 @@ pub(crate) struct DeviceTab {
     pub selected: Option<String>,
     pub view: DeviceView,
     hidden: bool,
+    /// Something covers the picture (a boot offer in its place) though the
+    /// tab is on screen: nothing streams, but lists still land.
+    obscured: bool,
     running: Running,
     /// Set once this Xcode's display API turned out unsupported; later
     /// devices go straight to screenshots because that is about Xcode, not a
@@ -79,6 +82,7 @@ impl DeviceTab {
             selected: None,
             view: DeviceView::NoneRunning,
             hidden: false,
+            obscured: false,
             running: Running::Nothing,
             reduced_why: None,
             retry: None,
@@ -111,7 +115,7 @@ impl DeviceTab {
 
     /// Diff what should run against what runs, and return the commands.
     fn reconcile(&mut self) -> Vec<Command> {
-        let want = if self.hidden {
+        let want = if self.hidden || self.obscured {
             Running::Nothing
         } else {
             match &self.view {
@@ -261,6 +265,14 @@ impl DeviceTab {
 
     pub(crate) fn on_hidden(&mut self) -> Vec<Command> {
         self.hidden = true;
+        self.reconcile()
+    }
+
+    /// The picture is covered (`true`) or shown again. Unlike
+    /// [`Self::on_hidden`] this is not about the tab being on screen, so the
+    /// caller keeps listing.
+    pub(crate) fn on_obscured(&mut self, obscured: bool) -> Vec<Command> {
+        self.obscured = obscured;
         self.reconcile()
     }
 
@@ -427,6 +439,38 @@ mod tests {
         assert!(fresh(&mut t, Ok(vec![dev("b")])).is_empty());
         assert_eq!(t.view, live("b"));
         assert_eq!(t.on_shown(), vec![Command::StartStream("b".into())]);
+    }
+
+    #[test]
+    fn obscuring_stops_the_stream_and_uncovering_resumes_it() {
+        let mut t = tab_on(&["a"]);
+        assert_eq!(t.on_obscured(true), vec![Command::StopStream]);
+        assert!(t.on_obscured(true).is_empty());
+        assert_eq!(t.on_obscured(false), vec![Command::StartStream("a".into())]);
+    }
+
+    #[test]
+    fn obscuring_stops_screenshots_too() {
+        let mut t = tab_on(&["a"]);
+        t.on_stream_failed(StreamError::Unsupported("SimDeviceScreen"));
+        assert_eq!(t.on_obscured(true), vec![Command::StopScreenshots]);
+        assert_eq!(t.on_obscured(false), vec![Command::StartScreenshots("a".into())]);
+    }
+
+    #[test]
+    fn lists_update_state_while_obscured_but_start_nothing() {
+        let mut t = tab_on(&["a"]);
+        t.on_obscured(true);
+        assert!(fresh(&mut t, Ok(vec![dev("b")])).is_empty());
+        assert_eq!(t.view, live("b"));
+        assert_eq!(t.selected.as_deref(), Some("b"));
+        // A selection made while obscured starts nothing either.
+        assert!(fresh(&mut t, Ok(vec![dev("a"), dev("b")])).is_empty());
+        assert!(t.on_select("a").is_empty());
+        // Hidden and obscured are separate: both must clear to run again.
+        t.on_hidden();
+        assert!(t.on_obscured(false).is_empty());
+        assert_eq!(t.on_shown(), vec![Command::StartStream("a".into())]);
     }
 
     #[test]

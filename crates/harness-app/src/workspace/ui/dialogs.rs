@@ -1,6 +1,7 @@
 //! Centered confirmation dialogs: quit, remove project, archive/delete,
-//! approving a project's hook scripts, and shutting a simulator down. They share one card, one backdrop and
-//! one button style, so each dialog only states what it asks.
+//! approving a project's hook scripts, and shutting a simulator down. They
+//! share one card, one backdrop and one button style, so each dialog only
+//! states what it asks.
 
 use super::super::lifecycle::{EndConfirm, EndKind, Loss};
 use super::super::*;

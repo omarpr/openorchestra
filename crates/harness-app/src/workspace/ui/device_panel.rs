@@ -342,7 +342,13 @@ impl HarnessWorkspace {
             }
         }
         // The state machine watches booted devices only.
-        let cmds = self.device_tab.on_list(ticket, list.map(|l| l.booted));
+        let mut cmds = self.device_tab.on_list(ticket, list.map(|l| l.booted));
+        // After the list, so an offer that just ended starts the device the
+        // list chose, not the one watched before it.
+        cmds.extend(
+            self.device_tab
+                .on_obscured(self.device_boot_offer.is_some()),
+        );
         self.run_device_commands(cmds, cx);
         cx.notify();
     }
@@ -356,6 +362,12 @@ impl HarnessWorkspace {
                 self.device_menu_open = false;
                 self.device_boot_offer =
                     self.device_list.shut_down.iter().find(|d| d.udid == udid).cloned();
+                // Nothing streams under the offer; the poll still lists, so
+                // the offer sees its device come up.
+                let cmds = self
+                    .device_tab
+                    .on_obscured(self.device_boot_offer.is_some());
+                self.run_device_commands(cmds, cx);
                 cx.notify();
             }
         }
@@ -364,7 +376,9 @@ impl HarnessWorkspace {
     pub(crate) fn watch_device(&mut self, udid: &str, cx: &mut Context<Self>) {
         self.device_menu_open = false;
         self.device_boot_offer = None;
-        let cmds = pick_device(&mut self.device_tab, &mut self.prefs, udid);
+        let mut cmds = pick_device(&mut self.device_tab, &mut self.prefs, udid);
+        // After the pick, so ending an offer starts the picked device only.
+        cmds.extend(self.device_tab.on_obscured(false));
         self.save_prefs(cx);
         self.run_device_commands(cmds, cx);
         cx.notify();

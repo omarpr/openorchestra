@@ -3,7 +3,8 @@
 //! Rotate and Home (private HID) are offered only when the caller says that
 //! path is available.
 
-// Nothing in the panel calls these yet; the next tasks wire them in.
+// Only boot and shutdown are wired in so far; the bar (Task 3) calls the
+// rest.
 #![allow(dead_code)]
 
 use std::time::Duration;

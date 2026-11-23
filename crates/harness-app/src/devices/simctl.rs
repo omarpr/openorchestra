@@ -124,7 +124,6 @@ fn shot_path(dir: &Path, udid: &str) -> PathBuf {
 }
 
 /// [`shot_path`] with the file extension of the screenshot's format.
-#[allow(dead_code)] // used by `controls`, which the panel wires in later
 pub(crate) fn shot_path_ext(dir: &Path, udid: &str, ext: &str) -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -133,7 +132,6 @@ pub(crate) fn shot_path_ext(dir: &Path, udid: &str, ext: &str) -> PathBuf {
 
 /// `xcrun simctl <args>` run to the end, whatever its exit code. Err only
 /// when it could not run or ran past the timeout.
-#[allow(dead_code)] // used by `controls`, which the panel wires in later
 pub(crate) fn simctl_ran(args: &[&str]) -> Result<Ran, String> {
     simctl_ran_within(args, TIMEOUT)
 }
@@ -150,7 +148,6 @@ fn simctl_ran_within(args: &[&str], timeout: Duration) -> Result<Ran, String> {
 
 /// `xcrun simctl <args>`: its stdout, or what stderr says (or a sentence
 /// about the exit code) when it fails.
-#[allow(dead_code)] // used by `controls`, which the panel wires in later
 pub(crate) fn simctl(args: &[&str]) -> Result<String, String> {
     simctl_within(args, TIMEOUT)
 }
@@ -169,7 +166,6 @@ pub(crate) fn simctl_within(args: &[&str], timeout: Duration) -> Result<String, 
 /// encountered processing the command (domain=…, code=405):"); it is dropped
 /// so the first line is the reason ("Unable to boot device in current
 /// state: Booted").
-#[allow(dead_code)] // used by `controls`, which the panel wires in later
 pub(crate) fn failure_text(ran: &Ran) -> String {
     let stderr = ran.stderr.trim();
     let stderr = match stderr.split_once('\n') {
