@@ -1,7 +1,7 @@
-//! The Device tab's test controls that need only public tools: appearance,
-//! text size and a PNG screenshot through `simctl`, booting or shutting a
-//! device down, and Rotate through `devicectl`. Home goes through the private
-//! HID path (`hid`, macOS only).
+//! The Device tab's test controls, all through public tools: appearance,
+//! text size, Home (bringing SpringBoard forward) and a PNG screenshot
+//! through `simctl`, booting or shutting a device down, and Rotate through
+//! `devicectl`.
 
 // Only boot and shutdown are wired in so far; the bar (Task 3) calls the
 // rest.
@@ -22,6 +22,7 @@ const DEVICECTL_TIMEOUT: Duration = Duration::from_secs(5);
 /// subcommand exists. Its exit code says nothing: a missing subcommand
 /// prints its parent's help and exits 0 too.
 const ROTATE_USAGE: &str = "USAGE: devicectl device orientation rotate";
+const SPRINGBOARD: &str = "com.apple.springboard";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Control {
@@ -156,17 +157,42 @@ fn devicectl_failure(ran: &Ran) -> String {
     }
 }
 
-/// The controls to offer for what the tab shows. Rotate and Home only when
-/// the caller's `hid` says so.
-pub(crate) fn available_controls(view: &DeviceView, hid: bool) -> Vec<Control> {
+/// Home: brings SpringBoard (the home screen) forward. Not a button press
+/// (no lock, no Siri), but the legacy HID button press is ignored by the
+/// guest on most iOS 27.2 boots, and this always works.
+pub(crate) fn springboard_args(udid: &str) -> [&str; 3] {
+    ["launch", udid, SPRINGBOARD]
+}
+
+/// `simctl launch`'s failure, with an unknown UDID ("Invalid device: …")
+/// put the way `devicectl` puts it.
+fn springboard_failure(why: String) -> String {
+    if why.starts_with("Invalid device") {
+        "The specified device was not found.".to_string()
+    } else {
+        why
+    }
+}
+
+/// Shows booted simulator `udid`'s home screen. Blocks for up to 5 s: call
+/// it off the main thread.
+pub(crate) fn launch_springboard(udid: &str) -> Result<(), String> {
+    simctl(&springboard_args(udid)).map(drop).map_err(springboard_failure)
+}
+
+/// The controls to offer for what the tab shows. Rotate only when `rotate`
+/// says this Xcode's `devicectl` can (the caller passes
+/// [`rotate_available`], asked off the main thread).
+pub(crate) fn available_controls(view: &DeviceView, rotate: bool) -> Vec<Control> {
     if !matches!(view, DeviceView::Live { .. } | DeviceView::Reduced { .. }) {
         return Vec::new();
     }
     let mut controls = Vec::new();
-    if hid {
-        controls.extend([Control::Rotate, Control::Home]);
+    if rotate {
+        controls.push(Control::Rotate);
     }
     controls.extend([
+        Control::Home,
         Control::ToggleAppearance,
         Control::TextSmaller,
         Control::TextBigger,
@@ -203,8 +229,8 @@ fn read_appearance(udid: &str) -> Result<Appearance, String> {
     parse_appearance(&out).ok_or_else(|| "this device has no appearance setting".to_string())
 }
 
-/// Runs a control that needs only public tools. `Home` is not among them
-/// (see `hid::press_home`).
+/// Runs a control. Blocks (each tool run is bounded): call it off the main
+/// thread.
 pub(crate) fn run_public(udid: &str, control: Control) -> Result<ControlOutcome, String> {
     match control {
         Control::ToggleAppearance => {
@@ -225,7 +251,7 @@ pub(crate) fn run_public(udid: &str, control: Control) -> Result<ControlOutcome,
         }
         Control::Screenshot => screenshot_png(udid).map(ControlOutcome::Png),
         Control::Rotate => rotate(udid).map(|()| ControlOutcome::Done),
-        Control::Home => Err("this control needs the device input path".into()),
+        Control::Home => launch_springboard(udid).map(|()| ControlOutcome::Done),
     }
 }
 
@@ -332,15 +358,21 @@ mod tests {
     }
 
     #[test]
-    fn public_controls_without_hid() {
+    fn home_without_rotate() {
         assert_eq!(
             available_controls(&live(), false),
-            [Control::ToggleAppearance, Control::TextSmaller, Control::TextBigger, Control::Screenshot]
+            [
+                Control::Home,
+                Control::ToggleAppearance,
+                Control::TextSmaller,
+                Control::TextBigger,
+                Control::Screenshot
+            ]
         );
     }
 
     #[test]
-    fn all_controls_with_hid_in_order() {
+    fn all_controls_with_rotate_in_order() {
         assert_eq!(
             available_controls(&live(), true),
             [
@@ -352,6 +384,22 @@ mod tests {
                 Control::Screenshot
             ]
         );
+    }
+
+    #[test]
+    fn home_brings_springboard_forward() {
+        assert_eq!(springboard_args("U"), ["launch", "U", "com.apple.springboard"]);
+    }
+
+    #[test]
+    fn home_on_a_missing_device_says_so() {
+        // Captured: `simctl launch <unknown udid> com.apple.springboard`,
+        // exit 148.
+        assert_eq!(
+            springboard_failure("Invalid device: 00000000-0000-0000-0000-000000000000".into()),
+            "The specified device was not found."
+        );
+        assert_eq!(springboard_failure("simctl timed out after 5 s".into()), "simctl timed out after 5 s");
     }
 
     #[test]
@@ -407,6 +455,103 @@ mod tests {
         assert_eq!(group(&udid), "booted", "right after boot returns");
         let again = boot(&udid).unwrap_err();
         eprintln!("boot when booted: {again:?}");
+    }
+
+    const NO_DEVICE: &str = "00000000-0000-0000-0000-000000000000";
+
+    fn png(udid: &str) -> Vec<u8> {
+        match run_public(udid, Control::Screenshot) {
+            Ok(ControlOutcome::Png(bytes)) => bytes,
+            other => panic!("screenshot: {other:?}"),
+        }
+    }
+
+    fn launch(udid: &str, bundle: &str) {
+        simctl(&["launch", udid, bundle]).unwrap();
+        // A first launch shows a placeholder for a moment.
+        std::thread::sleep(Duration::from_secs(3));
+    }
+
+    /// The mean brightness (0-255) of the middle of a screenshot: Settings
+    /// is near white (245), the home screen's wallpaper much darker (140).
+    fn brightness(png: &[u8]) -> f64 {
+        let image = image::load_from_memory(png).unwrap().to_luma8();
+        let (w, h) = image.dimensions();
+        let (mut sum, mut n) = (0.0, 0.0);
+        for y in (h / 5..h * 4 / 5).step_by(7) {
+            for x in (w / 5..w * 4 / 5).step_by(7) {
+                sum += f64::from(image.get_pixel(x, y)[0]);
+                n += 1.0;
+            }
+        }
+        sum / n
+    }
+
+    /// Manual, on a simulator created and booted for the purpose (never
+    /// anyone else's): `OO_TEST_SIM_UDID=<udid> cargo test rotate_on_a_live
+    /// -- --ignored --nocapture`. Turns it four times in Safari and watches
+    /// the screen stream's orientation go round.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn rotate_on_a_live_device() {
+        use super::super::sim_display::{ScreenEvent, ScreenStream};
+        use std::sync::mpsc;
+
+        let udid = std::env::var("OO_TEST_SIM_UDID").expect("set OO_TEST_SIM_UDID");
+        assert!(rotate_available(), "devicectl can't rotate");
+        // A device fresh from boot reports "unknown"; start from portrait.
+        // Safari turns with the device (the home screen and Settings don't).
+        let set = ["devicectl", "device", "orientation", "set", "--device", &udid, "portrait"];
+        let ran = crate::ports::run_bounded("xcrun", &set, DEVICECTL_TIMEOUT).unwrap();
+        assert_eq!(ran.code, Some(0), "{}", ran.stderr);
+        launch(&udid, "com.apple.mobilesafari");
+        let (tx, rx) = mpsc::channel();
+        let stream = ScreenStream::start(&udid, move |event| {
+            if let ScreenEvent::Orientation(o) = event {
+                let _ = tx.send(o);
+            }
+        })
+        .unwrap();
+        let start = rx.recv_timeout(Duration::from_secs(2)).expect("the starting orientation");
+        assert_eq!(start, 1, "portrait");
+        let mut seen = Vec::new();
+        for turn in 1..=4 {
+            assert_eq!(run_public(&udid, Control::Rotate), Ok(ControlOutcome::Done));
+            std::thread::sleep(Duration::from_millis(1500));
+            let now: Vec<u32> = rx.try_iter().collect();
+            eprintln!("turn {turn}: {now:?}");
+            seen.extend(now);
+        }
+        drop(stream);
+        // Safari refuses upside down, so one turn changes nothing: 3, -, 4, 1.
+        assert!(seen.contains(&3) && seen.contains(&4), "{seen:?}");
+        assert_eq!(seen.last(), Some(&start), "four turns come back round: {seen:?}");
+
+        let why = rotate(NO_DEVICE).unwrap_err();
+        assert!(why.starts_with("The specified device was not found."), "{why}");
+    }
+
+    /// Manual, on a simulator created and booted for the purpose:
+    /// `OO_TEST_SIM_UDID=<udid> cargo test home_on_a_live -- --ignored
+    /// --nocapture`. Opens Settings and goes Home, twice.
+    #[test]
+    #[ignore]
+    fn home_on_a_live_device() {
+        let udid = std::env::var("OO_TEST_SIM_UDID").expect("set OO_TEST_SIM_UDID");
+        for _ in 0..2 {
+            launch(&udid, "com.apple.Preferences");
+            let settings = brightness(&png(&udid));
+            assert_eq!(run_public(&udid, Control::Home), Ok(ControlOutcome::Done));
+            std::thread::sleep(Duration::from_secs(1));
+            let home = brightness(&png(&udid));
+            eprintln!("brightness: Settings {settings:.0}, after Home {home:.0}");
+            assert!(settings - home > 50.0, "Home left Settings in front");
+        }
+        assert_eq!(
+            run_public(NO_DEVICE, Control::Home),
+            Err("The specified device was not found.".to_string())
+        );
     }
 
     /// Manual: `OO_TEST_SIM_UDID=<booted test device> cargo test

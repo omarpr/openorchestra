@@ -1,6 +1,10 @@
 //! Input to a booted simulator through SimulatorKit's private legacy HID
-//! client (macOS only). Home for now; touch, swipe and keys build on the same
-//! [`Client`] and [`Message`].
+//! client (macOS only): the loader, [`Client`] and [`Message`] that touch,
+//! swipe and keys (the Device controls plan's Task 5) would build on. Nothing
+//! uses it yet, and Home doesn't: on iOS 27.2 the guest ignores legacy HID
+//! input on most boots (its CoreDevice `dtuhidd` disconnects the legacy
+//! services) while every send still completes without error, so Home is the
+//! public `simctl launch … com.apple.springboard` in `controls`.
 //!
 //! The calls were measured in the Device controls spike (see "Spike findings"
 //! in docs/superpowers/specs/2026-11-23-device-tab-controls-design.md):
@@ -23,7 +27,7 @@
 //!   after checking the selector, inside `objc2::exception::catch`, and the
 //!   completion block carries its signature.
 
-// Nothing calls Home until the bar (the Device controls plan's Task 3).
+// Kept for touch and keys (Task 5); nothing calls it yet.
 #![allow(dead_code)]
 
 use std::ffi::{CStr, CString, c_void};
@@ -36,7 +40,7 @@ use std::time::Duration;
 
 use block2::{ManualBlockEncoding, RcBlock};
 use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
-use objc2::rc::{Retained, autoreleasepool};
+use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Sel};
 use objc2::{msg_send, sel};
 use objc2_foundation::{NSClassFromString, NSError, NSString};
@@ -46,7 +50,6 @@ use super::sim_display::{
     booted_device, catching, check_paths, developer_dir, framework_paths, load_core_simulator,
     msg_send_fn, ns_error,
 };
-use super::simctl::simctl;
 
 /// Relative to the developer dir's parent (`…/Xcode.app/Contents`).
 const SIMULATOR_KIT: &str = "SharedFrameworks/SimulatorKit.framework/SimulatorKit";
@@ -54,31 +57,21 @@ const CLIENT_CLASS: &str = "SimulatorKit.SimDeviceLegacyHIDClient";
 const INIT_NAME: &str = "-[SimDeviceLegacyHIDClient initWithDevice:error:]";
 const SEND_NAME: &str =
     "-[SimDeviceLegacyHIDClient sendWithMessage:freeWhenDone:completionQueue:completion:]";
-/// The builders the HID input needs: Home's, and the touch and keyboard
-/// ones. Home is offered only when all of them are there.
-const BUILDERS: [&CStr; 3] = [
-    c"IndigoHIDMessageForButton",
+/// The builders touch and keys need. The HID input counts as there only
+/// when all of them are.
+const BUILDERS: [&CStr; 2] = [
     c"IndigoHIDMessageForMouseNSEvent",
     c"IndigoHIDMessageForKeyboardArbitrary",
 ];
-/// The only target ever sent (see the module docs).
+/// The only target ever to be sent (see the module docs).
 const TARGET: u32 = 0x32;
-/// `IndigoHIDMessageForButton` key codes and ops.
-const BUTTON_HOME: u32 = 0;
-const DOWN: u32 = 1;
-const UP: u32 = 2;
 /// How long a send waits for the client's completion.
 const ACK_TIMEOUT: Duration = Duration::from_secs(5);
-const SPRINGBOARD: &str = "com.apple.springboard";
-
-/// `IndigoHIDMessage *IndigoHIDMessageForButton(uint32_t keyCode, uint32_t op, uint32_t target)`.
-type ButtonFn = unsafe extern "C" fn(u32, u32, u32) -> *mut c_void;
 
 /// What loading SimulatorKit found.
 struct Hid {
     developer_dir: PathBuf,
     class: &'static AnyClass,
-    button: ButtonFn,
 }
 
 /// Where SimulatorKit is for the developer dir `xcode-select -p` gives.
@@ -86,47 +79,11 @@ fn simulator_kit_path(developer_dir: &Path) -> Option<PathBuf> {
     Some(developer_dir.parent()?.join(SIMULATOR_KIT))
 }
 
-/// Home's button presses, as (key code, op): down, then straight up.
-fn home_press() -> [(u32, u32); 2] {
-    [(BUTTON_HOME, DOWN), (BUTTON_HOME, UP)]
-}
-
-/// Whether the private HID input is there. Loads SimulatorKit on the first
+/// Whether the private HID input is there (which says nothing about whether
+/// the guest heeds it: see the module docs). Loads SimulatorKit on the first
 /// call, which blocks (`xcode-select`): call it off the main thread.
 pub(crate) fn hid_available() -> bool {
     loaded().is_ok()
-}
-
-/// Presses the Home button of booted simulator `udid`. Without the private
-/// HID input it brings SpringBoard forward instead (`simctl launch`), which
-/// shows the home screen but is not a button press. Blocks: call it off the
-/// main thread.
-pub(crate) fn press_home(udid: &str) -> Result<(), StreamError> {
-    let hid = match loaded() {
-        Ok(hid) => hid,
-        Err(why) => {
-            log::debug!("device: no HID input ({why:?}); Home brings SpringBoard forward");
-            return launch_springboard(udid);
-        }
-    };
-    autoreleasepool(|_| {
-        let client = Client::connect(hid, udid)?;
-        for (key_code, op) in home_press() {
-            client.send(hid.button(key_code, op)?)?;
-        }
-        Ok(())
-    })
-}
-
-/// The public stand-in for Home: `simctl launch <udid> com.apple.springboard`.
-fn launch_springboard(udid: &str) -> Result<(), StreamError> {
-    simctl(&["launch", udid, SPRINGBOARD]).map(drop).map_err(|why| {
-        if why.starts_with("Invalid device") {
-            StreamError::DeviceNotFound
-        } else {
-            StreamError::Failed(why)
-        }
-    })
 }
 
 /// SimulatorKit, loaded and checked once per process.
@@ -167,24 +124,16 @@ fn load() -> Result<Hid, StreamError> {
         }
     }
 
-    let mut button = ptr::null_mut();
     for name in BUILDERS {
         // SAFETY: a live handle and a C string.
         let symbol = unsafe { libc::dlsym(handle, name.as_ptr()) };
         if symbol.is_null() {
             return Err(StreamError::Unsupported(name.to_str().unwrap_or("IndigoHIDMessage")));
         }
-        if name == c"IndigoHIDMessageForButton" {
-            button = symbol;
-        }
     }
-    // SAFETY: the symbol is `IndigoHIDMessageForButton`, of type `ButtonFn`
-    // (from the spike's disassembly and runs).
-    let button = unsafe { std::mem::transmute::<*mut c_void, ButtonFn>(button) };
     Ok(Hid {
         developer_dir,
         class,
-        button,
     })
 }
 
@@ -194,15 +143,6 @@ fn init_sel() -> Sel {
 
 fn send_sel() -> Sel {
     sel!(sendWithMessage:freeWhenDone:completionQueue:completion:)
-}
-
-impl Hid {
-    /// A button event at [`TARGET`].
-    fn button(&self, key_code: u32, op: u32) -> Result<Message, StreamError> {
-        // SAFETY: plain integers in; a `calloc`ed message or NULL out.
-        let raw = unsafe { (self.button)(key_code, op, TARGET) };
-        Message::new(raw, "IndigoHIDMessageForButton")
-    }
 }
 
 /// An `IndigoHIDMessage` a builder `calloc`ed. Freed on drop unless sent:
@@ -222,17 +162,6 @@ impl Message {
         let raw = self.0.as_ptr();
         std::mem::forget(self);
         raw
-    }
-
-    /// The `u32` at `offset`, within the 0x20-byte header and the event
-    /// count's 0xA0-byte events.
-    #[cfg(test)]
-    fn read_u32(&self, offset: usize) -> u32 {
-        // SAFETY: the count byte is inside the header every message has.
-        let count = unsafe { *self.0.as_ptr().cast::<u8>().add(0x1C) };
-        assert!(offset + 4 <= 0x20 + usize::from(count) * 0xA0, "{offset:#x} past the message");
-        // SAFETY: in bounds, checked above; read unaligned to be safe.
-        unsafe { self.0.as_ptr().cast::<u8>().add(offset).cast::<u32>().read_unaligned() }
     }
 }
 
@@ -373,132 +302,5 @@ mod tests {
             ))
         );
         assert_eq!(simulator_kit_path(Path::new("/")), None);
-    }
-
-    #[test]
-    fn home_is_the_home_button_down_then_up() {
-        assert_eq!(home_press(), [(BUTTON_HOME, DOWN), (BUTTON_HOME, UP)]);
-        assert_eq!((BUTTON_HOME, DOWN, UP), (0, 1, 2));
-    }
-
-    #[test]
-    fn home_messages_target_0x32_only() {
-        // Builds the messages (no device needed) where this Mac's Xcode has
-        // the HID builders; elsewhere there is nothing to check.
-        let Ok(hid) = loaded() else {
-            eprintln!("skipped: no SimulatorKit HID input here");
-            return;
-        };
-        for (key_code, op) in home_press() {
-            let message = hid.button(key_code, op).unwrap();
-            // Header: event stride and count, then one button event.
-            assert_eq!(message.read_u32(0x18), 0xA0);
-            assert_eq!(message.read_u32(0x1C) & 0xFF, 1);
-            assert_eq!(message.read_u32(0x20), 2, "button/key event type");
-            assert_eq!(message.read_u32(0x30), key_code);
-            assert_eq!(message.read_u32(0x34), op);
-            assert_eq!(message.read_u32(0x38), 0x32, "target");
-        }
-    }
-
-    fn png(udid: &str) -> Vec<u8> {
-        use super::super::controls::{Control, ControlOutcome, run_public};
-        match run_public(udid, Control::Screenshot) {
-            Ok(ControlOutcome::Png(bytes)) => bytes,
-            other => panic!("screenshot: {other:?}"),
-        }
-    }
-
-    /// The mean brightness (0-255) of the middle of a screenshot: Settings
-    /// is near white (245 in the spike), the home screen's wallpaper much
-    /// darker (139).
-    fn brightness(png: &[u8]) -> f64 {
-        let image = image::load_from_memory(png).unwrap().to_luma8();
-        let (w, h) = image.dimensions();
-        let (mut sum, mut n) = (0.0, 0.0);
-        for y in (h / 5..h * 4 / 5).step_by(7) {
-            for x in (w / 5..w * 4 / 5).step_by(7) {
-                sum += f64::from(image.get_pixel(x, y)[0]);
-                n += 1.0;
-            }
-        }
-        sum / n
-    }
-
-    fn launch(udid: &str, bundle: &str) {
-        simctl(&["launch", udid, bundle]).unwrap();
-        // A first launch shows a placeholder for a moment.
-        std::thread::sleep(Duration::from_secs(3));
-    }
-
-    /// Manual, on a simulator created and booted for the purpose (never
-    /// anyone else's):
-    /// `OO_TEST_SIM_UDID=<udid> cargo test rotate_and_home_on -- --ignored --nocapture`.
-    /// Turns it four times in Safari, then presses Home over Settings, by the
-    /// HID path and by the public stand-in.
-    ///
-    /// The HID Home passes only on a boot where the guest kept its legacy
-    /// HID services: on iOS 27.2 most boots log "dtuhidd state changed to
-    /// active" and disconnect them, and the presses are then ignored though
-    /// they complete without error (Task 2's report has the details).
-    #[test]
-    #[ignore]
-    fn rotate_and_home_on_a_live_device() {
-        use super::super::controls::{rotate, rotate_available};
-        use super::super::sim_display::{ScreenEvent, ScreenStream};
-        const NO_DEVICE: &str = "00000000-0000-0000-0000-000000000000";
-
-        let udid = std::env::var("OO_TEST_SIM_UDID").expect("set OO_TEST_SIM_UDID");
-        assert!(rotate_available(), "devicectl can't rotate");
-        assert!(hid_available(), "no HID input: {:?}", loaded().err());
-
-        // A device fresh from boot reports "unknown"; start from portrait.
-        // Safari turns with the device (the home screen and Settings don't).
-        let set = ["devicectl", "device", "orientation", "set", "--device", &udid, "portrait"];
-        let ran = crate::ports::run_bounded("xcrun", &set, Duration::from_secs(5)).unwrap();
-        assert_eq!(ran.code, Some(0), "{}", ran.stderr);
-        launch(&udid, "com.apple.mobilesafari");
-        let (tx, rx) = mpsc::channel();
-        let stream = ScreenStream::start(&udid, move |event| {
-            if let ScreenEvent::Orientation(o) = event {
-                let _ = tx.send(o);
-            }
-        })
-        .unwrap();
-        let start = rx.recv_timeout(Duration::from_secs(2)).expect("the starting orientation");
-        assert_eq!(start, 1, "portrait");
-        let mut seen = Vec::new();
-        for turn in 1..=4 {
-            rotate(&udid).unwrap();
-            std::thread::sleep(Duration::from_millis(1500));
-            let now: Vec<u32> = rx.try_iter().collect();
-            eprintln!("turn {turn}: {now:?}");
-            seen.extend(now);
-        }
-        drop(stream);
-        // Safari refuses upside down, so one turn changes nothing: 3, -, 4, 1.
-        assert!(seen.contains(&3) && seen.contains(&4), "{seen:?}");
-        assert_eq!(seen.last(), Some(&start), "four turns come back round: {seen:?}");
-
-        launch(&udid, "com.apple.Preferences");
-        let settings = png(&udid);
-        press_home(&udid).unwrap();
-        std::thread::sleep(Duration::from_secs(1));
-        let (settings, home) = (brightness(&settings), brightness(&png(&udid)));
-        eprintln!("brightness: Settings {settings:.0}, after Home {home:.0}");
-        assert!(settings - home > 50.0, "Home left Settings in front");
-
-        launch(&udid, "com.apple.Preferences");
-        let settings = png(&udid);
-        launch_springboard(&udid).unwrap();
-        std::thread::sleep(Duration::from_secs(1));
-        let (settings, home) = (brightness(&settings), brightness(&png(&udid)));
-        eprintln!("brightness: Settings {settings:.0}, after SpringBoard {home:.0}");
-        assert!(settings - home > 50.0, "SpringBoard left Settings in front");
-
-        assert_eq!(press_home(NO_DEVICE), Err(StreamError::DeviceNotFound));
-        assert_eq!(launch_springboard(NO_DEVICE), Err(StreamError::DeviceNotFound));
-        let why = rotate(NO_DEVICE).unwrap_err();
-        assert!(why.starts_with("The specified device was not found."), "{why}");
     }
 }

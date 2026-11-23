@@ -176,6 +176,16 @@ impl Shared {
         }
     }
 
+    /// Passes `result` on; an error also silences the stream, so nothing
+    /// already queued (the starting orientation) reaches `on_event` for a
+    /// stream that failed to start.
+    fn stop_on_error<T>(&self, result: Result<T, StreamError>) -> Result<T, StreamError> {
+        if result.is_err() {
+            self.stopped.store(true, Ordering::Release);
+        }
+        result
+    }
+
     /// The properties callback's argument, a proxy for the screen's new
     /// `SimScreenProperties`. It fires once per `uiOrientation` change.
     fn properties_changed(&self, properties: *mut AnyObject) {
@@ -242,7 +252,7 @@ impl ScreenStream {
                 Ok(None) => {}
                 Err(e) => log::warn!("device: reading the screen orientation failed: {e:?}"),
             }
-            register(&screen, &registration, &queue, &shared)?;
+            shared.stop_on_error(register(&screen, &registration, &queue, &shared))?;
             Ok(ScreenStream {
                 screen,
                 registration,
@@ -633,6 +643,28 @@ mod tests {
         shared.emit(ScreenEvent::Frame);
         shared.surfaces_changed(std::ptr::null_mut());
         assert_eq!(calls.load(Ordering::SeqCst), 1, "events after the panic");
+    }
+
+    #[test]
+    fn a_failed_start_delivers_nothing() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let shared = Shared {
+            stopped: AtomicBool::new(false),
+            on_event: Box::new({
+                let calls = Arc::clone(&calls);
+                move |_| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                }
+            }),
+        };
+        assert_eq!(shared.stop_on_error(Ok(7)), Ok(7));
+        shared.emit(ScreenEvent::Orientation(1));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "a started stream delivers");
+        let failed = shared.stop_on_error::<()>(Err(StreamError::DeviceNotFound));
+        assert_eq!(failed, Err(StreamError::DeviceNotFound));
+        shared.emit(ScreenEvent::Orientation(3));
+        shared.emit(ScreenEvent::Frame);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "events after a failed start");
     }
 
     /// What a callback saw, sent back to the test thread.
