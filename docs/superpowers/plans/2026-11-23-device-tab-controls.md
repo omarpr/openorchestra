@@ -160,44 +160,47 @@ Added by the spec's Amendments §3. It doesn't depend on Task 0.
 
 ---
 
-### Task 5: Click, drag, scroll and type on the picture
+### Task 5: Click, drag, scroll and type on the picture (CoreDevice input helper)
 
-Added by the spec's Amendments §1. It depends on Task 0's findings for touch, scroll and keyboard, and on Task 2's `hid` module.
+Rewritten 2026-11-23 after the input spike: legacy HID is ignored on most iOS 27.2 boots, but CoreDevice's remote HID worked on 8 of 8 boots. The authority is the spec section "## Input spike findings (CoreDevice)": its call chain, stub `.swiftinterface`, helper protocol, timing, lifetime and coordinate space. The spike's sources are in `.superpowers/sdd/2026-11-23-device-tab-controls/spike-input/`.
 
 **Files:**
-- Modify: `crates/harness-app/src/devices/hid.rs` (touch, scroll, key senders)
-- Modify: `crates/harness-app/src/workspace/ui/device_panel.rs` (`DeviceScreen` mouse/scroll/key handlers, focus)
+- Create: `crates/harness-app/helpers/device-input/` (Swift sources for `oo-device-input`, the stub `CoreDevice.swiftinterface`, and anything else the findings need)
+- Create: `script/build-device-input-helper.sh`, modelled on `script/build-voice-helper.sh`: it takes the output path and an arch list, builds with `xcrun swiftc` against the private frameworks per the findings, and supports universal builds via `lipo`. It exits 0 and removes the output, with a one-line message, when the SDK or frameworks are missing, as on CI.
+- Modify: `Makefile`, `script/run-dev.sh`, `script/package-mac.sh` and `script/notarize-mac.sh`: build, place and sign the helper at `Contents/Helpers/oo-device-input` exactly as each one does `oo-voice`. Release signing uses `--options runtime --timestamp` with the app's identity.
+- Create: `crates/harness-app/src/devices/input.rs` (macOS-only process client)
+- Modify: `crates/harness-app/src/workspace/ui/device_panel.rs` (`DeviceScreen` mouse, scroll and key handlers, focus), `crates/harness-app/src/devices/worker.rs` (forward the current `Quarter` to the UI with its generation, which the mapping needs)
+- Modify: `crates/harness-app/src/devices/hid.rs` (delete it: legacy HID is retired) and `devices/mod.rs`
 - Modify: `CHANGELOG.md`
 
 **Interfaces:**
-- Produces in `hid.rs`:
-  - `pub(crate) enum TouchPhase { Down, Move, Up }`
-  - `pub(crate) fn touch(udid: &str, phase: TouchPhase, x: f64, y: f64) -> Result<(), StreamError>`, in the device coordinate space the findings name
-  - `pub(crate) fn scroll(udid: &str, dx: f64, dy: f64) -> Result<(), StreamError>`, or none if the findings say a swipe is the fallback (then the UI turns scroll into a short swipe)
-  - `pub(crate) fn key(udid: &str, key: KeyInput) -> Result<(), StreamError>`, where `KeyInput` covers text characters, Return, Delete, Tab, arrows and Esc
-  - All are sent on one dedicated input thread, in order. Events are never dropped, and moves are coalesced only between a Down and its Up.
-- Produces in the UI: `pub(crate) fn view_to_device(point: Point<Pixels>, view: Bounds<Pixels>, surface: (u32, u32), rotation: Quarter, frame_inset: Edges<Pixels>) -> Option<(f64, f64)>` (pure). It returns None outside the screen area, and accounts for object-fit contain, the drawn rotation and the frame.
+- Produces in `input.rs`:
+  - `pub(crate) struct InputHelper`: `spawn(udid: &str) -> Result<InputHelper, String>`, found next to the app executable in `../Helpers/oo-device-input`, falling back to `target/debug/oo-device-input` for `cargo run`.
+  - Methods: `touch(phase: TouchPhase, x: f64, y: f64)`, using the findings' 0…1 portrait ratios; `key(usage: u16, down: bool)`; `text(s: &str)`, if the protocol has it, otherwise per-key; `home()`.
+  - Writes are line-oriented and non-blocking: a writer thread drains a channel, so the UI thread never blocks.
+  - One helper per watched device. It is started lazily on the first input and killed on device change, tab hide, stream stop and drop.
+  - Helper exit or stderr makes input unavailable for that device until the next start attempt, with a capped retry.
+  - `pub(crate) fn helper_path() -> Option<PathBuf>`.
+- Produces in the UI: `pub(crate) fn view_to_device(point: Point<Pixels>, screen: Bounds<Pixels>, turn: Quarter) -> Option<(f64, f64)>` (pure). It maps a point in the drawn screen rectangle, which Task 6's `screen_rect_in_frame` supplies when the frame is shown, to the portrait 0…1 ratios the helper wants. It undoes the drawn turn and returns None outside the screen.
 - Behaviour:
-  - Mouse down on the picture → Down, drag → Move, up → Up. A right click or a click outside the screen does nothing.
-  - Scroll-wheel and trackpad deltas → `scroll`.
-  - Clicking the picture focuses it, and while it's focused, typing goes to the device. Esc stays with the app; Esc to the device is Shift-Esc. Clicking elsewhere unfocuses it.
-  - ⌘-chords stay with the app, except ⌘V, which pastes the Mac clipboard as typed text.
-  - The focus ring shows when the picture has focus.
-  - If `hid_available()` is false, the picture stays watch-only and the tooltip says `This Xcode's simulator input isn't supported`.
+  - Mouse down → touch down, drag → move, up → up.
+  - Trackpad or wheel scroll → a short synthesised swipe; there is no scroll capability.
+  - Clicking the picture focuses it. While it's focused, typed keys go to the device as USB HID usages: letters, digits, punctuation with Shift, Return, Delete, Tab, arrows, and Esc as Shift-Esc. ⌘-chords stay with the app, except ⌘V, which types the Mac clipboard as text.
+  - Esc or clicking elsewhere unfocuses, and a focus ring shows while focused.
+  - Home: if the helper is available, the bar's Home uses its button press; otherwise it uses the existing SpringBoard launch.
+  - If the helper is missing or fails, the picture stays watch-only, with the tooltip `Simulator input isn't available with this Xcode`.
 - CHANGELOG `### Added`: `- Click, drag, scroll and type on the Device tab's live view to use the simulator directly.`
 
 - [ ] **Step 1: Write the failing tests:**
   - `view_to_device_maps_corners_and_centre`
   - `points_outside_the_screen_are_ignored`
-  - `rotation_maps_points_into_device_space` (each Quarter)
-  - `the_frame_inset_is_subtracted`
-  - `cmd_chords_stay_with_the_app_except_paste` (pure key routing)
-- [ ] **Step 2:** `cargo test view_to_device key_routing` → FAIL.
-- [ ] **Step 3:** Implement from the findings.
-- [ ] **Step 4:** Full `cargo test` → PASS, and clippy is clean. Manual on your own device:
-  - tap Settings → General opens
-  - drag scrolls the list
-  - type into Safari's address bar, then Return loads the page
+  - `turned_points_map_back_to_portrait` (each Quarter)
+  - `cmd_chords_stay_with_the_app_except_paste`
+  - `keys_map_to_hid_usages` (a pure table from gpui keystrokes to usage codes, with Shift)
+  - `helper_lines_are_well_formed` (the line encoding per the findings' protocol)
+- [ ] **Step 2:** `cargo test view_to_device keys_map helper_lines` → FAIL.
+- [ ] **Step 3:** Implement the helper (Swift, from the spike), the build script and packaging, then the Rust client and the UI.
+- [ ] **Step 4:** Full `cargo test` → PASS, and clippy is clean. `bash script/build-device-input-helper.sh /tmp/oo-dt/oo-device-input` builds. An `#[ignore]` live test, `helper_taps_home_and_types` (with `OO_TEST_SIM_UDID` on your own device), spawns the helper, presses Home, taps Settings → General, and types in Safari's address bar, checked by `simctl io` screenshot. Run it on 3 fresh boots → PASS each.
 - [ ] **Step 5:** Commit: `feat(app): use the simulator from the Device tab` (with the CHANGELOG line).
 
 ---
