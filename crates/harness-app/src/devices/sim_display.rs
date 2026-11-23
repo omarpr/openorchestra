@@ -10,9 +10,10 @@
 //! `state.displayClass` is 0; it takes
 //! `registerScreenCallbacksWithUUID:callbackQueue:frameCallback:surfacesChangedCallback:propertiesChangedCallback:`.
 //!
-//! - Only CoreSimulator is loaded. SimulatorKit isn't needed for the screen;
-//!   its presence beside the selected developer dir is only the check that a
-//!   full Xcode, not the Command Line Tools, is selected.
+//! - Only CoreSimulator is loaded. SimulatorKit isn't needed for the screen.
+//!   The selected developer dir having `Platforms/iPhoneSimulator.platform`
+//!   is only the check that a full Xcode, not the Command Line Tools, is
+//!   selected.
 //! - The ports, descriptors and their state are ROCK remote proxies whose
 //!   classes are generated at run time and answer by forwarding: their
 //!   classes have none of these methods, so objc2's `msg_send!` (which checks
@@ -45,8 +46,9 @@ use crate::ports::run_bounded;
 
 const CORE_SIMULATOR: &str =
     "/Library/Developer/PrivateFrameworks/CoreSimulator.framework/CoreSimulator";
-/// Relative to the developer dir's parent (`…/Xcode.app/Contents`).
-const SIMULATOR_KIT: &str = "SharedFrameworks/SimulatorKit.framework/SimulatorKit";
+/// Relative to the developer dir; every full Xcode has it, the Command Line
+/// Tools don't.
+const SIMULATOR_PLATFORM: &str = "Platforms/iPhoneSimulator.platform";
 /// `-[SimDevice state]` of a booted device.
 const BOOTED: u64 = 3;
 /// `displayClass` of the device's own screen (the others are external
@@ -66,30 +68,30 @@ pub(crate) enum ScreenEvent {
     Gone,
 }
 
-/// The frameworks the stream needs.
+/// What the stream needs on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FrameworkPaths {
     pub core_simulator: PathBuf,
-    pub simulator_kit: PathBuf,
+    /// The iOS simulator platform, inside a full Xcode only.
+    pub simulator_platform: PathBuf,
 }
 
-/// Where the frameworks are for the developer dir `xcode-select -p` gives
+/// Where those are for the developer dir `xcode-select -p` gives
 /// (`…/Xcode.app/Contents/Developer`).
 pub(crate) fn framework_paths(developer_dir: &Path) -> FrameworkPaths {
-    let contents = developer_dir.parent().unwrap_or(developer_dir);
     FrameworkPaths {
         core_simulator: PathBuf::from(CORE_SIMULATOR),
-        simulator_kit: contents.join(SIMULATOR_KIT),
+        simulator_platform: developer_dir.join(SIMULATOR_PLATFORM),
     }
 }
 
-/// `NoXcode` unless both frameworks exist: a Command Line Tools developer dir
-/// has no SimulatorKit beside it.
+/// `NoXcode` unless both exist: a Command Line Tools developer dir has no
+/// simulator platform.
 pub(crate) fn check_paths(
     paths: &FrameworkPaths,
     exists: impl Fn(&Path) -> bool,
 ) -> Result<(), StreamError> {
-    if exists(&paths.core_simulator) && exists(&paths.simulator_kit) {
+    if exists(&paths.core_simulator) && exists(&paths.simulator_platform) {
         Ok(())
     } else {
         Err(StreamError::NoXcode)
@@ -494,13 +496,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn simulator_kit_is_found_beside_the_selected_xcode() {
+    fn the_simulator_platform_is_found_in_the_selected_xcode() {
         let paths = framework_paths(Path::new("/Applications/Xcode-beta.app/Contents/Developer"));
         assert_eq!(
-            paths.simulator_kit,
-            Path::new(
-                "/Applications/Xcode-beta.app/Contents/SharedFrameworks/SimulatorKit.framework/SimulatorKit"
-            )
+            paths.simulator_platform,
+            Path::new("/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform")
         );
         assert_eq!(
             paths.core_simulator,
@@ -509,9 +509,9 @@ mod tests {
     }
 
     #[test]
-    fn a_command_line_tools_developer_dir_has_no_simulator_kit() {
+    fn a_command_line_tools_developer_dir_has_no_simulator_platform() {
         let paths = framework_paths(Path::new("/Library/Developer/CommandLineTools"));
-        assert!(!paths.simulator_kit.exists());
+        assert!(!paths.simulator_platform.exists());
         assert_eq!(
             check_paths(&paths, |p| p.exists()),
             Err(StreamError::NoXcode)
@@ -522,6 +522,20 @@ mod tests {
             Err(StreamError::NoXcode)
         );
         assert_eq!(check_paths(&paths, |_| true), Ok(()));
+    }
+
+    #[test]
+    fn an_xcode_without_shared_simulator_kit_is_still_xcode() {
+        // Xcode 26 and older keep SimulatorKit elsewhere (only Xcode 27 has
+        // it in Contents/SharedFrameworks); the stream never loads it.
+        let root = tempfile::tempdir().unwrap();
+        let developer = root.path().join("Xcode-26.app/Contents/Developer");
+        std::fs::create_dir_all(developer.join("Platforms/iPhoneSimulator.platform")).unwrap();
+        let paths = framework_paths(&developer);
+        assert_eq!(
+            check_paths(&paths, |p| p == paths.core_simulator || p.exists()),
+            Ok(())
+        );
     }
 
     #[test]
