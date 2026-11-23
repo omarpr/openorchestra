@@ -30,6 +30,7 @@ use gpui::{
 use super::super::*;
 use super::device_panel::DeviceScreen;
 use crate::devices::Quarter;
+use crate::devices::chrome::Rect;
 use crate::devices::input::{
     HelperEvent, InputHelper, KeyAction, Retry, TouchPhase, UNAVAILABLE_TIP, helper_path,
     key_action,
@@ -43,9 +44,11 @@ pub(crate) const SWIPE_IDLE: Duration = Duration::from_millis(120);
 pub(crate) const GESTURE_IDLE: Duration = Duration::from_millis(600);
 /// A wheel's line, in view pixels.
 const SCROLL_LINE: Pixels = px(20.0);
-/// The focus ring's width, and its gap from the device.
-const RING: f32 = 2.0;
-const RING_GAP: f32 = 3.0;
+/// The focus ring's width: thin, round the screen (`chrome::focus_ring`).
+pub(crate) const RING: f32 = 2.0;
+/// How far, in view points, a trackpad gesture must move in all before its
+/// finger goes down: past iOS's tap slop, so a jitter is never a tap.
+pub(crate) const MIN_SWIPE: f32 = 10.0;
 
 /// (u, v) in the upright picture, as the portrait surface's (x, y): the
 /// inverse of the turn it was drawn with (see "Spike findings" in the
@@ -127,6 +130,9 @@ enum Gesture {
 pub(crate) struct Swipe {
     at: Option<Point<Pixels>>,
     gesture: Gesture,
+    /// A trackpad gesture's movement while no finger is down, until it
+    /// reaches [`MIN_SWIPE`].
+    pending: Point<Pixels>,
 }
 
 impl Swipe {
@@ -142,9 +148,13 @@ impl Swipe {
         screen: Bounds<Pixels>,
     ) -> Vec<(TouchPhase, Point<Pixels>)> {
         match step {
-            GestureStep::Started => self.gesture = Gesture::Touching,
+            GestureStep::Started => {
+                self.gesture = Gesture::Touching;
+                self.pending = Point::default();
+            }
             GestureStep::Ended | GestureStep::Cancelled => {
                 self.gesture = Gesture::Tail;
+                self.pending = Point::default();
                 return self.end().into_iter().collect();
             }
             GestureStep::Moved if self.gesture == Gesture::Tail && precise => return Vec::new(),
@@ -155,9 +165,18 @@ impl Swipe {
             return Vec::new();
         }
         let mut out = Vec::new();
+        let mut delta = delta;
         let from = match self.at {
             Some(at) => at,
             None if inside(pointer, screen) => {
+                if precise {
+                    self.pending += delta;
+                    let (x, y) = (f32::from(self.pending.x), f32::from(self.pending.y));
+                    if x.hypot(y) < MIN_SWIPE {
+                        return out;
+                    }
+                    delta = std::mem::take(&mut self.pending);
+                }
                 out.push((TouchPhase::Down, pointer));
                 pointer
             }
@@ -185,6 +204,13 @@ impl Swipe {
         self.at?;
         Some(if self.gesture == Gesture::Touching { GESTURE_IDLE } else { SWIPE_IDLE })
     }
+}
+
+/// Whether a helper's failure hands the keyboard back: only the current
+/// helper's (an old one's comes in late), and only while the picture has it
+/// (keys would go nowhere, with no ring to say so).
+pub(crate) fn give_back_keyboard(current: bool, has_keyboard: bool) -> bool {
+    current && has_keyboard
 }
 
 /// What a mouse press on the picture's element does.
@@ -241,6 +267,10 @@ pub(crate) struct ScreenInput {
     pub(crate) focus: FocusHandle,
     /// What had the keyboard before the picture took it.
     previous_focus: Option<FocusHandle>,
+    /// The picture has the keyboard (kept by `focus_watch`).
+    has_keyboard: bool,
+    /// Its helper failed while it had it: the next render hands it back.
+    give_back: bool,
     focus_watch: Vec<Subscription>,
 }
 
@@ -269,6 +299,8 @@ impl ScreenInput {
             swipe_ticket: 0,
             focus: cx.focus_handle(),
             previous_focus: None,
+            has_keyboard: false,
+            give_back: false,
             focus_watch: Vec::new(),
         }
     }
@@ -285,15 +317,8 @@ pub(crate) struct InputPaint {
 }
 
 impl InputPaint {
-    /// The picture was painted at `screen` (with the device's frame, if
-    /// any, at `device`), drawn upright by `turn`.
-    pub(crate) fn paint(
-        self,
-        screen: Bounds<Pixels>,
-        device: Bounds<Pixels>,
-        turn: Quarter,
-        window: &mut Window,
-    ) {
+    /// The picture was painted at `screen`, drawn upright by `turn`.
+    pub(crate) fn paint(&self, screen: Bounds<Pixels>, turn: Quarter, window: &mut Window) {
         if !self.interactive {
             self.hit.set(None);
             return;
@@ -314,24 +339,33 @@ impl InputPaint {
                 });
             }
         });
-        let (touching, this) = (self.touching, self.this);
+        let (touching, this) = (self.touching.clone(), self.this.clone());
         window.on_mouse_event(move |e: &MouseUpEvent, phase, _, cx| {
             if phase == DispatchPhase::Capture && e.button == MouseButton::Left && touching.get() {
                 let _ = this.update(cx, |screen, _| screen.lift(e.position));
             }
         });
-        if let Some(colour) = self.ring {
-            let ring = device.dilate(px(RING_GAP + RING));
-            let radius = f32::from(ring.size.width.min(ring.size.height)) * 0.12;
-            window.paint_quad(gpui::quad(
-                ring,
-                px(radius),
-                gpui::transparent_black(),
-                px(RING),
-                colour,
-                gpui::BorderStyle::Solid,
-            ));
-        }
+    }
+
+    /// The focus ring, while the picture has the keyboard: `ring` and its
+    /// corner `radius` from `chrome::focus_ring`. Painted last, over the
+    /// frame.
+    pub(crate) fn paint_ring(&self, ring: Rect, radius: f32, window: &mut Window) {
+        let Some(colour) = self.ring.filter(|_| self.interactive) else {
+            return;
+        };
+        let bounds = Bounds::new(
+            gpui::point(px(ring.x), px(ring.y)),
+            gpui::size(px(ring.w), px(ring.h)),
+        );
+        window.paint_quad(gpui::quad(
+            bounds,
+            px(radius),
+            gpui::transparent_black(),
+            px(RING),
+            colour,
+            gpui::BorderStyle::Solid,
+        ));
     }
 }
 
@@ -424,7 +458,14 @@ impl DeviceScreen {
                     retry.worked();
                 }
             }
-            HelperEvent::Failed(serial, why) if current(serial) => {
+            HelperEvent::Failed(serial, why) => {
+                let current = current(serial);
+                if give_back_keyboard(current, self.input.has_keyboard) {
+                    self.input.give_back = true;
+                }
+                if !current {
+                    return;
+                }
                 log::info!("device: simulator input stopped: {why}");
                 self.input.helper = None;
                 self.input.touching.set(false);
@@ -576,9 +617,20 @@ impl DeviceScreen {
             // The ring follows the keyboard, wherever it goes.
             let focus = self.input.focus.clone();
             self.input.focus_watch = vec![
-                cx.on_focus_in(&focus, window, |_, _, cx| cx.notify()),
-                cx.on_focus_out(&focus, window, |_, _, _, cx| cx.notify()),
+                cx.on_focus_in(&focus, window, |screen: &mut Self, _, cx| {
+                    screen.input.has_keyboard = true;
+                    cx.notify();
+                }),
+                cx.on_focus_out(&focus, window, |screen: &mut Self, _, _, cx| {
+                    screen.input.has_keyboard = false;
+                    cx.notify();
+                }),
             ];
+        }
+        // A helper failed while the picture had the keyboard: hand it back,
+        // as Esc does.
+        if std::mem::take(&mut self.input.give_back) {
+            cx.defer_in(window, |screen, window, cx| screen.unfocus(window, cx));
         }
         let interactive = interactive && self.takes_input();
         let focused = self.input.focus.is_focused(window);
@@ -777,6 +829,46 @@ mod tests {
         swipe.scroll(at(60.0, 120.0), d(0.0), Step::Ended, true, s);
         swipe.scroll(at(60.0, 120.0), d(0.0), Step::Started, true, s);
         assert_eq!(swipe.scroll(at(60.0, 120.0), d(-10.0), Step::Moved, true, s).len(), 2);
+    }
+
+    #[test]
+    fn a_tiny_trackpad_jitter_never_touches_the_device() {
+        let s = screen();
+        let mut swipe = Swipe::default();
+        let mv = |swipe: &mut Swipe, y| swipe.scroll(at(60.0, 120.0), d(y), Step::Moved, true, s);
+        swipe.scroll(at(60.0, 120.0), d(0.0), Step::Started, true, s);
+        // A pixel or two this way and that, inside iOS's tap slop: no Down,
+        // Move and Up that would read as a tap.
+        for y in [1.0, -2.0, 1.5, 9.0] {
+            assert!(mv(&mut swipe, y).is_empty(), "{y}");
+        }
+        assert_eq!(swipe.lift_after(), None);
+        assert!(swipe.scroll(at(60.0, 120.0), d(0.0), Step::Ended, true, s).is_empty());
+        // What a jitter moved is forgotten with its gesture.
+        swipe.scroll(at(60.0, 120.0), d(0.0), Step::Started, true, s);
+        assert!(mv(&mut swipe, 6.0).is_empty());
+        // Once the gesture has moved MIN_SWIPE in all, the finger goes down
+        // where it began and moves the whole way at once.
+        let went = mv(&mut swipe, 6.0);
+        let [(TouchPhase::Down, from), (TouchPhase::Move, to)] = went[..] else {
+            panic!("{went:?}");
+        };
+        assert_eq!(from, at(60.0, 120.0));
+        assert_eq!(to, at(60.0, 132.0));
+        const { assert!(MIN_SWIPE <= 12.0) };
+        // A wheel's line is well past it, and goes at once.
+        let mut wheel = Swipe::default();
+        assert_eq!(wheel.scroll(at(60.0, 120.0), d(-1.0), Step::Moved, false, s).len(), 2);
+    }
+
+    #[test]
+    fn only_the_current_helpers_failure_hands_the_keyboard_back() {
+        // The picture had the keyboard and its helper failed: it goes back
+        // (the ring would go, but keys would go nowhere).
+        assert!(give_back_keyboard(true, true));
+        // It didn't have it, or an old helper's failure came in late.
+        assert!(!give_back_keyboard(true, false));
+        assert!(!give_back_keyboard(false, true));
     }
 
     #[test]

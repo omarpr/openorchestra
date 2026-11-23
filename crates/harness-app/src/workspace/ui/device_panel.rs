@@ -22,7 +22,7 @@ use super::device_controls::error_line;
 use crate::devices::simctl::{DeviceList, ListError};
 use crate::devices::tab_state::{Command, DeviceTab, DeviceView};
 use crate::devices::chrome::{
-    ChromeSpec, OverlayCache, OverlayKey, Painted, Rect, frame_around, painted, place,
+    ChromeSpec, OverlayCache, OverlayKey, Painted, Rect, focus_ring, frame_around, painted, place,
 };
 use crate::devices::{DeviceInfo, Quarter, StreamError};
 
@@ -496,7 +496,6 @@ impl Render for DeviceScreen {
                 // overlay's hole.
                 let painted = painted(placement, geometry, turn, window.scale_factor());
                 let screen = bounds_of(painted.picture);
-                let device = bounds_of(placement.frame.map_or(painted.picture, |_| painted.overlay));
                 match picture {
                     #[cfg(target_os = "macos")]
                     Picture::Live(buffer) => window.paint_surface(screen, buffer),
@@ -505,34 +504,43 @@ impl Render for DeviceScreen {
                         let _ = window.paint_image(screen, screen, corners, shot, 0, false);
                     }
                 }
-                input.paint(screen, device, turn, window);
+                input.paint(screen, turn, window);
                 let framed = placement.frame.is_some();
                 let key = overlay_for(spec.as_deref(), &device_type, framed, painted, turn, fill)
                 .filter(|k| k.framed || !mask_failed);
-                let Some(key) = key else {
-                    return;
-                };
-                // This overlay, or until it's drawn the nearest kept one
-                // (stretched), so the picture is never shown unclipped. A
-                // framed one goes round the screen, an unframed one on it.
-                if let Some((drawn, image)) = overlays.closest(&key) {
-                    let at = match (drawn.framed, framed) {
-                        (true, true) => Some(painted.overlay),
-                        (true, false) => {
-                            frame_geometry.map(|g| frame_around(painted.picture, g, turn))
+                if let Some(key) = key {
+                    // This overlay, or until it's drawn the nearest kept one
+                    // (stretched), so the picture is never shown unclipped. A
+                    // framed one goes round the screen, an unframed one on it.
+                    if let Some((drawn, image)) = overlays.closest(&key) {
+                        let at = match (drawn.framed, framed) {
+                            (true, true) => Some(painted.overlay),
+                            (true, false) => {
+                                frame_geometry.map(|g| frame_around(painted.picture, g, turn))
+                            }
+                            (false, _) => Some(painted.picture),
+                        };
+                        if let Some(at) = at.map(bounds_of) {
+                            let image = image.clone();
+                            let _ = window.paint_image(at, at, Default::default(), image, 0, false);
                         }
-                        (false, _) => Some(painted.picture),
-                    };
-                    if let Some(at) = at.map(bounds_of) {
-                        let image = image.clone();
-                        let _ = window.paint_image(at, at, Default::default(), image, 0, false);
+                    }
+                    if overlays.get(&key).is_none() && wanted.as_ref() != Some(&key) {
+                        cx.defer(move |cx| {
+                            let _ = this.update(cx, |screen, cx| screen.want_overlay(key, cx));
+                        });
                     }
                 }
-                if overlays.get(&key).is_none() && wanted.as_ref() != Some(&key) {
-                    cx.defer(move |cx| {
-                        let _ = this.update(cx, |screen, cx| screen.want_overlay(key, cx));
-                    });
-                }
+                // Over the frame and the rounded corners: round the screen.
+                let ring = focus_ring(
+                    painted.picture,
+                    rect_of(bounds),
+                    spec.as_ref().and_then(|s| s.screen_pt),
+                    spec.as_ref().and_then(|s| s.screen_corner_pt),
+                    turn,
+                    super::device_input::RING,
+                );
+                input.paint_ring(ring.0, ring.1, window);
             },
         )
         .size_full()
@@ -1404,6 +1412,7 @@ mod tests {
     fn the_overlay_is_drawn_again_only_when_its_look_changes() {
         let spec = ChromeSpec {
             screen_pt: Some((402.0, 874.0)),
+            screen_corner_pt: Some(62.0),
             mask: Some("/m.pdf".into()),
             frame: None,
         };

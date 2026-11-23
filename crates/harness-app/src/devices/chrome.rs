@@ -14,7 +14,10 @@
 //! - `<bundle>/Contents/Resources/capabilities.plist`:
 //!   `capabilities.ScreenDimensionsCapability.main-screen-{width,height,scale}`
 //!   (1206 × 2622 px at 3×): the screen in points, which sets the frame's
-//!   thickness against the picture. The mask PDF's own size is no unit (it
+//!   thickness against the picture; and `capabilities.DeviceCornerRadius`
+//!   (62), the screen's corner radius in points, which the focus ring
+//!   follows (it matches the mask: phone11's is opaque from 55 px along its
+//!   diagonal at 3×, a 62.5 pt circle). The mask PDF's own size is no unit (it
 //!   is pixels on some devices, points or 6× on others), so the mask is
 //!   always stretched over the screen.
 //! - `/Library/Developer/DeviceKit/Chrome/phone11.devicechrome/Contents/Resources/chrome.json`:
@@ -128,6 +131,8 @@ pub(crate) struct FrameArt {
 pub(crate) struct ChromeSpec {
     /// The screen in points, portrait.
     pub screen_pt: Option<(f32, f32)>,
+    /// Its corner radius, in points (0 for a square screen).
+    pub screen_corner_pt: Option<f32>,
     /// The `framebufferMask` PDF.
     pub mask: Option<PathBuf>,
     /// Only with `screen_pt`: the frame is laid out around it.
@@ -192,6 +197,13 @@ pub(crate) fn parse_screen_points(json: &str) -> Option<(f32, f32)> {
     (w > 0.0 && h > 0.0).then(|| ((w / scale) as f32, (h / scale) as f32))
 }
 
+/// `capabilities.plist` (as JSON): the screen's corner radius, in points.
+pub(crate) fn parse_screen_corner(json: &str) -> Option<f32> {
+    let root: Value = serde_json::from_str(json).ok()?;
+    let radius = root.get("capabilities")?.get("DeviceCornerRadius")?.as_f64()?;
+    (radius >= 0.0).then_some(radius as f32)
+}
+
 /// `simctl list devicetypes -j`: each type's bundle, keyed by the
 /// identifier's suffix (`iPhone-18-Pro`, as `DeviceInfo::device_type`).
 pub(crate) fn parse_device_type_bundles(json: &str) -> Option<HashMap<String, PathBuf>> {
@@ -219,9 +231,9 @@ pub(crate) fn spec_from(
 ) -> Option<ChromeSpec> {
     let res = bundle.join("Contents/Resources");
     let profile = parse_profile(&read_plist(&res.join("profile.plist"))?)?;
-    let screen_pt = read_plist(&res.join("capabilities.plist"))
-        .as_deref()
-        .and_then(parse_screen_points);
+    let capabilities = read_plist(&res.join("capabilities.plist"));
+    let screen_pt = capabilities.as_deref().and_then(parse_screen_points);
+    let screen_corner_pt = capabilities.as_deref().and_then(parse_screen_corner);
     let mask = profile
         .mask
         .map(|name| res.join(format!("{name}.pdf")))
@@ -234,7 +246,7 @@ pub(crate) fn spec_from(
         let (pieces, sizing, composite) = parse_chrome_json(&json)?;
         Some(FrameArt { dir, pieces, composite, sizing })
     });
-    Some(ChromeSpec { screen_pt, mask, frame })
+    Some(ChromeSpec { screen_pt, screen_corner_pt, mask, frame })
 }
 
 /// A plist as JSON, via `plutil` (macOS ships it; elsewhere this is None).
@@ -279,6 +291,39 @@ pub(crate) fn chrome_for(device_type_id: &str) -> Option<Arc<ChromeSpec>> {
         .get_or_insert_with(HashMap::new)
         .insert(device_type_id.to_string(), spec.clone());
     spec
+}
+
+/// The focus ring round a screen painted at `picture` (upright, turned by
+/// `turn` from the portrait `screen_pt`) inside `canvas`: its rect and
+/// corner radius, `width` thick. It hugs the screen: just outside it where
+/// the canvas has room (up to `width`), else on its edge, so it is never
+/// clipped; its corners are the screen's (`corner_pt`, scaled to the
+/// picture) grown by as much. An unknown screen size or corner is square.
+pub(crate) fn focus_ring(
+    picture: Rect,
+    canvas: Rect,
+    screen_pt: Option<(f32, f32)>,
+    corner_pt: Option<f32>,
+    turn: Quarter,
+    width: f32,
+) -> (Rect, f32) {
+    let room = (picture.x - canvas.x)
+        .min(picture.y - canvas.y)
+        .min(canvas.x + canvas.w - (picture.x + picture.w))
+        .min(canvas.y + canvas.h - (picture.y + picture.h));
+    let out = room.clamp(0.0, width);
+    let scale = screen_pt
+        .map(|pt| turned_size(pt, turn).0)
+        .filter(|w| *w > 0.0)
+        .map_or(0.0, |w| picture.w / w);
+    let corner = (corner_pt.unwrap_or(0.0) * scale).min(picture.w.min(picture.h) / 2.0);
+    let ring = Rect {
+        x: picture.x - out,
+        y: picture.y - out,
+        w: picture.w + 2.0 * out,
+        h: picture.h + 2.0 * out,
+    };
+    (ring, corner + out)
 }
 
 /// How far, in points, a composite may differ from the frame it is drawn
@@ -884,6 +929,7 @@ mod tests {
     /// `capabilities.plist`, trimmed the same way.
     const CAPABILITIES: &str = r#"{
         "capabilities": {
+            "DeviceCornerRadius": 62,
             "ScreenDimensionsCapability": {
                 "main-screen-height": 2622,
                 "main-screen-scale": 3,
@@ -929,6 +975,59 @@ mod tests {
         assert_eq!(parse_screen_points("{}"), None);
     }
 
+    #[test]
+    fn parses_the_screens_corner_radius() {
+        // capabilities.DeviceCornerRadius, in points: 62 on the iPhone 18
+        // Pro, 18 on an iPad, 0 (square) on an iPhone SE.
+        assert_eq!(parse_screen_corner(CAPABILITIES), Some(62.0));
+        let square = r#"{"capabilities": {"DeviceCornerRadius": 0}}"#;
+        assert_eq!(parse_screen_corner(square), Some(0.0));
+        assert_eq!(parse_screen_corner("{}"), None);
+        assert_eq!(parse_screen_corner(r#"{"capabilities": {"DeviceCornerRadius": -3}}"#), None);
+    }
+
+    #[test]
+    fn the_focus_ring_hugs_the_screen() {
+        let r = |x, y, w, h| Rect { x, y, w, h };
+        let screen = Some((402.0, 874.0));
+        let corner = Some(62.0);
+        // Frame on: room round the screen, so the ring sits just outside it,
+        // its corners the screen's (62 pt at half size, 31) plus the ring.
+        let canvas = r(0.0, 0.0, 300.0, 600.0);
+        let framed = r(40.0, 60.0, 201.0, 437.0);
+        assert_eq!(
+            focus_ring(framed, canvas, screen, corner, Quarter::None, 2.0),
+            (r(38.0, 60.0 - 2.0, 205.0, 441.0), 33.0)
+        );
+        assert_eq!(focus_ring(framed, canvas, screen, corner, Quarter::Cw180, 2.0).1, 33.0);
+        // Frame off: the screen fills the canvas's width, so the ring stays
+        // on it rather than be clipped, with the screen's own corners.
+        let bare_canvas = r(0.0, 0.0, 201.0, 500.0);
+        let bare = r(0.0, 31.5, 201.0, 437.0);
+        assert_eq!(focus_ring(bare, bare_canvas, screen, corner, Quarter::None, 2.0), (bare, 31.0));
+        // Turned, the screen's long side is across: the same corners.
+        let turned = r(40.0, 60.0, 437.0, 201.0);
+        let wide = r(0.0, 0.0, 600.0, 300.0);
+        for turn in [Quarter::Cw90, Quarter::Cw270] {
+            assert_eq!(
+                focus_ring(turned, wide, screen, corner, turn, 2.0),
+                (r(38.0, 58.0, 441.0, 205.0), 33.0),
+                "{turn:?}"
+            );
+            let touching = r(0.0, 49.5, 600.0, 201.0 * 600.0 / 437.0);
+            let (ring, radius) = focus_ring(touching, wide, screen, corner, turn, 2.0);
+            assert_eq!(ring, touching, "{turn:?}");
+            assert!((radius - 62.0 * 600.0 / 874.0).abs() < 1e-3, "{turn:?} {radius}");
+        }
+        // Inside the canvas however little room: a gap of 1 gives 1.
+        let snug = r(1.0, 1.0, 201.0, 437.0);
+        let (ring, radius) = focus_ring(snug, r(0.0, 0.0, 203.0, 439.0), screen, corner, Quarter::None, 2.0);
+        assert_eq!((ring, radius), (r(0.0, 0.0, 203.0, 439.0), 32.0));
+        // A square screen, or one whose corners aren't known: square.
+        assert_eq!(focus_ring(framed, canvas, screen, Some(0.0), Quarter::None, 2.0).1, 2.0);
+        assert_eq!(focus_ring(framed, canvas, None, None, Quarter::None, 2.0).1, 2.0);
+    }
+
     /// A device type bundle and a chrome root in `dir`, laid out as Xcode
     /// lays them out, with the plists already as JSON. `chrome`: whether the
     /// named chrome is installed.
@@ -958,6 +1057,7 @@ mod tests {
         let (bundle, root) = install(dir.path(), true);
         let spec = spec_from(&bundle, &root, read).unwrap();
         assert_eq!(spec.screen_pt, Some((402.0, 874.0)));
+        assert_eq!(spec.screen_corner_pt, Some(62.0));
         assert_eq!(
             spec.mask.as_deref(),
             Some(bundle.join("Contents/Resources/4E5532ED-1470-47D1-BDF4-7AA90C26957A.pdf").as_path())
@@ -1309,6 +1409,7 @@ mod tests {
         let sizing = Insets { left: 18.0, top: 18.0, right: 18.0, bottom: 18.0 };
         let spec = ChromeSpec {
             screen_pt: Some((402.0, 874.0)),
+            screen_corner_pt: Some(62.0),
             mask: None,
             frame: Some(FrameArt {
                 dir: dir.path().to_path_buf(),
@@ -1396,6 +1497,7 @@ mod tests {
         let name = |n: &str| n.to_string();
         ChromeSpec {
             screen_pt: Some((402.0, 874.0)),
+            screen_corner_pt: Some(62.0),
             mask: Some(dir.join("mask.pdf")),
             frame: Some(FrameArt {
                 dir: dir.to_path_buf(),
