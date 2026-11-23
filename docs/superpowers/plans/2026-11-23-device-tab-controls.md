@@ -28,7 +28,7 @@
 1. **A click while the watched device changes** (the picker switches, or the device shuts down mid-command). The command must go to the device that was shown at click time and must not be retried on the new one. Pinned in Task 3 (the click captures the UDID; test).
 2. **Rotating while live.** The picture re-fits and stays upright, with no stretched frame or stale buffer size. Pinned in Task 3 (the pure "draw rotation" function from orientation and surface size) and checked by eye in Task 4.
 3. **Text size at its limits.** Repeated `increment` or `decrement` past the largest or smallest size must not error loudly. `simctl` may exit non-zero. Treat that as a quiet no-op note, not a red error. Pinned in Task 1.
-4. **Reduced mode.** Dark/Light, Text size and Screenshot work. Rotate and Home are hidden if the HID path didn't load, otherwise they still work. Pinned in Task 1 (`available_controls`).
+4. **Reduced mode.** Dark/Light, Text size and Screenshot work. Rotate is offered only when `rotate_available()` (public `devicectl`). Home is always offered: the `oo-device-input` helper's button press, else bringing SpringBoard forward. The legacy HID path is gone (amended 2026-11-23). Pinned in Task 1 (`available_controls`).
 5. **A large clipboard image.** A full-resolution PNG (1206×2622) is written once, with no UI hitch: encoding happens off the main thread. Pinned in Task 3.
 
 ---
@@ -247,6 +247,6 @@ Same isolation as the Device tab plan's Task 7: the `/tmp/oo-dt` scratch bundle 
 - [ ] **Step 2:** Rotate ×4: the picture turns and stays upright, then returns to portrait. Home from Settings: the home screen shows.
 - [ ] **Step 3:** Dark/Light: the picture changes, and the tooltip flips. Text size: Settings' text visibly grows and shrinks. At the limit, the quiet note shows.
 - [ ] **Step 4:** Copy screenshot: the clipboard holds a PNG of the device (`osascript -e 'clipboard info'` lists `«class PNGf»`), and the note shows.
-- [ ] **Step 5:** With `OO_DEVICE_FORCE_SCREENSHOTS=1`: the public controls still work, and Rotate/Home follow `hid_available()`.
+- [ ] **Step 5:** With `OO_DEVICE_FORCE_SCREENSHOTS=1`: the public controls still work, Rotate follows `rotate_available()`, and Home is always offered (the input helper's button press, else SpringBoard). There is no legacy HID any more.
 - [ ] **Step 6:** Switch devices mid-click (start Screenshot, then pick the other device): the screenshot is of the first device, and nothing runs on the second.
 - [ ] **Step 7:** Delete the test devices. Report the results.

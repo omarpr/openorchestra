@@ -158,11 +158,15 @@ pub(crate) enum HelperEvent {
 
 /// The Home presses waiting for the helper's answer, oldest first.
 type HomeWaiters = Arc<Mutex<VecDeque<Sender<Result<(), String>>>>>;
+/// The helper's process once started, until it is reaped (by its writer
+/// thread or after its handle drops, whichever first).
+type SharedChild = Arc<Mutex<Option<Child>>>;
 
 /// A running `oo-device-input` for one simulator.
 pub(crate) struct InputHelper {
     lines: Sender<Line>,
     home_waiters: HomeWaiters,
+    child: SharedChild,
 }
 
 impl InputHelper {
@@ -176,18 +180,36 @@ impl InputHelper {
         events: UnboundedSender<HelperEvent>,
     ) -> Result<InputHelper, String> {
         let path = helper_path().ok_or_else(|| format!("no {HELPER} with this build"))?;
+        Self::spawn_at(&path, udid, serial, events)
+    }
+
+    /// [`InputHelper::spawn`], of the program at `path`.
+    fn spawn_at(
+        path: &Path,
+        udid: &str,
+        serial: u64,
+        events: UnboundedSender<HelperEvent>,
+    ) -> Result<InputHelper, String> {
         let (lines, rx) = mpsc::channel();
         let home_waiters = HomeWaiters::default();
-        let udid = udid.to_string();
-        let waiters = home_waiters.clone();
+        let child = SharedChild::default();
+        let (path, udid) = (path.to_path_buf(), udid.to_string());
+        let (waiters, shared) = (home_waiters.clone(), child.clone());
         std::thread::Builder::new()
             .name("oo-device-input".into())
-            .spawn(move || run(&path, &udid, serial, rx, events, waiters))
+            .spawn(move || run(&path, &udid, serial, rx, events, waiters, shared))
             .map_err(|e| format!("starting the input thread: {e}"))?;
         Ok(InputHelper {
             lines,
             home_waiters,
+            child,
         })
+    }
+
+    /// The helper's process id, once started and until reaped.
+    #[cfg(all(test, target_os = "macos"))]
+    fn pid(&self) -> Option<u32> {
+        self.child.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(Child::id)
     }
 
     fn send(&self, line: Line) {
@@ -236,6 +258,18 @@ impl InputHelper {
     }
 }
 
+impl Drop for InputHelper {
+    /// The writer thread ends the helper once it sees the handle go, but a
+    /// helper that stopped reading (hung) can block it in a write for good:
+    /// this reaps it too, after the same grace.
+    fn drop(&mut self) {
+        let child = self.child.clone();
+        let _ = std::thread::Builder::new()
+            .name("oo-device-input-reap".into())
+            .spawn(move || reap(&child));
+    }
+}
+
 /// The writer thread: starts the helper, then writes what the UI sends
 /// until the handle is dropped or the helper goes; then sees it ends.
 fn run(
@@ -245,6 +279,7 @@ fn run(
     lines: Receiver<Line>,
     events: UnboundedSender<HelperEvent>,
     home_waiters: HomeWaiters,
+    shared: SharedChild,
 ) {
     let fail = |why: String| {
         let _ = events.unbounded_send(HelperEvent::Failed(serial, why));
@@ -259,10 +294,10 @@ fn run(
         Ok(child) => child,
         Err(e) => return fail(format!("starting {}: {e}", path.display())),
     };
-    let (Some(stdin), Some(stdout), Some(stderr)) =
-        (child.stdin.take(), child.stdout.take(), child.stderr.take())
-    else {
-        reap(child);
+    let pipes = (child.stdin.take(), child.stdout.take(), child.stderr.take());
+    *shared.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
+    let (Some(stdin), Some(stdout), Some(stderr)) = pipes else {
+        reap(&shared);
         return fail(format!("{HELPER} has no pipes"));
     };
     let replies = {
@@ -283,11 +318,11 @@ fn run(
             })
     };
     if replies.is_err() || complaints.is_err() {
-        reap(child);
+        reap(&shared);
         return fail("starting the input reader threads failed".into());
     }
     write_lines(stdin, &lines);
-    reap(child);
+    reap(&shared);
 }
 
 /// Writes each batch of waiting lines, coalesced, until the sender is
@@ -357,17 +392,28 @@ fn read_replies(
 }
 
 /// Waits a moment for the helper to finish (its last sends leave in that
-/// time), then kills it.
-fn reap(mut child: Child) {
+/// time), then kills it. Whoever reaps it takes it out of `shared`, so it
+/// is never killed (nor its pid reused) twice.
+fn reap(shared: &SharedChild) {
+    let lock = || shared.lock().unwrap_or_else(|e| e.into_inner());
     let deadline = Instant::now() + EXIT_GRACE;
     while Instant::now() < deadline {
-        if let Ok(Some(_)) = child.try_wait() {
-            return;
+        {
+            let mut slot = lock();
+            let Some(child) = slot.as_mut() else {
+                return;
+            };
+            if let Ok(Some(_)) = child.try_wait() {
+                *slot = None;
+                return;
+            }
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    if let Some(mut child) = lock().take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }
 
 /// Where the helper is for the executable at `exe`, in the order to look:
@@ -790,6 +836,39 @@ mod tests {
                 PathBuf::from("/r/target/debug/oo-device-input"),
             ]
         );
+    }
+
+    /// A helper that stops reading its stdin (hung) while a long paste
+    /// fills the pipe blocks the writer thread in a write, which used to
+    /// keep the process alive after its handle was gone. It is killed a
+    /// moment after the drop all the same.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_helper_that_stops_reading_is_killed_when_dropped() {
+        // `sleep 30` stands in for it: it never reads stdin.
+        let (events, _rx) = futures::channel::mpsc::unbounded();
+        let helper = InputHelper::spawn_at(Path::new("/bin/sleep"), "30", 1, events).unwrap();
+        let started = Instant::now();
+        let pid = loop {
+            if let Some(pid) = helper.pid() {
+                break pid;
+            }
+            assert!(started.elapsed() < Duration::from_secs(5), "never started");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        // Far more than a pipe holds (2000 keys, four lines each).
+        for _ in 0..5 {
+            helper.text(&"a".repeat(MAX_PASTE));
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        let alive = |pid: u32| unsafe { libc::kill(pid as i32, 0) } == 0;
+        assert!(alive(pid), "gone before the drop");
+        drop(helper);
+        let dropped = Instant::now();
+        while alive(pid) && dropped.elapsed() < EXIT_GRACE + Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!alive(pid), "still running {:?} after the drop", dropped.elapsed());
     }
 
     /// A screenshot of `udid`, saved as `<dir>/<name>.png`, as a coarse luma

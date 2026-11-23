@@ -213,6 +213,16 @@ pub(crate) fn give_back_keyboard(current: bool, has_keyboard: bool) -> bool {
     current && has_keyboard
 }
 
+/// Whether the picture keeps the keyboard when the device input goes to
+/// changes: `given_for` is the device it had when the user clicked it,
+/// `now` the one it has once the change has settled. Only the same device
+/// keeps it (the live view falling back to screenshots passes through none
+/// on the way). Never another (a device the tab moved on to by itself,
+/// which nobody clicked), nor none (the tab hidden: keys would go nowhere).
+pub(crate) fn keep_keyboard(given_for: Option<&str>, now: Option<&str>) -> bool {
+    now.is_some() && now == given_for
+}
+
 /// What a mouse press on the picture's element does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Press {
@@ -267,10 +277,13 @@ pub(crate) struct ScreenInput {
     pub(crate) focus: FocusHandle,
     /// What had the keyboard before the picture took it.
     previous_focus: Option<FocusHandle>,
-    /// The picture has the keyboard (kept by `focus_watch`).
+    /// The picture has the keyboard (kept by `focus_watch`), and the
+    /// device it was clicked for.
     has_keyboard: bool,
-    /// Its helper failed while it had it: the next render hands it back.
-    give_back: bool,
+    keyboard_for: Option<String>,
+    /// The window it's drawn in, to hand the keyboard back from outside a
+    /// render (it may not be drawn at all then).
+    window: Option<gpui::AnyWindowHandle>,
     focus_watch: Vec<Subscription>,
 }
 
@@ -300,7 +313,8 @@ impl ScreenInput {
             focus: cx.focus_handle(),
             previous_focus: None,
             has_keyboard: false,
-            give_back: false,
+            keyboard_for: None,
+            window: None,
             focus_watch: Vec::new(),
         }
     }
@@ -379,7 +393,30 @@ impl DeviceScreen {
         self.stop_input();
         self.input.failed = false;
         self.input.target = udid;
+        if self.input.has_keyboard {
+            self.settle_keyboard(false, cx);
+        }
         cx.notify();
+    }
+
+    /// Once this update is done (the device may come straight back), hand
+    /// the keyboard back as Esc does, unless the picture still shows the
+    /// device it was clicked for; `force`: hand it back regardless.
+    fn settle_keyboard(&mut self, force: bool, cx: &mut Context<Self>) {
+        let Some(window) = self.input.window else {
+            return;
+        };
+        let this = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            let _ = window.update(cx, |_, window, cx| {
+                let _ = this.update(cx, |screen, cx| {
+                    let input = &screen.input;
+                    if force || !keep_keyboard(input.keyboard_for.as_deref(), input.target.as_deref()) {
+                        screen.unfocus(window, cx);
+                    }
+                });
+            });
+        });
     }
 
     /// Lifts any finger and ends the helper.
@@ -461,7 +498,7 @@ impl DeviceScreen {
             HelperEvent::Failed(serial, why) => {
                 let current = current(serial);
                 if give_back_keyboard(current, self.input.has_keyboard) {
-                    self.input.give_back = true;
+                    self.settle_keyboard(true, cx);
                 }
                 if !current {
                     return;
@@ -511,6 +548,7 @@ impl DeviceScreen {
                     self.input.previous_focus = window.focused(cx);
                     window.focus(&self.input.focus, cx);
                 }
+                self.input.keyboard_for = self.input.target.clone();
                 self.lift_all();
                 self.send_touch(TouchPhase::Down, event.position, hit);
                 self.input.touching.set(self.input.helper.is_some());
@@ -579,11 +617,14 @@ impl DeviceScreen {
                 cx.stop_propagation();
             }
             KeyAction::Paste => {
+                // No helper: ⌘V is left to the app.
                 let text = cx.read_from_clipboard().and_then(|item| item.text());
-                if let (Some(text), Some(helper)) = (text, self.helper()) {
-                    helper.text(&text);
+                if let Some(helper) = self.helper() {
+                    if let Some(text) = text {
+                        helper.text(&text);
+                    }
+                    cx.stop_propagation();
                 }
-                cx.stop_propagation();
             }
             KeyAction::Press { usage, shift } => {
                 if let Some(helper) = self.helper() {
@@ -627,11 +668,7 @@ impl DeviceScreen {
                 }),
             ];
         }
-        // A helper failed while the picture had the keyboard: hand it back,
-        // as Esc does.
-        if std::mem::take(&mut self.input.give_back) {
-            cx.defer_in(window, |screen, window, cx| screen.unfocus(window, cx));
-        }
+        self.input.window = Some(window.window_handle());
         let interactive = interactive && self.takes_input();
         let focused = self.input.focus.is_focused(window);
         InputPaint {
@@ -859,6 +896,21 @@ mod tests {
         // A wheel's line is well past it, and goes at once.
         let mut wheel = Swipe::default();
         assert_eq!(wheel.scroll(at(60.0, 120.0), d(-1.0), Step::Moved, false, s).len(), 2);
+    }
+
+    #[test]
+    fn the_keyboard_stays_only_with_the_device_it_was_given_for() {
+        // The same device again (the live view falling back to screenshots
+        // passes through no target on the way): keep typing to it.
+        assert!(keep_keyboard(Some("a"), Some("a")));
+        // Another device (the watched one shut down and the tab moved on,
+        // or the saved pick booted): never type to one nobody clicked.
+        assert!(!keep_keyboard(Some("a"), Some("b")));
+        // No device any more (the tab hidden, the picture gone): keys would
+        // go nowhere.
+        assert!(!keep_keyboard(Some("a"), None));
+        assert!(!keep_keyboard(None, Some("a")));
+        assert!(!keep_keyboard(None, None));
     }
 
     #[test]

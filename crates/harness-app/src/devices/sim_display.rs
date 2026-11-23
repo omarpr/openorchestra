@@ -68,8 +68,6 @@ pub(crate) enum ScreenEvent {
     /// The UI's orientation (`screenProperties.uiOrientation`; see
     /// [`super::quarter_for`]): once when the stream starts, then on each
     /// change. The surface itself stays portrait whatever the orientation.
-    // Read by the upright picture (the Device controls plan's Task 3).
-    #[allow(dead_code)]
     Orientation(u32),
     /// The device shut down or the display went away.
     Gone,
@@ -117,7 +115,7 @@ pub(crate) fn developer_dir() -> Result<PathBuf, StreamError> {
 }
 
 /// `dlopen`s CoreSimulator, once per process.
-pub(super) fn load_core_simulator() -> Result<(), StreamError> {
+fn load_core_simulator() -> Result<(), StreamError> {
     static LOADED: OnceLock<Result<(), StreamError>> = OnceLock::new();
     LOADED
         .get_or_init(|| {
@@ -288,7 +286,7 @@ impl Drop for ScreenStream {
 
 /// The `SimDevice` for `udid`, if it is booted; `DeviceNotFound` if it isn't
 /// (or isn't a device at all). Needs [`load_core_simulator`] first.
-pub(super) fn booted_device(
+fn booted_device(
     developer_dir: &Path,
     udid: &str,
 ) -> Result<Retained<AnyObject>, StreamError> {
@@ -515,7 +513,7 @@ fn screen_orientation(screen: &AnyObject) -> Result<Option<u32>, StreamError> {
 }
 
 /// Runs `f`, turning an Objective-C exception into `Failed`.
-pub(super) fn catching<R>(f: impl FnOnce() -> R) -> Result<R, StreamError> {
+fn catching<R>(f: impl FnOnce() -> R) -> Result<R, StreamError> {
     exception::catch(AssertUnwindSafe(f)).map_err(|e| {
         StreamError::Failed(match e {
             Some(e) => format!("Objective-C exception: {e}"),
@@ -524,7 +522,7 @@ pub(super) fn catching<R>(f: impl FnOnce() -> R) -> Result<R, StreamError> {
     })
 }
 
-pub(super) fn ns_error(e: Retained<NSError>) -> StreamError {
+fn ns_error(e: Retained<NSError>) -> StreamError {
     StreamError::Failed(e.localizedDescription().to_string())
 }
 
@@ -535,7 +533,7 @@ pub(super) fn ns_error(e: Retained<NSError>) -> StreamError {
 /// `F` must be an `unsafe extern "C-unwind" fn` whose arguments (receiver,
 /// selector, then the method's) and return type match the method it is
 /// called for.
-pub(super) unsafe fn msg_send_fn<F: Copy>() -> F {
+unsafe fn msg_send_fn<F: Copy>() -> F {
     type Raw = unsafe extern "C-unwind" fn();
     let raw: Raw = objc2::ffi::objc_msgSend;
     assert_eq!(size_of::<F>(), size_of::<Raw>());
