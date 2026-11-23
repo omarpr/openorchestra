@@ -280,6 +280,10 @@ mod tests {
     use super::{ListError, Ran, RunFailed, failure_text, list_outcome, shot_path};
     use std::path::Path;
 
+    // `xcrun` and its Unix paths exist only on macOS; on Windows
+    // "/X/usr/bin/simctl" isn't an absolute path, so the lookup rightly
+    // falls back to xcrun.
+    #[cfg(target_os = "macos")]
     #[test]
     fn xcode_tools_run_directly_once_found() {
         use super::{Tool, Xcode, tool_from_find};
