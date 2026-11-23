@@ -248,7 +248,10 @@ debug = 0
 # can. Only a real bundle may use the framework — the dev binary falls back
 # to osascript.
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
+# `exception`: the Device tab's private simulator calls (devices/sim_display.rs)
+# can raise Objective-C exceptions, which must be caught rather than unwind
+# into Rust. Adds only objc2-exception-helper.
+objc2 = { version = "0.6", features = ["exception"] }
 objc2-foundation = "0.3"
 objc2-user-notifications = "0.3"
 block2 = "0.6"
@@ -308,6 +311,16 @@ objc2-core-graphics = { version = "0.3", default-features = false, features = [
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFData"] }
 # Posts web view callbacks back onto the main queue (see NativeEvents).
 dispatch2 = { version = "0.3", default-features = false, features = ["std", "objc2"] }
+# The Device tab's simulator screen (devices/sim_display.rs) arrives as
+# IOSurfaces. Already in the lockfile at 0.3.2 via gpui.
+objc2-io-surface = { version = "0.3", default-features = false, features = [
+    "std",
+    "IOSurfaceRef",
+    "IOSurfaceTypes",
+    "objc2",
+    # CFRetained<IOSurfaceRef> (its cf_type! impl is gated on this).
+    "objc2-core-foundation",
+] }
 # gpui's Window hands out its NSView through HasWindowHandle.
 raw-window-handle = "0.6"
 

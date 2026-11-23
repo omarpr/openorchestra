@@ -4,6 +4,8 @@
 // Used by the Device tab (tasks 3–6 of docs/superpowers/plans/2026-11-22-device-tab-ios.md).
 #![allow(dead_code, unused_imports)]
 
+#[cfg(target_os = "macos")]
+pub(crate) mod sim_display;
 pub(crate) mod simctl;
 
 use std::sync::Mutex;
