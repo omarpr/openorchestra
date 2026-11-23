@@ -172,6 +172,8 @@ pub(crate) fn boot_offer_after_list(
 /// off the UI thread from the device type's chrome (`devices::chrome`) for
 /// the size it is drawn at, and made again only when that size, the turn,
 /// the toggle or the panel's colour changes. Never per frame.
+///
+/// It is also the device's touch screen and keyboard (`device_input`).
 pub(crate) struct DeviceScreen {
     /// The live stream's newest frame (420f, ready for `surface()`), and
     /// how far it was turned upright.
@@ -201,6 +203,7 @@ pub(crate) struct DeviceScreen {
     overlay_failed: Vec<(String, bool)>,
     /// Redraws the corners in the panel's colour when the theme changes.
     _theme: gpui::Subscription,
+    pub(super) input: super::device_input::ScreenInput,
 }
 
 /// The picture on show, as painted.
@@ -290,6 +293,7 @@ impl DeviceScreen {
             overlay_drawing: false,
             overlay_failed: Vec::new(),
             _theme: cx.observe_global::<crate::theme::HarnessTheme>(|_, cx| cx.notify()),
+            input: super::device_input::ScreenInput::new(cx),
         }
     }
 
@@ -463,10 +467,15 @@ impl DeviceScreen {
 }
 
 impl Render for DeviceScreen {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some((picture, turn)) = self.picture() else {
+            self.no_input_picture();
             return div().size_full().into_any_element();
         };
+        // Taps map back through the turn the picture was drawn with, which
+        // for a screenshot is a guess in landscape: that stays watch-only.
+        let mappable = !matches!(picture, Picture::Shot(_)) || turn == Quarter::None;
+        let input = self.input_paint(mappable, window, cx);
         let device_type = self.device_type.clone().unwrap_or_default();
         let spec = self.spec.clone();
         // The frame, unless it's off, this type has none, or it couldn't
@@ -479,7 +488,7 @@ impl Render for DeviceScreen {
         let wanted = self.overlay_wanted.clone();
         let fill = fill_of(crate::theme::theme(cx).bg1);
         let this = cx.entity().downgrade();
-        gpui::canvas(
+        let canvas = gpui::canvas(
             |_, _, _| {},
             move |bounds, (), window, cx| {
                 let placement = place(rect_of(bounds), picture.size(), geometry, turn);
@@ -487,6 +496,7 @@ impl Render for DeviceScreen {
                 // overlay's hole.
                 let painted = painted(placement, geometry, turn, window.scale_factor());
                 let screen = bounds_of(painted.picture);
+                let device = bounds_of(placement.frame.map_or(painted.picture, |_| painted.overlay));
                 match picture {
                     #[cfg(target_os = "macos")]
                     Picture::Live(buffer) => window.paint_surface(screen, buffer),
@@ -495,6 +505,7 @@ impl Render for DeviceScreen {
                         let _ = window.paint_image(screen, screen, corners, shot, 0, false);
                     }
                 }
+                input.paint(screen, device, turn, window);
                 let framed = placement.frame.is_some();
                 let key = overlay_for(spec.as_deref(), &device_type, framed, painted, turn, fill)
                 .filter(|k| k.framed || !mask_failed);
@@ -525,7 +536,8 @@ impl Render for DeviceScreen {
             },
         )
         .size_full()
-        .into_any_element()
+        .into_any_element();
+        self.input_element(canvas, cx)
     }
 }
 
@@ -681,6 +693,10 @@ impl HarnessWorkspace {
                 // For the appearance button: the device may have changed,
                 // or been switched by someone else while the tab was away.
                 self.read_device_appearance(udid.clone(), cx);
+                // Input goes to it now (and to nothing it replaced).
+                let target = Some(udid.clone());
+                self.device_screen
+                    .update(cx, |screen, cx| screen.set_input_target(target, cx));
                 // Its frame.
                 if let Some(device) = self.device_tab.booted.iter().find(|d| &d.udid == udid) {
                     let device_type = device.device_type.clone();
@@ -734,7 +750,10 @@ impl HarnessWorkspace {
         {
             self.device_frames = None;
         }
-        self.device_screen.update(cx, |screen, cx| screen.clear(cx));
+        self.device_screen.update(cx, |screen, cx| {
+            screen.clear(cx);
+            screen.set_input_target(None, cx);
+        });
     }
 
     #[cfg(target_os = "macos")]

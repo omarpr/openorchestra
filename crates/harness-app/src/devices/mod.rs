@@ -5,8 +5,7 @@ pub(crate) mod chrome;
 pub(crate) mod controls;
 #[cfg(target_os = "macos")]
 pub(crate) mod convert;
-#[cfg(target_os = "macos")]
-pub(crate) mod hid;
+pub(crate) mod input;
 #[cfg(target_os = "macos")]
 pub(crate) mod sim_display;
 pub(crate) mod simctl;

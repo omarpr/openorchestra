@@ -1,7 +1,7 @@
 //! A booted simulator's screen, live, through Apple's private CoreSimulator
 //! API (macOS only). Watch-only: it registers for the screen's callbacks and
-//! nothing else; it never boots, resizes, rotates or sends input. (The
-//! simulator lookup, [`booted_device`], is shared with `hid`, which does.)
+//! nothing else; it never boots, resizes, rotates or sends input (that is
+//! `devices::input`'s helper).
 //!
 //! The call chain was measured in the Device tab spike (see "Spike findings"
 //! in docs/superpowers/specs/2026-11-22-device-tab-ios-design.md):

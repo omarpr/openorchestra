@@ -1,0 +1,93 @@
+// swift-interface-format-version: 1.0
+// swift-module-flags: -target arm64-apple-macos15.0 -enable-library-evolution -swift-version 5 -module-name CoreDevice
+// Hand-written stub of the private CoreDevice module (Xcode 27.2). Declares only what oo-device-input calls
+// (see "Input spike findings (CoreDevice)" in docs/superpowers/specs/2026-11-23-device-tab-controls-design.md).
+// Names and signatures must mangle exactly like the real exports, or linking fails.
+import Swift
+import Foundation
+import CoreGraphics
+
+public protocol DeviceCapabilityProtocol {}
+public protocol DeviceCapability {
+  associatedtype ProtocolType
+  associatedtype ImplType
+}
+public struct CapabilityStaticMember<A> {}
+public struct HIDDeviceCapability {}
+public struct DigitizerHIDCapability : DeviceCapability {
+  public typealias ProtocolType = any HIDDigitizer
+  public typealias ImplType = any HIDDigitizer
+}
+public struct KeyboardHIDCapability : DeviceCapability {
+  public typealias ProtocolType = any HIDKeyboard
+  public typealias ImplType = any HIDKeyboard
+}
+public struct ButtonHIDCapability : DeviceCapability {
+  public typealias ProtocolType = any HIDButton
+  public typealias ImplType = any HIDButton
+}
+extension CapabilityStaticMember where A == HIDDeviceCapability {
+  public static var digitizer: CapabilityStaticMember<DigitizerHIDCapability> { get }
+  public static var keyboard: CapabilityStaticMember<KeyboardHIDCapability> { get }
+  public static var button: CapabilityStaticMember<ButtonHIDCapability> { get }
+}
+
+public struct DigitizerPoint {
+  public init(x: Double, y: Double)
+}
+public enum DigitizerEventType : UInt {
+  case start
+  case position
+  case end
+}
+public enum DigitizerEdge : UInt {
+  case none
+  case top
+  case left
+  case bottom
+  case right
+}
+public enum DigitizerTarget : UInt {
+  case mainScreen
+  case display1
+}
+public enum HIDButtonState : UInt8 {
+  case down
+  case up
+}
+public struct HIDKeyboardUsageCode {
+  public init(rawValue: UInt16)
+}
+
+public protocol HIDDigitizer : DeviceCapabilityProtocol {
+  func send(pointOne: DigitizerPoint, pointTwo: DigitizerPoint?, eventType: DigitizerEventType, edge: DigitizerEdge, target: DigitizerTarget) throws
+  func sendBarrier()
+}
+public protocol HIDKeyboard : DeviceCapabilityProtocol {
+  func send(key: HIDKeyboardUsageCode, state: HIDButtonState) throws
+  func sendBarrier()
+}
+public protocol HIDButton : DeviceCapabilityProtocol {
+  func sendCustomButton(usagePage: Int, usageCode: Int, state: HIDButtonState) throws
+}
+
+public protocol CoreDeviceServiceConnection {}
+public struct CoreDeviceService {
+  public static var sharedConnection: any CoreDeviceServiceConnection { get }
+}
+public class RemoteDevice {
+  public var deviceIdentifier: UUID { get }
+  public func getImplementation<A : DeviceCapability>(for: CapabilityStaticMember<A>) async throws -> A.ProtocolType
+}
+public enum DeviceVisibilityClass : Swift.Hashable {
+  case `default`
+  case simulators
+  case devicesBeingProvisioned
+  case wirelessPairableDevices
+}
+public class DeviceManager {
+  public init(serviceConnection: any CoreDeviceServiceConnection)
+  public init(serviceConnection: any CoreDeviceServiceConnection, allowedDeviceVisibilityClasses: Swift.Set<DeviceVisibilityClass>)
+  public func awaitFullInitialization() async
+  public var devices: [UUID : RemoteDevice] { get }
+}

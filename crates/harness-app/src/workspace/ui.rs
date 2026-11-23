@@ -7,6 +7,7 @@ mod chrome;
 pub(crate) use chrome::app_menu_open;
 pub(crate) mod conductor;
 pub(crate) mod device_controls;
+pub(crate) mod device_input;
 pub(crate) mod device_panel;
 mod dialogs;
 mod diff;

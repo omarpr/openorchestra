@@ -36,7 +36,7 @@ pub(crate) enum ToolTab {
     #[default]
     Review,
     Ports,
-    /// Watch-only iOS Simulator view (macOS). Never written to `tool_tab` on
+    /// The iOS Simulator view (macOS). Never written to `tool_tab` on
     /// disk: older builds reject unknown enum values and would reset every
     /// pref, so it is stored as `tool_tab: "review"` plus `device_tab: true`.
     Device,

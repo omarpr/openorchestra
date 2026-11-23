@@ -1,5 +1,6 @@
 //! The Device tab's test controls, all through public tools: appearance,
-//! text size, Home (bringing SpringBoard forward) and a PNG screenshot
+//! text size, Home (bringing SpringBoard forward, where the input helper
+//! can't press the button) and a PNG screenshot
 //! through `simctl`, booting or shutting a device down, and Rotate through
 //! `devicectl`.
 
@@ -153,9 +154,9 @@ fn devicectl_failure(ran: &Ran) -> String {
     }
 }
 
-/// Home: brings SpringBoard (the home screen) forward. Not a button press
-/// (no lock, no Siri), but the legacy HID button press is ignored by the
-/// guest on most iOS 27.2 boots, and this always works.
+/// Home without the Device input helper (which presses the real button,
+/// `devices::input`): brings SpringBoard (the home screen) forward. Not a
+/// button press (no lock, no Siri), but public, and it always works.
 pub(crate) fn springboard_args(udid: &str) -> [&str; 3] {
     ["launch", udid, SPRINGBOARD]
 }

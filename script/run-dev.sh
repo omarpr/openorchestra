@@ -34,6 +34,11 @@ bash "$ROOT/script/build-voice-helper.sh" "$VOICE_HELPER"
 if [ -f "$VOICE_HELPER" ]; then
   codesign --force --sign - "$VOICE_HELPER"
 fi
+DEVICE_INPUT_HELPER="$APP/Contents/Helpers/oo-device-input"
+bash "$ROOT/script/build-device-input-helper.sh" "$DEVICE_INPUT_HELPER"
+if [ -f "$DEVICE_INPUT_HELPER" ]; then
+  codesign --force --sign - "$DEVICE_INPUT_HELPER"
+fi
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

@@ -189,10 +189,13 @@ cp "$ROOT/assets/openOrchestra.icns" "$APP/Contents/Resources/$APP_NAME.icns"
 # and one left out of the bundle is a choice that silently plays nothing.
 cp "$ROOT"/crates/harness-app/sounds/*.wav "$APP/Contents/Resources/"
 VOICE_HELPER="$APP/Contents/Helpers/oo-voice"
+DEVICE_INPUT_HELPER="$APP/Contents/Helpers/oo-device-input"
 if ((universal)); then
   bash "$ROOT/script/build-voice-helper.sh" "$VOICE_HELPER" arm64 x86_64
+  bash "$ROOT/script/build-device-input-helper.sh" "$DEVICE_INPUT_HELPER" arm64 x86_64
 else
   bash "$ROOT/script/build-voice-helper.sh" "$VOICE_HELPER" "$ARCH_TAG"
+  bash "$ROOT/script/build-device-input-helper.sh" "$DEVICE_INPUT_HELPER" "$ARCH_TAG"
 fi
 
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -235,6 +238,9 @@ if ((notarize)); then
 elif command -v codesign >/dev/null 2>&1; then
   if [ -f "$VOICE_HELPER" ]; then
     codesign --force --sign - "$VOICE_HELPER"
+  fi
+  if [ -f "$DEVICE_INPUT_HELPER" ]; then
+    codesign --force --sign - "$DEVICE_INPUT_HELPER"
   fi
   say "ad-hoc signing"
   codesign --force --sign - "$APP" || echo "(codesign failed; app still runnable via right-click → Open)"

@@ -12,6 +12,10 @@ use crate::devices::DeviceInfo;
 use crate::devices::controls::{Appearance, Control, ControlOutcome};
 use crate::devices::tab_state::{DeviceTab, DeviceView};
 
+/// How long Home waits for the input helper (which may be starting: about
+/// half a second) before bringing SpringBoard forward instead.
+const HOME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The device whose picture the tab shows (live or screenshots), which is
 /// the one the bar's controls act on. None while nothing is shown.
 pub(crate) fn watched_device(tab: &DeviceTab) -> Option<&DeviceInfo> {
@@ -182,12 +186,25 @@ impl HarnessWorkspace {
         ) else {
             return;
         };
+        // Home presses the device's button when its input helper can;
+        // otherwise (or if it doesn't answer) SpringBoard is brought forward.
+        let home = match control {
+            Control::Home => self.device_screen.update(cx, |screen, _| screen.press_home(&udid)),
+            _ => None,
+        };
         self.device_control_in_flight = true;
         cx.notify();
         cx.spawn(async move |view, cx| {
             let result = {
                 let udid = udid.clone();
                 cx.background_spawn(async move {
+                    if let Some(answer) = home {
+                        match answer.recv_timeout(HOME_TIMEOUT) {
+                            Ok(Ok(())) => return Ok(ControlOutcome::Done),
+                            Ok(Err(e)) => log::info!("device: Home button failed: {e}"),
+                            Err(_) => log::info!("device: no answer to Home from the input helper"),
+                        }
+                    }
                     crate::devices::controls::run_public(&udid, control)
                 })
                 .await

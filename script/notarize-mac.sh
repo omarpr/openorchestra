@@ -196,7 +196,7 @@ fi
 # Sign.
 #
 # No --deep: Apple deprecated it and it pushes our entitlements onto nested
-# code. Sign the voice helper before the outer app bundle.
+# code. Sign the helpers (voice, Device input) before the outer app bundle.
 # --timestamp is required for notarization; without it Apple rejects the
 # submission after the upload rather than before it.
 # ---------------------------------------------------------------------------
@@ -205,6 +205,10 @@ if [ "$kind" = app ]; then
   voice_helper="$target/Contents/Helpers/oo-voice"
   if [ -f "$voice_helper" ]; then
     codesign --force --options runtime --timestamp --sign "$IDENTITY" "$voice_helper"
+  fi
+  device_input_helper="$target/Contents/Helpers/oo-device-input"
+  if [ -f "$device_input_helper" ]; then
+    codesign --force --options runtime --timestamp --sign "$IDENTITY" "$device_input_helper"
   fi
   say "signing $(basename "$target") (hardened runtime)"
   codesign --force --options runtime --timestamp \
