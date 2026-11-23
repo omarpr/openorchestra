@@ -144,7 +144,7 @@ pub(crate) struct ScreenStream {
 
 /// What the callback blocks hold. It outlives the registration: a callback
 /// already queued can still run just after unregistering, and finds
-/// `stopped` set.
+/// `stopped` set. A panicking `on_event` sets it too.
 struct Shared {
     stopped: AtomicBool,
     on_event: Box<dyn Fn(ScreenEvent) + Send + Sync>,
@@ -153,7 +153,17 @@ struct Shared {
 impl Shared {
     fn emit(&self, event: ScreenEvent) {
         if !self.stopped.load(Ordering::Acquire) {
-            (self.on_event)(event);
+            self.deliver(event);
+        }
+    }
+
+    /// Calls `on_event`, never letting a panic unwind out of the block into
+    /// libdispatch (that would abort the app). After a panic the stream goes
+    /// quiet.
+    fn deliver(&self, event: ScreenEvent) {
+        let delivered = std::panic::catch_unwind(AssertUnwindSafe(|| (self.on_event)(event)));
+        if delivered.is_err() && !self.stopped.swap(true, Ordering::AcqRel) {
+            log::error!("device: the screen event handler panicked; stopping the stream");
         }
     }
 
@@ -170,7 +180,7 @@ impl Shared {
             Some(surface) => ScreenEvent::Surface(unsafe { CFRetained::retain(surface) }),
             None => ScreenEvent::Gone,
         };
-        (self.on_event)(event);
+        self.deliver(event);
     }
 }
 
@@ -299,6 +309,8 @@ fn find_main_screen(developer_dir: &Path, udid: &str) -> Result<Retained<AnyObje
     let register = sel!(registerScreenCallbacksWithUUID:callbackQueue:frameCallback:surfacesChangedCallback:propertiesChangedCallback:);
     let unregister = sel!(unregisterScreenCallbacksWithUUID:);
     let mut any_screen = false;
+    // A screen that lacks what picks the main display.
+    let mut missing = None;
     for i in 0..count {
         // SAFETY: `-objectAtIndex:` with an index below `count`.
         let port: Retained<AnyObject> =
@@ -314,12 +326,14 @@ fn find_main_screen(developer_dir: &Path, udid: &str) -> Result<Retained<AnyObje
         }
         any_screen = true;
         if !responds(&descriptor, sel!(state))? {
+            missing = Some("-[SimScreen state]");
             continue;
         }
         let Some(display) = send_object(&descriptor, sel!(state))? else {
             continue;
         };
         if !responds(&display, sel!(displayClass))? {
+            missing = Some("-[SimDisplayDescriptorState displayClass]");
             continue;
         }
         type DisplayClass = unsafe extern "C-unwind" fn(*const AnyObject, Sel) -> u16;
@@ -331,10 +345,10 @@ fn find_main_screen(developer_dir: &Path, udid: &str) -> Result<Retained<AnyObje
             return Ok(descriptor);
         }
     }
-    Err(if any_screen {
-        StreamError::Failed("the device has no main display".into())
-    } else {
-        StreamError::Unsupported(REGISTER_NAME)
+    Err(match (missing, any_screen) {
+        (Some(name), _) => StreamError::Unsupported(name),
+        (None, true) => StreamError::Failed("the device has no main display".into()),
+        (None, false) => StreamError::Unsupported(REGISTER_NAME),
     })
 }
 
@@ -473,6 +487,7 @@ fn send_object(obj: &AnyObject, sel: Sel) -> Result<Option<Retained<AnyObject>>,
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::mpsc::{self, Receiver};
     use std::time::Instant;
 
@@ -507,6 +522,28 @@ mod tests {
             Err(StreamError::NoXcode)
         );
         assert_eq!(check_paths(&paths, |_| true), Ok(()));
+    }
+
+    #[test]
+    fn a_panicking_handler_is_contained_and_silences_the_stream() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let shared = Shared {
+            stopped: AtomicBool::new(false),
+            on_event: Box::new({
+                let calls = Arc::clone(&calls);
+                move |_| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    // Unwinds like a panic, without the panic hook's output.
+                    std::panic::resume_unwind(Box::new("handler bug"));
+                }
+            }),
+        };
+        shared.emit(ScreenEvent::Frame);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(shared.stopped.load(Ordering::SeqCst));
+        shared.emit(ScreenEvent::Frame);
+        shared.surfaces_changed(std::ptr::null_mut());
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "events after the panic");
     }
 
     /// What a callback saw, sent back to the test thread.
