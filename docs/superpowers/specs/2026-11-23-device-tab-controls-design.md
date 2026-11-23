@@ -480,7 +480,7 @@ On iOS 27.2 the guest's `dtuhidd` (CoreDevice's HID daemon) goes active at
 boot and disconnects backboardd's legacy `ExternalKeyboardService`,
 `MainScreenButtonsService` and `ScreenTouchService`. Whether legacy IndigoHID
 then works depends on a boot race. The ratio so far is 1 of 9 boots in Task
-2, and here 2 of 5 controls were ignored and 3 worked. CoreDevice's remote HID
+2. Here, of 6 conclusive controls, 3 were ignored and 3 worked. CoreDevice's remote HID
 is served *by* `dtuhidd`, so the takeover doesn't affect it.
 
 ### The call chain
@@ -560,8 +560,10 @@ was about 4 s after that.
 | 4 | shutdown + boot | ✓ | ✓ | ✓ | ✓ | **ignored** |
 | 5 | `simctl erase` + boot | ✓ | ✓ | ✓ | ✓ (text shown in the suggestions; keyboard tutorial covered the field) | worked |
 | 6 | **new never-booted device** | ✓ | ✓ | ✓ | first-launch Start Page swallowed the tap; ✓ on retry once loaded | worked |
+| 7 | shutdown + boot, **hardened helper** (`codesign --options runtime` + app entitlements, `flags=0x10002(adhoc,runtime)`) | ✓ | ✓ | ✓ | ✓ | worked |
 
-**CoreDevice input reached the device on 7 of 7 boots.** Every miss was the
+**CoreDevice input reached the device on 8 of 8 boots**, including under the
+hardened runtime with the app's entitlements and no new entitlement. Every miss was the
 target UI not being ready or a coordinate of mine. The legacy path was
 ignored on 3 of those boots.
 
