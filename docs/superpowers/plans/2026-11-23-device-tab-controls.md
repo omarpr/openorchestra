@@ -1,0 +1,138 @@
+# Device tab test controls Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** A bottom bar in the Device tab with Rotate, Home, Dark/Light, Text size − / +, and Screenshot, acting only on the watched simulator, only on a click.
+
+**Architecture:** A pure-where-possible `devices::controls` module that runs public `simctl` commands (appearance, content size, screenshot) with timeouts. A macOS-only `devices::hid` module sends Rotate and Home through SimulatorKit's private HID path, found by a spike and loaded defensively like `sim_display`. A new `workspace/ui/device_controls.rs` draws the bar and dispatches clicks off the main thread, one control at a time. If the spike shows the surface stays portrait, the picture is rotated when drawn.
+
+**Tech Stack:** Rust 2024, gpui (zed rev e8bc16a), objc2 0.6 (`exception` feature already on), `block2`, `dispatch2`, `xcrun simctl`.
+
+**Spec:** `docs/superpowers/specs/2026-11-23-device-tab-controls-design.md` (and, for the existing tab, `docs/superpowers/specs/2026-11-22-device-tab-ios-design.md`)
+
+## Global Constraints
+
+- Build, test and clippy from `crates/harness-app` (`cargo test`, `cargo clippy --all-targets -- -D warnings`); the root workspace skips it.
+- Never run `cargo fmt` in harness-app. Format touched lines by hand.
+- Work on the current branch (master). No worktrees or branches. Don't push.
+- Every user-visible commit adds a `CHANGELOG.md` `## Unreleased` line (Added/Changed/Fixed) in that commit.
+- macOS-only code is behind `#[cfg(target_os = "macos")]` attributes. `cfg!(target_os = …)` is forbidden outside `src/platform.rs` (a test enforces it). The Windows build must still pass.
+- A control acts only on the currently watched UDID, only on a user click. Nothing else changes a simulator.
+- No control blocks the UI thread. Every `simctl` call and HID send runs off the main thread with a 5 s timeout (`ports::run_bounded_why`). One control is in flight at a time.
+- A missing private class, selector or symbol never panics or throws: check with `NSClassFromString`, `respondsToSelector:` or `dlsym` first, and wrap sends in `objc2::exception::catch`. If the private path is unavailable, Rotate and Home are hidden.
+- Live checks only on a simulator the run creates (`xcrun simctl create "OO device test" "iPhone 18 Pro"`; the name sorts before the user's devices) and deletes. Never target the user's existing simulators. Never quit or reconfigure the user's Device Hub or openOrchestra apps.
+- Exact copy: tooltips `Rotate`, `Home`, `Dark appearance` / `Light appearance` (naming the appearance the click switches to), `Smaller text`, `Larger text`, `Copy screenshot`. Notes: `Copied screenshot` on success; on failure, the error's first line via `set_error_note`.
+
+## Review Focus
+
+1. **A click while the watched device changes** (the picker switches, or the device shuts down mid-command). The command must go to the device that was shown at click time and must not be retried on the new one. Pinned in Task 3 (the click captures the UDID; test).
+2. **Rotating while live.** The picture re-fits and stays upright, with no stretched frame or stale buffer size. Pinned in Task 3 (the pure "draw rotation" function from orientation and surface size) and checked by eye in Task 4.
+3. **Text size at its limits.** Repeated `increment` or `decrement` past the largest or smallest size must not error loudly. `simctl` may exit non-zero. Treat that as a quiet no-op note, not a red error. Pinned in Task 1.
+4. **Reduced mode.** Dark/Light, Text size and Screenshot work. Rotate and Home are hidden if the HID path didn't load, otherwise they still work. Pinned in Task 1 (`available_controls`).
+5. **A large clipboard image.** A full-resolution PNG (1206×2622) is written once, with no UI hitch: encoding happens off the main thread. Pinned in Task 3.
+
+---
+
+### Task 0: Spike: how to rotate and press Home (throwaway, gate)
+
+**Files:**
+- Create (uncommitted): spike sources under `.superpowers/sdd/2026-11-23-device-tab-controls/spike/`
+- Modify: `docs/superpowers/specs/2026-11-23-device-tab-controls-design.md` (add "Spike findings")
+
+- [ ] **Step 1:** Create and boot the test device headless. Using the ObjC runtime and `dlsym`, find how to rotate the device and press Home from outside Device Hub. Candidates to try: `IndigoHIDMessageForButton` plus a `SimDeviceLegacyHIDClient` (`initWithDevice:error:`, `sendWithMessage:freeWhenDone:completionQueue:completion:` or whatever this Xcode has); a device-orientation HID or GSEvent; any `SimDevice` or SimulatorKit rotation selector (`deviceRotation`, `SimDisplayUIOrientationChangeDelegate`). Prior art for orientation: Meta's idb and Radon IDE.
+- [ ] **Step 2:** Prove each one works. Rotate four times: `screenProperties.uiOrientation` cycles and the app's layout visibly changes in a `simctl io screenshot`. Home: launch Settings (`simctl launch $UDID com.apple.Preferences`), press Home, and a screenshot shows the home screen. Do this with Device Hub closed if it isn't running, and with it open if it is. Change nothing else.
+- [ ] **Step 3:** Record whether the live screen surface (from `sim_display`'s register call) changes size on rotation, or stays portrait while `uiOrientation` changes. Note the orientation enum values.
+- [ ] **Step 4:** Hardened-runtime check: sign the spike with `codesign --force --options runtime --entitlements crates/harness-app/resources/openOrchestra.entitlements --sign -` and repeat Step 2.
+- [ ] **Step 5: Gate.** If rotation can't be sent without Device Hub, stop and report: the plan drops Rotate (Home alone, if it works, still ships).
+- [ ] **Step 6:** Write "Spike findings" (exact symbols, signatures, block encodings, struct layouts if any, enum values, surface behaviour on rotation) into the spec. Commit only the spec: `docs: record the Device controls spike findings`. Delete the test device.
+
+---
+
+### Task 1: Public controls: appearance, text size, screenshot PNG
+
+**Files:**
+- Create: `crates/harness-app/src/devices/controls.rs` (all platforms; declared `pub(crate) mod controls;` in `devices/mod.rs`)
+- Modify: `crates/harness-app/src/devices/simctl.rs` (factor the bounded `xcrun simctl …` call it already uses into `pub(crate) fn simctl(args: &[&str]) -> Result<String, String>` if that isn't there yet, and reuse it)
+
+**Interfaces:**
+- Produces:
+  - `pub(crate) enum Control { Rotate, Home, ToggleAppearance, TextSmaller, TextBigger, Screenshot }` (`Clone, Copy, Debug, PartialEq, Eq`)
+  - `pub(crate) enum Appearance { Light, Dark }`, plus `pub(crate) fn parse_appearance(stdout: &str) -> Option<Appearance>` (`"light\n"` → Light, `"dark"` → Dark, `"unsupported"`/`"unknown"`/other → None)
+  - `pub(crate) fn appearance_args(udid: &str, set: Option<Appearance>) -> Vec<String>`: `["ui", udid, "appearance"]` plus `"light"`/`"dark"` when set
+  - `pub(crate) fn content_size_args(udid: &str, bigger: bool) -> Vec<String>`: `["ui", udid, "content_size", "increment"|"decrement"]`
+  - `pub(crate) fn available_controls(view: &DeviceView, hid: bool) -> Vec<Control>`: nothing for NeedsXcode/NoneRunning/ShutDown; for Live and Reduced, the three public controls plus Screenshot, and Rotate + Home when `hid` is true. Order: Rotate, Home, ToggleAppearance, TextSmaller, TextBigger, Screenshot.
+  - `pub(crate) fn run_public(udid: &str, control: Control) -> Result<ControlOutcome, String>`, where `pub(crate) enum ControlOutcome { Done, Appearance(Appearance), AtLimit, Png(Vec<u8>) }`. ToggleAppearance reads the current value, sets the other one, and returns the new one. A text-size call that exits non-zero with stderr mentioning the size limit, or any non-zero exit after a valid increment/decrement, returns `AtLimit`: record the real stderr you see in the test fixture. Screenshot runs `simctl io <udid> screenshot --type=png <path>` to a unique `<udid>-<pid>-<n>.png` (add a PNG variant beside `simctl::shot_path`), reads the bytes, removes the file, and returns them.
+
+- [ ] **Step 1: Write the failing tests:** `parses_light_and_dark`, `unsupported_appearance_is_none`, `appearance_args_get_and_set`, `content_size_args_increment_and_decrement`, `no_controls_when_nothing_is_running`, `public_controls_without_hid`, `all_controls_with_hid_in_order`, `reduced_mode_keeps_public_controls`, `text_size_at_the_limit_is_quiet` (a pure `fn content_size_outcome(code: i32, stderr: &str) -> ControlOutcome` fed with the stderr you captured on a real device at the limit).
+- [ ] **Step 2:** `cargo test controls::` → FAIL.
+- [ ] **Step 3:** Implement.
+- [ ] **Step 4:** `cargo test controls::` → PASS. Manual check on the test device: an `#[ignore]` test `public_controls_on_a_live_device` (reads `OO_TEST_SIM_UDID`) toggles the appearance twice and back, steps text bigger then smaller, and takes a PNG whose first 8 bytes are the PNG signature. Run it with `OO_TEST_SIM_UDID=$UDID cargo test public_controls_on -- --ignored` → PASS.
+- [ ] **Step 5:** Commit: `feat(devices): public simulator test controls` (internal, no changelog line).
+
+---
+
+### Task 2: Rotate and Home through the private HID path (macOS)
+
+**Files:**
+- Create: `crates/harness-app/src/devices/hid.rs` (`#[cfg(target_os = "macos")]`)
+
+**Interfaces:**
+- Consumes: the spec's "Spike findings" (Task 0).
+- Produces:
+  - `pub(crate) fn hid_available() -> bool`: loads once (in a `OnceLock`) and caches whether every symbol and selector the findings need is present
+  - `pub(crate) fn rotate(udid: &str) -> Result<(), StreamError>` (90° clockwise from the current orientation)
+  - `pub(crate) fn press_home(udid: &str) -> Result<(), StreamError>`
+  - These are blocking: callers run them off the main thread. Missing pieces return `StreamError::Unsupported("<symbol or selector>")`. A bad UDID returns `DeviceNotFound`.
+
+- [ ] **Step 1: Write the failing tests:** pure parts only, e.g. `next_orientation_cycles_clockwise` (the orientation values from the findings) and any message-building helper the findings call for.
+- [ ] **Step 2:** `cargo test hid::` → FAIL.
+- [ ] **Step 3:** Implement from the findings, with the same defensive rules as `sim_display.rs`: proxies messaged via typed `objc_msgSend` after `respondsToSelector:`, everything inside `exception::catch`, blocks with signatures.
+- [ ] **Step 4:** `cargo test hid::` → PASS. Manual check: an `#[ignore]` test `rotate_and_home_on_a_live_device` (with `OO_TEST_SIM_UDID`) rotates four times, asserting `uiOrientation` returns to the start (read via `sim_display` or the findings' getter), then launches Settings, presses Home, and checks that a screenshot differs from the Settings one. → PASS on the test device.
+- [ ] **Step 5:** Commit: `feat(devices): rotate and press Home on a simulator` (internal).
+
+---
+
+### Task 3: The bottom bar, upright picture, clipboard
+
+**Files:**
+- Create: `crates/harness-app/src/workspace/ui/device_controls.rs` (declared in `workspace/ui.rs`)
+- Modify: `crates/harness-app/src/workspace/ui/device_panel.rs` (call the bar under the picture, and apply the draw rotation in `render_device_screen` / `DeviceScreen`)
+- Modify: `crates/harness-app/src/workspace.rs` (a `device_control_in_flight: bool` field)
+- Modify: `CHANGELOG.md`
+
+**Interfaces:**
+- Consumes: `Control`, `available_controls`, `run_public`, `ControlOutcome` (Task 1); `hid_available`, `rotate`, `press_home` (Task 2); `DeviceTab.view` / `selected`; `set_note` and `set_error_note` (`workspace/render.rs:819-830`); `gpui::ClipboardItem` with `ClipboardEntry::Image(gpui::Image)` (`gpui/src/platform.rs:3143`) via `cx.write_to_clipboard`.
+- Produces: `pub(crate) fn draw_rotation(surface_w: u32, surface_h: u32, ui_orientation: u32) -> Quarter` (a pure function, `pub(crate) enum Quarter { None, Cw90, Cw180, Cw270 }`) and `pub(crate) fn render_device_controls(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement`.
+
+Behaviour:
+- The bar sits at the bottom of the Device tab, under the picture: a row of icon buttons, in `available_controls` order, with the tooltips from Global Constraints. It is hidden when `available_controls` is empty.
+- A click captures the current `selected` UDID, sets `device_control_in_flight`, and runs the control in `background_spawn` (`hid::*` or `run_public`). On completion it clears the flag and shows the note. Clicks while a control is in flight are ignored, and the buttons look disabled.
+- Screenshot: the PNG bytes go to `ClipboardItem` as `gpui::Image` (format PNG) on the UI thread. Encoding was already done by simctl. Note: `Copied screenshot`.
+- ToggleAppearance: the button's tooltip and icon follow the last known appearance, read on device change (one `appearance` get, off the main thread) and updated from `ControlOutcome::Appearance`.
+- `AtLimit`: a plain note, `Text size is at its limit`, not an error.
+- Upright picture: if the spike found the surface stays portrait, `DeviceScreen` draws the surface rotated by `draw_rotation(..)` using the orientation reported on the stream's properties callback (wire `propertiesChanged` through `ScreenEvent` if the findings say that's where it comes from). Otherwise `draw_rotation` returns `None` and only the re-fit applies.
+- CHANGELOG `### Added`: `- **Device tab controls** (macOS): rotate, Home, dark/light appearance, text size and copy-screenshot buttons under the live simulator view.`
+
+- [ ] **Step 1: Write the failing tests:**
+  - `draw_rotation_for_each_orientation`, with the values from the findings
+  - `a_click_targets_the_device_shown_at_click_time`: a pure `fn control_target(selected: Option<&str>, view: &DeviceView) -> Option<String>`, None when nothing is live or reduced
+  - `a_second_click_while_one_runs_is_ignored`: a pure `fn may_run_control(in_flight: bool) -> bool`, or fold it into `control_target`
+  - `the_appearance_tooltip_names_the_switch_target`
+- [ ] **Step 2:** `cargo test device_control` and `cargo test draw_rotation` → FAIL.
+- [ ] **Step 3:** Implement.
+- [ ] **Step 4:** Full `cargo test` → PASS. `cargo clippy --all-targets -- -D warnings` → clean.
+- [ ] **Step 5:** Commit: `feat(app): test controls under the Device tab's live view` (with the CHANGELOG line).
+
+---
+
+### Task 4: Verify in a real build
+
+Same isolation as the Device tab's Task 7: the `/tmp/oo-dt` scratch bundle with the HOME/TMUX wrapper, your own "OO device test" simulator, and the user's devices and apps untouched. Window captures and clicks need macOS Screen Recording and Accessibility for the host app. If they're missing, do the non-visual checks and list the rest for the user to check by eye.
+
+- [ ] **Step 1:** Rebuild and refresh the scratch bundle. Open the Device tab on the test device.
+- [ ] **Step 2:** Rotate ×4: the picture turns and stays upright, then returns to portrait. Home from Settings: the home screen shows.
+- [ ] **Step 3:** Dark/Light: the picture changes, and the tooltip flips. Text size: Settings' text visibly grows and shrinks. At the limit, the quiet note shows.
+- [ ] **Step 4:** Copy screenshot: the clipboard holds a PNG of the device (`osascript -e 'clipboard info'` lists `«class PNGf»`), and the note shows.
+- [ ] **Step 5:** With `OO_DEVICE_FORCE_SCREENSHOTS=1`: the public controls still work, and Rotate/Home follow `hid_available()`.
+- [ ] **Step 6:** Switch devices mid-click (start Screenshot, then pick the other device): the screenshot is of the first device, and nothing runs on the second.
+- [ ] **Step 7:** Delete the test devices. Report the results.
