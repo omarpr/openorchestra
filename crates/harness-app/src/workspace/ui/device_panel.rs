@@ -21,7 +21,9 @@ use super::super::*;
 use super::device_controls::error_line;
 use crate::devices::simctl::{DeviceList, ListError};
 use crate::devices::tab_state::{Command, DeviceTab, DeviceView};
-use crate::devices::chrome::{ChromeSpec, OverlayKey, Placement, Rect, place};
+use crate::devices::chrome::{
+    ChromeSpec, OverlayCache, OverlayKey, Placement, Rect, frame_around, place,
+};
 use crate::devices::{DeviceInfo, Quarter, StreamError};
 
 /// How often the device list is polled while the tab is on screen.
@@ -187,8 +189,9 @@ pub(crate) struct DeviceScreen {
     spec_reading: bool,
     /// The bar's Show frame (`Prefs::device_frame`).
     show_frame: bool,
-    /// The overlay drawn last, and what it was drawn for.
-    overlay: Option<(OverlayKey, Arc<RenderImage>)>,
+    /// The overlays drawn so far for this device type: one per turn and
+    /// framed or not, so turning back or toggling again needs no redraw.
+    overlays: OverlayCache<Arc<RenderImage>>,
     /// The overlay to draw next; one is drawn at a time.
     overlay_wanted: Option<OverlayKey>,
     overlay_drawing: bool,
@@ -284,7 +287,7 @@ impl DeviceScreen {
             spec: None,
             spec_reading: false,
             show_frame,
-            overlay: None,
+            overlays: OverlayCache::new(),
             overlay_wanted: None,
             overlay_drawing: false,
             overlay_failed: Vec::new(),
@@ -381,7 +384,7 @@ impl DeviceScreen {
 
     /// The paint found `key` is what the overlay should be.
     fn want_overlay(&mut self, key: OverlayKey, cx: &mut Context<Self>) {
-        if self.overlay.as_ref().map(|(k, _)| k) == Some(&key) {
+        if self.overlays.get(&key).is_some() {
             return;
         }
         self.overlay_wanted = Some(key);
@@ -431,7 +434,7 @@ impl DeviceScreen {
         }
         match image {
             Some(image) => {
-                if let Some((_, old)) = self.overlay.replace((key, image)) {
+                for old in self.overlays.insert(key, image) {
                     // As in `drop_shot`.
                     cx.defer(move |cx| cx.drop_image(old, None));
                 }
@@ -470,12 +473,11 @@ impl Render for DeviceScreen {
         let spec = self.spec.clone();
         // The frame, unless it's off, this type has none, or it couldn't
         // be drawn: then the rounded screen alone.
-        let geometry = spec
-            .as_ref()
-            .and_then(|s| s.geometry())
-            .filter(|_| self.show_frame && !self.failed(&device_type, true));
+        let frame_geometry = spec.as_ref().and_then(|s| s.geometry());
+        let geometry =
+            frame_geometry.filter(|_| self.show_frame && !self.failed(&device_type, true));
         let mask_failed = self.failed(&device_type, false);
-        let overlay = self.overlay.clone();
+        let overlays = self.overlays.clone();
         let wanted = self.overlay_wanted.clone();
         let fill = fill_of(crate::theme::theme(cx).bg1);
         let this = cx.entity().downgrade();
@@ -504,18 +506,23 @@ impl Render for DeviceScreen {
                 let Some(key) = key else {
                     return;
                 };
-                // The last overlay drawn while the next one is made: the
-                // right kind for this picture, stretched to its size.
-                if let Some((drawn, image)) = &overlay
-                    && drawn.device_type == key.device_type
-                    && drawn.turn == key.turn
-                    && drawn.framed == key.framed
-                {
-                    let at = bounds_of(placement.frame.unwrap_or(placement.screen));
-                    let _ = window.paint_image(at, at, Default::default(), image.clone(), 0, false);
+                // This overlay, or until it's drawn the nearest kept one
+                // (stretched), so the picture is never shown unclipped. A
+                // framed one goes round the screen, an unframed one on it.
+                if let Some((drawn, image)) = overlays.closest(&key) {
+                    let at = if drawn.framed {
+                        placement.frame.or_else(|| {
+                            frame_geometry.map(|g| frame_around(placement.screen, g, turn))
+                        })
+                    } else {
+                        Some(placement.screen)
+                    };
+                    if let Some(at) = at.map(bounds_of) {
+                        let image = image.clone();
+                        let _ = window.paint_image(at, at, Default::default(), image, 0, false);
+                    }
                 }
-                let drawn = overlay.as_ref().map(|(k, _)| k);
-                if drawn != Some(&key) && wanted.as_ref() != Some(&key) {
+                if overlays.get(&key).is_none() && wanted.as_ref() != Some(&key) {
                     cx.defer(move |cx| {
                         let _ = this.update(cx, |screen, cx| screen.want_overlay(key, cx));
                     });

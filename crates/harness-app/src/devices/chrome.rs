@@ -32,8 +32,8 @@
 //! their composite is the art. Otherwise the nine slices: a chrome is shared
 //! by devices with different screens (phone12's composite fits the 18 Pro
 //! Max, not the Air), and the older chromes have no composite. Corners are
-//! drawn at their size and edges stretched between them, which fits any
-//! screen.
+//! drawn at their size and each edge's cross-section repeated between them,
+//! on shared whole-pixel boundaries, which fits any screen without seams.
 //!
 //! gpui can't clip a surface to an image mask, so the frame is one overlay
 //! drawn over the picture: the frame with the mask's shape cut out of it, or
@@ -283,10 +283,13 @@ pub(crate) fn chrome_for(device_type_id: &str) -> Option<Arc<ChromeSpec>> {
 
 /// How far, in points, a composite may differ from the frame it is drawn
 /// over in either direction.
+// Only the macOS renderer draws.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const COMPOSITE_SLACK_PT: f32 = 4.0;
 
 /// Whether a composite of `composite` points can stand for a frame of
 /// `frame` points (portrait both).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn composite_fits(composite: (f32, f32), frame: (f32, f32)) -> bool {
     (composite.0 - frame.0).abs() <= COMPOSITE_SLACK_PT
         && (composite.1 - frame.1).abs() <= COMPOSITE_SLACK_PT
@@ -407,9 +410,11 @@ pub(crate) mod render {
 
     use super::{ChromeSpec, FrameArt, OverlayKey, Quarter, Rect, screen_rect_in_frame, turned_size};
 
-    /// A page of a PDF, and its size in points.
+    /// A page of a PDF, and its size in points. The document is kept with
+    /// its page, which it owns.
     struct Pdf {
         page: CFRetained<CGPDFPage>,
+        _doc: CFRetained<CGPDFDocument>,
         bounds: CGRect,
     }
 
@@ -418,16 +423,17 @@ pub(crate) mod render {
         let doc = CGPDFDocument::with_url(Some(&url))?;
         let page = CGPDFDocument::page(Some(&doc), 1)?;
         let bounds = CGPDFPage::box_rect(Some(&page), CGPDFBox::MediaBox);
-        (bounds.size.width > 0.0 && bounds.size.height > 0.0).then_some(Pdf { page, bounds })
+        (bounds.size.width > 0.0 && bounds.size.height > 0.0).then_some(Pdf { page, _doc: doc, bounds })
     }
 
     /// A blank BGRA bitmap, premultiplied (all CoreGraphics draws into),
-    /// and its context drawing into `pixels`.
+    /// and its context drawing into `pixels`. The context is declared
+    /// first so it is released first, before the pixels it draws into.
     struct Canvas {
+        ctx: CFRetained<CGContext>,
         pixels: Vec<u8>,
         w: usize,
         h: usize,
-        ctx: CFRetained<CGContext>,
     }
 
     impl Canvas {
@@ -450,7 +456,7 @@ pub(crate) mod render {
                     info,
                 )
             }?;
-            Some(Canvas { pixels, w, h, ctx })
+            Some(Canvas { ctx, pixels, w, h })
         }
 
         /// Draw `pdf` stretched over `r` (pixels, origin top left).
@@ -494,8 +500,24 @@ pub(crate) mod render {
 
         /// The pixels, done drawing.
         fn into_pixels(self) -> Vec<u8> {
-            drop(self.ctx);
-            self.pixels
+            let Canvas { ctx, pixels, .. } = self;
+            drop(ctx);
+            pixels
+        }
+
+        /// Paint `line` (premultiplied BGRA pixels) over the pixels from
+        /// (x, y), source over.
+        fn blend(&mut self, x: usize, y: usize, line: &[u8]) {
+            let at = (y * self.w + x) * 4;
+            let Some(dst) = self.pixels.get_mut(at..at + line.len()) else {
+                return;
+            };
+            for (d, s) in dst.as_chunks_mut::<4>().0.iter_mut().zip(line.as_chunks::<4>().0) {
+                let keep = 255 - u32::from(s[3]);
+                for k in 0..4 {
+                    d[k] = (u32::from(s[k]) + (u32::from(d[k]) * keep + 127) / 255).min(255) as u8;
+                }
+            }
         }
     }
 
@@ -508,9 +530,33 @@ pub(crate) mod render {
         (x0, y0, x1.max(x0), y1.max(y0))
     }
 
+    /// How long an edge piece is drawn before its middle line is taken.
+    const STRIP: usize = 64;
+
+    /// An edge piece's cross-section, `thick` pixels across: its line half
+    /// way along, drawn `STRIP` long so art that stops short of the piece's
+    /// ends (or blurs there) is left out. `along_y`: the piece runs down
+    /// (Left, Right) rather than across (Top, Bottom).
+    fn cross_section(pdf: &Pdf, thick: usize, along_y: bool) -> Option<Vec<u8>> {
+        let (w, h) = if along_y { (thick, STRIP) } else { (STRIP, thick) };
+        let strip = Canvas::new(w, h)?;
+        strip.draw(pdf, Rect { x: 0.0, y: 0.0, w: w as f32, h: h as f32 });
+        let pixels = strip.into_pixels();
+        let mid = STRIP / 2;
+        Some(if along_y {
+            pixels[mid * w * 4..(mid + 1) * w * 4].to_vec()
+        } else {
+            (0..h).flat_map(|y| pixels[(y * w + mid) * 4..(y * w + mid + 1) * 4].to_vec()).collect()
+        })
+    }
+
     /// The nine slices laid out on `canvas` (the whole frame), `s` pixels
-    /// per point: corners at their size, edges stretched between them.
-    fn draw_frame(canvas: &Canvas, art: &FrameArt, s: f32) -> Option<()> {
+    /// per point. Every boundary is a whole pixel shared by both pieces,
+    /// with no overlap (two semi-transparent rims laid over each other show
+    /// as a line). Each edge is its cross-section repeated exactly between
+    /// the corners, and the corners are drawn at their size. So no join
+    /// can leave a gap or a doubled row.
+    fn draw_frame(canvas: &mut Canvas, art: &FrameArt, s: f32) -> Option<()> {
         let piece = |name: &str| open(&art.dir.join(format!("{name}.pdf")));
         let p = &art.pieces;
         let (tl, t, tr, r, br, b, bl, l) = (
@@ -523,22 +569,44 @@ pub(crate) mod render {
             piece(&p.bottom_left)?,
             piece(&p.left)?,
         );
-        let (w, h) = (canvas.w as f32, canvas.h as f32);
-        let px = |pt: f64| (pt as f32 * s).round();
+        let (w, h) = (canvas.w, canvas.h);
+        let px = |pt: f64| ((pt as f32 * s).round().max(1.0) as usize).min(w.min(h));
         let size = |pdf: &Pdf| (px(pdf.bounds.size.width), px(pdf.bounds.size.height));
-        let rect = |x, y, w, h| Rect { x, y, w, h };
         let ((tlw, tlh), (trw, trh)) = (size(&tl), size(&tr));
         let ((blw, blh), (brw, brh)) = (size(&bl), size(&br));
-        canvas.draw(&tl, rect(0.0, 0.0, tlw, tlh));
-        canvas.draw(&tr, rect(w - trw, 0.0, trw, trh));
-        canvas.draw(&bl, rect(0.0, h - blh, blw, blh));
+        // Left and right edges: rows, from the top corner's bottom to the
+        // bottom corner's top.
+        for (pdf, right) in [(&l, false), (&r, true)] {
+            let thick = size(pdf).0;
+            let line = cross_section(pdf, thick, true)?;
+            let x = if right { w - thick } else { 0 };
+            let (top, bottom) = if right { (trh, brh) } else { (tlh, blh) };
+            for y in top..h.saturating_sub(bottom) {
+                canvas.blend(x, y, &line);
+            }
+        }
+        // Top and bottom edges: columns, the same way.
+        for (pdf, bottom) in [(&t, false), (&b, true)] {
+            let thick = size(pdf).1;
+            let column = cross_section(pdf, thick, false)?;
+            let y0 = if bottom { h - thick } else { 0 };
+            let (left, right) = if bottom { (blw, brw) } else { (tlw, trw) };
+            for x in left..w.saturating_sub(right) {
+                for (k, px) in column.as_chunks::<4>().0.iter().enumerate() {
+                    canvas.blend(x, y0 + k, px);
+                }
+            }
+        }
+        let rect = |x: usize, y: usize, w: usize, h: usize| Rect {
+            x: x as f32,
+            y: y as f32,
+            w: w as f32,
+            h: h as f32,
+        };
+        canvas.draw(&tl, rect(0, 0, tlw, tlh));
+        canvas.draw(&tr, rect(w - trw, 0, trw, trh));
+        canvas.draw(&bl, rect(0, h - blh, blw, blh));
         canvas.draw(&br, rect(w - brw, h - brh, brw, brh));
-        canvas.draw(&t, rect(tlw, 0.0, w - tlw - trw, size(&t).1));
-        let bh = size(&b).1;
-        canvas.draw(&b, rect(blw, h - bh, w - blw - brw, bh));
-        canvas.draw(&l, rect(0.0, tlh, size(&l).0, h - tlh - blh));
-        let rw = size(&r).0;
-        canvas.draw(&r, rect(w - rw, trh, rw, h - trh - brh));
         Some(())
     }
 
@@ -593,7 +661,7 @@ pub(crate) mod render {
         if pw == 0 || ph == 0 {
             return None;
         }
-        let canvas = Canvas::new(pw, ph)?;
+        let mut canvas = Canvas::new(pw, ph)?;
         let mask = match &spec.mask {
             Some(path) => Some(open(path)?),
             None => None,
@@ -619,7 +687,7 @@ pub(crate) mod render {
                 });
             match composite {
                 Some(pdf) => canvas.draw(&pdf, whole),
-                None => draw_frame(&canvas, art, pw as f32 / frame_pt.0)?,
+                None => draw_frame(&mut canvas, art, pw as f32 / frame_pt.0)?,
             }
             screen
         } else {
@@ -636,6 +704,66 @@ pub(crate) mod render {
             Quarter::Cw90 => image::imageops::rotate90(&upright),
             Quarter::Cw180 => image::imageops::rotate180(&upright),
             Quarter::Cw270 => image::imageops::rotate270(&upright),
+        })
+    }
+}
+
+/// The frame around a screen drawn at `screen` (turned by `turn`): the
+/// inverse of [`screen_rect_in_frame`].
+pub(crate) fn frame_around(screen: Rect, geometry: FrameGeometry, turn: Quarter) -> Rect {
+    let (sw, _) = turned_size(geometry.screen_pt, turn);
+    let (fw, fh) = geometry.frame_pt(turn);
+    let i = geometry.sizing.turned(turn);
+    let s = if sw > 0.0 { screen.w / sw } else { 0.0 };
+    Rect { x: screen.x - i.left * s, y: screen.y - i.top * s, w: fw * s, h: fh * s }
+}
+
+/// The overlays drawn for the device shown: one per (turn, framed), so
+/// turning the device back or toggling the frame again is a hit. All are
+/// for one device type and panel colour; a new one of either clears the
+/// rest.
+#[derive(Clone)]
+pub(crate) struct OverlayCache<T> {
+    entries: Vec<(OverlayKey, T)>,
+}
+
+impl<T> OverlayCache<T> {
+    pub(crate) fn new() -> Self {
+        Self { entries: Vec::new() }
+    }
+
+    pub(crate) fn get(&self, key: &OverlayKey) -> Option<&T> {
+        self.entries.iter().find(|(k, _)| k == key).map(|(_, image)| image)
+    }
+
+    /// Keep `image` for `key`. Returns what it pushes out (to free): the
+    /// slot's older overlay (another size), or every one for another device
+    /// type or colour.
+    pub(crate) fn insert(&mut self, key: OverlayKey, image: T) -> Vec<T> {
+        let (keep, gone): (Vec<_>, Vec<_>) = std::mem::take(&mut self.entries)
+            .into_iter()
+            .partition(|(k, _)| {
+                k.device_type == key.device_type
+                    && k.fill == key.fill
+                    && (k.turn, k.framed) != (key.turn, key.framed)
+            });
+        self.entries = keep;
+        self.entries.push((key, image));
+        gone.into_iter().map(|(_, image)| image).collect()
+    }
+
+    /// What to paint while `want` is drawn: it, or else the nearest kept,
+    /// so the picture is never shown unclipped. Same turn first (the
+    /// rounded corners sit right), then the same kind, then any; within
+    /// each, the same device type and size first.
+    pub(crate) fn closest(&self, want: &OverlayKey) -> Option<&(OverlayKey, T)> {
+        self.entries.iter().min_by_key(|(k, _)| {
+            (
+                k.turn != want.turn,
+                k.framed != want.framed,
+                k.device_type != want.device_type,
+                k.size_px != want.size_px,
+            )
         })
     }
 }
@@ -884,7 +1012,7 @@ mod tests {
             ("bare", Quarter::None, false),
             ("bare-cw270", Quarter::Cw270, false),
         ] {
-            let scale = 2.0;
+            let scale: f32 = std::env::var("OO_FRAME_SCALE").ok().and_then(|s| s.parse().ok()).unwrap_or(2.0);
             let (fw, fh) = geometry.frame_pt(turn);
             let (sw, sh) = turned_size(geometry.screen_pt, turn);
             let (w, h) = if framed { (fw, fh) } else { (sw, sh) };
@@ -925,6 +1053,169 @@ mod tests {
                 *px = image::Rgba([mix(o[2], under[0]), mix(o[1], under[1]), mix(o[0], under[2]), 255]);
             }
             out.save(dir.join(format!("{name}.png"))).unwrap();
+        }
+    }
+
+    fn key(turn: Quarter, framed: bool, w: u32) -> OverlayKey {
+        OverlayKey {
+            device_type: "iPhone-18-Pro".into(),
+            size_px: (w, w * 2),
+            turn,
+            framed,
+            fill: [1, 2, 3, 255],
+        }
+    }
+
+    #[test]
+    fn the_frame_around_a_screen_is_the_inverse_of_the_screen_in_it() {
+        let g = duo();
+        for turn in [Quarter::None, Quarter::Cw90, Quarter::Cw180, Quarter::Cw270] {
+            let (fw, fh) = g.frame_pt(turn);
+            let frame = Rect { x: 7.0, y: 3.0, w: fw * 0.7, h: fh * 0.7 };
+            let screen = screen_rect_in_frame(frame, g, turn);
+            assert!(near(frame_around(screen, g, turn), frame), "{turn:?}");
+        }
+    }
+
+    #[test]
+    fn rotating_back_and_forth_hits_the_overlay_cache() {
+        let mut cache = OverlayCache::new();
+        for (turn, framed) in [
+            (Quarter::None, true),
+            (Quarter::Cw90, true),
+            (Quarter::None, false),
+            (Quarter::Cw90, false),
+        ] {
+            assert!(cache.insert(key(turn, framed, 100), (turn, framed)).is_empty());
+        }
+        // Each (turn, framed) is kept: back to portrait framed is a hit.
+        assert_eq!(cache.get(&key(Quarter::None, true, 100)), Some(&(Quarter::None, true)));
+        assert_eq!(cache.get(&key(Quarter::Cw90, false, 100)), Some(&(Quarter::Cw90, false)));
+        // A new size replaces that slot's overlay only.
+        assert_eq!(cache.insert(key(Quarter::None, true, 120), (Quarter::Cw180, true)), vec![(Quarter::None, true)]);
+        assert_eq!(cache.get(&key(Quarter::None, true, 100)), None);
+        assert!(cache.get(&key(Quarter::Cw90, true, 100)).is_some());
+        // Another device type or panel colour: the old ones go.
+        let other = OverlayKey { device_type: "iPhone-Air".into(), ..key(Quarter::None, true, 100) };
+        assert_eq!(cache.insert(other.clone(), (Quarter::Cw270, false)).len(), 4);
+        assert_eq!(cache.get(&other), Some(&(Quarter::Cw270, false)));
+        let dark = OverlayKey { fill: [9, 9, 9, 255], ..other.clone() };
+        assert_eq!(cache.insert(dark.clone(), (Quarter::None, false)).len(), 1);
+    }
+
+    #[test]
+    fn until_its_overlay_lands_the_closest_one_is_painted() {
+        let mut cache = OverlayCache::new();
+        assert!(cache.closest(&key(Quarter::None, true, 100)).is_none());
+        cache.insert(key(Quarter::None, false, 90), "bare");
+        // Nothing framed yet: the rounded screen rather than nothing.
+        assert_eq!(cache.closest(&key(Quarter::None, true, 100)).map(|e| e.1), Some("bare"));
+        cache.insert(key(Quarter::Cw90, true, 100), "framed turned");
+        // Same turn wins over same kind: its corners are in the right place.
+        assert_eq!(cache.closest(&key(Quarter::None, true, 100)).map(|e| e.1), Some("bare"));
+        cache.insert(key(Quarter::None, true, 80), "framed small");
+        // Same turn and kind, another size: stretched, it beats the rest.
+        assert_eq!(cache.closest(&key(Quarter::None, true, 100)).map(|e| e.1), Some("framed small"));
+        // An exact hit is that one.
+        assert_eq!(cache.closest(&key(Quarter::Cw90, true, 100)).map(|e| e.1), Some("framed turned"));
+        // Only other turns: still something.
+        let mut turned = OverlayCache::new();
+        turned.insert(key(Quarter::Cw90, true, 100), "turned");
+        assert_eq!(turned.closest(&key(Quarter::Cw270, false, 100)).map(|e| e.1), Some("turned"));
+    }
+
+    /// A one-page PDF of `w` × `h` points drawing `content`.
+    #[cfg(target_os = "macos")]
+    fn write_pdf(path: &Path, (w, h): (f32, f32), content: &str) {
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w} {h}] /Contents 4 0 R /Resources << >> >>"
+            ),
+            format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+        ];
+        let mut out = String::from("%PDF-1.4\n");
+        let mut offsets = Vec::new();
+        for (n, object) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out += &format!("{} 0 obj\n{object}\nendobj\n", n + 1);
+        }
+        let xref = out.len();
+        out += &format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1);
+        for offset in offsets {
+            out += &format!("{offset:010} 00000 n \n");
+        }
+        out += &format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1);
+        std::fs::write(path, out).unwrap();
+    }
+
+    /// Nine slices drawn at a few scales leave no gap at their joins, even
+    /// when an edge piece's art stops a hair short of its ends (as art
+    /// stretched hundreds of times along a 1-point piece can): the frame's
+    /// band stays opaque all round.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn slice_joins_leave_no_seam() {
+        let dir = tempfile::tempdir().unwrap();
+        let grey = "0.3 g";
+        for corner in ["TL", "TR", "BL", "BR"] {
+            write_pdf(&dir.path().join(format!("{corner}.pdf")), (110.0, 110.0), &format!("{grey} 0 0 110 110 re f"));
+        }
+        for side in ["Left", "Right"] {
+            write_pdf(&dir.path().join(format!("{side}.pdf")), (110.0, 1.0), &format!("{grey} 0 0.05 110 0.9 re f"));
+        }
+        for side in ["Top", "Base"] {
+            write_pdf(&dir.path().join(format!("{side}.pdf")), (1.0, 110.0), &format!("{grey} 0.05 0 0.9 110 re f"));
+        }
+        let name = |n: &str| n.to_string();
+        let sizing = Insets { left: 18.0, top: 18.0, right: 18.0, bottom: 18.0 };
+        let spec = ChromeSpec {
+            screen_pt: Some((402.0, 874.0)),
+            mask: None,
+            frame: Some(FrameArt {
+                dir: dir.path().to_path_buf(),
+                pieces: NineSlice {
+                    top_left: name("TL"),
+                    top: name("Top"),
+                    top_right: name("TR"),
+                    right: name("Right"),
+                    bottom_right: name("BR"),
+                    bottom: name("Base"),
+                    bottom_left: name("BL"),
+                    left: name("Left"),
+                },
+                composite: None,
+                sizing,
+            }),
+        };
+        let geometry = spec.geometry().unwrap();
+        for scale in [0.8, 1.0, 1.37, 2.0, 3.0] {
+            let (fw, fh) = geometry.frame_pt(Quarter::None);
+            let (w, h) = ((fw * scale).round() as u32, (fh * scale).round() as u32);
+            let key = OverlayKey {
+                device_type: "x".into(),
+                size_px: (w, h),
+                turn: Quarter::None,
+                framed: true,
+                fill: [255, 0, 255, 255],
+            };
+            let image = render::overlay(&spec, &key).unwrap();
+            let whole = Rect { x: 0.0, y: 0.0, w: w as f32, h: h as f32 };
+            let hole = screen_rect_in_frame(whole, geometry, Quarter::None);
+            let mut gaps = Vec::new();
+            for (x, y, px) in image.enumerate_pixels() {
+                // The band: outside the screen, a pixel clear of its edge.
+                let (fx, fy) = (x as f32, y as f32);
+                let near_hole = fx > hole.x - 2.0
+                    && fx < hole.x + hole.w + 1.0
+                    && fy > hole.y - 2.0
+                    && fy < hole.y + hole.h + 1.0;
+                if !near_hole && px.0[3] < 250 {
+                    gaps.push((x, y, px.0[3]));
+                }
+            }
+            assert!(gaps.is_empty(), "scale {scale}: {} gap pixels, e.g. {:?}", gaps.len(), &gaps[..gaps.len().min(5)]);
         }
     }
 }
