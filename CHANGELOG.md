@@ -17,6 +17,7 @@ Unreleased is empty.
 - **Device tab** (macOS): watch a running iOS simulator live from the tools panel, picked from every booted simulator on the Mac. Watch-only; falls back to about 2 frames a second when this Xcode's simulator display API isn't available.
 - Boot and shut down simulators from the Device tab.
 - **Device tab controls** (macOS): rotate, Home, dark/light appearance, text size and copy-screenshot buttons under the live simulator view.
+- The Device tab draws the iPhone's frame and rounded screen (toggle with Show frame).
 
 ### Fixed
 

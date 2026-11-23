@@ -151,6 +151,7 @@ impl HarnessWorkspace {
         let mut device_tab = crate::devices::tab_state::DeviceTab::new();
         device_tab.preferred = prefs.device_udid.clone();
         device_tab.selected = prefs.device_udid.clone();
+        let device_frame = prefs.device_frame;
         let _ = device_tab.on_hidden();
         #[cfg(target_os = "macos")]
         let (device_to_ui, mut device_from_stream) = futures::channel::mpsc::unbounded();
@@ -291,7 +292,9 @@ impl HarnessWorkspace {
             ports_sort_menu: None,
             ports_sort_trigger_press: None,
             device_tab,
-            device_screen: cx.new(|_| crate::workspace::ui::device_panel::DeviceScreen::new()),
+            device_screen: cx.new(|cx| {
+                crate::workspace::ui::device_panel::DeviceScreen::new(device_frame, cx)
+            }),
             device_shown: false,
             device_generation: 0,
             device_live: None,

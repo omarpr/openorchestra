@@ -16,10 +16,12 @@ use objc2_io_surface::IOSurfaceRef;
 
 use super::convert::{PixelConverter, SendPixelBuffer};
 use super::sim_display::{ScreenEvent, ScreenStream};
-use super::{FrameSlot, StreamError, quarter_for};
+use super::{FrameSlot, Quarter, StreamError, quarter_for};
 
-/// Where a stream's frames land; the UI takes from it on a [`StreamMsg::Frame`].
-pub(crate) type Frames = Arc<FrameSlot<SendPixelBuffer>>;
+/// Where a stream's frames land, each with the turn that made it upright
+/// (the frame around it turns too); the UI takes from it on a
+/// [`StreamMsg::Frame`].
+pub(crate) type Frames = Arc<FrameSlot<(SendPixelBuffer, Quarter)>>;
 
 /// What the worker and the stream tell the UI. Each carries the generation
 /// of the start it belongs to; the UI drops anything not current.
@@ -154,9 +156,10 @@ fn start(
         };
         // The surface stays portrait when the device turns (see "Spike
         // findings" in the Device controls design).
-        match converter.convert(surface, quarter_for(*orientation)) {
+        let turn = quarter_for(*orientation);
+        match converter.convert(surface, turn) {
             Ok(buffer) => {
-                if frames.put(SendPixelBuffer(buffer)) {
+                if frames.put((SendPixelBuffer(buffer), turn)) {
                     let _ = to_ui.unbounded_send(StreamMsg::Frame(generation));
                 }
             }
@@ -249,7 +252,7 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(2000));
             let frame = frames.take().expect("a frame since the turn");
-            let (fw, fh, frame) = frame_grid(&frame.0);
+            let (fw, fh, frame) = frame_grid(&frame.0.0);
             let png = match run_public(&udid, Control::Screenshot) {
                 Ok(ControlOutcome::Png(png)) => png,
                 other => panic!("no screenshot: {other:?}"),

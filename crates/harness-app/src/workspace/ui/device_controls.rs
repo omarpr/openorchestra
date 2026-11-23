@@ -1,6 +1,7 @@
 //! The Device tab's bottom bar: buttons under the picture that act on the
 //! simulator it shows (rotate, Home, appearance, text size, copy a
-//! screenshot, shut down), and the runs behind them.
+//! screenshot, shut down), and the runs behind them; and Show frame, which
+//! only changes how the picture is drawn.
 //!
 //! A control acts only on the device on screen when it was clicked, only on
 //! a click, and off the UI thread. One runs at a time
@@ -83,6 +84,14 @@ pub(crate) fn outcome_note(result: &Result<ControlOutcome, String>) -> Option<(S
     }
 }
 
+/// Show frame's button. It stays the same either way and shows as pressed
+/// while the frame is on.
+pub(crate) const FRAME_TOGGLE: ControlLook = ControlLook {
+    id: "device-frame",
+    icon: "icons/oo/phone_frame.svg",
+    tooltip: "Show frame",
+};
+
 /// The line of a failure worth showing: its first, trimmed.
 pub(crate) fn error_line(e: &str) -> String {
     e.trim().lines().next().unwrap_or_default().trim().to_string()
@@ -142,6 +151,15 @@ impl HarnessWorkspace {
                 .when(busy, |d| {
                     d.child(div().flex_none().text_xs().text_color(hx.tx2).child("Working…"))
                 })
+                // Not a device control: it works while one runs.
+                .child(bar_button(
+                    hx,
+                    FRAME_TOGGLE,
+                    true,
+                    self.prefs.device_frame,
+                    |ws, _, cx| ws.toggle_device_frame(cx),
+                    cx,
+                ))
                 .child(self.device_bar_button(
                     hx,
                     "device-shut-down",
@@ -268,24 +286,19 @@ impl HarnessWorkspace {
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let enabled = !self.device_control_in_flight;
-        div()
-            .id(id)
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .size(px(24.0))
-            .rounded_md()
-            .tooltip(tip(tooltip))
-            .child(gpui::svg().size(px(14.0)).path(icon).text_color(hx.tx1))
-            .when(!enabled, |d| d.opacity(0.4))
-            .when(enabled, |d| {
-                d.cursor_pointer()
-                    .hover(|d| d.bg(hx.surface_hover))
-                    .on_click(cx.listener(move |ws, _, window, cx| on_click(ws, window, cx)))
-            })
-            .into_any_element()
+        let look = ControlLook { id, icon, tooltip };
+        bar_button(hx, look, !self.device_control_in_flight, false, on_click, cx)
+    }
+
+    /// Show frame: draw the iPhone's frame around the picture or not, and
+    /// remember it.
+    fn toggle_device_frame(&mut self, cx: &mut Context<Self>) {
+        self.prefs.device_frame = !self.prefs.device_frame;
+        let show = self.prefs.device_frame;
+        self.device_screen
+            .update(cx, |screen, cx| screen.set_show_frame(show, cx));
+        self.save_prefs(cx);
+        cx.notify();
     }
 
     /// Shut down: ask first, naming the device on screen now.
@@ -351,6 +364,40 @@ impl HarnessWorkspace {
         })
         .detach();
     }
+}
+
+/// An icon button for the bar. `enabled`: clickable (else dimmed);
+/// `pressed`: drawn as a toggle that is on.
+fn bar_button(
+    hx: &HarnessTheme,
+    look: ControlLook,
+    enabled: bool,
+    pressed: bool,
+    on_click: impl Fn(&mut HarnessWorkspace, &mut Window, &mut Context<HarnessWorkspace>) + 'static,
+    cx: &mut Context<HarnessWorkspace>,
+) -> AnyElement {
+    div()
+        .id(look.id)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(24.0))
+        .rounded_md()
+        .tooltip(tip(look.tooltip))
+        .child(gpui::svg().size(px(14.0)).path(look.icon).text_color(if pressed {
+            hx.tx0
+        } else {
+            hx.tx1
+        }))
+        .when(pressed, |d| d.bg(hx.surface2))
+        .when(!enabled, |d| d.opacity(0.4))
+        .when(enabled, |d| {
+            d.cursor_pointer()
+                .hover(|d| d.bg(hx.surface_hover))
+                .on_click(cx.listener(move |ws, _, window, cx| on_click(ws, window, cx)))
+        })
+        .into_any_element()
 }
 
 #[cfg(test)]
@@ -459,6 +506,7 @@ mod tests {
         assert_eq!(tooltip(Control::TextSmaller), "Smaller text");
         assert_eq!(tooltip(Control::TextBigger), "Larger text");
         assert_eq!(tooltip(Control::Screenshot), "Copy screenshot");
+        assert_eq!(super::FRAME_TOGGLE.tooltip, "Show frame");
     }
 
     #[test]
@@ -483,7 +531,7 @@ mod tests {
     fn every_bar_icon_is_bundled() {
         use gpui::AssetSource as _;
         let assets = crate::app_assets::AppAssets;
-        let mut icons = vec!["icons/power.svg"];
+        let mut icons = vec!["icons/power.svg", super::FRAME_TOGGLE.icon];
         for control in [
             Control::Rotate,
             Control::Home,

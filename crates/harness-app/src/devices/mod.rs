@@ -1,6 +1,7 @@
 //! The Device tab's pure model: simulator listing, device choice and
 //! the single-frame hand-off between the capture thread and the UI.
 
+pub(crate) mod chrome;
 pub(crate) mod controls;
 #[cfg(target_os = "macos")]
 pub(crate) mod convert;

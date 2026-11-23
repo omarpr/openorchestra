@@ -182,6 +182,11 @@ pub(crate) struct Prefs {
     /// The simulator the Device tab last watched.
     #[serde(default)]
     pub(crate) device_udid: Option<String>,
+    /// Draw the iPhone's frame around the Device tab's picture (the bar's
+    /// Show frame). On by default, including for prefs files written before
+    /// it existed; older builds ignore the key.
+    #[serde(default = "default_true")]
+    pub(crate) device_frame: bool,
     /// Row order in the Ports tool tab. Absent in older prefs → port ascending.
     #[serde(default)]
     pub(crate) ports_sort: crate::ports::PortSort,
@@ -251,6 +256,7 @@ impl Default for Prefs {
             tool_tab: ToolTab::default(),
             device_tab: false,
             device_udid: None,
+            device_frame: true,
             ports_sort: Default::default(),
             diff_view: DiffView::default(),
             diff_list_width: 280.0,
@@ -603,5 +609,27 @@ mod links_pref_tests {
         old.as_object_mut().unwrap().remove("links_in_browser_tab");
         let p: Prefs = serde_json::from_value(old).unwrap();
         assert!(p.links_in_browser_tab);
+    }
+}
+
+#[cfg(test)]
+mod device_frame_pref_tests {
+    use super::{Prefs, load_prefs, save_prefs_to};
+
+    #[test]
+    fn device_frame_defaults_on_and_survives_a_save_load_cycle() {
+        assert!(Prefs::default().device_frame);
+        // A prefs.json written before the setting existed.
+        let mut old = serde_json::to_value(Prefs::default()).unwrap();
+        old.as_object_mut().unwrap().remove("device_frame");
+        let p: Prefs = serde_json::from_value(old).unwrap();
+        assert!(p.device_frame);
+        // Turned off, it stays off across a save and a load.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        save_prefs_to(&path, &Prefs { device_frame: false, ..Prefs::default() });
+        assert!(!load_prefs(&path).device_frame);
+        save_prefs_to(&path, &Prefs::default());
+        assert!(load_prefs(&path).device_frame);
     }
 }

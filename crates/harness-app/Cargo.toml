@@ -307,6 +307,12 @@ objc2-core-graphics = { version = "0.3", default-features = false, features = [
     "CGImage",
     "CGColorSpace",
     "CGDataProvider",
+    # The Device tab's iPhone frame (devices/chrome.rs): Apple's chrome PDFs
+    # drawn into a bitmap.
+    "CGBitmapContext",
+    "CGContext",
+    "CGPDFDocument",
+    "CGPDFPage",
 ] }
 # CFDictionary + CFNumber: the Device tab's pixel buffer pool attributes
 # (devices/convert.rs).
@@ -315,6 +321,8 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
     "CFData",
     "CFDictionary",
     "CFNumber",
+    # The frame's PDFs are opened by URL (devices/chrome.rs).
+    "CFURL",
 ] }
 # Posts web view callbacks back onto the main queue (see NativeEvents).
 dispatch2 = { version = "0.3", default-features = false, features = ["std", "objc2"] }

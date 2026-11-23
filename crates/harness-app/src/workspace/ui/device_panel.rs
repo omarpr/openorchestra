@@ -15,13 +15,14 @@
 use std::collections::VecDeque;
 use std::sync::OnceLock;
 
-use gpui::{AnyView, ImageFormat, ObjectFit, RenderImage, StyleRefinement};
+use gpui::{AnyView, ImageFormat, RenderImage, StyleRefinement};
 
 use super::super::*;
 use super::device_controls::error_line;
 use crate::devices::simctl::{DeviceList, ListError};
 use crate::devices::tab_state::{Command, DeviceTab, DeviceView};
-use crate::devices::{DeviceInfo, StreamError};
+use crate::devices::chrome::{ChromeSpec, OverlayKey, Placement, Rect, place};
+use crate::devices::{DeviceInfo, Quarter, StreamError};
 
 /// How often the device list is polled while the tab is on screen.
 pub(crate) const DEVICE_POLL: Duration = Duration::from_secs(3);
@@ -163,20 +164,131 @@ pub(crate) fn boot_offer_after_list(
 
 /// The simulator's picture. Its own entity, embedded cached, so a new frame
 /// re-renders this view alone.
+///
+/// It draws the device's frame around the picture (or, with Show frame
+/// off, just rounds its corners): one overlay image over the picture, made
+/// off the UI thread from the device type's chrome (`devices::chrome`) for
+/// the size it is drawn at, and made again only when that size, the turn,
+/// the toggle or the panel's colour changes. Never per frame.
 pub(crate) struct DeviceScreen {
-    /// The live stream's newest frame (420f, ready for `surface()`).
+    /// The live stream's newest frame (420f, ready for `surface()`), and
+    /// how far it was turned upright.
     #[cfg(target_os = "macos")]
-    frame: Option<objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>>,
+    frame: Option<(
+        objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>,
+        Quarter,
+    )>,
     /// The newest screenshot, in Reduced mode.
     shot: Option<Arc<RenderImage>>,
+    /// The type of the device shown, and its chrome once read (None while
+    /// it is read, or when it has none).
+    device_type: Option<String>,
+    spec: Option<Arc<ChromeSpec>>,
+    spec_reading: bool,
+    /// The bar's Show frame (`Prefs::device_frame`).
+    show_frame: bool,
+    /// The overlay drawn last, and what it was drawn for.
+    overlay: Option<(OverlayKey, Arc<RenderImage>)>,
+    /// The overlay to draw next; one is drawn at a time.
+    overlay_wanted: Option<OverlayKey>,
+    overlay_drawing: bool,
+    /// (device type, framed) overlays that couldn't be drawn (an unreadable
+    /// PDF): a frame falls back to the rounded screen, and neither is
+    /// tried again.
+    overlay_failed: Vec<(String, bool)>,
+    /// Redraws the corners in the panel's colour when the theme changes.
+    _theme: gpui::Subscription,
+}
+
+/// The picture on show, as painted.
+enum Picture {
+    #[cfg(target_os = "macos")]
+    Live(objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>),
+    Shot(Arc<RenderImage>),
+}
+
+impl Picture {
+    /// Its size in pixels, upright.
+    fn size(&self) -> (f32, f32) {
+        match self {
+            #[cfg(target_os = "macos")]
+            Picture::Live(buffer) => (
+                objc2_core_video::CVPixelBufferGetWidth(buffer) as f32,
+                objc2_core_video::CVPixelBufferGetHeight(buffer) as f32,
+            ),
+            Picture::Shot(shot) => {
+                let size = shot.size(0);
+                (size.width.0 as f32, size.height.0 as f32)
+            }
+        }
+    }
+}
+
+/// The turn of a screenshot, which comes upright and says nothing of how
+/// the device is held: landscape is taken as turned clockwise. Only the
+/// frame's side buttons would tell the two landscapes apart, and the frame
+/// is drawn without them.
+pub(crate) fn shot_turn((w, h): (f32, f32)) -> Quarter {
+    if w > h { Quarter::Cw90 } else { Quarter::None }
+}
+
+/// The panel colour behind the picture, as the overlay's fill.
+fn fill_of(colour: gpui::Rgba) -> [u8; 4] {
+    let c = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    [c(colour.r), c(colour.g), c(colour.b), 255]
+}
+
+fn rect_of(bounds: gpui::Bounds<Pixels>) -> Rect {
+    Rect {
+        x: f32::from(bounds.origin.x),
+        y: f32::from(bounds.origin.y),
+        w: f32::from(bounds.size.width),
+        h: f32::from(bounds.size.height),
+    }
+}
+
+fn bounds_of(r: Rect) -> gpui::Bounds<Pixels> {
+    gpui::Bounds::new(gpui::point(px(r.x), px(r.y)), gpui::size(px(r.w), px(r.h)))
+}
+
+/// What the overlay for a picture placed at `placement` must be, at
+/// `scale` device pixels per pixel. None when there is nothing to draw.
+pub(crate) fn overlay_for(
+    spec: Option<&ChromeSpec>,
+    device_type: &str,
+    placement: Placement,
+    turn: Quarter,
+    scale: f32,
+    fill: [u8; 4],
+) -> Option<OverlayKey> {
+    let framed = placement.frame.is_some();
+    spec.filter(|s| framed || s.mask.is_some())?;
+    let at = placement.frame.unwrap_or(placement.screen);
+    let size_px = ((at.w * scale).round() as u32, (at.h * scale).round() as u32);
+    (size_px.0 > 0 && size_px.1 > 0).then(|| OverlayKey {
+        device_type: device_type.to_string(),
+        size_px,
+        turn,
+        framed,
+        fill,
+    })
 }
 
 impl DeviceScreen {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(show_frame: bool, cx: &mut Context<Self>) -> Self {
         Self {
             #[cfg(target_os = "macos")]
             frame: None,
             shot: None,
+            device_type: None,
+            spec: None,
+            spec_reading: false,
+            show_frame,
+            overlay: None,
+            overlay_wanted: None,
+            overlay_drawing: false,
+            overlay_failed: Vec::new(),
+            _theme: cx.observe_global::<crate::theme::HarnessTheme>(|_, cx| cx.notify()),
         }
     }
 
@@ -197,9 +309,10 @@ impl DeviceScreen {
     fn show_frame(
         &mut self,
         frame: objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>,
+        turn: Quarter,
         cx: &mut Context<Self>,
     ) {
-        self.frame = Some(frame);
+        self.frame = Some((frame, turn));
         cx.notify();
     }
 
@@ -220,27 +333,197 @@ impl DeviceScreen {
         cx.defer(move |cx| cx.drop_image(old, None));
         true
     }
+
+    /// The device shown is of `device_type`: read its chrome off the UI
+    /// thread. Asked on each start until it's known: a read that timed out
+    /// isn't cached (`chrome_for`), so the next start tries again.
+    pub(crate) fn set_device_type(&mut self, device_type: String, cx: &mut Context<Self>) {
+        let same = self.device_type.as_deref() == Some(device_type.as_str());
+        if same && (self.spec.is_some() || self.spec_reading) {
+            return;
+        }
+        if !same {
+            self.device_type = Some(device_type.clone());
+            self.spec = None;
+            cx.notify();
+        }
+        self.spec_reading = true;
+        cx.spawn(async move |this, cx| {
+            let spec = {
+                let device_type = device_type.clone();
+                cx.background_spawn(async move { crate::devices::chrome::chrome_for(&device_type) })
+                    .await
+            };
+            if spec.is_none() {
+                log::debug!("device: no frame or mask for {device_type}");
+            }
+            let _ = this.update(cx, |screen, cx| {
+                screen.spec_reading = false;
+                if screen.device_type.as_deref() == Some(device_type.as_str()) {
+                    screen.spec = spec;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn set_show_frame(&mut self, show: bool, cx: &mut Context<Self>) {
+        if self.show_frame != show {
+            self.show_frame = show;
+            cx.notify();
+        }
+    }
+
+    fn failed(&self, device_type: &str, framed: bool) -> bool {
+        self.overlay_failed.iter().any(|(t, f)| t == device_type && *f == framed)
+    }
+
+    /// The paint found `key` is what the overlay should be.
+    fn want_overlay(&mut self, key: OverlayKey, cx: &mut Context<Self>) {
+        if self.overlay.as_ref().map(|(k, _)| k) == Some(&key) {
+            return;
+        }
+        self.overlay_wanted = Some(key);
+        self.draw_wanted(cx);
+    }
+
+    /// Draw the wanted overlay off the UI thread, unless one is drawing (it
+    /// draws the newest want when it lands).
+    fn draw_wanted(&mut self, cx: &mut Context<Self>) {
+        if self.overlay_drawing {
+            return;
+        }
+        let Some(key) = self.overlay_wanted.clone() else {
+            return;
+        };
+        let Some(spec) = self
+            .spec
+            .clone()
+            .filter(|_| self.device_type.as_deref() == Some(key.device_type.as_str()))
+        else {
+            self.overlay_wanted = None;
+            return;
+        };
+        self.overlay_drawing = true;
+        cx.spawn(async move |this, cx| {
+            let image = {
+                let key = key.clone();
+                cx.background_spawn(async move {
+                    crate::devices::chrome::render_overlay(&spec, &key)
+                })
+                .await
+            };
+            let _ = this.update(cx, |screen, cx| screen.overlay_drawn(key, image, cx));
+        })
+        .detach();
+    }
+
+    fn overlay_drawn(
+        &mut self,
+        key: OverlayKey,
+        image: Option<Arc<RenderImage>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.overlay_drawing = false;
+        if self.overlay_wanted.as_ref() == Some(&key) {
+            self.overlay_wanted = None;
+        }
+        match image {
+            Some(image) => {
+                if let Some((_, old)) = self.overlay.replace((key, image)) {
+                    // As in `drop_shot`.
+                    cx.defer(move |cx| cx.drop_image(old, None));
+                }
+            }
+            None => {
+                log::info!(
+                    "device: couldn't draw the {} for {}",
+                    if key.framed { "frame" } else { "rounded corners" },
+                    key.device_type
+                );
+                self.overlay_failed.push((key.device_type, key.framed));
+            }
+        }
+        self.draw_wanted(cx);
+        cx.notify();
+    }
+
+    fn picture(&self) -> Option<(Picture, Quarter)> {
+        #[cfg(target_os = "macos")]
+        if let Some((frame, turn)) = &self.frame {
+            return Some((Picture::Live(frame.clone()), *turn));
+        }
+        let shot = self.shot.clone()?;
+        let picture = Picture::Shot(shot);
+        let turn = shot_turn(picture.size());
+        Some((picture, turn))
+    }
 }
 
 impl Render for DeviceScreen {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let base = div().size_full().flex().items_center().justify_center();
-        #[cfg(target_os = "macos")]
-        if let Some(frame) = &self.frame {
-            return base.child(
-                gpui::surface(frame.clone())
-                    .object_fit(ObjectFit::Contain)
-                    .size_full(),
-            );
-        }
-        match &self.shot {
-            Some(shot) => base.child(
-                gpui::img(gpui::ImageSource::Render(shot.clone()))
-                    .object_fit(ObjectFit::Contain)
-                    .size_full(),
-            ),
-            None => base,
-        }
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some((picture, turn)) = self.picture() else {
+            return div().size_full().into_any_element();
+        };
+        let device_type = self.device_type.clone().unwrap_or_default();
+        let spec = self.spec.clone();
+        // The frame, unless it's off, this type has none, or it couldn't
+        // be drawn: then the rounded screen alone.
+        let geometry = spec
+            .as_ref()
+            .and_then(|s| s.geometry())
+            .filter(|_| self.show_frame && !self.failed(&device_type, true));
+        let mask_failed = self.failed(&device_type, false);
+        let overlay = self.overlay.clone();
+        let wanted = self.overlay_wanted.clone();
+        let fill = fill_of(crate::theme::theme(cx).bg1);
+        let this = cx.entity().downgrade();
+        gpui::canvas(
+            |_, _, _| {},
+            move |bounds, (), window, cx| {
+                let placement = place(rect_of(bounds), picture.size(), geometry, turn);
+                let screen = bounds_of(placement.screen);
+                match picture {
+                    #[cfg(target_os = "macos")]
+                    Picture::Live(buffer) => window.paint_surface(screen, buffer),
+                    Picture::Shot(shot) => {
+                        let corners = Default::default();
+                        let _ = window.paint_image(screen, screen, corners, shot, 0, false);
+                    }
+                }
+                let key = overlay_for(
+                    spec.as_deref(),
+                    &device_type,
+                    placement,
+                    turn,
+                    window.scale_factor(),
+                    fill,
+                )
+                .filter(|k| k.framed || !mask_failed);
+                let Some(key) = key else {
+                    return;
+                };
+                // The last overlay drawn while the next one is made: the
+                // right kind for this picture, stretched to its size.
+                if let Some((drawn, image)) = &overlay
+                    && drawn.device_type == key.device_type
+                    && drawn.turn == key.turn
+                    && drawn.framed == key.framed
+                {
+                    let at = bounds_of(placement.frame.unwrap_or(placement.screen));
+                    let _ = window.paint_image(at, at, Default::default(), image.clone(), 0, false);
+                }
+                let drawn = overlay.as_ref().map(|(k, _)| k);
+                if drawn != Some(&key) && wanted.as_ref() != Some(&key) {
+                    cx.defer(move |cx| {
+                        let _ = this.update(cx, |screen, cx| screen.want_overlay(key, cx));
+                    });
+                }
+            },
+        )
+        .size_full()
+        .into_any_element()
     }
 }
 
@@ -396,6 +679,12 @@ impl HarnessWorkspace {
                 // For the appearance button: the device may have changed,
                 // or been switched by someone else while the tab was away.
                 self.read_device_appearance(udid.clone(), cx);
+                // Its frame.
+                if let Some(device) = self.device_tab.booted.iter().find(|d| &d.udid == udid) {
+                    let device_type = device.device_type.clone();
+                    self.device_screen
+                        .update(cx, |screen, cx| screen.set_device_type(device_type, cx));
+                }
             }
             match cmd {
                 Command::StartStream(udid) => {
@@ -479,12 +768,12 @@ impl HarnessWorkspace {
         let current = |generation: u64| live == Some(generation);
         match msg {
             StreamMsg::Frame(generation) if current(generation) => {
-                let Some(frame) = self.device_frames.as_ref().and_then(|f| f.take()) else {
+                let Some((frame, turn)) = self.device_frames.as_ref().and_then(|f| f.take()) else {
                     return;
                 };
                 // The picture's entity only: the workspace isn't notified.
                 self.device_screen
-                    .update(cx, |screen, cx| screen.show_frame(frame.0, cx));
+                    .update(cx, |screen, cx| screen.show_frame(frame.0, turn, cx));
             }
             StreamMsg::Started(generation) if current(generation) => {
                 log::debug!("device: live view started");
@@ -849,8 +1138,11 @@ fn device_empty(
 mod tests {
     use super::{
         PickAction, PollTick, Shoot, boot_offer_after_list, device_on_screen, list_failure_line,
-        may_shoot, pick_device, pick_for_boot, picker_action, poll_tick, reduced_note, sync_shown,
+        may_shoot, overlay_for, pick_device, pick_for_boot, picker_action, poll_tick, reduced_note,
+        shot_turn, sync_shown,
     };
+    use crate::devices::Quarter;
+    use crate::devices::chrome::{ChromeSpec, Placement, Rect};
     use crate::devices::DeviceInfo;
     use crate::devices::simctl::DeviceList;
     use crate::devices::tab_state::{Command, DeviceTab};
@@ -1079,5 +1371,46 @@ mod tests {
         // An old generation ends, whether or not a shot is in flight.
         assert_eq!(may_shoot(Some(2), 1, false), Shoot::Stop);
         assert_eq!(may_shoot(None, 1, true), Shoot::Stop);
+    }
+
+    #[test]
+    fn a_landscape_screenshot_is_taken_as_turned() {
+        assert_eq!(shot_turn((1206.0, 2622.0)), Quarter::None);
+        assert_eq!(shot_turn((2622.0, 1206.0)), Quarter::Cw90);
+    }
+
+    #[test]
+    fn the_overlay_is_drawn_again_only_when_its_look_changes() {
+        let spec = ChromeSpec {
+            screen_pt: Some((402.0, 874.0)),
+            mask: Some("/m.pdf".into()),
+            frame: None,
+        };
+        let screen = Rect { x: 0.0, y: 0.0, w: 201.0, h: 437.0 };
+        let bare = Placement { frame: None, screen };
+        let fill = [1, 2, 3, 255];
+        let key = |p, turn, scale, fill| overlay_for(Some(&spec), "iPhone-18-Pro", p, turn, scale, fill);
+        let one = key(bare, Quarter::None, 2.0, fill).unwrap();
+        // The same picture, painted again (a new frame): the same overlay.
+        assert_eq!(key(bare, Quarter::None, 2.0, fill), Some(one.clone()));
+        assert_eq!(one.size_px, (402, 874));
+        assert!(!one.framed);
+        // Its size, the display's scale, the turn or the panel's colour: a new one.
+        let wider = Placement { frame: None, screen: Rect { w: 300.0, ..screen } };
+        assert_ne!(key(wider, Quarter::None, 2.0, fill), Some(one.clone()));
+        assert_ne!(key(bare, Quarter::None, 1.0, fill), Some(one.clone()));
+        assert_ne!(key(bare, Quarter::Cw90, 2.0, fill), Some(one.clone()));
+        assert_ne!(key(bare, Quarter::None, 2.0, [9, 9, 9, 255]), Some(one.clone()));
+        // A frame: drawn at the frame's size.
+        let frame = Rect { x: 0.0, y: 0.0, w: 219.0, h: 455.0 };
+        let framed = key(Placement { frame: Some(frame), screen }, Quarter::None, 2.0, fill).unwrap();
+        assert!(framed.framed);
+        assert_eq!(framed.size_px, (438, 910));
+        // No chrome, no mask, or nothing to cover: no overlay.
+        assert_eq!(overlay_for(None, "x", bare, Quarter::None, 2.0, fill), None);
+        let no_mask = ChromeSpec { mask: None, ..spec.clone() };
+        assert_eq!(overlay_for(Some(&no_mask), "x", bare, Quarter::None, 2.0, fill), None);
+        let empty = Placement { frame: None, screen: Rect { w: 0.0, ..screen } };
+        assert_eq!(key(empty, Quarter::None, 2.0, fill), None);
     }
 }

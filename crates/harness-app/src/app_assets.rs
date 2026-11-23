@@ -28,6 +28,10 @@ const OWN: &[(&str, &[u8])] = &[
     ),
     ("icons/oo/camera.svg", include_bytes!("../icons/camera.svg")),
     (
+        "icons/oo/phone_frame.svg",
+        include_bytes!("../icons/phone_frame.svg"),
+    ),
+    (
         "icons/oo/agents/claudecode.svg",
         include_bytes!("../icons/agents/claudecode.svg"),
     ),

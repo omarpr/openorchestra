@@ -1,0 +1,43 @@
+{
+  "identifier": "com.apple.dt.devicekit.chrome.phone11",
+  "images": {
+    "topLeft": "Phone TL",
+    "top": "Phone Top",
+    "topRight": "Phone TR",
+    "right": "Phone Right",
+    "bottomRight": "Phone BR",
+    "bottom": "Phone Base",
+    "bottomLeft": "Phone BL",
+    "left": "Phone Left",
+    "composite": "PhoneComposite",
+    "screen": "Screen",
+    "sizing": {
+      "leftWidth": 18,
+      "rightWidth": 18,
+      "topHeight": 18,
+      "bottomHeight": 18
+    },
+    "padding": {
+      "width": 9,
+      "height": 0
+    },
+    "devicePadding": {
+      "top": 0,
+      "left": 9,
+      "bottom": 0,
+      "right": 9
+    }
+  },
+  "paths": {
+    "simpleOutsideBorder": {
+      "insets": {
+        "top": 0,
+        "left": 0,
+        "bottom": 0,
+        "right": 0
+      },
+      "cornerRadiusX": 80,
+      "cornerRadiusY": 80
+    }
+  }
+}
