@@ -32,29 +32,43 @@ fn runtime_os(key: &str) -> String {
     }
 }
 
-/// The booted devices in `simctl list devices booted -j` output, sorted by
-/// name then OS.
-pub(crate) fn parse_booted(json: &str) -> Result<Vec<DeviceInfo>, String> {
+/// The simulators in the default device set, as the picker groups them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct DeviceList {
+    pub booted: Vec<DeviceInfo>,
+    pub shut_down: Vec<DeviceInfo>,
+}
+
+/// The available devices in `simctl list devices -j` output: booted ones and
+/// shut-down ones, each sorted by name then OS. Devices on their way between
+/// the two (Booting, Shutting Down, Creating) are in neither, nor is one
+/// whose runtime is gone (`isAvailable: false`).
+pub(crate) fn parse_devices(json: &str) -> Result<DeviceList, String> {
     let root: Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
     let runtimes = root
         .get("devices")
         .and_then(Value::as_object)
         .ok_or_else(|| "no \"devices\" object in simctl output".to_string())?;
-    let mut out = Vec::new();
+    let mut out = DeviceList::default();
     for (runtime, devices) in runtimes {
         let os = runtime_os(runtime);
         for d in devices.as_array().into_iter().flatten() {
             let field = |k: &str| d.get(k).and_then(Value::as_str);
-            if field("state") != Some("Booted") {
+            if d.get("isAvailable").and_then(Value::as_bool) != Some(true) {
                 continue;
             }
+            let group = match field("state") {
+                Some("Booted") => &mut out.booted,
+                Some("Shutdown") => &mut out.shut_down,
+                _ => continue,
+            };
             let (Some(udid), Some(name)) = (field("udid"), field("name")) else {
                 continue;
             };
             let device_type = field("deviceTypeIdentifier")
                 .map(|t| t.strip_prefix(TYPE_PREFIX).unwrap_or(t))
                 .unwrap_or_default();
-            out.push(DeviceInfo {
+            group.push(DeviceInfo {
                 udid: udid.to_string(),
                 name: name.to_string(),
                 os: os.clone(),
@@ -62,21 +76,23 @@ pub(crate) fn parse_booted(json: &str) -> Result<Vec<DeviceInfo>, String> {
             });
         }
     }
-    out.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.os.cmp(&b.os)));
+    for group in [&mut out.booted, &mut out.shut_down] {
+        group.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.os.cmp(&b.os)));
+    }
     Ok(out)
 }
 
-/// Booted simulators, via `xcrun simctl list devices booted -j`.
-pub(crate) fn list_booted() -> Result<Vec<DeviceInfo>, ListError> {
+/// Every simulator in the default set, via `xcrun simctl list devices -j`.
+pub(crate) fn list_devices() -> Result<DeviceList, ListError> {
     list_outcome(run_bounded_why(
         "xcrun",
-        &["simctl", "list", "devices", "booted", "-j"],
+        &["simctl", "list", "devices", "-j"],
         TIMEOUT,
     ))
 }
 
 /// What a `simctl list` run means for the tab.
-fn list_outcome(ran: Result<Ran, RunFailed>) -> Result<Vec<DeviceInfo>, ListError> {
+fn list_outcome(ran: Result<Ran, RunFailed>) -> Result<DeviceList, ListError> {
     // A slow simctl (CoreSimulator starting, a busy Mac) is a failed list,
     // which keeps the view; only a missing xcrun means no Xcode.
     let ran = ran.map_err(|why| match why {
@@ -96,7 +112,7 @@ fn list_outcome(ran: Result<Ran, RunFailed>) -> Result<Vec<DeviceInfo>, ListErro
             None => "simctl list was stopped by a signal".to_string(),
         }));
     }
-    parse_booted(&ran.stdout).map_err(ListError::Failed)
+    parse_devices(&ran.stdout).map_err(ListError::Failed)
 }
 
 /// A file of its own for each screenshot, `<dir>/<udid>-<pid>-<n>.jpg`: two
@@ -119,29 +135,52 @@ pub(crate) fn shot_path_ext(dir: &Path, udid: &str, ext: &str) -> PathBuf {
 /// when it could not run or ran past the timeout.
 #[allow(dead_code)] // used by `controls`, which the panel wires in later
 pub(crate) fn simctl_ran(args: &[&str]) -> Result<Ran, String> {
+    simctl_ran_within(args, TIMEOUT)
+}
+
+/// [`simctl_ran`] with its own time limit.
+fn simctl_ran_within(args: &[&str], timeout: Duration) -> Result<Ran, String> {
     let mut full = vec!["simctl"];
     full.extend_from_slice(args);
-    run_bounded_why("xcrun", &full, TIMEOUT).map_err(|why| match why {
+    run_bounded_why("xcrun", &full, timeout).map_err(|why| match why {
         RunFailed::Spawn => "xcrun simctl could not start".to_string(),
-        RunFailed::TimedOut => format!("simctl timed out after {} s", TIMEOUT.as_secs()),
+        RunFailed::TimedOut => format!("simctl timed out after {} s", timeout.as_secs()),
     })
 }
 
-/// `xcrun simctl <args>`: its stdout, or the first line of stderr (or a
-/// sentence about the exit code) when it fails.
+/// `xcrun simctl <args>`: its stdout, or what stderr says (or a sentence
+/// about the exit code) when it fails.
 #[allow(dead_code)] // used by `controls`, which the panel wires in later
 pub(crate) fn simctl(args: &[&str]) -> Result<String, String> {
-    let ran = simctl_ran(args)?;
+    simctl_within(args, TIMEOUT)
+}
+
+/// [`simctl`] with its own time limit, for the slow ones (boot, shutdown).
+pub(crate) fn simctl_within(args: &[&str], timeout: Duration) -> Result<String, String> {
+    let ran = simctl_ran_within(args, timeout)?;
     if ran.code == Some(0) {
         return Ok(ran.stdout);
     }
     Err(failure_text(&ran))
 }
 
-/// What a failed simctl run says, trimmed; never empty.
+/// What a failed simctl run says, trimmed; never empty. CoreSimulator's
+/// errors open with a line that only says an error happened ("An error was
+/// encountered processing the command (domain=…, code=405):"); it is dropped
+/// so the first line is the reason ("Unable to boot device in current
+/// state: Booted").
 #[allow(dead_code)] // used by `controls`, which the panel wires in later
 pub(crate) fn failure_text(ran: &Ran) -> String {
     let stderr = ran.stderr.trim();
+    let stderr = match stderr.split_once('\n') {
+        Some((head, rest))
+            if head.starts_with("An error was encountered processing the command")
+                && !rest.trim().is_empty() =>
+        {
+            rest.trim()
+        }
+        _ => stderr,
+    };
     match ran.code {
         _ if !stderr.is_empty() => stderr.to_string(),
         Some(code) => format!("simctl failed with exit code {code}"),
@@ -171,7 +210,7 @@ pub(crate) fn screenshot_jpeg(udid: &str, dir: &Path) -> Result<Vec<u8>, String>
 
 #[cfg(test)]
 mod tests {
-    use super::{ListError, Ran, RunFailed, list_outcome, shot_path};
+    use super::{ListError, Ran, RunFailed, failure_text, list_outcome, shot_path};
     use std::path::Path;
 
     fn exited(code: i32, stderr: &str) -> Result<Ran, RunFailed> {
@@ -211,6 +250,28 @@ mod tests {
             "{:?}",
             list_outcome(exited(1, ""))
         );
+    }
+
+    #[test]
+    fn a_simctl_error_starts_with_its_reason() {
+        // Captured from `simctl boot` on a booted iOS 27.2 device.
+        let ran = Ran {
+            code: Some(149),
+            stdout: String::new(),
+            stderr: "An error was encountered processing the command (domain=com.apple.CoreSimulator.SimError, code=405):\nUnable to boot device in current state: Booted\n".into(),
+        };
+        assert_eq!(failure_text(&ran), "Unable to boot device in current state: Booted");
+        // Nothing after the header: keep it rather than say nothing.
+        let ran = Ran {
+            stderr: "An error was encountered processing the command (domain=x, code=1):\n".into(),
+            ..ran
+        };
+        assert_eq!(
+            failure_text(&ran),
+            "An error was encountered processing the command (domain=x, code=1):"
+        );
+        let ran = Ran { stderr: "Invalid device: X\n".into(), ..ran };
+        assert_eq!(failure_text(&ran), "Invalid device: X");
     }
 
     #[test]

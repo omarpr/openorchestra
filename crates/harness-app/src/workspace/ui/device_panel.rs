@@ -1,5 +1,7 @@
-//! The tools panel's Device tab: a watch-only view of a booted iOS
-//! simulator, picked from every booted one on the Mac.
+//! The tools panel's Device tab: a view of a booted iOS simulator, picked
+//! from the Mac's simulators. A shut-down one can be booted from the picker,
+//! and the bar under the picture (`device_controls`) shuts the shown one
+//! down.
 //!
 //! What runs is decided by `devices::tab_state::DeviceTab`; this file feeds
 //! it (device lists, visibility, stream events, the picker) and carries out
@@ -16,8 +18,10 @@ use std::sync::OnceLock;
 use gpui::{AnyView, ImageFormat, ObjectFit, RenderImage, StyleRefinement};
 
 use super::super::*;
-use crate::devices::StreamError;
+use super::device_controls::error_line;
+use crate::devices::simctl::{DeviceList, ListError};
 use crate::devices::tab_state::{Command, DeviceTab, DeviceView};
+use crate::devices::{DeviceInfo, StreamError};
 
 /// How often the device list is polled while the tab is on screen.
 pub(crate) const DEVICE_POLL: Duration = Duration::from_secs(3);
@@ -55,7 +59,7 @@ pub(crate) fn list_failure_line(listed: bool, last_error: Option<&str>) -> Optio
     if listed {
         return None;
     }
-    last_error.map(|e| e.trim().lines().next().unwrap_or_default().trim().to_string())
+    last_error.map(error_line)
 }
 
 /// `OO_DEVICE_FORCE_SCREENSHOTS=1` makes every stream start fail, so the tab
@@ -122,6 +126,39 @@ pub(crate) fn pick_device(tab: &mut DeviceTab, prefs: &mut Prefs, udid: &str) ->
     }
     prefs.device_udid = Some(udid.to_string());
     tab.on_select(udid)
+}
+
+/// What choosing a device in the picker does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PickAction {
+    Watch,
+    /// It is shut down: offer to boot it.
+    Boot,
+}
+
+pub(crate) fn picker_action(list: &DeviceList, pick: &str) -> PickAction {
+    if list.shut_down.iter().any(|d| d.udid == pick) {
+        PickAction::Boot
+    } else {
+        PickAction::Watch
+    }
+}
+
+/// Boot was clicked for `udid`: it becomes the user's pick (and is saved),
+/// so the first list that shows it running goes live on it.
+pub(crate) fn pick_for_boot(tab: &mut DeviceTab, prefs: &mut Prefs, udid: &str) {
+    tab.preferred = Some(udid.to_string());
+    prefs.device_udid = Some(udid.to_string());
+}
+
+/// The boot offer once `booted` has landed: gone when its device is
+/// running. A device on its way up is in no group yet, so leaving the
+/// shut-down group doesn't end the offer.
+pub(crate) fn boot_offer_after_list(
+    offer: Option<DeviceInfo>,
+    booted: &[DeviceInfo],
+) -> Option<DeviceInfo> {
+    offer.filter(|o| !booted.iter().any(|d| d.udid == o.udid))
 }
 
 /// The simulator's picture. Its own entity, embedded cached, so a new frame
@@ -263,7 +300,7 @@ impl HarnessWorkspace {
         }
     }
 
-    /// List the booted simulators now, off the UI thread. One at a time.
+    /// List the simulators now, off the UI thread. One at a time.
     pub(crate) fn refresh_devices(&mut self, cx: &mut Context<Self>) {
         if std::mem::replace(&mut self.device_listing, true) {
             return;
@@ -271,7 +308,7 @@ impl HarnessWorkspace {
         let ticket = self.device_tab.list_started();
         cx.spawn(async move |view, cx| {
             let list = cx
-                .background_spawn(async move { crate::devices::simctl::list_booted() })
+                .background_spawn(async move { crate::devices::simctl::list_devices() })
                 .await;
             let _ = view.update(cx, |ws, cx| ws.apply_device_list(ticket, list, cx));
         })
@@ -281,25 +318,52 @@ impl HarnessWorkspace {
     fn apply_device_list(
         &mut self,
         ticket: u64,
-        list: Result<Vec<crate::devices::DeviceInfo>, crate::devices::simctl::ListError>,
+        list: Result<DeviceList, ListError>,
         cx: &mut Context<Self>,
     ) {
         self.device_listing = false;
-        if let Err(crate::devices::simctl::ListError::Failed(e)) = &list {
-            log::debug!("device: listing simulators failed: {e}");
-            self.device_list_error = Some(e.clone());
-        } else {
-            self.device_listed = true;
-            self.device_list_error = None;
+        match &list {
+            Err(ListError::Failed(e)) => {
+                log::debug!("device: listing simulators failed: {e}");
+                self.device_list_error = Some(e.clone());
+            }
+            Err(ListError::NoXcode) => {
+                self.device_listed = true;
+                self.device_list_error = None;
+                self.device_list = DeviceList::default();
+                self.device_boot_offer = None;
+            }
+            Ok(got) => {
+                self.device_listed = true;
+                self.device_list_error = None;
+                self.device_list = got.clone();
+                self.device_boot_offer =
+                    boot_offer_after_list(self.device_boot_offer.take(), &got.booted);
+            }
         }
-        let cmds = self.device_tab.on_list(ticket, list);
+        // The state machine watches booted devices only.
+        let cmds = self.device_tab.on_list(ticket, list.map(|l| l.booted));
         self.run_device_commands(cmds, cx);
         cx.notify();
     }
 
-    /// The menu's choice.
+    /// The menu's choice: watch a running device, or offer to boot a
+    /// shut-down one in place of the picture.
+    fn pick_from_menu(&mut self, udid: &str, cx: &mut Context<Self>) {
+        match picker_action(&self.device_list, udid) {
+            PickAction::Watch => self.watch_device(udid, cx),
+            PickAction::Boot => {
+                self.device_menu_open = false;
+                self.device_boot_offer =
+                    self.device_list.shut_down.iter().find(|d| d.udid == udid).cloned();
+                cx.notify();
+            }
+        }
+    }
+
     pub(crate) fn watch_device(&mut self, udid: &str, cx: &mut Context<Self>) {
         self.device_menu_open = false;
+        self.device_boot_offer = None;
         let cmds = pick_device(&mut self.device_tab, &mut self.prefs, udid);
         self.save_prefs(cx);
         self.run_device_commands(cmds, cx);
@@ -507,6 +571,7 @@ impl HarnessWorkspace {
                     None => div().flex_1().into_any_element(),
                 }
             }
+            _ if self.device_boot_offer.is_some() => self.render_boot_offer(hx, cx),
             DeviceView::NeedsXcode => device_empty(
                 hx,
                 "Needs Xcode".into(),
@@ -545,6 +610,54 @@ impl HarnessWorkspace {
             .min_h_0()
             .children(self.render_device_picker(hx, cx))
             .child(body)
+            .children(self.render_device_controls(hx, cx))
+            .into_any_element()
+    }
+
+    /// "Boot <name>" in place of the picture, for a shut-down pick.
+    fn render_boot_offer(&self, hx: &HarnessTheme, cx: &mut Context<Self>) -> AnyElement {
+        let Some(device) = &self.device_boot_offer else {
+            return div().flex_1().into_any_element();
+        };
+        let busy = self.device_control_in_flight;
+        let label = if busy {
+            format!("Booting {}…", device.name)
+        } else {
+            format!("Boot {}", device.name)
+        };
+        let button = div()
+            .id("device-boot")
+            .flex_none()
+            .px_3()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(hx.accent)
+            .bg(tint(hx.accent, 0.16))
+            .text_sm()
+            .text_color(hx.accent)
+            .child(label)
+            .when(busy, |d| d.opacity(0.6))
+            .when(!busy, |d| {
+                d.cursor_pointer()
+                    .hover(|d| d.bg(tint(hx.accent, 0.24)))
+                    .on_click(cx.listener(|ws, _, _, cx| ws.boot_offered_device(cx)))
+            });
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .px_3()
+            .child(button)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(hx.tx2)
+                    .child(format!("{} · {} is shut down.", device.name, device.os)),
+            )
             .into_any_element()
     }
 
@@ -566,22 +679,28 @@ impl HarnessWorkspace {
             .into_any_element()
     }
 
-    /// "<name> · <os> ▾" over a list of every booted simulator. None while
-    /// nothing is booted.
+    /// "<name> · <os> ▾" over the simulators: running ones, then shut-down
+    /// ones. None while there are none.
     fn render_device_picker(
         &self,
         hx: &HarnessTheme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let booted = &self.device_tab.booted;
-        if booted.is_empty() {
+        let DeviceList { booted, shut_down } = &self.device_list;
+        if booted.is_empty() && shut_down.is_empty() {
             return None;
         }
-        let label = |d: &crate::devices::DeviceInfo| format!("{} · {}", d.name, d.os);
-        let selected = self.device_tab.selected.as_deref();
+        let label = |d: &DeviceInfo| format!("{} · {}", d.name, d.os);
+        // The device in the body: a boot offer, else the one watched.
+        let shown = match &self.device_boot_offer {
+            Some(offer) => Some(offer.udid.as_str()),
+            None => self.device_tab.selected.as_deref(),
+        };
         let current = booted
             .iter()
-            .find(|d| Some(d.udid.as_str()) == selected)
+            .chain(shut_down)
+            .chain(&self.device_boot_offer)
+            .find(|d| Some(d.udid.as_str()) == shown)
             .map(label)
             .unwrap_or_else(|| "Choose a simulator".to_string());
         let open = self.device_menu_open;
@@ -615,8 +734,13 @@ impl HarnessWorkspace {
         let mut col = div().flex().flex_col().min_w_0().child(button);
         if open {
             let mut list = div()
+                .id("device-picker-menu")
                 .mt_1()
                 .min_w(px(180.0))
+                // Many shut-down simulators (one per model and runtime) is
+                // common: scroll rather than run off the window.
+                .max_h(px(360.0))
+                .overflow_y_scroll()
                 .p(px(4.0))
                 .rounded_md()
                 .bg(hx.surface2)
@@ -630,26 +754,40 @@ impl HarnessWorkspace {
                         cx.notify();
                     }
                 }));
-            for d in booted {
-                let is_selected = Some(d.udid.as_str()) == selected;
-                let udid = d.udid.clone();
+            for (heading, group) in [("Running", booted), ("Shut down", shut_down)] {
+                if group.is_empty() {
+                    continue;
+                }
                 list = list.child(
                     div()
-                        .id(gpui::SharedString::from(format!("device-pick-{}", d.udid)))
-                        .flex()
-                        .items_center()
-                        .gap_2()
                         .px_2()
-                        .py_1()
-                        .rounded_md()
+                        .pt_1()
+                        .pb(px(2.0))
                         .text_xs()
-                        .text_color(if is_selected { hx.tx0 } else { hx.tx1 })
-                        .cursor_pointer()
-                        .hover(|d| d.bg(hx.surface_hover))
-                        .child(div().w(px(10.0)).child(if is_selected { "✓" } else { "" }))
-                        .child(label(d))
-                        .on_click(cx.listener(move |ws, _, _, cx| ws.watch_device(&udid, cx))),
+                        .text_color(hx.tx2)
+                        .child(heading),
                 );
+                for d in group {
+                    let is_shown = Some(d.udid.as_str()) == shown;
+                    let udid = d.udid.clone();
+                    list = list.child(
+                        div()
+                            .id(gpui::SharedString::from(format!("device-pick-{}", d.udid)))
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .text_xs()
+                            .text_color(if is_shown { hx.tx0 } else { hx.tx1 })
+                            .cursor_pointer()
+                            .hover(|d| d.bg(hx.surface_hover))
+                            .child(div().w(px(10.0)).child(if is_shown { "✓" } else { "" }))
+                            .child(label(d))
+                            .on_click(cx.listener(move |ws, _, _, cx| ws.pick_from_menu(&udid, cx))),
+                    );
+                }
             }
             col = col.child(gpui::deferred(
                 gpui::anchored().snap_to_window().child(list),
@@ -690,10 +828,11 @@ fn device_empty(
 #[cfg(test)]
 mod tests {
     use super::{
-        PollTick, Shoot, device_on_screen, list_failure_line, may_shoot, pick_device, poll_tick,
-        reduced_note, sync_shown,
+        PickAction, PollTick, Shoot, boot_offer_after_list, device_on_screen, list_failure_line,
+        may_shoot, pick_device, pick_for_boot, picker_action, poll_tick, reduced_note, sync_shown,
     };
     use crate::devices::DeviceInfo;
+    use crate::devices::simctl::DeviceList;
     use crate::devices::tab_state::{Command, DeviceTab};
     use crate::workspace::{Prefs, ToolTab, load_prefs, save_prefs_to};
 
@@ -800,6 +939,45 @@ mod tests {
         // A device that isn't booted (a stale menu) is not remembered.
         assert!(pick_device(&mut tab, &mut prefs, "gone").is_empty());
         assert_eq!(prefs.device_udid.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn the_picker_offers_boot_for_a_shut_down_pick() {
+        let list = DeviceList {
+            booted: vec![dev("a")],
+            shut_down: vec![dev("b")],
+        };
+        assert_eq!(picker_action(&list, "a"), PickAction::Watch);
+        assert_eq!(picker_action(&list, "b"), PickAction::Boot);
+        // Gone from both (a stale menu): watching it is a no-op.
+        assert_eq!(picker_action(&list, "gone"), PickAction::Watch);
+    }
+
+    #[test]
+    fn a_booted_pick_goes_live_on_the_list_that_shows_it_running() {
+        let (mut tab, _) = watching_a();
+        let mut prefs = Prefs::default();
+        pick_for_boot(&mut tab, &mut prefs, "c");
+        assert_eq!(prefs.device_udid.as_deref(), Some("c"));
+        // Still booting: the tab stays on what it watches.
+        let ticket = tab.list_started();
+        assert!(tab.on_list(ticket, Ok(vec![dev("a"), dev("b")])).is_empty());
+        assert_eq!(tab.selected.as_deref(), Some("a"));
+        // Running: it goes live.
+        let ticket = tab.list_started();
+        assert_eq!(
+            tab.on_list(ticket, Ok(vec![dev("a"), dev("b"), dev("c")])),
+            vec![Command::StopStream, Command::StartStream("c".into())]
+        );
+    }
+
+    #[test]
+    fn the_boot_offer_lasts_until_its_device_is_running() {
+        let offer = Some(dev("c"));
+        // Booting: in neither group, and the offer stays.
+        assert_eq!(boot_offer_after_list(offer.clone(), &[dev("a")]), offer);
+        assert_eq!(boot_offer_after_list(offer, &[dev("a"), dev("c")]), None);
+        assert_eq!(boot_offer_after_list(None, &[dev("a")]), None);
     }
 
     #[test]

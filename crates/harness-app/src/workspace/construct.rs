@@ -301,6 +301,10 @@ impl HarnessWorkspace {
             device_shot_in_flight: false,
             device_menu_open: false,
             device_menu_press: None,
+            device_list: Default::default(),
+            device_boot_offer: None,
+            device_shutdown_confirm: None,
+            device_control_in_flight: false,
             #[cfg(target_os = "macos")]
             device_worker: None,
             #[cfg(target_os = "macos")]

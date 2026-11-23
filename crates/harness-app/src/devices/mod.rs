@@ -1,4 +1,4 @@
-//! The Device tab's pure model: booted-simulator listing, device choice and
+//! The Device tab's pure model: simulator listing, device choice and
 //! the single-frame hand-off between the capture thread and the UI.
 
 pub(crate) mod controls;
@@ -13,7 +13,7 @@ pub(crate) mod worker;
 
 use std::sync::Mutex;
 
-/// A booted simulator.
+/// A simulator.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DeviceInfo {
     pub udid: String,
@@ -76,12 +76,21 @@ impl<T> FrameSlot<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::simctl::parse_booted;
+    use super::simctl::{DeviceList, parse_devices};
     use super::*;
 
     const ONE: &str = include_str!("testdata/booted_one.json");
     const NONE: &str = include_str!("testdata/booted_none.json");
     const TWO: &str = include_str!("testdata/booted_two.json");
+    const ALL: &str = include_str!("testdata/devices_all.json");
+
+    fn parse_booted(json: &str) -> Result<Vec<DeviceInfo>, String> {
+        parse_devices(json).map(|l| l.booted)
+    }
+
+    fn names(list: &[DeviceInfo]) -> Vec<(&str, &str)> {
+        list.iter().map(|d| (d.name.as_str(), d.os.as_str())).collect()
+    }
 
     fn dev(udid: &str) -> DeviceInfo {
         DeviceInfo {
@@ -114,6 +123,30 @@ mod tests {
     fn a_shutdown_device_in_the_list_is_skipped() {
         let json = ONE.replace("\"Booted\"", "\"Shutdown\"");
         assert_eq!(parse_booted(&json), Ok(vec![]));
+    }
+
+    #[test]
+    fn parses_booted_and_shut_down_groups() {
+        let DeviceList { booted, shut_down } = parse_devices(ALL).unwrap();
+        // Each group sorted by name, then OS.
+        assert_eq!(names(&booted), [("iPhone 18 Pro", "iOS 27.0"), ("iPhone 18 Pro", "iOS 27.2")]);
+        assert_eq!(names(&shut_down), [("iPad Air 13-inch (M4)", "iOS 27.0"), ("iPhone 18", "iOS 27.2")]);
+        assert_eq!(shut_down[1].udid, "11111111-0000-0000-0000-000000000001");
+        assert_eq!(shut_down[1].device_type, "iPhone-18");
+        assert_eq!(parse_devices(NONE), Ok(DeviceList::default()));
+    }
+
+    #[test]
+    fn unavailable_and_transitional_devices_are_left_out() {
+        let list = parse_devices(ALL).unwrap();
+        let all: Vec<&str> = list.booted.iter().chain(&list.shut_down).map(|d| d.name.as_str()).collect();
+        // Booting, Shutting Down and Creating are in neither group, nor is a
+        // device whose runtime is gone (`isAvailable: false`), booted or not.
+        for gone in ["iPhone Air", "iPhone 17e", "iPhone 17", "iPhone 16", "iPhone 16 Pro"] {
+            assert!(!all.contains(&gone), "{gone} in {all:?}");
+        }
+        assert_eq!(all.len(), 4, "{all:?}");
+        assert!(parse_devices("not json").is_err());
     }
 
     #[test]

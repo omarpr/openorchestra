@@ -735,6 +735,7 @@ impl HarnessWorkspace {
             // Drawn once its loss check is in (`render_end_confirm`).
             || self.end_confirm.as_ref().is_some_and(|c| c.losses.is_some())
             || self.hook_trust.is_some()
+            || self.device_shutdown_confirm.is_some()
             || self.failure_toast_showing()
             || self.zed_modal_open(cx)
             || super::super::ui::app_menu_open()

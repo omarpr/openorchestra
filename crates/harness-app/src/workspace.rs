@@ -952,6 +952,19 @@ pub struct HarnessWorkspace {
     /// open menu's outside handler leaves that press to the button).
     device_menu_open: bool,
     device_menu_press: Option<gpui::Point<Pixels>>,
+    /// The last good device list, both groups, for the picker. Cleared when
+    /// Xcode is missing.
+    device_list: crate::devices::simctl::DeviceList,
+    /// A shut-down device picked in the menu: the tab offers to boot it in
+    /// place of the picture, until it is running or another device is
+    /// picked.
+    device_boot_offer: Option<crate::devices::DeviceInfo>,
+    /// The device the Shut down confirm asks about, captured from the
+    /// picture on screen when Shut down was clicked.
+    device_shutdown_confirm: Option<crate::devices::DeviceInfo>,
+    /// A Device tab control (boot and shutdown included) is running; one at
+    /// a time, and the buttons wait.
+    device_control_in_flight: bool,
     /// The thread that owns the live stream; started on the first stream.
     #[cfg(target_os = "macos")]
     device_worker: Option<crate::devices::worker::StreamWorker>,

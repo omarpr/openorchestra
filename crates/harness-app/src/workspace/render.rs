@@ -469,6 +469,9 @@ impl Render for HarnessWorkspace {
         if let Some(dialog) = self.render_hook_trust(&hx, cx) {
             root = root.child(dialog);
         }
+        if let Some(dialog) = self.render_device_shutdown_prompt(&hx, cx) {
+            root = root.child(dialog);
+        }
         root
     }
 }

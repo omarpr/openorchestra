@@ -1,5 +1,5 @@
-//! Centered confirmation dialogs: quit, remove project, archive/delete, and
-//! approving a project's hook scripts. They share one card, one backdrop and
+//! Centered confirmation dialogs: quit, remove project, archive/delete,
+//! approving a project's hook scripts, and shutting a simulator down. They share one card, one backdrop and
 //! one button style, so each dialog only states what it asks.
 
 use super::super::lifecycle::{EndConfirm, EndKind, Loss};
@@ -243,6 +243,46 @@ impl HarnessWorkspace {
             },
             cx,
         )
+    }
+
+    /// "Shut down <name>?" for the Device tab's Shut down: agents share these
+    /// simulators. Cancel is the highlighted, safe choice; clicking outside
+    /// cancels.
+    pub(crate) fn render_device_shutdown_prompt(
+        &self,
+        hx: &HarnessTheme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let device = self.device_shutdown_confirm.clone()?;
+        let cancel = |ws: &mut Self, cx: &mut Context<Self>| {
+            ws.device_shutdown_confirm = None;
+            cx.notify();
+        };
+        let card = self
+            .dialog_card(hx, format!("Shut down {}?", device.name), cx)
+            .child(div().text_sm().text_color(hx.tx1).child("An agent may be using it."))
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .mt_1()
+                    .child(
+                        dialog_button(hx, "device-shutdown-cancel", "Cancel", Tone::Primary)
+                            .on_click(cx.listener(move |ws, _, _, cx| cancel(ws, cx))),
+                    )
+                    .child(
+                        dialog_button(hx, "device-shutdown-confirm", "Shut down", Tone::Plain)
+                            .on_click(cx.listener(move |ws, _, _, cx| {
+                                ws.shut_down_device(&device, cx)
+                            })),
+                    ),
+            );
+        Some(self.dialog_backdrop(
+            "device-shutdown-backdrop",
+            card,
+            move |ws, _, cx| cancel(ws, cx),
+            cx,
+        ))
     }
 
     /// Archive / delete confirmation, naming exactly what would be lost.
