@@ -5,6 +5,8 @@
 #![allow(dead_code, unused_imports)]
 
 #[cfg(target_os = "macos")]
+pub(crate) mod convert;
+#[cfg(target_os = "macos")]
 pub(crate) mod sim_display;
 pub(crate) mod simctl;
 pub(crate) mod tab_state;

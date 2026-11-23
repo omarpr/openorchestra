@@ -308,7 +308,14 @@ objc2-core-graphics = { version = "0.3", default-features = false, features = [
     "CGColorSpace",
     "CGDataProvider",
 ] }
-objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFData"] }
+# CFDictionary + CFNumber: the Device tab's pixel buffer pool attributes
+# (devices/convert.rs).
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "CFData",
+    "CFDictionary",
+    "CFNumber",
+] }
 # Posts web view callbacks back onto the main queue (see NativeEvents).
 dispatch2 = { version = "0.3", default-features = false, features = ["std", "objc2"] }
 # The Device tab's simulator screen (devices/sim_display.rs) arrives as
@@ -320,6 +327,32 @@ objc2-io-surface = { version = "0.3", default-features = false, features = [
     "objc2",
     # CFRetained<IOSurfaceRef> (its cf_type! impl is gated on this).
     "objc2-core-foundation",
+] }
+# The Device tab converts the simulator's BGRA screen into the 420f pixel
+# buffers gpui's surface() draws (devices/convert.rs). objc2-core-video 0.3.2
+# is already in the lockfile via gpui; objc2-video-toolbox is the one new
+# crate. Beyond the basics: CVPixelBufferIOSurface wraps the source IOSurface
+# as a CVPixelBuffer for the transfer; CVBase has the lock flags its tests
+# read pixels with; VTSession + VTPixelTransferProperties set the
+# destination's YCbCr matrix to BT.601, the one gpui's surface shader
+# hardcodes.
+objc2-core-video = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CVBase",
+    "CVPixelBuffer",
+    "CVPixelBufferIOSurface",
+    "CVPixelBufferPool",
+    "CVBuffer",
+    "CVImageBuffer",
+    "CVReturn",
+    "objc2-io-surface",
+] }
+objc2-video-toolbox = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "VTPixelTransferSession",
+    "VTPixelTransferProperties",
+    "VTSession",
+    "objc2-core-video",
 ] }
 # gpui's Window hands out its NSView through HasWindowHandle.
 raw-window-handle = "0.6"
