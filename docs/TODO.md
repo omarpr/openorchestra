@@ -2,6 +2,23 @@
 
 Ideas and follow-ups that aren't scheduled yet. Newest first.
 
+## Give each task its own simulator or emulator
+
+**Added 2026-11-22.** The Device tab
+(`docs/superpowers/specs/2026-11-22-device-tab-ios-design.md`) lists every
+booted simulator and emulator on the Mac with a picker, because it can't
+tell which task is using which device: iOS simulators run under
+`launchd_sim`, not under the agent that booted them.
+
+Goal: openOrchestra assigns a device to each task (creates or picks a
+simulator/AVD, and tells the task's agents to use it, e.g. through an
+environment variable or the agent's instructions), so the Device tab can
+show "this task's device" exactly, and two tasks never fight over one
+simulator.
+
+What it takes: a per-task device record, a way to hand it to every agent
+kind openOrchestra launches, and cleanup when a task is archived.
+
 ## Install more editor languages from Zed extensions
 
 **Added 2026-11-18.** The editor highlights every language zed has built in
