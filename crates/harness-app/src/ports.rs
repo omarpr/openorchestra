@@ -887,11 +887,31 @@ fn accepted(cmd: &str, ran: Ran) -> Option<String> {
     clean.then_some(ran.stdout)
 }
 
+/// Why a bounded command gave no output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunFailed {
+    /// It could not be started (not installed, say).
+    Spawn,
+    /// It ran past its timeout and was stopped.
+    TimedOut,
+}
+
 /// Windows: no process groups or O_NONBLOCK pipes, so read each pipe on its
 /// own thread and stop the whole tree with `taskkill /T` on timeout.
 #[cfg(windows)]
 #[allow(dead_code)] // only tests run commands on Windows
 pub(crate) fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration) -> Option<Ran> {
+    run_bounded_why(cmd, args, timeout).ok()
+}
+
+/// [`run_bounded`], saying why there is no output.
+#[cfg(windows)]
+#[allow(dead_code)] // only tests run commands on Windows
+pub(crate) fn run_bounded_why(
+    cmd: &str,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> Result<Ran, RunFailed> {
     use std::io::Read;
     use std::os::windows::process::CommandExt;
     use std::process::Stdio;
@@ -903,7 +923,7 @@ pub(crate) fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration
         .stderr(Stdio::piped())
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
-        .ok()?;
+        .map_err(|_| RunFailed::Spawn)?;
     let reader = |mut pipe: Box<dyn Read + Send>| {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -913,16 +933,16 @@ pub(crate) fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration
         });
         rx
     };
-    let out_rx = reader(Box::new(child.stdout.take()?));
-    let err_rx = reader(Box::new(child.stderr.take()?));
+    let out_rx = reader(Box::new(child.stdout.take().ok_or(RunFailed::Spawn)?));
+    let err_rx = reader(Box::new(child.stderr.take().ok_or(RunFailed::Spawn)?));
     let deadline = std::time::Instant::now() + timeout;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
                 let left = deadline.saturating_duration_since(std::time::Instant::now());
-                let stdout = out_rx.recv_timeout(left).ok()?;
+                let stdout = out_rx.recv_timeout(left).map_err(|_| RunFailed::TimedOut)?;
                 let stderr = err_rx.recv_timeout(left).unwrap_or_default();
-                return Some(Ran {
+                return Ok(Ran {
                     code: status.code(),
                     stdout: String::from_utf8_lossy(&stdout).into_owned(),
                     stderr: String::from_utf8_lossy(&stderr).into_owned(),
@@ -934,7 +954,7 @@ pub(crate) fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration
             _ => {
                 os_compat::process::kill_tree(child.id());
                 let _ = child.wait();
-                return None;
+                return Err(RunFailed::TimedOut);
             }
         }
     }
@@ -942,6 +962,16 @@ pub(crate) fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration
 
 #[cfg(unix)]
 pub(crate) fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration) -> Option<Ran> {
+    run_bounded_why(cmd, args, timeout).ok()
+}
+
+/// [`run_bounded`], saying why there is no output.
+#[cfg(unix)]
+pub(crate) fn run_bounded_why(
+    cmd: &str,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> Result<Ran, RunFailed> {
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
     let mut child = std::process::Command::new(cmd)
@@ -952,12 +982,12 @@ pub(crate) fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration
         // Its own process group, so a timeout can stop helpers it started.
         .process_group(0)
         .spawn()
-        .ok()?;
+        .map_err(|_| RunFailed::Spawn)?;
     // Read both pipes here, non-blocking, against the deadline: no reader
     // thread that a helper holding a pipe could leave blocked. Dropping them
     // closes our read ends whatever the helpers do.
-    let mut stdout = NonBlocking::new(child.stdout.take()?);
-    let mut stderr = NonBlocking::new(child.stderr.take()?);
+    let mut stdout = NonBlocking::new(child.stdout.take().ok_or(RunFailed::Spawn)?);
+    let mut stderr = NonBlocking::new(child.stderr.take().ok_or(RunFailed::Spawn)?);
     let deadline = std::time::Instant::now() + timeout;
     let mut code = None;
     let mut exited = false;
@@ -975,7 +1005,7 @@ pub(crate) fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration
             }
         }
         if exited && stdout.eof && stderr.eof {
-            return Some(Ran {
+            return Ok(Ran {
                 code,
                 stdout: stdout.text(),
                 stderr: stderr.text(),
@@ -997,7 +1027,7 @@ pub(crate) fn run_bounded(cmd: &str, args: &[&str], timeout: std::time::Duration
         }
         let _ = child.wait();
     }
-    None
+    Err(RunFailed::TimedOut)
 }
 
 /// A child's pipe, switched to non-blocking, collecting what it has so far.
@@ -1498,6 +1528,21 @@ quiet-1\tbusybox\t\t\t\t\n";
         assert_eq!(
             (ok.code, ok.stdout.as_str(), ok.stderr.as_str()),
             (Some(3), "hi\n", "oops\n")
+        );
+    }
+
+    #[test]
+    fn run_bounded_why_tells_a_timeout_from_a_missing_command() {
+        let sh = posix_sh();
+        assert_eq!(
+            run_bounded_why(&sh, &["-c", "sleep 3"], std::time::Duration::from_millis(200))
+                .map(|_| ()),
+            Err(RunFailed::TimedOut)
+        );
+        assert_eq!(
+            run_bounded_why("oo-no-such-command", &[], std::time::Duration::from_secs(1))
+                .map(|_| ()),
+            Err(RunFailed::Spawn)
         );
     }
 

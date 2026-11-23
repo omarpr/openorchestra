@@ -7,7 +7,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use super::DeviceInfo;
-use crate::ports::run_bounded;
+use crate::ports::{Ran, RunFailed, run_bounded, run_bounded_why};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 const RUNTIME_PREFIX: &str = "com.apple.CoreSimulator.SimRuntime.";
@@ -68,14 +68,33 @@ pub(crate) fn parse_booted(json: &str) -> Result<Vec<DeviceInfo>, String> {
 
 /// Booted simulators, via `xcrun simctl list devices booted -j`.
 pub(crate) fn list_booted() -> Result<Vec<DeviceInfo>, ListError> {
-    let ran = run_bounded("xcrun", &["simctl", "list", "devices", "booted", "-j"], TIMEOUT)
-        .ok_or(ListError::NoXcode)?;
+    list_outcome(run_bounded_why(
+        "xcrun",
+        &["simctl", "list", "devices", "booted", "-j"],
+        TIMEOUT,
+    ))
+}
+
+/// What a `simctl list` run means for the tab.
+fn list_outcome(ran: Result<Ran, RunFailed>) -> Result<Vec<DeviceInfo>, ListError> {
+    // A slow simctl (CoreSimulator starting, a busy Mac) is a failed list,
+    // which keeps the view; only a missing xcrun means no Xcode.
+    let ran = ran.map_err(|why| match why {
+        RunFailed::Spawn => ListError::NoXcode,
+        RunFailed::TimedOut => {
+            ListError::Failed(format!("simctl list timed out after {} s", TIMEOUT.as_secs()))
+        }
+    })?;
     if ran.code != Some(0) {
-        return Err(if ran.stderr.contains("unable to find utility") {
-            ListError::NoXcode
-        } else {
-            ListError::Failed(ran.stderr.trim().to_string())
-        });
+        if ran.stderr.contains("unable to find utility") {
+            return Err(ListError::NoXcode);
+        }
+        let stderr = ran.stderr.trim();
+        return Err(ListError::Failed(match ran.code {
+            _ if !stderr.is_empty() => stderr.to_string(),
+            Some(code) => format!("simctl list failed with exit code {code}"),
+            None => "simctl list was stopped by a signal".to_string(),
+        }));
     }
     parse_booted(&ran.stdout).map_err(ListError::Failed)
 }
@@ -112,8 +131,47 @@ pub(crate) fn screenshot_jpeg(udid: &str, dir: &Path) -> Result<Vec<u8>, String>
 
 #[cfg(test)]
 mod tests {
-    use super::shot_path;
+    use super::{ListError, Ran, RunFailed, list_outcome, shot_path};
     use std::path::Path;
+
+    fn exited(code: i32, stderr: &str) -> Result<Ran, RunFailed> {
+        Ok(Ran {
+            code: Some(code),
+            stdout: String::new(),
+            stderr: stderr.into(),
+        })
+    }
+
+    #[test]
+    fn a_slow_simctl_is_a_failed_list_not_a_missing_xcode() {
+        assert!(
+            matches!(list_outcome(Err(RunFailed::TimedOut)), Err(ListError::Failed(e)) if e.contains("timed out")),
+            "{:?}",
+            list_outcome(Err(RunFailed::TimedOut))
+        );
+    }
+
+    #[test]
+    fn only_a_missing_xcrun_or_simctl_means_no_xcode() {
+        assert_eq!(list_outcome(Err(RunFailed::Spawn)), Err(ListError::NoXcode));
+        assert_eq!(
+            list_outcome(exited(72, "xcrun: error: unable to find utility \"simctl\", not a developer tool or in PATH")),
+            Err(ListError::NoXcode)
+        );
+        assert_eq!(
+            list_outcome(exited(69, "You have not agreed to the Xcode license agreements.\n")),
+            Err(ListError::Failed("You have not agreed to the Xcode license agreements.".into()))
+        );
+    }
+
+    #[test]
+    fn a_silent_simctl_failure_still_says_something() {
+        assert!(
+            matches!(list_outcome(exited(1, "  ")), Err(ListError::Failed(e)) if e.contains("exit code 1")),
+            "{:?}",
+            list_outcome(exited(1, ""))
+        );
+    }
 
     #[test]
     fn device_screenshots_never_share_a_file() {
