@@ -1,6 +1,6 @@
 # Device tab: Android emulators — design
 
-Date: 2026-11-23. Status: draft, prepared for review (phase 2 of the Device
+Date: 2026-11-23. Status: decisions recorded 2026-11-23 (see "Decisions"); ready for planning (phase 2 of the Device
 tab; phase 1 is `2026-11-22-device-tab-ios-design.md` plus
 `2026-11-23-device-tab-controls-design.md`).
 
@@ -28,8 +28,9 @@ typing straight into the device. Android is phase 2, after iOS shipped.
 - **Device frame** from the AVD's skin (`<sdk>/skins/<name>/`: `layout`,
   `back.webp`, `mask.webp`), with the screen's rounded corners from the
   skin's `corner_radius` / mask, and the same "Show frame" toggle.
-- **Windows too.** The Android path is public and cross-platform; on Windows
-  the Device tab appears with Android devices only. (iOS stays macOS-only.)
+- **macOS only in this phase** (user, 2026-11-23). The Android path is public
+  and cross-platform, so keep pure Android modules platform-neutral where
+  it's free, but the Device tab stays macOS-only; Windows is a later phase.
 
 ## Non-goals
 
@@ -38,6 +39,8 @@ typing straight into the device. Android is phase 2, after iOS shipped.
 - Multi-display, foldables' posture UI, sensors, GPS, phone/SMS, snapshots.
 - Starting adb servers or managing adb ourselves beyond what the controls
   need.
+- The Device tab on Windows (later phase).
+- A Recents / app-switcher button (Back only).
 
 ## Anti-goals
 
@@ -96,6 +99,9 @@ Pick A, with `adb` used only for the few controls gRPC lacks (appearance and
 font scale: `adb -s emulator-<port> shell cmd uimode night yes|no`,
 `settings put system font_scale`).
 
+Since the tab stays macOS-only this phase, Design §4's Windows `RenderImage`
+path isn't needed now: draw through the existing 420f `surface()` route.
+
 ## Design
 
 1. **Generated client, no protoc at build time.** Vendor the needed protos
@@ -143,8 +149,9 @@ font scale: `adb -s emulator-<port> shell cmd uimode night yes|no`,
    verify the feature); feed the existing overlay pipeline (`chrome.rs`'s
    placement + overlay cache) through a `FrameArt` that has an Android
    variant.
-8. **Windows:** the Device tab shows on Windows when an Android SDK is found;
-   the iOS parts stay `#[cfg(target_os = "macos")]`.
+8. **Windows:** not in this phase. Pure Android parsing compiles everywhere;
+   the rest is `#[cfg(target_os = "macos")]` like the iOS parts; the Windows
+   build must still pass.
 
 ## Spike first (throwaway, gate)
 
@@ -161,8 +168,6 @@ touches an emulator it didn't start):
    verified by screenshot.
 4. tonic + generated code builds in harness-app without new system deps; the
    lockfile delta.
-5. Discovery directory on Windows (if a Windows box is available; otherwise
-   from the emulator source) — record the path.
 
 If auth can't be satisfied without Android Studio, stop and come back.
 
@@ -180,11 +185,9 @@ Module layout under `devices/android/`, tokio runtime placement, resize
 debounce, exact picker grouping copy, which emulator key names to use, how
 `emulator -list-avds` is cached.
 
-## Open questions for the user (before planning)
+## Decisions (user, 2026-11-23)
 
-1. Should Android emulators an **agent** started be shown and controllable
-   exactly like iOS ones (yes by default, same as iOS)?
-2. Windows: ship Android-only Device tab there in this phase, or keep Windows
-   for later?
-3. Add **Back** (and Recents?) to the bar for Android — Back only is my
-   proposal.
+1. Emulators an agent started are shown and controllable exactly like iOS
+   simulators (same picker, input only on the user's click).
+2. Windows: not in this phase; the Device tab stays macOS-only.
+3. Android-only button: **Back** (no Recents).
