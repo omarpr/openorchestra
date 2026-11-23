@@ -109,3 +109,36 @@ split, and whether the Dark/Light button reads the current appearance on
 device change or on first click.
 
 A CHANGELOG `Unreleased` → `Added` line ships with the user-visible commit.
+
+## Amendments (2026-11-23, from the user)
+
+These widen the scope above. Where they conflict with earlier sections, they win.
+
+1. **Interactive picture** (user: "you should allow clicking and controlling
+   simulator"). Option C is in: click = tap, drag = swipe, trackpad/wheel =
+   scroll, and typing goes to the device while the picture has focus (click
+   into it first, like the browser tab; Esc or clicking elsewhere gives focus
+   back). Same private HID path as Rotate/Home, so the same rule: if it's
+   missing on this Xcode, the picture stays watch-only. The spike is extended
+   to taps, swipes, scroll and keyboard.
+2. **Device frame** (user: "the iPhone border around it … same with
+   Android"). Draw Apple's device chrome around the picture, read at run
+   time from `/Library/Developer/DeviceKit/Chrome/<chromeIdentifier>.devicechrome`
+   (`chrome.json` plus PDF pieces); the device type's `profile.plist` names
+   `chromeIdentifier` and `framebufferMask`. The mask gives the screen its
+   rounded corners and is always applied. My call: the frame is on by
+   default, with a "Show frame" toggle in the bottom bar. If a model has no
+   chrome, show the rounded screen alone. Android skins
+   (`<sdk>/skins/<name>/`, PNG + `layout`) come with the Android phase.
+3. **Boot and Shut down from the tab** (user: "it would be nice to shutdown
+   it on the device tab"). The picker lists shut-down simulators as well as
+   running ones (from `simctl list devices -j`), in two groups. Picking a
+   shut-down one offers **Boot** (`simctl boot <udid>`, headless). The bottom
+   bar gets **Shut down** for the watched device. My call: it asks first
+   ("Shut down iPhone 18 Pro? An agent may be using it."), because agents
+   share these devices. This retires the original non-goal "booting, shutting
+   down or creating simulators" for boot and shutdown only; creating and
+   deleting devices stay out.
+
+Consequence for the "no work while hidden" rule: unchanged. Input, boot and
+shutdown only happen on a click while the tab is on screen.
