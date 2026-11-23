@@ -104,9 +104,49 @@ fn list_outcome(ran: Result<Ran, RunFailed>) -> Result<Vec<DeviceInfo>, ListErro
 /// Dev and release apps (which share the temp dir) never write, read or
 /// delete each other's.
 fn shot_path(dir: &Path, udid: &str) -> PathBuf {
+    shot_path_ext(dir, udid, "jpg")
+}
+
+/// [`shot_path`] with the file extension of the screenshot's format.
+#[allow(dead_code)] // used by `controls`, which the panel wires in later
+pub(crate) fn shot_path_ext(dir: &Path, udid: &str, ext: &str) -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    dir.join(format!("{udid}-{}-{n}.jpg", std::process::id()))
+    dir.join(format!("{udid}-{}-{n}.{ext}", std::process::id()))
+}
+
+/// `xcrun simctl <args>` run to the end, whatever its exit code. Err only
+/// when it could not run or ran past the timeout.
+#[allow(dead_code)] // used by `controls`, which the panel wires in later
+pub(crate) fn simctl_ran(args: &[&str]) -> Result<Ran, String> {
+    let mut full = vec!["simctl"];
+    full.extend_from_slice(args);
+    run_bounded_why("xcrun", &full, TIMEOUT).map_err(|why| match why {
+        RunFailed::Spawn => "xcrun simctl could not start".to_string(),
+        RunFailed::TimedOut => format!("simctl timed out after {} s", TIMEOUT.as_secs()),
+    })
+}
+
+/// `xcrun simctl <args>`: its stdout, or the first line of stderr (or a
+/// sentence about the exit code) when it fails.
+#[allow(dead_code)] // used by `controls`, which the panel wires in later
+pub(crate) fn simctl(args: &[&str]) -> Result<String, String> {
+    let ran = simctl_ran(args)?;
+    if ran.code == Some(0) {
+        return Ok(ran.stdout);
+    }
+    Err(failure_text(&ran))
+}
+
+/// What a failed simctl run says, trimmed; never empty.
+#[allow(dead_code)] // used by `controls`, which the panel wires in later
+pub(crate) fn failure_text(ran: &Ran) -> String {
+    let stderr = ran.stderr.trim();
+    match ran.code {
+        _ if !stderr.is_empty() => stderr.to_string(),
+        Some(code) => format!("simctl failed with exit code {code}"),
+        None => "simctl was stopped by a signal".to_string(),
+    }
 }
 
 /// A JPEG screenshot of the device. simctl writes only to a file, so it goes
