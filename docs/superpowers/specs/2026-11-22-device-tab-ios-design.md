@@ -229,6 +229,214 @@ helper process, or A as the main route).
   stale UDID falls back to the first booted device).
 - A CHANGELOG `Unreleased` line with the user-visible commit.
 
+## Spike findings (2026-11-22)
+
+Measured on Xcode 27.2 (27B52), macOS 27 (Darwin 27.3), Apple Silicon, with
+a throwaway Objective-C spike (the controller allowed ObjC instead of
+`examples/sim_spike.rs`). The test device was created for the purpose
+(`simctl create oo-device-test "iPhone 18 Pro"`, iOS 27.2, booted headless
+with `simctl boot`) and deleted afterwards. **Result: the private route
+works**, under the hardened runtime too, and needs only CoreSimulator.
+
+### Loading
+
+- `dlopen("/Library/Developer/PrivateFrameworks/CoreSimulator.framework/CoreSimulator", RTLD_NOW)`
+  is enough. **SimulatorKit is not needed for the display**: the run that
+  skipped the SimulatorKit `dlopen` got the same surfaces and frames. The
+  Xcode path is used only as the developer dir string passed to the
+  service context (`xcode-select -p`).
+- After the `dlopen`, `objc_getProtocol("SimScreen")` is non-nil. Neither
+  CoreSimulator nor SimulatorKit has a class that implements the
+  screen-callback selector as an instance method. The objects you get are
+  **ROCK remote proxies whose class names are generated at run time**, for
+  example
+  `ROCKRemoteProxy-0F58CBFD-…-SimScreen-SimDeviceIOPortDescriptorInterface-ROCKImpersonateable-SimDisplayIOSurfaceRenderable-SimDisplayResizeableRenderable-SimDisplayRenderable`.
+  The UUID part changes between runs. Never look these classes up by name:
+  test each instance with `respondsToSelector:` (and, if wanted,
+  `conformsToProtocol:`). Both returned YES on every display descriptor.
+
+### Call chain, UDID to screen (all instance methods unless marked +)
+
+| Step | Receiver | Selector | Types (64-bit) | Returns |
+|---|---|---|---|---|
+| 1 | class `SimServiceContext` | + `sharedServiceContextForDeveloperDir:error:` | `@32@0:8@16^@24` (NSString*, NSError**) | `SimServiceContext` |
+| 2 | context | `defaultDeviceSetWithError:` | `@24@0:8^@16` | `SimDeviceSet` |
+| 3 | device set | `devicesByUDID` (also `devices`) | `@16@0:8` | `NSDictionary<NSUUID*, SimDevice*>` |
+| 4 | `SimDevice` | `state` `Q`, 3 = Booted; `stateString`; `name`; `UDID` | | |
+| 5 | `SimDevice` | `io` | `@16@0:8` | `SimDeviceIOClient` (a `SimDeviceIO`, `<SimDeviceIOProtocol>`) |
+| 6 | io | `ioPorts` | `@16@0:8` | `NSArray` of 15 port proxies (`<SimDeviceIOPortInterface>`) |
+| 7 | port | `portIdentifier` (NSString), `ioPortClass` (`S`, 1 = display), `uuid` (NSUUID), `descriptor` | | descriptor proxy |
+| 8 | display descriptor | `state` | | `ROCKImmutableProxy` `<SimDisplayDescriptorState>`: `displayClass` `S`, `defaultWidthForDisplay`/`defaultHeightForDisplay` `I`, `defaultPixelFormat` `I`, `mask` (NSURL) |
+| 9 | display descriptor | `screenProperties` | | `<SimScreenProperties>`: `pixelSize` `{CGSize=dd}`, `screenID` `I`, `screenType` `Q`, `uiOrientation` `I`, `powerState` `i`, `name`, `currentMode` (`<SimScreenMode>`: `pixelFormat` `I`, `refreshRate` `I`, 6000 = 60 Hz) |
+| 10 | **display descriptor = the screen** | `registerScreenCallbacksWithUUID:callbackQueue:frameCallback:surfacesChangedCallback:propertiesChangedCallback:` | `v56@0:8@16@24@?32@?40@?48` | void |
+| 11 | same | `unregisterScreenCallbacksWithUUID:` | `v24@0:8@16` (NSUUID*) | void |
+
+So the object that implements the selector is **the display port's
+`descriptor`** (protocol `SimScreen`, from `CoreSimDeviceIO.framework`). The
+same proxy also answers `SimDisplayIOSurfaceRenderable`
+(`framebufferSurface`, `maskedFramebufferSurface`, and idb's older
+`registerCallbackWithUUID:ioSurfacesChangeCallback:`) and
+`SimDisplayRenderable` (`displaySize` = 1206×2622 on the main display).
+
+**Choosing the main display.** The phone has four
+`com.apple.framebuffer.display` ports: main LCD, TVOut 720×480, Wireless
+720×480 and Resizable 7680×4320. The rule that works:
+**`descriptor.state.displayClass == 0`**. Exactly one port matched. Every
+other discriminator agreed: `screenProperties.screenType == 0`
+("Integrated"), `screenID == 1`, `name == "LCD"`, `powerState == 1` (the
+external ones read 0), a non-nil `state.mask` (the PDF corner mask), and a
+non-zero `displaySize`. Port order is not stable enough to rely on (main
+was 5th). The `com.apple.framebuffer.server` port's descriptor
+(`SimScreenAdapter`) has `enumerateScreensWithCompletionQueue:completionHandler:`.
+It returns the same four proxies, identical objects, so it's an alternative
+path to the same screen but adds nothing.
+
+### Callback signatures (from `_protocol_getMethodTypeEncoding`, confirmed by calls)
+
+- `frameCallback`: `void (^)(void)`. Block signature `v8@?0`.
+- `surfacesChangedCallback`: `void (^)(IOSurface *framebuffer, IOSurface *masked)`.
+  Signature `v24@?0@"IOSurface"8@"IOSurface"16`. The variant without class
+  names, `v24@?0@8@16`, also works.
+- `propertiesChangedCallback`: `void (^)(id<SimScreenProperties>)`. Signature
+  `v16@?0@8`.
+- `callbackQueue`: a `dispatch_queue_t`. **The frame and surfaces
+  callbacks arrive on the queue you pass.** That was confirmed with a
+  labelled serial queue (label read inside each callback, never on the main
+  thread) and with the main queue (label `com.apple.main-thread`,
+  `pthread_main_np() == 1`). `propertiesChanged` never fired, so its queue
+  is unconfirmed; assume it's the same one.
+- **The blocks must carry a signature** (`BLOCK_HAS_SIGNATURE`, flag 1<<30).
+  A block without one makes the register call throw
+  `NSInternalInconsistencyException: Block is missing signature field`,
+  synchronously, as an Objective-C exception. From Rust: build the blocks
+  with `block2::RcBlock::with_encoding` and a `ManualBlockEncoding` that
+  carries the strings above (block2 0.6.2 is in
+  `crates/harness-app/Cargo.lock`). Wrap the `msg_send` in
+  `objc2::exception::catch`, or an exception aborts the app. That needs
+  objc2's `exception` feature, which harness-app doesn't enable today
+  (`objc2 = "0.6"`, objc2 0.6.3, no `objc2-exception-helper` in the
+  lockfile), so turning it on adds that one small crate. The object
+  arguments must be encoded as `@`: with `^v` (raw pointer) in the
+  signature, registering succeeded and frames arrived, but **the surfaces
+  callback was silently never called**.
+
+### Observed behaviour
+
+- **Surfaces arrive at once.** `surfacesChanged` ran on the callback queue
+  less than 1 ms after register returned (asynchronously, never inside the
+  call). Both surfaces were non-nil, 1206×2622, `'BGRA'`, bytes per row 4864
+  (padded; 1206×4 = 4824). That matches `screenProperties.pixelSize` and
+  `simctl io enumerate`. The objects are of class `IOSurface` (toll-free
+  bridged to `IOSurfaceRef`); retain them to keep them past the callback.
+- **Which surface is the picture.** Arg 1 has the same `IOSurfaceGetID` as
+  `framebufferSurface`: the full rectangular picture, opaque (alpha 255
+  in the corners). Arg 2 matches `maskedFramebufferSurface`: **the same
+  picture with the device's rounded-corner mask applied** (alpha 0 outside
+  the screen shape, identical pixels inside). Both were dumped to PNG and
+  checked by eye. Both are updated in place on every frame: same IDs all
+  session, `IOSurfaceGetSeed` moves on both in step. **Use arg 1** for the
+  420f route, because 420f has no alpha (the masked corners would
+  presumably convert to black; not run). Arg 2 suits a native layer that
+  wants rounded corners.
+- **Frames.** With nothing changing on screen: 0 frame callbacks, 0.0% CPU.
+  During the `simctl ui appearance` loop: bursts of 3–6 callbacks about
+  every 0.3 s, about 16 per second, stopping between toggles. With a
+  continuous CSS animation in Safari on the device: a steady **60 per
+  second**, the display's 6000 = 60 Hz. About 6% of callbacks arrive with
+  no new seed (up to four within 0.3 ms), so coalescing to the latest frame
+  costs nothing.
+- **No surface replacement** happened during toggles or animation, and
+  `propertiesChanged` never fired: there was no size or orientation change,
+  and it doesn't fire on register.
+- **Unregister** stops the callbacks: 0 or 1 more in the following 3 s
+  while the device kept animating, across runs. **A callback already queued
+  can still run just after `unregisterScreenCallbacksWithUUID:` returns.**
+  Keep the blocks' captured state alive (e.g. an `Arc` with a "stopped"
+  flag) and ignore late calls; don't free what they touch on unregister.
+- **Device shutdown while registered**: `surfacesChanged(nil, nil)` fires
+  on the queue, frames stop, nothing throws. Afterwards `screenProperties`
+  reads zeros, and `unregisterScreenCallbacksWithUUID:` on the dead device
+  is harmless. Treat nil surfaces as "device gone".
+- **Doesn't alter the device.** Before and after every run (register,
+  frames, unregister): pixel size 1206×2622, orientation 1 (portrait) and
+  power state 1, all unchanged. `simctl io enumerate` diffed before and
+  after shows only `Seed:` changing. That counter rises by 2 on every
+  client connection, including `simctl io enumerate` itself, so it isn't a
+  device change. No mode, power or resize selector was ever called.
+
+### Hardened runtime
+
+A copy of the spike was signed with
+`codesign --force --options runtime --entitlements crates/harness-app/resources/openOrchestra.entitlements --sign -`
+(`flags=0x10002(adhoc,runtime)`). It loads CoreSimulator and SimulatorKit,
+gets surfaces and runs at 60 frames per second, and routes (a) and (b) both
+work. Library validation is really enforced in this configuration: an
+ad-hoc-signed test dylib was refused by the same kind of binary ("mapping
+process and mapped file (non-platform)"). The Apple-signed frameworks
+(Software Signing, team 59GAB85EFG) pass. Not yet re-checked on a real
+Developer ID `notarize-mac.sh --sign-only` build, which should behave the
+same, since Apple-signed code is accepted whatever the team.
+
+### Cost of the two drawing routes (the spike process's CPU from `getrusage`; GPU from ioreg `AppUsage.accumulatedGPUTime` on the AGX user clients the process created, used here in place of Activity Monitor's GPU column)
+
+| Route | Idle | Toggle loop (~16 fps) | Sustained 60 fps | CPU per frame | Process GPU |
+|---|---|---|---|---|---|
+| Registration only (no drawing) | 0.0% | 0.2% | 0.8% | 0.13 ms | 0 |
+| (a) `VTPixelTransferSession` BGRA→420f, full size, pooled `CVPixelBuffer` (IOSurface + Metal compatible) | 0.0% | 1.2% | 6.7–7.7% (3 runs) | 1.1–1.3 ms | 0 |
+| (a′) same, downscaled to 402×874 | 0.0% | 1.2% | 7.1% | 1.2 ms | 0 |
+| (b) bare `NSWindow`, layer `contents` = IOSurface, `setContentsChanged` per frame | 0.04% | 0.4% | 2.7–3.1% (3 runs) | 0.44–0.51 ms | 0 |
+
+Percentages are of one core. Hardened-runtime copies gave the same figures
+(a 7.0%, b 2.8%).
+
+- Measured fact: the spike's AGX (GPU) client recorded **zero GPU time**
+  in route (a). During (a) the process also holds
+  `IOSurfaceAcceleratorClient` connections, which is consistent with
+  VideoToolbox doing the conversion on the hardware scaler rather than the
+  GPU. No no-VT control was run for that client. Downscaling in the
+  transfer saves no CPU.
+- `setContentsChanged` is CALayer SPI (not in the headers; call it with
+  `msg_send`). The public alternative is to set `contents` again each frame.
+- **Not measured:** WindowServer's GPU time was pure noise (58–269 ms/s
+  with nothing changed, because other apps are on screen), so nothing could
+  be attributed to route (b)'s compositing. Worse, the Mac's screen was
+  locked during the spike (`CGSSessionScreenIsLocked = 1`), the test
+  window's `occlusionState` was not visible, and WindowServer may not have
+  composited it at all. (b)'s real cost is its 3% plus compositing that
+  wasn't measured. (a)'s figure is a lower bound too: it doesn't include
+  gpui repainting the window on every frame.
+
+### Device Hub
+
+Device Hub (process `DeviceHub`, `com.apple.dt.Devices`) **was already
+running**, the user's own, with its main window open since before the
+spike. So every run above coexisted with it, and the "Device Hub closed"
+case was not tested: quitting the user's app was off-limits. Nothing in
+any run changed the test device's size, orientation or power, and frames
+kept flowing at 60 per second. Whether Device Hub was showing *this* device
+at the time is **unverified**: the screen was locked, so its window
+couldn't be inspected. Focus (does watching change which window or
+device has focus) was not checked either. An `open -g` with
+`-CurrentDeviceUDID` went to the
+running instance and opened no new window (window numbers confirm it). The
+"Device Hub shows this same device" case is still open for the manual
+test.
+
+### Route chosen
+
+**(a) Convert to 420f with `VTPixelTransferSession` and draw with gpui's
+`surface()`.** The plan's gate, verbatim: "If (a) costs clearly more than
+(b), more than ~10% of one core during motion, stop and report: Task 5
+switches to the native-layer route". At the worst case measured, a
+sustained 60 fps, (a) passes on either reading of that sentence: about 7%
+of a core in absolute terms, and about 4 points more than (b) (≈3%). Both
+are 0 while idle. (a) also avoids the z-order and focus problems of native
+views. **Condition for
+Task 5:** measure the whole app (conversion plus gpui repainting the window
+at 60 fps) with the Device tab live. If that exceeds the budget, switch to
+(b), a `CALayer` whose `contents` is the framebuffer IOSurface (arg 2 if
+rounded corners are wanted), positioned like `browser_pane/webview.rs`.
+
 ## Phase 2: Android (separate design, after this ships)
 
 Notes so far: every running emulator writes
