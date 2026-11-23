@@ -457,3 +457,215 @@ it either. Both are expected, not verified.
 - **Survive a backboardd restart:** recreate the HID client on error.
   Whether the surface is replaced too is not established, so keep the
   existing `surfacesChanged` handling.
+
+## Input spike findings (CoreDevice)
+
+Measured the same day on Xcode 27.2 (27B52), macOS 27 (Darwin 27.3), Apple
+Silicon and the iOS 27.2 runtime. I used throwaway simulators named "OO
+device test input" (iPhone 18 Pro), created for this spike and deleted
+afterwards. **These findings supersede the HID part of "Spike findings"
+above.**
+
+**Result: CoreDevice's remote HID is reliable.** It worked on every boot
+tested, including boots where the legacy `SimDeviceLegacyHIDClient` path was
+ignored in the same boot. It covers Home, tap, drag and keyboard. It needs a
+small **Swift helper binary**, because these are pure-Swift async, generic,
+protocol APIs on `_SwiftObject` classes, which Rust can't reach through the
+ObjC runtime. Device Hub's own touch path is a third route
+(`UniversalHIDService`); I didn't need it, so it's documented only.
+
+### Why the legacy path fails
+
+On iOS 27.2 the guest's `dtuhidd` (CoreDevice's HID daemon) goes active at
+boot and disconnects backboardd's legacy `ExternalKeyboardService`,
+`MainScreenButtonsService` and `ScreenTouchService`. Whether legacy IndigoHID
+then works depends on a boot race. The ratio so far is 1 of 9 boots in Task
+2, and here 2 of 5 controls were ignored and 3 worked. CoreDevice's remote HID
+is served *by* `dtuhidd`, so the takeover doesn't affect it.
+
+### The call chain
+
+The simulator advertises these CoreDevice features: `…feature.remote.hid.button`,
+`.hid.digitizer`, `.hid.keyboard`, `.hid.scroll`, `.hid.vendordefined` and
+`…feature.remote.universalhidservice`. Its CoreDevice `deviceIdentifier` is
+the simctl UDID.
+
+1. **Device list.** Call
+   `DeviceManager(serviceConnection: CoreDeviceService.sharedConnection,
+   allowedDeviceVisibilityClasses: [.simulators])`.
+   - The visibility set is **required**. The one-argument init leaves out
+     simulators: it listed 3 devices and not ours.
+2. **Wait for the list.** `await dm.awaitFullInitialization()` takes about
+   7–9 ms when CoreDeviceService is already running.
+3. **Find the device.** Look up `dm.devices[UUID(udid)]`, and look up only
+   the UDID being watched. The dictionary also holds other simulators and
+   physical devices.
+4. **Get the three implementations.** Each call is about 20–30 ms, and each
+   result is cached for the process lifetime.
+   - `try await dev.getImplementation(for: CapabilityStaticMember<HIDDeviceCapability>.digitizer)`
+     gives an `any HIDDigitizer`, which is `IndigoHIDDigitizer`, a
+     `HIDXPCService` holding an XPC connection to the guest feature.
+   - `….keyboard` gives an `any HIDKeyboard`, which is `UniversalHIDKeyboard`.
+   - `….button` gives an `any HIDButton`, which is `IndigoHIDButton`.
+5. **Send.** The sends are synchronous `throws` calls that queue XPC messages:
+   - **Home:** `button.sendCustomButton(usagePage: 0x0C, usageCode: 0x40, state: .down)`,
+     then the same with `.up`. That is the consumer page, Menu usage.
+     `usageCode: 0x30` is Power/Lock; it's in the helper but wasn't run.
+   - **Touch:** `digitizer.send(pointOne: DigitizerPoint(x:y:), pointTwo: nil,
+     eventType: .start | .position | .end, edge: .none, target: .mainScreen)`.
+     The points are **0…1 ratios of the portrait screen, origin top-left**.
+     For example, (0.80, 0.39) hit News and (0.855, 0.487) hit Settings on
+     the default home screen. `pointTwo` is for a second finger (untested).
+   - **Keys:** `keyboard.send(key: HIDKeyboardUsageCode(rawValue: usage), state: .down/.up)`.
+     These take USB HID keyboard usages, the same table as the legacy section:
+     a–z 0x04–0x1D, Return 0x28, Delete 0x2A, Space 0x2C and Left Shift 0xE1.
+     For a capital, send Shift down, the key down and up, then Shift up.
+     **No target patching** is needed. The software keyboard stays on
+     screen, unlike the legacy path.
+
+### Timing and lifetime
+
+- **Sends are asynchronous.** Each call returns in about 0.1 ms. **If the
+  process exits right after its last send, the queued events are lost.** In
+  one test, 11 Deletes and `text …`, followed by `sendBarrier()` and an
+  immediate exit, typed nothing. Keep the helper process **long-lived**: one
+  per watched device, alive while the tab can send input. A one-shot helper
+  would have to wait about 200–500 ms before exiting.
+- **Pacing.** A drag of 15 `.position` events 20 ms apart scrolled lists. No
+  16 ms throttle was observed; the legacy builder's NULL-on-fast-move
+  doesn't apply. Keystrokes sent back-to-back, about 0 ms apart, all arrived.
+  The one partial result came in boot 1, where the field showed "Hello". It
+  was a screenshot taken 0.8 s after a burst while Safari was busy, and with
+  1.5 s waits the full text was always there.
+- **Cold start** of the helper is about 0.45 s wall time, measured as start,
+  device found, all three implementations, plus a 200 ms trailing sleep. An
+  unknown UDID gives "not found" in about 0.05 s.
+- **Apps must be ready.** A tap during an app's launch animation, or into
+  Safari's first-launch Start Page while its first page is still loading,
+  does nothing. The input path is fine in those cases; the target UI wasn't
+  there yet. Other taps in the same boot worked.
+
+### Reliability
+
+The checks below were judged from `simctl io … screenshot` montages. The
+helper started about 1 s after `simctl bootstatus -b`, and the first Home
+was about 4 s after that.
+
+| Boot | How | Home | Tap Settings icon, then General | Drag scrolls General | Safari: tap bar, type `Hello OO 42`, Delete ×11, `example.org`, Return | Legacy control (spike `probe … button 0 0x32`, after the test) |
+|---|---|---|---|---|---|---|
+| 0 | first boot of the first device | ✓ | ✓ (separately) | ✓ | ✓ | not run |
+| 1 | shutdown + boot | ✓ | Settings ✓; General tap landed during launch (test timing) | ✓ | typed, URL loaded ✓ (field showed `Hello` at 0.8 s) | inconclusive (no before-shot) |
+| 2 | shutdown + boot | ✓ | ✓ (hit Accessibility: my y was off) | ✓ | ✓ | **ignored** |
+| 3 | shutdown + boot | ✓ | ✓ | ✓ | ✓ | **ignored** |
+| 4 | shutdown + boot | ✓ | ✓ | ✓ | ✓ | **ignored** |
+| 5 | `simctl erase` + boot | ✓ | ✓ | ✓ | ✓ (text shown in the suggestions; keyboard tutorial covered the field) | worked |
+| 6 | **new never-booted device** | ✓ | ✓ | ✓ | first-launch Start Page swallowed the tap; ✓ on retry once loaded | worked |
+
+**CoreDevice input reached the device on 7 of 7 boots.** Every miss was the
+target UI not being ready or a coordinate of mine. The legacy path was
+ignored on 3 of those boots.
+
+### Building the helper (no Swift module ships)
+
+CoreDevice ships no `.swiftmodule` or `.swiftinterface`. The spike compiles
+against a **hand-written stub interface**:
+`.superpowers/sdd/2026-11-23-device-tab-controls/spike-input/stub/CoreDevice.swiftmodule/arm64-apple-macos.swiftinterface`.
+
+- **Flags:** `-enable-library-evolution -module-name CoreDevice`, so calls go
+  through the exported `Tj` dispatch thunks and `WC` enum-case symbols.
+- **Declarations:** it declares only what is called:
+  - `DeviceCapability` (associated types `ProtocolType`, `ImplType`);
+  - `CapabilityStaticMember<A>`, unconstrained, with the
+    `where A == HIDDeviceCapability` statics `digitizer`, `keyboard` and
+    `button`;
+  - the `Digitizer/Keyboard/ButtonHIDCapability` structs, each with both
+    associated types set to `any HIDDigitizer`, `any HIDKeyboard` or
+    `any HIDButton` (checked at run time with
+    `swift_getAssociatedTypeWitness`);
+  - the protocols `HIDDigitizer`, `HIDKeyboard` and `HIDButton`, each
+    refining `DeviceCapabilityProtocol`. **None of them is class-bound**
+    (the protocol-descriptor flags say "Any"), so the existentials are
+    opaque 5-word containers;
+  - the enums `DigitizerEventType {start, position, end}`, `DigitizerEdge`,
+    `DigitizerTarget {mainScreen, …}`, `HIDButtonState {down, up}` and
+    `DeviceVisibilityClass {default, simulators, …}`;
+  - the structs `DigitizerPoint(x: Double, y: Double)` and
+    `HIDKeyboardUsageCode(rawValue: UInt16)`;
+  - `CoreDeviceService.sharedConnection`;
+  - the classes `RemoteDevice` and `DeviceManager`, which are plain Swift
+    classes, not actors.
+- **Mixed module:** some types (`DigitizerPoint`, `HIDButtonState`, …) are
+  mangled as `CoreDevice.*` but exported from `CoreDeviceUtilities`. Declare
+  them in the same stub and link both frameworks.
+- **Build:**
+  `swiftc -parse-as-library -I stub -F /Library/Developer/PrivateFrameworks
+  -F /Library/Developer/PrivateFrameworks/CoreDevice.framework/Versions/A/Frameworks
+  -framework CoreDevice -framework CoreDeviceUtilities -framework UniversalHID`.
+- **A wrong declaration fails at link time.** It shows up as an undefined
+  `$s10CoreDevice…` symbol, so the build itself verifies the stub against
+  this Xcode. At run time the check is `dlopen` plus the dispatch-thunk
+  symbols, for example
+  `$s10CoreDevice12HIDDigitizerP4send8pointOne0E3Two9eventType4edge6targetyAA14DigitizerPointV_AKSgAA0l5EventI0OAA0L4EdgeOAA0L6TargetOtKFTj`,
+  `$s10CoreDevice06RemoteB0C17getImplementation3for12ProtocolTypeQzAA22CapabilityStaticMemberVyxG_tYaKAA0bI0RzlFTj`,
+  `$s10CoreDevice11HIDKeyboardP4send3key5stateyAA0C9UsageCodeV_AA14HIDButtonStateOtKFTj`
+  and `$s10CoreDevice9HIDButtonP16sendCustomButton9usagePage0G4Code5stateySi_SiAA0C5StateOtKFTj`.
+  If the frameworks are missing (as on the CI runner), the helper fails to
+  launch; treat that as "input unavailable".
+
+### Helper protocol (as spiked; `oohid <udid> serve`)
+
+- **Input:** one command per line on stdin:
+  - `home`
+  - `tap x y`
+  - `down x y`, `move x y`, `up x y`
+  - `drag x1 y1 x2 y2 ms steps`
+  - `key <usage> down|up`
+  - `press <usage>`
+  - `text <string>` (US layout)
+  - `sleep ms`
+  - `quit`
+- **Output:** one line per command on stdout, `ok <ms>` or `err <description>`.
+- **Errors:** an unknown device exits 1 before reading stdin.
+- **Coordinates:** x and y are ratios in the **portrait surface** space. Use
+  the orientation formulas from the legacy section to map a click on the
+  upright picture.
+- **Threading:** the helper runs on Swift concurrency's cooperative pool. The
+  app writes lines and reads replies on a background thread, never the UI
+  thread.
+- **Lifetime:** start the helper lazily on the first click and keep it for
+  the watched device. Restart it on EOF or an `err`, and on device change or
+  shutdown.
+
+### Device Hub's own path (not needed, for reference)
+
+DeviceKit (`SharedFrameworks/DeviceKit.framework`) takes buttons and keys
+through `HIDButton.sendButton` and `HIDKeyboard.send`. For **touch** it uses
+a different route:
+
+- `getImplementation(for: .universalHidService)`;
+- `connectedServiceDescriptors()` and
+  `createService(descriptor:)`;
+- `send(report: UniversalHID.HIDReport, to: HIDServiceID.touchscreen(displayID:))`,
+  with the reports built by `UniversalHID.DigitizerFilter` from
+  IOHIDEvents.
+
+These methods are `throws(CoreDeviceError)`. That is typed throws on a
+struct, so the stub would need to model the typed-throws ABI. Not tried,
+because `HIDDigitizer` already works.
+
+### Concerns
+
+- **Private and unversioned.** These are private Swift APIs. A future Xcode
+  can rename them, and the helper then fails to link or to launch. Either
+  way it's a clean "unavailable", not a crash in the app.
+- **Retire the legacy HID.** Don't keep the legacy HID as a silent fallback;
+  it fails without an error. Home's public fallback stays
+  (`simctl launch … com.apple.springboard`).
+- **Not tested:**
+  - two fingers;
+  - landscape mapping on this path (assumed identical to legacy, since it
+    uses the same portrait ratios);
+  - a shut-down device that is still in `devices`;
+  - Device Hub closed (it was running throughout, and I didn't drive it);
+  - the scroll capability (`.hid.scroll`, `IndigoHIDScroll`). A swipe stays
+    the scroll fallback.
