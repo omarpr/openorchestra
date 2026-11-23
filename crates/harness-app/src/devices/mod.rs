@@ -34,13 +34,18 @@ pub(crate) enum StreamError {
     Failed(String),
 }
 
-/// The selected UDID if it is still booted, else the first booted device.
+/// The device to watch: the user's pick if it is booted, else the one being
+/// watched if it still is (a device that boots meanwhile doesn't take over),
+/// else the first booted device.
 pub(crate) fn choose_device<'a>(
     booted: &'a [DeviceInfo],
-    selected: Option<&str>,
+    preferred: Option<&str>,
+    current: Option<&str>,
 ) -> Option<&'a DeviceInfo> {
-    selected
-        .and_then(|udid| booted.iter().find(|d| d.udid == udid))
+    let find = |udid: &str| booted.iter().find(|d| d.udid == udid);
+    preferred
+        .and_then(find)
+        .or_else(|| current.and_then(find))
         .or_else(|| booted.first())
 }
 
@@ -127,19 +132,26 @@ mod tests {
     #[test]
     fn choose_keeps_a_booted_selection() {
         let list = [dev("a"), dev("b")];
-        assert_eq!(choose_device(&list, Some("b")).unwrap().udid, "b");
+        assert_eq!(choose_device(&list, None, Some("b")).unwrap().udid, "b");
+    }
+
+    #[test]
+    fn choose_prefers_the_pick_then_the_watched_device() {
+        let list = [dev("a"), dev("b"), dev("c")];
+        assert_eq!(choose_device(&list, Some("c"), Some("b")).unwrap().udid, "c");
+        assert_eq!(choose_device(&list, Some("gone"), Some("b")).unwrap().udid, "b");
     }
 
     #[test]
     fn choose_falls_back_to_the_first_when_the_selection_is_gone() {
         let list = [dev("a"), dev("b")];
-        assert_eq!(choose_device(&list, Some("gone")).unwrap().udid, "a");
-        assert_eq!(choose_device(&list, None).unwrap().udid, "a");
+        assert_eq!(choose_device(&list, Some("gone"), Some("gone")).unwrap().udid, "a");
+        assert_eq!(choose_device(&list, None, None).unwrap().udid, "a");
     }
 
     #[test]
     fn choose_with_nothing_booted_is_none() {
-        assert!(choose_device(&[], Some("a")).is_none());
+        assert!(choose_device(&[], Some("a"), Some("a")).is_none());
     }
 
     #[test]

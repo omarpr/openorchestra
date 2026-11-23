@@ -149,6 +149,7 @@ impl HarnessWorkspace {
         // The Device tab starts hidden; the first render shows it if it is on
         // screen (`sync_device_visibility`), which lists the devices at once.
         let mut device_tab = crate::devices::tab_state::DeviceTab::new();
+        device_tab.preferred = prefs.device_udid.clone();
         device_tab.selected = prefs.device_udid.clone();
         let _ = device_tab.on_hidden();
         #[cfg(target_os = "macos")]
@@ -296,6 +297,7 @@ impl HarnessWorkspace {
             device_live: None,
             device_listing: false,
             device_listed: false,
+            device_list_error: None,
             device_shot_in_flight: false,
             device_menu_open: false,
             device_menu_press: None,

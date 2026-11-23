@@ -942,6 +942,9 @@ pub struct HarnessWorkspace {
     /// The first device list has landed (before that the tab shows nothing
     /// rather than "No simulator running").
     device_listed: bool,
+    /// The last device list's error, while it failed (shown until a list
+    /// first lands).
+    device_list_error: Option<String>,
     /// A Reduced-mode screenshot is being taken. One at a time across
     /// loops: a loop started while a stopped one's shot lands waits for it.
     device_shot_in_flight: bool,

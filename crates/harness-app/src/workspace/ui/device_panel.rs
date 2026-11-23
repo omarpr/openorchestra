@@ -28,6 +28,35 @@ const SHOT_RETRY: Duration = Duration::from_millis(500);
 const SHOT_WAIT: Duration = Duration::from_millis(100);
 const REDUCED_NOTE: &str =
     "Reduced frame rate — this Xcode's simulator display API isn't supported";
+/// For a fallback that may pass (no display yet while a device boots, say);
+/// the tooltip says why.
+const RETRY_NOTE: &str = "Reduced frame rate — the live view couldn't start";
+
+/// The line over a Reduced picture. `transient`: the live view failed for
+/// a reason that may pass and is tried again.
+pub(crate) fn reduced_note(transient: bool) -> &'static str {
+    if transient { RETRY_NOTE } else { REDUCED_NOTE }
+}
+
+/// Whether the Device tab is on screen: its tool tab is shown and the
+/// window is neither minimised, hidden, covered nor on another Space.
+pub(crate) fn device_on_screen(
+    tab_shown: bool,
+    minimized_or_hidden: bool,
+    window_visible: bool,
+) -> bool {
+    tab_shown && !minimized_or_hidden && window_visible
+}
+
+/// Until a list has succeeded, the line to show under "Couldn't list
+/// simulators" when the last one failed (the error's first line); None
+/// shows the tab's usual state.
+pub(crate) fn list_failure_line(listed: bool, last_error: Option<&str>) -> Option<String> {
+    if listed {
+        return None;
+    }
+    last_error.map(|e| e.trim().lines().next().unwrap_or_default().trim().to_string())
+}
 
 /// `OO_DEVICE_FORCE_SCREENSHOTS=1` makes every stream start fail, so the tab
 /// takes its screenshot fallback (for checking that path). Read once.
@@ -57,7 +86,7 @@ pub(crate) struct PollTick {
 }
 
 /// `tab_shown`: the panel is open on the Device tab; `visible`: that, and
-/// the window isn't minimised or hidden.
+/// the window is on screen ([`device_on_screen`]).
 pub(crate) fn poll_tick(tab_shown: bool, visible: bool) -> PollTick {
     PollTick {
         reconcile: tab_shown,
@@ -198,13 +227,18 @@ impl HarnessWorkspace {
     }
 
     /// Whether the Device tab is on screen: the only time it lists devices,
-    /// streams or takes screenshots. A minimised window or hidden app isn't.
+    /// streams or takes screenshots. A minimised, hidden or fully covered
+    /// window, or one on another Space, isn't.
     pub(crate) fn device_visible(&self, window: &Window) -> bool {
-        self.device_tab_shown() && !crate::browser_pane::window_is_minimized_or_hidden(window)
+        device_on_screen(
+            self.device_tab_shown(),
+            crate::browser_pane::window_is_minimized_or_hidden(window),
+            window.is_visible(),
+        )
     }
 
     /// Catch-all for every way the Device tab's visibility changes (tool
-    /// tab, panel open or closed, minimise, ⌘H): runs from `render`, the
+    /// tab, panel open or closed, minimise, ⌘H, covered): runs from `render`, the
     /// window-visibility observer, `set_tool_tab` and `toggle_diff`. A
     /// no-op unless it changed.
     pub(crate) fn sync_device_visibility(&mut self, window: &Window, cx: &mut Context<Self>) {
@@ -234,28 +268,31 @@ impl HarnessWorkspace {
         if std::mem::replace(&mut self.device_listing, true) {
             return;
         }
+        let ticket = self.device_tab.list_started();
         cx.spawn(async move |view, cx| {
             let list = cx
                 .background_spawn(async move { crate::devices::simctl::list_booted() })
                 .await;
-            let _ = view.update(cx, |ws, cx| ws.apply_device_list(list, cx));
+            let _ = view.update(cx, |ws, cx| ws.apply_device_list(ticket, list, cx));
         })
         .detach();
     }
 
     fn apply_device_list(
         &mut self,
+        ticket: u64,
         list: Result<Vec<crate::devices::DeviceInfo>, crate::devices::simctl::ListError>,
         cx: &mut Context<Self>,
     ) {
         self.device_listing = false;
-        if !matches!(list, Err(crate::devices::simctl::ListError::Failed(_))) {
-            self.device_listed = true;
-        }
         if let Err(crate::devices::simctl::ListError::Failed(e)) = &list {
             log::debug!("device: listing simulators failed: {e}");
+            self.device_list_error = Some(e.clone());
+        } else {
+            self.device_listed = true;
+            self.device_list_error = None;
         }
-        let cmds = self.device_tab.on_list(list);
+        let cmds = self.device_tab.on_list(ticket, list);
         self.run_device_commands(cmds, cx);
         cx.notify();
     }
@@ -367,6 +404,7 @@ impl HarnessWorkspace {
             }
             StreamMsg::Started(generation) if current(generation) => {
                 log::debug!("device: live view started");
+                self.device_tab.on_stream_started();
             }
             StreamMsg::Failed(generation, e) if current(generation) => {
                 log::info!("device: no live view ({e:?}); using screenshots");
@@ -459,21 +497,29 @@ impl HarnessWorkspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let body = match &self.device_tab.view {
-            // Nothing yet rather than "No simulator running" for a moment.
-            _ if !self.device_listed => div().flex_1().into_any_element(),
+            // Nothing yet rather than "No simulator running" for a moment,
+            // unless listing failed.
+            _ if !self.device_listed => {
+                match list_failure_line(self.device_listed, self.device_list_error.as_deref()) {
+                    Some(line) => {
+                        device_empty(hx, "Couldn't list simulators".into(), Some(line.into()))
+                    }
+                    None => div().flex_1().into_any_element(),
+                }
+            }
             DeviceView::NeedsXcode => device_empty(
                 hx,
                 "Needs Xcode".into(),
-                Some("Install Xcode to watch iOS simulators here."),
+                Some("Install Xcode to watch iOS simulators here.".into()),
             ),
             DeviceView::NoneRunning => device_empty(
                 hx,
                 "No simulator running".into(),
-                Some("Simulators your agents boot show up here."),
+                Some("Simulators your agents boot show up here.".into()),
             ),
             DeviceView::ShutDown { name } => device_empty(hx, format!("{name} shut down"), None),
             DeviceView::Live { .. } => self.render_device_screen(),
-            DeviceView::Reduced { why, .. } => div()
+            DeviceView::Reduced { why, transient, .. } => div()
                 .flex()
                 .flex_col()
                 .flex_1()
@@ -487,7 +533,7 @@ impl HarnessWorkspace {
                         .text_xs()
                         .text_color(hx.tx2)
                         .tooltip(tip(why.clone()))
-                        .child(REDUCED_NOTE),
+                        .child(reduced_note(*transient)),
                 )
                 .child(self.render_device_screen())
                 .into_any_element(),
@@ -623,7 +669,11 @@ impl HarnessWorkspace {
 }
 
 /// A centred title, and a line under it when there is one.
-fn device_empty(hx: &HarnessTheme, title: String, detail: Option<&'static str>) -> AnyElement {
+fn device_empty(
+    hx: &HarnessTheme,
+    title: String,
+    detail: Option<gpui::SharedString>,
+) -> AnyElement {
     div()
         .flex()
         .flex_col()
@@ -639,7 +689,10 @@ fn device_empty(hx: &HarnessTheme, title: String, detail: Option<&'static str>) 
 
 #[cfg(test)]
 mod tests {
-    use super::{PollTick, Shoot, may_shoot, pick_device, poll_tick, sync_shown};
+    use super::{
+        PollTick, Shoot, device_on_screen, list_failure_line, may_shoot, pick_device, poll_tick,
+        reduced_note, sync_shown,
+    };
     use crate::devices::DeviceInfo;
     use crate::devices::tab_state::{Command, DeviceTab};
     use crate::workspace::{Prefs, ToolTab, load_prefs, save_prefs_to};
@@ -658,7 +711,8 @@ mod tests {
         let mut tab = DeviceTab::new();
         let mut shown = true;
         assert!(sync_shown(&mut tab, &mut shown, true).is_empty());
-        tab.on_list(Ok(vec![dev("a"), dev("b")]));
+        let ticket = tab.list_started();
+        tab.on_list(ticket, Ok(vec![dev("a"), dev("b")]));
         assert_eq!(tab.selected.as_deref(), Some("a"));
         (tab, shown)
     }
@@ -775,6 +829,47 @@ mod tests {
                 list: false
             }
         );
+    }
+
+    #[test]
+    fn a_covered_window_or_another_space_is_not_on_screen() {
+        // gpui reports a fully covered window, or one on another Space, as
+        // not visible; the stream stops there too.
+        assert!(device_on_screen(true, false, true));
+        assert!(!device_on_screen(true, false, false));
+        assert!(!device_on_screen(true, true, false));
+        assert!(!device_on_screen(false, false, true));
+        // And the poll then lists nothing.
+        assert_eq!(
+            poll_tick(true, device_on_screen(true, false, false)),
+            PollTick {
+                reconcile: true,
+                list: false
+            }
+        );
+    }
+
+    #[test]
+    fn a_transient_fallback_does_not_blame_the_xcode() {
+        assert!(reduced_note(false).contains("isn't supported"));
+        assert!(!reduced_note(true).contains("isn't supported"), "{}", reduced_note(true));
+        assert!(reduced_note(true).starts_with("Reduced frame rate"));
+    }
+
+    #[test]
+    fn a_list_that_never_worked_says_why() {
+        let licence = "You have not agreed to the Xcode license agreements. You must agree...\nRun sudo xcodebuild -license";
+        assert_eq!(
+            list_failure_line(false, Some(licence)).as_deref(),
+            Some("You have not agreed to the Xcode license agreements. You must agree...")
+        );
+        assert_eq!(
+            list_failure_line(false, Some("  simctl list timed out after 5 s \n")).as_deref(),
+            Some("simctl list timed out after 5 s")
+        );
+        // Nothing failed yet, or a list already worked: the usual state.
+        assert_eq!(list_failure_line(false, None), None);
+        assert_eq!(list_failure_line(true, Some(licence)), None);
     }
 
     #[test]

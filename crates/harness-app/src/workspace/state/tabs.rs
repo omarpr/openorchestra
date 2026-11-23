@@ -843,7 +843,8 @@ impl HarnessWorkspace {
                     ws.browser_window_hidden = true;
                     ws.sync_browser_views(window, cx);
                 }
-                // The Device tab stops streaming while minimised or hidden.
+                // The Device tab stops streaming while minimised, hidden or
+                // covered.
                 ws.sync_device_visibility(window, cx);
             });
         })
