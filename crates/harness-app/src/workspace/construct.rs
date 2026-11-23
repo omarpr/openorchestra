@@ -146,6 +146,14 @@ impl HarnessWorkspace {
         };
         let new_task_home = new_target_repo.clone();
 
+        // The Device tab starts hidden; the first render shows it if it is on
+        // screen (`sync_device_visibility`), which lists the devices at once.
+        let mut device_tab = crate::devices::tab_state::DeviceTab::new();
+        device_tab.selected = prefs.device_udid.clone();
+        let _ = device_tab.on_hidden();
+        #[cfg(target_os = "macos")]
+        let (device_to_ui, mut device_from_stream) = futures::channel::mpsc::unbounded();
+
         let (a2a_change_tx, a2a_change_rx) = crossbeam_channel::bounded::<()>(1);
         let (a2a_inbox_tx, a2a_inbox_rx) =
             crossbeam_channel::unbounded::<a2a_broker::InboxDelivery>();
@@ -281,6 +289,21 @@ impl HarnessWorkspace {
             ports_scan_failed: false,
             ports_sort_menu: None,
             ports_sort_trigger_press: None,
+            device_tab,
+            device_screen: cx.new(|_| crate::workspace::ui::device_panel::DeviceScreen::new()),
+            device_shown: false,
+            device_generation: 0,
+            device_live: None,
+            device_listing: false,
+            device_listed: false,
+            device_menu_open: false,
+            device_menu_press: None,
+            #[cfg(target_os = "macos")]
+            device_worker: None,
+            #[cfg(target_os = "macos")]
+            device_frames: None,
+            #[cfg(target_os = "macos")]
+            device_to_ui,
             archived_repos,
             archived_path,
             confirm_removal: None,
@@ -800,6 +823,39 @@ impl HarnessWorkspace {
                     .update(cx, |ws, cx| ws.finish_ports_scan(seq, started, sample, cx))
                     .is_err()
                 {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        // Booted simulators for the Device tool tab. Lists only while that tab
+        // is on screen (`device_visible`: the window not minimised or hidden
+        // either); `sync_device_visibility` lists at once when it appears.
+        cx.spawn_in(window, async move |view, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(crate::workspace::ui::device_panel::DEVICE_POLL)
+                    .await;
+                let polled = view.update_in(cx, |ws, window, cx| {
+                    if ws.device_visible(window) {
+                        ws.refresh_devices(cx);
+                    }
+                });
+                if polled.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        // The Device tab's stream thread and stream report here: frames
+        // (which redraw only the picture), failures, a device going away.
+        #[cfg(target_os = "macos")]
+        cx.spawn(async move |view, cx| {
+            use futures::StreamExt as _;
+            while let Some(msg) = device_from_stream.next().await {
+                if view.update(cx, |ws, cx| ws.on_device_msg(msg, cx)).is_err() {
                     break;
                 }
             }

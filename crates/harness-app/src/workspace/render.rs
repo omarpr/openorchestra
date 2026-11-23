@@ -35,6 +35,8 @@ impl Render for HarnessWorkspace {
         // opening or closing): the native page view must match what this
         // frame draws.
         self.sync_browser_views(window, cx);
+        // Likewise the Device tab: it streams only while on screen.
+        self.sync_device_visibility(window, cx);
 
         let hx = theme(cx).clone();
         self.ensure_conductor(&hx, cx);

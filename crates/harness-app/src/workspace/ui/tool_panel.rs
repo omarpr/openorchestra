@@ -58,6 +58,9 @@ impl HarnessWorkspace {
             ToolTab::Git,
             ToolTab::Review,
             ToolTab::Ports,
+            // iOS simulators exist only on macOS.
+            #[cfg(target_os = "macos")]
+            ToolTab::Device,
         ] {
             let selected = active == tab;
             let label = match tab {
@@ -268,8 +271,7 @@ impl HarnessWorkspace {
                 self.render_diff_surface(hx, Some(width), false, cx)
             }
             ToolTab::Ports => self.render_ports_panel(hx, cx),
-            // Placeholder until the Device panel lands.
-            ToolTab::Device => div().into_any_element(),
+            ToolTab::Device => self.render_device_panel(hx, cx),
             ToolTab::Files if self.files_sub_tab == FilesSubTab::Search => {
                 self.render_project_search_panel(hx, cx)
             }

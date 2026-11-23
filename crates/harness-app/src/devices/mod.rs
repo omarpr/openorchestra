@@ -1,15 +1,14 @@
 //! The Device tab's pure model: booted-simulator listing, device choice and
 //! the single-frame hand-off between the capture thread and the UI.
 
-// Used by the Device tab (tasks 3–6 of docs/superpowers/plans/2026-11-22-device-tab-ios.md).
-#![allow(dead_code, unused_imports)]
-
 #[cfg(target_os = "macos")]
 pub(crate) mod convert;
 #[cfg(target_os = "macos")]
 pub(crate) mod sim_display;
 pub(crate) mod simctl;
 pub(crate) mod tab_state;
+#[cfg(target_os = "macos")]
+pub(crate) mod worker;
 
 use std::sync::Mutex;
 
@@ -25,6 +24,8 @@ pub(crate) struct DeviceInfo {
 }
 
 /// Why a device stream could not start or kept going.
+// Elsewhere than macOS no stream exists, so only `Unsupported` is ever made.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StreamError {
     NoXcode,
@@ -32,8 +33,6 @@ pub(crate) enum StreamError {
     DeviceNotFound,
     Failed(String),
 }
-
-pub(crate) use simctl::parse_booted;
 
 /// The selected UDID if it is still booted, else the first booted device.
 pub(crate) fn choose_device<'a>(
@@ -48,8 +47,11 @@ pub(crate) fn choose_device<'a>(
 /// Holds the newest frame. A capture thread `put`s; the UI `take`s. A `put`
 /// over an unread frame replaces it and returns false, so the UI is woken
 /// once per burst rather than once per frame.
+// Only the macOS stream (`worker`) hands frames over.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) struct FrameSlot<T>(Mutex<Option<T>>);
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 impl<T> FrameSlot<T> {
     pub(crate) fn new() -> Self {
         Self(Mutex::new(None))
@@ -68,6 +70,7 @@ impl<T> FrameSlot<T> {
 
 #[cfg(test)]
 mod tests {
+    use super::simctl::parse_booted;
     use super::*;
 
     const ONE: &str = include_str!("testdata/booted_one.json");

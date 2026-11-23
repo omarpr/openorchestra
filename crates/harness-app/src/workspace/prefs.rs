@@ -264,6 +264,12 @@ impl Default for Prefs {
 }
 
 impl Prefs {
+    /// Whether the tools panel is open on the Device tab: the prefs half of
+    /// `HarnessWorkspace::device_visible`, which also asks the window.
+    pub(crate) fn device_tab_shown(&self) -> bool {
+        self.diff_open && self.tool_tab == ToolTab::Device
+    }
+
     /// Clamp on load, not just on write: a hand-edited or truncated prefs file
     /// must not be able to render a panel unusable or invisible.
     pub(crate) fn sanitized(mut self) -> Self {

@@ -12,6 +12,10 @@ Unreleased is empty.
 
 ## Unreleased
 
+### Added
+
+- **Device tab** (macOS): watch a running iOS simulator live from the tools panel, picked from every booted simulator on the Mac. Watch-only; falls back to about 2 frames a second when this Xcode's simulator display API isn't available.
+
 ### Fixed
 
 - An unknown tools-panel tab in prefs.json no longer resets every setting.

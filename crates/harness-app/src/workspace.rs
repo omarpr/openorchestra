@@ -922,6 +922,40 @@ pub struct HarnessWorkspace {
         crate::workspace::ui::ports_panel::SortMenu,
         gpui::Point<Pixels>,
     )>,
+    /// The Device tab: booted simulators, the one watched, and what should
+    /// run. Per window; the task, worktree and center-tab switch paths never
+    /// touch it.
+    device_tab: crate::devices::tab_state::DeviceTab,
+    /// The watched simulator's picture, its own entity so frames redraw it
+    /// alone.
+    device_screen: Entity<crate::workspace::ui::device_panel::DeviceScreen>,
+    /// Whether `device_tab` was last told it is on screen
+    /// (`sync_device_visibility`).
+    device_shown: bool,
+    /// Numbers each stream or screenshot-loop start; `device_live` is the
+    /// running one's, `None` while nothing runs. Reports from any other
+    /// generation are dropped.
+    device_generation: u64,
+    device_live: Option<u64>,
+    /// A device list is being fetched; one at a time.
+    device_listing: bool,
+    /// The first device list has landed (before that the tab shows nothing
+    /// rather than "No simulator running").
+    device_listed: bool,
+    /// The simulator picker's menu, and the last press on its button (the
+    /// open menu's outside handler leaves that press to the button).
+    device_menu_open: bool,
+    device_menu_press: Option<gpui::Point<Pixels>>,
+    /// The thread that owns the live stream; started on the first stream.
+    #[cfg(target_os = "macos")]
+    device_worker: Option<crate::devices::worker::StreamWorker>,
+    /// The running stream's frame slot.
+    #[cfg(target_os = "macos")]
+    device_frames: Option<crate::devices::worker::Frames>,
+    /// Where the stream thread and the stream report; the receiving end is a
+    /// task spawned in `new`.
+    #[cfg(target_os = "macos")]
+    device_to_ui: futures::channel::mpsc::UnboundedSender<crate::devices::worker::StreamMsg>,
     /// Project roots the user archived — hidden from the active list but kept so
     /// they can be restored. Persisted to `archived.json`; never deletes files.
     archived_repos: Vec<PathBuf>,

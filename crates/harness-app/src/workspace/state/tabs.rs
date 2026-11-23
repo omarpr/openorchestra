@@ -830,6 +830,7 @@ impl HarnessWorkspace {
                 self.browser_window_hidden = false;
                 cx.notify();
             }
+            self.sync_device_visibility(window, cx);
             return;
         }
         cx.spawn_in(window, async move |ws, cx| {
@@ -842,6 +843,8 @@ impl HarnessWorkspace {
                     ws.browser_window_hidden = true;
                     ws.sync_browser_views(window, cx);
                 }
+                // The Device tab stops streaming while minimised or hidden.
+                ws.sync_device_visibility(window, cx);
             });
         })
         .detach();

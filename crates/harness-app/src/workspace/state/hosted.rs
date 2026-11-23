@@ -9,7 +9,7 @@ impl HarnessWorkspace {
     ///
     /// Always available so Files/Git stay reachable even when Review lives in a
     /// center tab.
-    pub(crate) fn toggle_diff(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let was_visible = self.ports_visible();
         self.prefs.diff_open = !self.prefs.diff_open;
         // Reopening onto Ports: rows from before the panel closed may be
@@ -17,6 +17,7 @@ impl HarnessWorkspace {
         if !was_visible && self.ports_visible() {
             self.refresh_ports(cx);
         }
+        self.sync_device_visibility(window, cx);
         self.save_prefs(cx);
         cx.notify();
     }
@@ -58,8 +59,10 @@ impl HarnessWorkspace {
                 window.focus(&self.diff_surface_focus, cx);
             }
             ToolTab::Ports => self.refresh_ports(cx),
-            ToolTab::Device => {}
+            ToolTab::Device => self.refresh_devices(cx),
         }
+        // Showing or leaving the Device tab starts or stops its stream.
+        self.sync_device_visibility(window, cx);
         self.save_prefs(cx);
         cx.notify();
     }
