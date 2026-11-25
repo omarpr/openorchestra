@@ -25,6 +25,8 @@ Unreleased is empty.
 
 ### Fixed
 
+- Android live-view retries continue when listing iOS simulators fails.
+
 - The Device tab returns keyboard focus and backs off when input cannot start.
 
 - An unknown tools-panel tab in prefs.json no longer resets every setting.

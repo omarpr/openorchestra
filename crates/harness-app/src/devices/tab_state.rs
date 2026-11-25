@@ -253,8 +253,8 @@ impl DeviceTab {
                     .cloned()
                     .collect();
                 list.extend(android);
-                if list == self.booted {
-                    // Nothing new: as for any failed list.
+                if list == self.booted && !matches!(self.view, DeviceView::Android { .. }) {
+                    // An unchanged Android list still counts for Android retries.
                     self.on_list(ticket, Err(ListError::Failed(e)))
                 } else {
                     self.on_list(ticket, Ok(list))
@@ -900,6 +900,18 @@ mod tests {
         assert_eq!(t.view, DeviceView::ShutDown { name: "name-p".into() });
         assert!(fresh(&mut t, Ok(vec![])).is_empty());
         assert_eq!(t.view, DeviceView::NoneRunning);
+    }
+
+    #[test]
+    fn an_unchanged_android_poll_advances_a_retry_when_simctl_times_out() {
+        let mut t = DeviceTab::new();
+        fresh(&mut t, Ok(vec![android("p")]));
+        t.on_stream_failed(StreamError::Starting("not answering yet".into()));
+        let ticket = t.list_started();
+        assert_eq!(
+            t.on_lists(ticket, Err(ListError::Failed("timeout".into())), vec![android("p")]),
+            vec![start("android:p")],
+        );
     }
 
     /// Picking the emulator already shown, once its stream failed, is an
