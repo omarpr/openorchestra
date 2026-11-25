@@ -809,9 +809,9 @@ pub(crate) mod render {
     }
 
     /// A skin's frame: its background, anchored on the screen's hole so the
-    /// art's screen edge is the picture's, then its foreground over the
-    /// hole. Returns what of the foreground covers the screen, a pixel of
-    /// the hole each (row by row), to keep when the screen is cut out.
+    /// art's screen edge is the picture's. Returns the foreground's
+    /// premultiplied pixels, one pixel of the hole each (row by row), to
+    /// composite after the background's rounded opening is cut.
     fn draw_skin(
         canvas: &mut Canvas,
         back: &Path,
@@ -838,8 +838,8 @@ pub(crate) mod render {
         let Some(path) = foreground else {
             return Some(None);
         };
-        // Drawn on its own first: its alpha is also what stays over the
-        // screen.
+        // Drawn on its own first: compositing it before the rounded cut
+        // would retain the underlay's colour through a translucent edge.
         let (hw, hh) = (hw as usize, hh as usize);
         let fg = Canvas::new(hw, hh)?;
         let whole = Rect { x: 0.0, y: 0.0, w: hw as f32, h: hh as f32 };
@@ -852,12 +852,7 @@ pub(crate) mod render {
             return Some(None);
         };
         fg.draw_image(&image, whole);
-        let fg = fg.into_pixels();
-        let (x0, y0) = (hole.x0 as usize, hole.y0 as usize);
-        for (y, row) in fg.chunks_exact(hw * 4).enumerate() {
-            canvas.blend(x0, y0 + y, row);
-        }
-        Some(Some(fg.as_chunks::<4>().0.iter().map(|px| px[3]).collect()))
+        Some(Some(fg.into_pixels()))
     }
 
     pub(crate) fn overlay(spec: &ChromeSpec, key: &OverlayKey) -> Option<RgbaImage> {
@@ -868,8 +863,9 @@ pub(crate) mod render {
         }
         let mut canvas = Canvas::new(pw, ph)?;
         let whole = Rect { x: 0.0, y: 0.0, w: pw as f32, h: ph as f32 };
-        // What of a skin's foreground covers the screen: kept with the frame.
-        let mut covered: Option<Vec<u8>> = None;
+        // A skin foreground goes over the background only after its rounded
+        // opening is cut, preserving the foreground's own transparency.
+        let mut foreground_pixels: Option<Vec<u8>> = None;
         // A framed skin's own corner radius, in place of the spec's (none
         // for a skin that gives none).
         let mut skin_corner: Option<Option<f32>> = None;
@@ -904,7 +900,7 @@ pub(crate) mod render {
                 }
                 FrameArt::Skin { back, back_at, foreground, corner, .. } => {
                     skin_corner = Some(*corner);
-                    covered =
+                    foreground_pixels =
                         draw_skin(&mut canvas, back, *back_at, foreground.as_deref(), geometry, screen)?;
                 }
             }
@@ -920,18 +916,18 @@ pub(crate) mod render {
             (Some((sw, _)), Some(r)) if sw > 0.0 => r * hw as f32 / sw,
             _ => 0.0,
         };
-        let mut keep = match &spec.mask {
+        let keep = match &spec.mask {
             Some(mask) => Some(keep_for(Some(mask), hw as usize, hh as usize, corner)?),
             None => None,
         };
-        if let Some(covered) = covered {
-            let keep = keep.get_or_insert_with(|| vec![0; covered.len()]);
-            for (k, c) in keep.iter_mut().zip(covered) {
-                *k = (*k).max(c);
+        cut(&mut canvas.pixels, pw, hole, keep.as_deref());
+        if let Some(foreground) = foreground_pixels {
+            let (x0, y0) = (hole.x0 as usize, hole.y0 as usize);
+            for (y, row) in foreground.chunks_exact(hw as usize * 4).enumerate() {
+                canvas.blend(x0, y0 + y, row);
             }
         }
         let mut pixels = canvas.into_pixels();
-        cut(&mut pixels, pw, hole, keep.as_deref());
         unpremultiply(&mut pixels);
         let upright = RgbaImage::from_raw(pw as u32, ph as u32, pixels)?;
         Some(match key.turn {
@@ -2034,6 +2030,41 @@ mod tests {
         let all = [Quarter::None, Quarter::Cw90, Quarter::Cw180, Quarter::Cw270];
         let leaks = leaks(&spec, &all, &[SIZES[0], SIZES[3]], &[ORIGINS[1], ORIGINS[3]]);
         assert!(leaks.is_empty(), "{} leaking pixels, e.g. {:?}", leaks.len(), &leaks[..leaks.len().min(6)]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn skin_foreground_is_composited_after_the_screen_cutout() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = skin_like(dir.path(), Some(109.0 / 4.0), Some(camera));
+        let art = image::RgbaImage::from_fn(320, 714, |x, y| {
+            if (150..170).contains(&x) && (390..410).contains(&y) {
+                image::Rgba([0, 0, 255, 128])
+            } else if camera(x, y) {
+                image::Rgba([0, 0, 255, 255])
+            } else {
+                image::Rgba([0, 0, 0, 0])
+            }
+        });
+        art.save_with_format(dir.path().join("mask.webp"), image::ImageFormat::WebP).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(dir.path().join("mask.webp"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
+            .unwrap();
+        let key = OverlayKey {
+            device_type: "a".into(),
+            size_px: (352, 744),
+            turn: Quarter::None,
+            framed: true,
+            fill: [10, 200, 30, 255],
+        };
+        let overlay = render::overlay(&spec, &key).unwrap();
+        // No green from the opaque panel underlay survives in the
+        // translucent blue; the opaque camera still covers completely.
+        assert_eq!(overlay.get_pixel(175, 410).0, [255, 0, 0, 128]);
+        assert_eq!(overlay.get_pixel(175, 37).0, [255, 0, 0, 255]);
     }
 
     #[cfg(target_os = "macos")]
