@@ -25,6 +25,7 @@ Unreleased is empty.
 
 ### Fixed
 
+- Android settings and graceful shutdown stay tied to the selected emulator run.
 - An Android shutdown confirmation expires when the emulator restarts.
 - The Device tab replaces the picture and its controls together when an AVD restarts.
 - The Device tab tracks simultaneous Android boots independently.

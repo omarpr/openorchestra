@@ -6,7 +6,7 @@
 //!   clockwise from what `getPhysicalModel` reports, within [−180, 180).
 //! - Copy screenshot: `getScreenshot` as a PNG.
 //! - Shut down: `setVmState(SHUTDOWN)`.
-//! - Dark/Light and Text size: `adb -s emulator-<serial port> shell` with
+//! - Dark/Light and Text size: a verified adb shell with
 //!   `cmd uimode night` and `settings … system font_scale`, offered only
 //!   when the SDK has adb.
 //!
@@ -14,6 +14,7 @@
 //! and adb run bounded: call it off the main thread.
 
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::Duration;
 
 use super::grpc::image_format::ImgFormat;
@@ -24,7 +25,8 @@ use super::input::{BACK_KEY, HOME_KEY, named_key};
 use super::stream::{Client, authorized, connect, status_text, without_token};
 use crate::devices::AndroidRunning;
 use crate::devices::controls::{Appearance, Control, ControlOutcome};
-use crate::ports::{RunFailed, run_bounded_why};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::process::Command;
 
 /// The text sizes Text size steps through, smallest first, as `settings`
 /// is given them.
@@ -50,14 +52,6 @@ pub(crate) fn adb_path(sdk: &Path) -> PathBuf {
 /// main thread, with each list): it may be installed later.
 pub(crate) fn adb() -> Option<PathBuf> {
     super::sdk::sdk().map(|sdk| adb_path(&sdk)).filter(|adb| adb.is_file())
-}
-
-/// The arguments that run `command` in the shell of the emulator whose
-/// console is on `serial_port`.
-pub(crate) fn adb_shell_args(serial_port: u16, command: &[&str]) -> Vec<String> {
-    let mut args = vec!["-s".to_string(), format!("emulator-{serial_port}"), "shell".to_string()];
-    args.extend(command.iter().map(|arg| arg.to_string()));
-    args
 }
 
 /// `cmd uimode night` prints "Night mode: yes" or "Night mode: no" (also
@@ -217,22 +211,17 @@ pub(crate) fn shutdown(dev: &AndroidRunning) -> Result<(), String> {
 /// may have its console port.
 fn power_off_gracefully(dev: &AndroidRunning) -> Result<(), String> {
     still_running(dev, super::discovery::still_emulator)?;
-    let adb = adb().ok_or_else(|| "adb isn't in the Android SDK".to_string())?;
     let started = std::time::Instant::now();
-    let args = adb_shell_args(dev.serial_port, &POWER_OFF);
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    // As the guest goes down, adb may lose it before answering: only the
-    // emulator's exit says it worked.
-    let ran = run_bounded_why(&adb.to_string_lossy(), &args, GRACEFUL_WAIT);
+    let ran = adb_shell_with_timeout(dev, &POWER_OFF, GRACEFUL_WAIT);
     let left = GRACEFUL_WAIT.saturating_sub(started.elapsed());
+    // As the guest goes down, adb may lose it before answering.
     if exited_within(dev, left) {
         return Ok(());
     }
-    Err(match ran {
-        Err(RunFailed::Spawn) => "adb could not start".to_string(),
-        Err(RunFailed::TimedOut) => format!("adb reboot -p timed out after {} s", GRACEFUL_WAIT.as_secs()),
-        Ok(_) => format!("the emulator was still running {} s after reboot -p", GRACEFUL_WAIT.as_secs()),
-    })
+    match ran {
+        Err(why) => Err(why),
+        Ok(_) => Err(format!("the emulator was still running {} s after reboot -p", GRACEFUL_WAIT.as_secs())),
+    }
 }
 
 /// `setVmState(SHUTDOWN)`, then waits for the emulator to exit (about
@@ -295,6 +284,7 @@ fn call<T>(
     let port = dev.grpc_port;
     let result = runtime.block_on(async move {
         let client = connect(port).await.map_err(|(_, why)| why)?;
+        verify_run(dev)?;
         match tokio::time::timeout(CALL_TIMEOUT, calls(client)).await {
             Ok(result) => result.map_err(|status| status_text(&status)),
             Err(_) => Err(format!("The emulator didn't answer within {} s", CALL_TIMEOUT.as_secs())),
@@ -303,36 +293,99 @@ fn call<T>(
     result.map_err(|why| without_token(&why, dev.token.as_deref()))
 }
 
-/// An error unless `dev` still runs, by `alive` (the emulator's pid still
-/// its qemu). Asked before anything is sent: adb finds an emulator by its
-/// console port, which another may have taken once `dev` exited.
+/// An error unless `dev`'s emulator process still runs.
 fn still_running(dev: &AndroidRunning, alive: impl Fn(u32) -> bool) -> Result<(), String> {
     if alive(dev.pid) { Ok(()) } else { Err("The emulator has shut down".into()) }
 }
 
-/// Runs `command` in `dev`'s shell through adb; its stdout.
-fn adb_shell(dev: &AndroidRunning, command: &[&str]) -> Result<String, String> {
-    still_running(dev, super::discovery::still_emulator)?;
-    let adb = adb().ok_or_else(|| "adb isn't in the Android SDK".to_string())?;
-    let args = adb_shell_args(dev.serial_port, command);
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let ran = run_bounded_why(&adb.to_string_lossy(), &args, ADB_TIMEOUT).map_err(|why| match why {
-        RunFailed::Spawn => "adb could not start".to_string(),
-        RunFailed::TimedOut => format!("adb timed out after {} s", ADB_TIMEOUT.as_secs()),
-    })?;
-    if ran.code == Some(0) {
-        return Ok(ran.stdout);
+fn verify_run(dev: &AndroidRunning) -> Result<(), String> {
+    if super::discovery::is_same_run(dev) {
+        Ok(())
+    } else {
+        Err("The selected emulator run has ended".into())
     }
-    let stderr = ran.stderr.trim();
-    Err(match ran.code {
-        _ if !stderr.is_empty() => format!("adb: {}", stderr.lines().next().unwrap_or_default()),
-        Some(code) => format!("adb failed with exit code {code}"),
-        None => "adb was stopped by a signal".to_string(),
+}
+
+const ADB_READY: &str = "oo-adb-ready";
+
+/// The guest acknowledges the shell connection, then waits for permission.
+/// Its stdin is tied to that transport even if another emulator takes the
+/// same serial, or the adb server restarts, while we verify the run.
+fn gated_shell(command: &[&str]) -> String {
+    let command = command.iter().map(|arg| crate::tmux::shell_quote(arg)).collect::<Vec<_>>().join(" ");
+    format!("printf '%s\n' {ADB_READY}; IFS= read -r permit && [ \"$permit\" = run ] && exec {command}")
+}
+
+async fn run_gated_shell(
+    command: &mut Command,
+    verify: impl FnOnce() -> Result<(), String>,
+) -> Result<String, String> {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("adb could not start: {e}"))?;
+    let mut input = child.stdin.take().expect("piped stdin");
+    let mut output = BufReader::new(child.stdout.take().expect("piped stdout"));
+    let mut error = child.stderr.take().expect("piped stderr");
+    let run = async {
+        let mut ready = String::new();
+        output.read_line(&mut ready).await.map_err(|e| e.to_string())?;
+        if ready.trim_end() == ADB_READY {
+            verify()?;
+            input.write_all(b"run\n").await.map_err(|e| e.to_string())?;
+        }
+        drop(input);
+        let mut stdout = Vec::new();
+        output.read_to_end(&mut stdout).await.map_err(|e| e.to_string())?;
+        let status = child.wait().await.map_err(|e| e.to_string())?;
+        Ok::<_, String>((ready, stdout, status))
+    };
+    let read_error = async {
+        let mut stderr = Vec::new();
+        error.read_to_end(&mut stderr).await.map_err(|e| e.to_string())?;
+        Ok(stderr)
+    };
+    let ((ready, stdout, status), stderr) = tokio::try_join!(run, read_error)?;
+    if ready.trim_end() == ADB_READY && status.success() {
+        return Ok(String::from_utf8_lossy(&stdout).into_owned());
+    }
+    let stderr = String::from_utf8_lossy(&stderr);
+    let detail = stderr.lines().find(|line| !line.trim().is_empty()).map_or_else(
+        || status.code().map_or_else(|| "stopped by a signal".into(), |code| format!("exited with code {code}")),
+        str::to_string,
+    );
+    Err(format!("adb: {detail}"))
+}
+
+fn adb_shell(dev: &AndroidRunning, command: &[&str]) -> Result<String, String> {
+    adb_shell_with_timeout(dev, command, ADB_TIMEOUT)
+}
+
+fn adb_shell_with_timeout(
+    dev: &AndroidRunning,
+    command: &[&str],
+    timeout: Duration,
+) -> Result<String, String> {
+    verify_run(dev)?;
+    let adb = adb().ok_or_else(|| "adb isn't in the Android SDK".to_string())?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("starting the adb runtime: {e}"))?;
+    let mut child = Command::new(adb);
+    // Only the local adb server's emulator serial identifies this Mac's port.
+    child.args(["-H", "127.0.0.1", "-P", "5037", "-s", &format!("emulator-{}", dev.serial_port),
+        "shell", "-T", &gated_shell(command)]);
+    runtime.block_on(async {
+        tokio::time::timeout(timeout, run_gated_shell(&mut child, || verify_run(dev)))
+            .await
+            .map_err(|_| format!("adb timed out after {} s", timeout.as_secs()))?
     })
 }
 
-/// Restores a live test AVD's exact font-scale setting, including an unset
-/// value, on every scope exit. Cleanup must not panic while already unwinding.
 #[cfg(test)]
 pub(crate) struct FontScaleRestore {
     dev: AndroidRunning,
@@ -402,10 +455,6 @@ mod tests {
         assert_eq!(power_off_steps(true), [PowerOff::Graceful, PowerOff::Hard]);
         // Without: the VM's alone.
         assert_eq!(power_off_steps(false), [PowerOff::Hard]);
-        assert_eq!(
-            adb_shell_args(5554, &POWER_OFF),
-            ["-s", "emulator-5554", "shell", "reboot", "-p"]
-        );
         assert!(GRACEFUL_WAIT <= Duration::from_secs(15));
     }
 
@@ -445,13 +494,30 @@ mod tests {
     #[test]
     fn adb_runs_in_the_emulators_shell() {
         assert_eq!(
-            adb_shell_args(5554, &["cmd", "uimode", "night", "yes"]),
-            ["-s", "emulator-5554", "shell", "cmd", "uimode", "night", "yes"]
-        );
-        assert_eq!(
             adb_path(Path::new("/sdk")),
             PathBuf::from("/sdk/platform-tools/adb")
         );
+    }
+
+    #[test]
+    fn the_selected_shell_runs_only_after_host_verification() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let touched = dir.path().join("command ran");
+        let script = gated_shell(&["touch", touched.to_str().unwrap()]);
+        let mut child = Command::new("/bin/sh");
+        child.args(["-c", &script]);
+        let run = |child: &mut Command, allowed| {
+            runtime.block_on(async {
+                tokio::time::timeout(ADB_TIMEOUT, run_gated_shell(child, || {
+                    if allowed { Ok(()) } else { Err("run replaced".into()) }
+                })).await.unwrap()
+            })
+        };
+        assert_eq!(run(&mut child, false), Err("run replaced".into()));
+        assert!(!touched.exists());
+        assert_eq!(run(&mut child, true), Ok(String::new()));
+        assert!(touched.exists());
     }
 
     /// Manual timing, on an AVD booted for the purpose (never anyone

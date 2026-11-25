@@ -265,7 +265,7 @@ prost = "0.14"
 # The Android picture's stream (devices/android/stream.rs) runs on a
 # current-thread runtime with a connect timeout. These features are already
 # on through gpui_tokio; declared because the stream uses them.
-tokio = { version = "1", features = ["rt", "time", "net"] }
+tokio = { version = "1", features = ["rt", "time", "net", "process", "io-util"] }
 block2 = "0.6"
 # The browser tab's WKWebView (browser_pane/webview.rs). Same objc2 0.6 family
 # as above; objc2-app-kit 0.3.2 and dispatch2 0.3.1 are already in the lockfile
