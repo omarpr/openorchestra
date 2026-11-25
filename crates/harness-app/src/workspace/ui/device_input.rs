@@ -1479,8 +1479,11 @@ mod tests {
         sink.text(" héllo");
         sink.text(" wörld!");
         sleep(ms(1500));
-        let pasted = shot("c3-pasted");
-        check(differ(&typed, &pasted) > 0.3, format!("paste ({:.2})", differ(&typed, &pasted)));
+        shot("c3-pasted");
+        shell(&["uiautomator", "dump", "/data/local/tmp/oo-device-input.xml"]);
+        let hierarchy = shell(&["cat", "/data/local/tmp/oo-device-input.xml"]);
+        let expected = "text=\"Wifi 2 héllo wörld!\"";
+        assert!(hierarchy.contains(expected), "the guest field must contain exactly {expected}: {hierarchy}");
         assert_eq!(run(&dev, Control::Home, None), Ok(ControlOutcome::Done));
         sleep(ms(1000));
 
