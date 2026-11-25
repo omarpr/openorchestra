@@ -417,7 +417,9 @@ pub(crate) fn spec_for_avd(config: &str, skin: Option<&AndroidSkin>) -> Option<C
 /// thread.
 pub(crate) fn chrome_for_avd(avd_dir: &Path) -> Option<Arc<ChromeSpec>> {
     let config = std::fs::read_to_string(avd_dir.join("config.ini")).ok()?;
-    spec_for_avd(&config, skin_for(avd_dir).as_deref()).map(Arc::new)
+    let skins = super::sdk::sdk().map(|sdk| sdk.join("skins"));
+    let skin = skin_from(&config, skins.as_deref());
+    spec_for_avd(&config, skin.as_ref()).map(Arc::new)
 }
 
 /// The overlay cache's name for the AVD at `avd_dir`.
