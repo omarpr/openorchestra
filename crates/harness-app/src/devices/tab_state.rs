@@ -167,6 +167,15 @@ impl DeviceTab {
         ticket: u64,
         list: Result<Vec<DeviceInfo>, ListError>,
     ) -> Vec<Command> {
+        self.apply_list(ticket, list, true)
+    }
+
+    fn apply_list(
+        &mut self,
+        ticket: u64,
+        list: Result<Vec<DeviceInfo>, ListError>,
+        ios_poll_succeeded: bool,
+    ) -> Vec<Command> {
         match list {
             // The pick (`preferred`) stays, for when Xcode is back.
             Err(ListError::NoXcode) => {
@@ -211,7 +220,11 @@ impl DeviceTab {
                 match chosen {
                     None => self.view = DeviceView::NoneRunning,
                     Some(udid) if self.gone.as_ref().is_some_and(|(g, _)| *g == udid) => {}
-                    Some(udid) if self.shows(&udid) => self.count_down_retry(),
+                    Some(udid) if self.shows(&udid) => {
+                        if ios_poll_succeeded || Platform::of_id(&udid) == Platform::Android {
+                            self.count_down_retry();
+                        }
+                    }
                     Some(udid) => self.view = self.view_for(&udid),
                 }
             }
@@ -257,7 +270,7 @@ impl DeviceTab {
                     // An unchanged Android list still counts for Android retries.
                     self.on_list(ticket, Err(ListError::Failed(e)))
                 } else {
-                    self.on_list(ticket, Ok(list))
+                    self.apply_list(ticket, Ok(list), false)
                 }
             }
         }
@@ -1064,6 +1077,19 @@ mod tests {
         t.on_lists(ticket, failed(), vec![android("p")]);
         assert!(!ids(&t).contains(&"a".to_string()), "{:?}", ids(&t));
         assert_eq!(t.view, watching("p"));
+    }
+
+    #[test]
+    fn an_android_list_change_does_not_advance_a_simulator_retry() {
+        let mut t = tab_on(&["a"]);
+        t.on_stream_failed(StreamError::Failed("simulator stream closed".into()));
+        let ticket = t.list_started();
+        assert!(t.on_lists(ticket, Err(ListError::Failed("timeout".into())), vec![android("p")]).is_empty());
+        assert_eq!(t.view, reduced("a", "simulator stream closed", true));
+        assert_eq!(fresh(&mut t, Ok(vec![dev("a")])), vec![
+            Command::StopScreenshots,
+            start("a"),
+        ]);
     }
 
     #[test]

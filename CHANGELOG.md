@@ -25,6 +25,7 @@ Unreleased is empty.
 
 ### Fixed
 
+- The iOS screenshot fallback stays active while listing simulators fails.
 - Android live-view retries continue when listing iOS simulators fails.
 
 - The Device tab returns keyboard focus and backs off when input cannot start.
