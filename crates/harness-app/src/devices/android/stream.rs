@@ -215,8 +215,9 @@ impl AndroidStream {
         let request = authorized(format, dev.token.as_deref()).map_err(StreamError::Failed)?;
         let port = dev.grpc_port;
         // The emulator's refusal quotes the token it got; the note and the
-        // log mustn't.
+        // log mustn't. The same scrub applies when the call ends later.
         let token = dev.token.clone();
+        let scrub = token.clone();
         // Usual for a while after an emulator is listed: its port takes the
         // connection (or refuses it) before it answers.
         let listed_for = super::discovery::listed_for(dev.pid);
@@ -236,7 +237,7 @@ impl AndroidStream {
             .name("oo-android-stream".into())
             .spawn(move || {
                 runtime.block_on(async move {
-                    let pump = std::pin::pin!(pump(frames, pid, on_event));
+                    let pump = std::pin::pin!(pump(frames, pid, scrub, on_event));
                     // Either ends it: a drop (the cancel's sender goes too),
                     // or the call.
                     futures::future::select(cancelled, pump).await;
@@ -289,6 +290,7 @@ pub(crate) async fn connect(port: u16) -> Result<Client, (bool, String)> {
 async fn pump(
     mut frames: tonic::Streaming<Image>,
     pid: u32,
+    token: Option<String>,
     mut on_event: impl FnMut(StreamEvent),
 ) {
     let (why, unavailable) = loop {
@@ -306,7 +308,8 @@ async fn pump(
             }
             Ok(None) => break ("The emulator ended the picture".to_string(), false),
             Err(status) => {
-                break (status_text(&status), status.code() == tonic::Code::Unavailable);
+                let text = without_token(&status_text(&status), token.as_deref());
+                break (text, status.code() == tonic::Code::Unavailable);
             }
         }
     };
