@@ -331,6 +331,40 @@ fn adb_shell(dev: &AndroidRunning, command: &[&str]) -> Result<String, String> {
     })
 }
 
+/// Restores a live test AVD's exact font-scale setting, including an unset
+/// value, on every scope exit. Cleanup must not panic while already unwinding.
+#[cfg(test)]
+pub(crate) struct FontScaleRestore {
+    dev: AndroidRunning,
+    raw: String,
+}
+
+#[cfg(test)]
+impl FontScaleRestore {
+    pub(crate) fn new(dev: &AndroidRunning) -> Self {
+        let raw = adb_shell(dev, &["settings", "get", "system", "font_scale"])
+            .expect("read the original font scale");
+        Self { dev: dev.clone(), raw }
+    }
+
+    pub(crate) fn original(&self) -> &str {
+        self.raw.trim()
+    }
+}
+
+#[cfg(test)]
+impl Drop for FontScaleRestore {
+    fn drop(&mut self) {
+        let result = match self.original() {
+            "" | "null" => adb_shell(&self.dev, &["settings", "delete", "system", "font_scale"]),
+            value => adb_shell(&self.dev, &["settings", "put", "system", "font_scale", value]),
+        };
+        if let Err(why) = result {
+            eprintln!("device: restoring the test font scale failed: {why}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,11 +500,16 @@ mod tests {
         }
         rows.push(("Dark/Light (read first)", read_first));
         rows.push(("Dark/Light (known)", median(known)));
+        let restore = FontScaleRestore::new(&dev);
+        let original = restore.original().to_string();
         let (mut bigger, mut smaller) = (Vec::new(), Vec::new());
         for _ in 0..4 {
             bigger.push(time(Control::TextBigger, None).0);
             smaller.push(time(Control::TextSmaller, None).0);
         }
+        drop(restore);
+        let restored = adb_shell(&dev, &["settings", "get", "system", "font_scale"]).unwrap();
+        assert_eq!(restored.trim(), original);
         rows.push(("Larger text", median(bigger)));
         rows.push(("Smaller text", median(smaller)));
         eprintln!("| Control | ms (median) |\n|---|---|");
