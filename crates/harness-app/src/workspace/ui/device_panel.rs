@@ -547,15 +547,11 @@ impl DeviceScreen {
         .detach();
     }
 
-    /// The device shown has no frame or rounded corners known (an emulator
-    /// that isn't listed as running): the picture is drawn plain, not in the
-    /// last device's frame.
-    pub(crate) fn no_device_type(&mut self, cx: &mut Context<Self>) {
-        let had_type = self.device_type.take().is_some();
-        let had_spec = self.spec.take().is_some();
-        if had_type || had_spec {
-            cx.notify();
-        }
+    pub(super) fn has_live_frame(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        return self.frame.is_some();
+        #[cfg(not(target_os = "macos"))]
+        false
     }
 
     pub(crate) fn set_show_frame(&mut self, show: bool, cx: &mut Context<Self>) {
@@ -915,59 +911,27 @@ impl HarnessWorkspace {
     pub(crate) fn run_device_commands(&mut self, cmds: Vec<Command>, cx: &mut Context<Self>) {
         let mut queue = VecDeque::from(cmds);
         while let Some(cmd) = queue.pop_front() {
-            if let Command::StartStream(udid) | Command::StartScreenshots(udid) = &cmd {
-                if simulator_work(udid) {
-                    // For the appearance button: the device may have
-                    // changed, or been switched by someone else while the
-                    // tab was away.
-                    self.read_device_appearance(udid.clone(), cx);
-                    // Input goes to it now (and to nothing it replaced).
-                    let target = Some(InputTarget::Simulator(udid.clone()));
-                    self.device_screen
-                        .update(cx, |screen, cx| screen.set_input_target(target, cx));
-                    // Its frame.
-                    if let Some(device) = self.device_tab.booted.iter().find(|d| &d.udid == udid)
-                    {
-                        let device_type = device.device_type.clone();
-                        let read = {
-                            let device_type = device_type.clone();
-                            move || crate::devices::chrome::chrome_for(&device_type)
-                        };
-                        self.device_screen.update(cx, |screen, cx| {
-                            screen.set_device_type(device_type, read, cx)
-                        });
-                    }
-                } else {
-                    // An emulator: input goes to it now, as the newest list
-                    // found it (and to nothing it replaced), and its frame is
-                    // its AVD's skin.
-                    #[cfg(target_os = "macos")]
-                    let running = self
-                        .device_tab
-                        .booted
-                        .iter()
-                        .find(|d| &d.udid == udid)
-                        .and_then(|d| d.android.clone());
-                    // Its appearance isn't read here: that runs adb, and a
-                    // start comes with every list while it boots. The
-                    // toggle reads it on its first click instead.
-                    #[cfg(target_os = "macos")]
+            if let Command::StartStream(udid) | Command::StartScreenshots(udid) = &cmd
+                && simulator_work(udid)
+            {
+                // For the appearance button: the device may have
+                // changed, or been switched by someone else while the
+                // tab was away.
+                self.read_device_appearance(udid.clone(), cx);
+                // Input goes to it now (and to nothing it replaced).
+                let target = Some(InputTarget::Simulator(udid.clone()));
+                self.device_screen
+                    .update(cx, |screen, cx| screen.set_input_target(target, cx));
+                // Its frame.
+                if let Some(device) = self.device_tab.booted.iter().find(|d| &d.udid == udid)
+                {
+                    let device_type = device.device_type.clone();
+                    let read = {
+                        let device_type = device_type.clone();
+                        move || crate::devices::chrome::chrome_for(&device_type)
+                    };
                     self.device_screen.update(cx, |screen, cx| {
-                        let chrome = running.as_ref().map(|r| (r.avd_dir.clone(), r.pid));
-                        screen.set_input_target(running.map(InputTarget::Emulator), cx);
-                        match chrome {
-                            Some((dir, pid)) => {
-                                let key = crate::devices::android::skin::chrome_key(&dir, pid);
-                                let read = move || crate::devices::android::skin::chrome_for_avd(&dir);
-                                screen.set_device_type(key, read, cx);
-                            }
-                            None => screen.no_device_type(cx),
-                        }
-                    });
-                    #[cfg(not(target_os = "macos"))]
-                    self.device_screen.update(cx, |screen, cx| {
-                        screen.set_input_target(None, cx);
-                        screen.no_device_type(cx);
+                        screen.set_device_type(device_type, read, cx)
                     });
                 }
             }
@@ -1013,6 +977,9 @@ impl HarnessWorkspace {
 
     fn stop_device_work(&mut self, cx: &mut Context<Self>) {
         self.device_live = None;
+        if self.device_appearance.as_ref().is_some_and(|(id, _)| !simulator_work(id)) {
+            self.device_appearance = None;
+        }
         #[cfg(target_os = "macos")]
         {
             self.device_frames = None;
@@ -1039,10 +1006,8 @@ impl HarnessWorkspace {
             Platform::Ios => None,
             Platform::Android => Some(
                 self.device_tab
-                    .booted
-                    .iter()
-                    .find(|d| d.udid == udid)
-                    .and_then(|d| d.android.clone())
+                    .android_stream_target()
+                    .cloned()
                     .ok_or(StreamError::DeviceNotFound)?,
             ),
         };
@@ -1059,6 +1024,11 @@ impl HarnessWorkspace {
         match emulator {
             None => worker.start(generation, udid, frames),
             Some(dev) => {
+                let dir = dev.avd_dir.clone();
+                let chrome = crate::devices::android::skin::chrome_key(&dir, dev.pid);
+                self.device_screen.update(cx, |screen, cx| {
+                    screen.set_device_type(chrome, move || crate::devices::android::skin::chrome_for_avd(&dir), cx);
+                });
                 let side = self.device_screen.read(cx).side();
                 self.device_side.started(side);
                 worker.start_android(generation, dev, side, frames);
@@ -1122,9 +1092,20 @@ impl HarnessWorkspace {
                 let Some((frame, turn)) = self.device_frames.as_ref().and_then(|f| f.take()) else {
                     return;
                 };
-                // The picture's entity only: the workspace isn't notified.
-                self.device_screen
-                    .update(cx, |screen, cx| screen.show_frame(frame.0, turn, cx));
+                // Enable input and the bar only once this run has a picture.
+                // Subsequent frames only redraw the picture's entity.
+                let first = !self.device_screen.read(cx).has_live_frame();
+                let emulator = first.then(|| self.device_tab.android_stream_target()).flatten().cloned();
+                let android_picture = emulator.is_some();
+                self.device_screen.update(cx, |screen, cx| {
+                    if let Some(dev) = emulator {
+                        screen.set_input_target(Some(InputTarget::Emulator(dev)), cx);
+                    }
+                    screen.show_frame(frame.0, turn, cx);
+                });
+                if android_picture {
+                    cx.notify();
+                }
             }
             StreamMsg::Started(generation) if current(generation) => {
                 log::debug!("device: live view started");
@@ -1737,10 +1718,10 @@ mod tests {
     fn an_emulator_start_runs_no_adb() {
         let body = method_body(include_str!("device_panel.rs"), "pub(crate) fn run_device_commands(");
         let reads: Vec<usize> = body.match_indices("self.read_device_appearance(").map(|(i, _)| i).collect();
-        let emulator = body.find("} else {").expect("the emulator branch");
+        let simulator = body.find("&& simulator_work(udid)").expect("the simulator guard");
+        let start = body.find("match cmd").expect("stream dispatch");
         assert_eq!(reads.len(), 1, "{reads:?}");
-        assert!(reads[0] < emulator, "an emulator's start reads its appearance");
-        assert!(body[..reads[0]].contains("if simulator_work(udid)"));
+        assert!(simulator < reads[0] && reads[0] < start, "an emulator's start reads its appearance");
     }
 
     #[test]

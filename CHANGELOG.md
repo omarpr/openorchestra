@@ -25,6 +25,7 @@ Unreleased is empty.
 
 ### Fixed
 
+- The Device tab replaces the picture and its controls together when an AVD restarts.
 - The Device tab tracks simultaneous Android boots independently.
 - Android boot offers stay busy until the picker sees the emulator running.
 - The Device picker keeps its last AVD inventory and reports Android listing failures.

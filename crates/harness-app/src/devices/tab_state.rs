@@ -3,7 +3,7 @@
 //! It never does I/O; callers run the returned [`Command`]s.
 
 use super::simctl::ListError;
-use super::{choose_device, DeviceInfo, Platform, StreamError};
+use super::{AndroidRunning, DeviceInfo, Platform, StreamError, choose_device};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DeviceView {
@@ -36,7 +36,7 @@ pub(crate) enum Command {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Running {
     Nothing,
-    Stream(String),
+    Stream(String, Option<AndroidRunning>),
     Screenshots(String),
 }
 
@@ -128,6 +128,18 @@ impl DeviceTab {
             | DeviceView::Android { udid: u, .. } if u == udid)
     }
 
+    fn listed_android<'a>(list: &'a [DeviceInfo], udid: &str) -> Option<&'a AndroidRunning> {
+        list.iter().find(|d| d.udid == udid).and_then(|d| d.android.as_ref())
+    }
+
+    /// The emulator bound to the current stream, independent of the saved AVD ID.
+    pub(crate) fn android_stream_target(&self) -> Option<&AndroidRunning> {
+        match &self.running {
+            Running::Stream(_, dev) => dev.as_ref(),
+            _ => None,
+        }
+    }
+
     /// Diff what should run against what runs, and return the commands.
     fn reconcile(&mut self) -> Vec<Command> {
         let want = if self.hidden || self.obscured {
@@ -137,7 +149,7 @@ impl DeviceTab {
                 // An emulator's stream too: the panel sends an Android id to
                 // the emulator, never to simctl.
                 DeviceView::Live { udid } | DeviceView::Android { udid, why: None, .. } => {
-                    Running::Stream(udid.clone())
+                    Running::Stream(udid.clone(), Self::listed_android(&self.booted, udid).cloned())
                 }
                 DeviceView::Reduced { udid, .. } => Running::Screenshots(udid.clone()),
                 _ => Running::Nothing,
@@ -148,12 +160,12 @@ impl DeviceTab {
         }
         let mut cmds = Vec::new();
         match &self.running {
-            Running::Stream(_) => cmds.push(Command::StopStream),
+            Running::Stream(..) => cmds.push(Command::StopStream),
             Running::Screenshots(_) => cmds.push(Command::StopScreenshots),
             Running::Nothing => {}
         }
         match &want {
-            Running::Stream(u) => cmds.push(Command::StartStream(u.clone())),
+            Running::Stream(u, _) => cmds.push(Command::StartStream(u.clone())),
             Running::Screenshots(u) => cmds.push(Command::StartScreenshots(u.clone())),
             Running::Nothing => {}
         }
@@ -199,6 +211,14 @@ impl DeviceTab {
                     _ => None,
                 };
                 let left = left.map(|udid| (self.name_of(&udid), udid));
+                let replaced = match &self.view {
+                    DeviceView::Android { udid, .. } => {
+                        let before = Self::listed_android(&self.booted, udid);
+                        let after = Self::listed_android(&list, udid);
+                        after.is_some() && before != after
+                    }
+                    _ => false,
+                };
                 self.booted = list;
                 if let Some((g, at)) = &self.gone
                     && (ticket > *at || !self.booted.iter().any(|d| &d.udid == g))
@@ -220,6 +240,10 @@ impl DeviceTab {
                 match chosen {
                     None => self.view = DeviceView::NoneRunning,
                     Some(udid) if self.gone.as_ref().is_some_and(|(g, _)| *g == udid) => {}
+                    Some(udid) if replaced && self.shows(&udid) => {
+                        self.retry = None;
+                        self.view = self.view_for(&udid);
+                    }
                     Some(udid) if self.shows(&udid) => {
                         if ios_poll_succeeded || Platform::of_id(&udid) == Platform::Android {
                             self.count_down_retry();
@@ -799,6 +823,32 @@ mod tests {
 
     fn start(udid: &str) -> Command {
         Command::StartStream(udid.into())
+    }
+
+    #[test]
+    fn a_replacement_run_of_the_same_avd_restarts_its_stream() {
+        let mut t = DeviceTab::new();
+        let run = |pid| {
+            let mut dev = android("p");
+            dev.android = Some(AndroidRunning {
+                pid, avd_id: "p".into(), name: "name-p".into(), grpc_port: 8554,
+                token: Some(format!("token-{pid}")), serial_port: 5554, avd_dir: "/p".into(),
+            });
+            dev
+        };
+        let first = run(10);
+        fresh(&mut t, Ok(vec![first.clone()]));
+        assert!(t.on_select("android:p").is_empty());
+        assert!(fresh(&mut t, Ok(vec![first])).is_empty());
+        assert_eq!(t.android_stream_target().map(|r| r.pid), Some(10));
+
+        assert_eq!(fresh(&mut t, Ok(vec![run(11)])), vec![Command::StopStream, start("android:p")]);
+        assert_eq!(t.preferred.as_deref(), Some("android:p"));
+        assert_eq!(t.android_stream_target().map(|r| r.pid), Some(11));
+
+        t.on_stream_failed(StreamError::Failed("x".into()));
+        assert_eq!(fresh(&mut t, Ok(vec![run(12)])), vec![start("android:p")]);
+        assert_eq!(t.android_stream_target().map(|r| r.pid), Some(12));
     }
 
     #[test]

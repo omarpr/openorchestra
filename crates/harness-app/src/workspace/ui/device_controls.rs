@@ -54,20 +54,29 @@ pub(crate) fn watched_device(tab: &DeviceTab) -> Option<&DeviceInfo> {
 
 /// The device the bar acts on: the one on screen, unless a boot offer
 /// shows in place of its picture.
-fn bar_target(tab: &DeviceTab, boot_offer: bool) -> Option<&DeviceInfo> {
+fn bar_target(tab: &DeviceTab, boot_offer: bool, android_picture: bool) -> Option<&DeviceInfo> {
     if boot_offer {
         return None;
     }
-    watched_device(tab)
+    watched_device(tab).filter(|dev| {
+        dev.platform == Platform::Ios || android_picture && dev.android.as_ref().is_some_and(|run| {
+            tab.android_stream_target() == Some(run)
+        })
+    })
 }
 
 /// The UDID a control click acts on: the device on screen at the click.
 /// None while another control runs (the click is ignored) or nothing shows.
-pub(crate) fn control_target(tab: &DeviceTab, boot_offer: bool, in_flight: bool) -> Option<String> {
+pub(crate) fn control_target(
+    tab: &DeviceTab,
+    boot_offer: bool,
+    in_flight: bool,
+    android_picture: bool,
+) -> Option<String> {
     if in_flight {
         return None;
     }
-    bar_target(tab, boot_offer).map(|d| d.udid.clone())
+    bar_target(tab, boot_offer, android_picture).map(|d| d.udid.clone())
 }
 
 /// Whether booting a `platform` device holds the bar (one control at a
@@ -150,8 +159,10 @@ pub(crate) fn error_line(e: &str) -> String {
 impl HarnessWorkspace {
     /// The device the bar acts on: the one on screen, unless a boot offer
     /// shows in place of its picture.
-    fn device_bar_target(&self) -> Option<&DeviceInfo> {
-        bar_target(&self.device_tab, self.device_boot_offer.is_some())
+    fn device_bar_target(&self, cx: &App) -> Option<&DeviceInfo> {
+        bar_target(
+            &self.device_tab, self.device_boot_offer.is_some(), self.device_screen.read(cx).has_live_frame(),
+        )
     }
 
     /// The row under the picture: the test controls, then Shut down. None
@@ -161,7 +172,7 @@ impl HarnessWorkspace {
         hx: &HarnessTheme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let target = self.device_bar_target()?;
+        let target = self.device_bar_target(cx)?;
         let look = bar_look(self.device_control_in_flight, self.device_control_slow);
         let appearance = self
             .device_appearance
@@ -236,6 +247,7 @@ impl HarnessWorkspace {
             &self.device_tab,
             self.device_boot_offer.is_some(),
             self.device_control_in_flight,
+            self.device_screen.read(cx).has_live_frame(),
         ) else {
             return;
         };
@@ -285,10 +297,10 @@ impl HarnessWorkspace {
     }
 
     /// [`Self::run_device_control`] on the emulator `udid`, through its gRPC
-    /// or adb, as the newest list found it.
+    /// or adb, using the run bound to the visible picture.
     #[cfg(target_os = "macos")]
     fn run_android_control(&mut self, control: Control, udid: String, cx: &mut Context<Self>) {
-        let Some(dev) = self.android_running(&udid) else {
+        let Some(dev) = self.device_tab.android_stream_target().cloned() else {
             return;
         };
         let appearance = self
@@ -297,6 +309,7 @@ impl HarnessWorkspace {
             .filter(|(known_for, _)| *known_for == udid)
             .map(|&(_, a)| a);
         self.begin_device_control(Some(control), cx);
+        let target = dev.clone();
         cx.spawn(async move |view, cx| {
             let result = cx
                 .background_spawn(async move {
@@ -305,7 +318,11 @@ impl HarnessWorkspace {
                 .await;
             let _ = view.update(cx, |ws, cx| {
                 ws.end_device_control();
-                ws.device_control_done(udid, result, cx);
+                if !matches!(result, Ok(ControlOutcome::Appearance(_)))
+                    || ws.device_tab.android_stream_target() == Some(&target)
+                {
+                    ws.device_control_done(udid, result, cx);
+                }
                 cx.notify();
             });
         })
@@ -451,7 +468,7 @@ impl HarnessWorkspace {
         if self.device_control_in_flight {
             return;
         }
-        self.device_shutdown_confirm = self.device_bar_target().cloned();
+        self.device_shutdown_confirm = self.device_bar_target(cx).cloned();
         cx.notify();
     }
 
@@ -461,7 +478,7 @@ impl HarnessWorkspace {
         self.device_shutdown_confirm = None;
         cx.notify();
         if self.device_control_in_flight
-            || self.device_bar_target().map(|d| d.udid.as_str()) != Some(device.udid.as_str())
+            || self.device_bar_target(cx).map(|d| d.udid.as_str()) != Some(device.udid.as_str())
         {
             return;
         }
@@ -683,15 +700,15 @@ mod tests {
     #[test]
     fn a_click_targets_the_device_shown_at_click_time() {
         let mut tab = watching_a();
-        assert_eq!(control_target(&tab, false, false).as_deref(), Some("a"));
+        assert_eq!(control_target(&tab, false, false, false).as_deref(), Some("a"));
         // A pick that isn't booted yet leaves "a" on screen: "a" it is.
         tab.preferred = Some("c".into());
-        assert_eq!(control_target(&tab, false, false).as_deref(), Some("a"));
+        assert_eq!(control_target(&tab, false, false, false).as_deref(), Some("a"));
         // Screenshots of "b": "b".
         tab.view = DeviceView::Reduced { udid: "b".into(), why: "x".into(), transient: true };
-        assert_eq!(control_target(&tab, false, false).as_deref(), Some("b"));
+        assert_eq!(control_target(&tab, false, false, false).as_deref(), Some("b"));
         // A boot offer covers the picture: nothing.
-        assert_eq!(control_target(&tab, true, false), None);
+        assert_eq!(control_target(&tab, true, false, false), None);
         // Nothing on screen: nothing.
         for view in [
             DeviceView::NeedsXcode,
@@ -699,7 +716,7 @@ mod tests {
             DeviceView::ShutDown { name: "a".into() },
         ] {
             tab.view = view;
-            assert_eq!(control_target(&tab, false, false), None, "{:?}", tab.view);
+            assert_eq!(control_target(&tab, false, false, false), None, "{:?}", tab.view);
         }
     }
 
@@ -712,20 +729,25 @@ mod tests {
             udid: "android:p".into(),
             name: "p".into(),
             platform: crate::devices::Platform::Android,
+            android: Some(crate::devices::AndroidRunning {
+                pid: 10, avd_id: "p".into(), name: "p".into(), grpc_port: 8554,
+                token: None, serial_port: 5554, avd_dir: "/p".into(),
+            }),
             ..Default::default()
         };
         let ticket = tab.list_started();
         tab.on_list(ticket, Ok(vec![emulator.clone()]));
         assert_eq!(tab.selected.as_deref(), Some("android:p"));
         assert_eq!(watched_device(&tab), Some(&emulator));
-        assert_eq!(control_target(&tab, false, false).as_deref(), Some("android:p"));
+        assert_eq!(control_target(&tab, false, false, false), None);
+        assert_eq!(control_target(&tab, false, false, true).as_deref(), Some("android:p"));
         assert!(crate::devices::controls::available_controls(&tab.view, true).is_empty());
         assert!(crate::devices::controls::android_controls(&tab.view, false).contains(&Control::Back));
         // While it shows no picture (still starting, or its stream failed),
         // nothing: as for a simulator with none.
         tab.view = DeviceView::Android { udid: "android:p".into(), why: Some("x".into()), starting: true };
         assert_eq!(watched_device(&tab), None);
-        assert_eq!(control_target(&tab, false, false), None);
+        assert_eq!(control_target(&tab, false, false, false), None);
     }
 
     #[test]
@@ -744,7 +766,7 @@ mod tests {
         assert!(boot_busy("android:m", false, &pending));
         assert!(!boot_busy("android:n", false, &pending));
         assert!(!boot_busy("IOS-UDID", false, &pending));
-        assert_eq!(control_target(&watching_a(), false, false).as_deref(), Some("a"));
+        assert_eq!(control_target(&watching_a(), false, false, false).as_deref(), Some("a"));
         // A control or a simulator boot running: every offer is busy.
         assert!(boot_busy("android:n", true, &pending));
     }
@@ -762,8 +784,8 @@ mod tests {
     #[test]
     fn a_second_click_while_one_runs_is_ignored() {
         let tab = watching_a();
-        assert_eq!(control_target(&tab, false, true), None);
-        assert_eq!(control_target(&tab, false, false).as_deref(), Some("a"));
+        assert_eq!(control_target(&tab, false, true, false), None);
+        assert_eq!(control_target(&tab, false, false, false).as_deref(), Some("a"));
     }
 
     #[test]
