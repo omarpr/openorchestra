@@ -1284,7 +1284,7 @@ mod tests {
     #[test]
     #[ignore]
     fn android_input_and_controls_on_a_live_emulator() {
-        use crate::devices::android::controls::{adb, read_appearance, run};
+        use crate::devices::android::controls::{FontScaleRestore, adb, read_appearance, run};
         use crate::devices::android::discovery::{running_emulators, still_emulator};
         use crate::devices::android::input::AndroidInput;
         use crate::devices::android::stream::{AndroidStream, StreamEvent};
@@ -1316,8 +1316,8 @@ mod tests {
                 missed.borrow_mut().push(what);
             }
         };
-        // What it changes, to put back.
-        let font_before = shell(&["settings", "get", "system", "font_scale"]);
+        // What it changes, to put back, even if an assertion panics.
+        let font_restore = FontScaleRestore::new(&dev);
         let night_before = read_appearance(&dev).unwrap();
         shell(&["settings", "put", "system", "pointer_location", "1"]);
 
@@ -1494,6 +1494,7 @@ mod tests {
         check(differ(&last, &dark) > 3.0, format!("appearance ({:.1})", differ(&last, &dark)));
         assert_eq!(run(&dev, Control::ToggleAppearance, Some(other)), Ok(ControlOutcome::Appearance(night_before)));
         check(read_appearance(&dev) == Ok(night_before), "appearance back".into());
+        shell(&["settings", "put", "system", "font_scale", "1.0"]);
         assert_eq!(run(&dev, Control::TextBigger, None), Ok(ControlOutcome::Done));
         let bigger = shell(&["settings", "get", "system", "font_scale"]);
         sleep(ms(1500));
@@ -1503,11 +1504,9 @@ mod tests {
         let smaller = shell(&["settings", "get", "system", "font_scale"]);
         check(smaller == "1.0", format!("text size back to {smaller}"));
 
-        // Put back what was changed.
-        match font_before.as_str() {
-            "null" | "" => shell(&["settings", "delete", "system", "font_scale"]),
-            v => shell(&["settings", "put", "system", "font_scale", v]),
-        };
+        // Put back what was changed. The shutdown check below deliberately
+        // writes a different font scale after this restoration.
+        drop(font_restore);
         shell(&["settings", "delete", "system", "pointer_location"]);
         drop(sink);
         drop(stream);
