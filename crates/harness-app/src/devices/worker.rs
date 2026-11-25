@@ -12,6 +12,7 @@
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::channel::mpsc::UnboundedSender;
 use objc2_core_foundation::CFRetained;
@@ -27,14 +28,21 @@ use super::{AndroidRunning, FrameSlot, Quarter, StreamError, quarter_for};
 /// [`StreamMsg::Frame`].
 pub(crate) type Frames = Arc<FrameSlot<(SendPixelBuffer, Quarter)>>;
 
-/// What the worker and the stream tell the UI. Each carries the generation
-/// of the start it belongs to; the UI drops anything not current.
+/// A lifecycle message belongs to one attempt within a picture's generation.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StreamAttempt {
+    pub generation: u64,
+    sequence: u64,
+}
+
+/// Frame notifications belong to the view generation. Lifecycle messages
+/// also carry the RPC attempt, since resizing keeps the view generation.
 pub(crate) enum StreamMsg {
-    Started(u64),
-    Failed(u64, StreamError),
+    Started(StreamAttempt),
+    Failed(StreamAttempt, StreamError),
     /// A new frame is in that start's [`Frames`].
     Frame(u64),
-    Gone(u64),
+    Gone(StreamAttempt),
 }
 
 /// What to stream.
@@ -94,15 +102,23 @@ fn coalesce(earlier: Request, later: Request) -> Request {
 /// stream it holds there.
 pub(crate) struct StreamWorker {
     requests: Sender<Request>,
+    latest_attempt: Arc<AtomicU64>,
 }
 
 impl StreamWorker {
     pub(crate) fn spawn(to_ui: UnboundedSender<StreamMsg>) -> std::io::Result<Self> {
         let (requests, rx) = mpsc::channel();
+        let latest_attempt = Arc::new(AtomicU64::new(0));
+        let worker_attempt = latest_attempt.clone();
         std::thread::Builder::new()
             .name("oo-device-stream".into())
-            .spawn(move || run(rx, to_ui))?;
-        Ok(Self { requests })
+            .spawn(move || run(rx, to_ui, &worker_attempt))?;
+        Ok(Self { requests, latest_attempt })
+    }
+
+    pub(crate) fn is_current(&self, live: Option<u64>, attempt: StreamAttempt) -> bool {
+        live == Some(attempt.generation)
+            && self.latest_attempt.load(Ordering::Acquire) == attempt.sequence
     }
 
     pub(crate) fn start(&self, generation: u64, udid: String, frames: Frames) {
@@ -140,7 +156,7 @@ impl StreamWorker {
     }
 }
 
-fn run(rx: Receiver<Request>, to_ui: UnboundedSender<StreamMsg>) {
+fn run(rx: Receiver<Request>, to_ui: UnboundedSender<StreamMsg>, latest_attempt: &AtomicU64) {
     let mut current: Option<Current> = None;
     while let Ok(mut request) = rx.recv() {
         // Only the newest request matters: each start replaces the stream
@@ -153,12 +169,7 @@ fn run(rx: Receiver<Request>, to_ui: UnboundedSender<StreamMsg>) {
                 current = None;
                 continue;
             }
-            Request::Start { generation, target, frames } => {
-                // Drop the old stream before starting the next: one
-                // registration (or call) at a time.
-                current = None;
-                (generation, target, frames)
-            }
+            Request::Start { generation, target, frames } => (generation, target, frames),
             Request::Resize { generation, side } => {
                 let Some(Current::Emulator { generation: g, dev, size, frames, .. }) = &current
                 else {
@@ -167,19 +178,22 @@ fn run(rx: Receiver<Request>, to_ui: UnboundedSender<StreamMsg>) {
                 if *g != generation || emulator_box(dev, side) == *size {
                     continue;
                 }
-                let (dev, frames) = (dev.clone(), frames.clone());
-                current = None;
-                (generation, Target::Emulator { dev, side }, frames)
+                (generation, Target::Emulator { dev: dev.clone(), side }, frames.clone())
             }
         };
+        // Invalidate lifecycle messages already queued by the old call before
+        // dropping it. The frame slot remains shared when only the size changes.
+        let sequence = latest_attempt.fetch_add(1, Ordering::AcqRel) + 1;
+        let attempt = StreamAttempt { generation, sequence };
+        drop(current.take());
         let started = match target {
-            Target::Simulator(udid) => start(generation, &udid, frames, to_ui.clone()).map(|s| {
-                let _ = to_ui.unbounded_send(StreamMsg::Started(generation));
+            Target::Simulator(udid) => start(attempt, &udid, frames, to_ui.clone()).map(|s| {
+                let _ = to_ui.unbounded_send(StreamMsg::Started(attempt));
                 Current::Simulator { _stream: s }
             }),
             Target::Emulator { dev, side } => {
                 let size = emulator_box(&dev, side);
-                start_android(generation, &dev, size, frames.clone(), to_ui.clone()).map(|s| {
+                start_android(attempt, &dev, size, frames.clone(), to_ui.clone()).map(|s| {
                     Current::Emulator { generation, dev, size, frames, _stream: s }
                 })
             }
@@ -187,7 +201,7 @@ fn run(rx: Receiver<Request>, to_ui: UnboundedSender<StreamMsg>) {
         match started {
             Ok(stream) => current = Some(stream),
             Err(e) => {
-                let _ = to_ui.unbounded_send(StreamMsg::Failed(generation, e));
+                let _ = to_ui.unbounded_send(StreamMsg::Failed(attempt, e));
             }
         }
     }
@@ -209,7 +223,7 @@ fn emulator_box(dev: &AndroidRunning, side: u32) -> (u32, u32) {
 /// the tab's backoff. An end is `Gone` when the emulator exited, else a
 /// failure with its reason.
 fn start_android(
-    generation: u64,
+    attempt: StreamAttempt,
     dev: &AndroidRunning,
     size: (u32, u32),
     frames: Frames,
@@ -223,10 +237,10 @@ fn start_android(
                 Ok(buffer) => {
                     // Drawn as it comes; the turn maps touches back.
                     if frames.put((SendPixelBuffer(buffer), turn)) {
-                        let _ = to_ui.unbounded_send(StreamMsg::Frame(generation));
+                        let _ = to_ui.unbounded_send(StreamMsg::Frame(attempt.generation));
                     }
                     if std::mem::take(&mut first) {
-                        let _ = to_ui.unbounded_send(StreamMsg::Started(generation));
+                        let _ = to_ui.unbounded_send(StreamMsg::Started(attempt));
                     }
                 }
                 Err(e) if !logged_error => {
@@ -238,10 +252,10 @@ fn start_android(
         }
         StreamEvent::Ended { gone: true, why } => {
             log::debug!("device: the emulator shut down ({why})");
-            let _ = to_ui.unbounded_send(StreamMsg::Gone(generation));
+            let _ = to_ui.unbounded_send(StreamMsg::Gone(attempt));
         }
         StreamEvent::Ended { gone: false, why } => {
-            let _ = to_ui.unbounded_send(StreamMsg::Failed(generation, StreamError::Failed(why)));
+            let _ = to_ui.unbounded_send(StreamMsg::Failed(attempt, StreamError::Failed(why)));
         }
     })
 }
@@ -264,7 +278,7 @@ struct Converting {
 }
 
 fn start(
-    generation: u64,
+    attempt: StreamAttempt,
     udid: &str,
     frames: Frames,
     to_ui: UnboundedSender<StreamMsg>,
@@ -285,7 +299,7 @@ fn start(
             ScreenEvent::Orientation(o) => state.orientation = o,
             ScreenEvent::Gone => {
                 state.picture = None;
-                let _ = to_ui.unbounded_send(StreamMsg::Gone(generation));
+                let _ = to_ui.unbounded_send(StreamMsg::Gone(attempt));
                 return;
             }
         }
@@ -304,7 +318,7 @@ fn start(
         match converter.convert(surface, turn) {
             Ok(buffer) => {
                 if frames.put((SendPixelBuffer(buffer), turn)) {
-                    let _ = to_ui.unbounded_send(StreamMsg::Frame(generation));
+                    let _ = to_ui.unbounded_send(StreamMsg::Frame(attempt.generation));
                 }
             }
             Err(e) if !*logged_error => {
@@ -351,6 +365,21 @@ mod tests {
             Request::Resize { generation, side } => ('R', *generation, *side),
             Request::Stop => ('-', 0, 0),
         }
+    }
+
+    #[test]
+    fn lifecycle_messages_from_the_replaced_resize_attempt_are_stale() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let (requests, _) = std::sync::mpsc::channel();
+        let latest_attempt = Arc::new(AtomicU64::new(1));
+        let worker = StreamWorker { requests, latest_attempt: latest_attempt.clone() };
+        let original = super::StreamAttempt { generation: 3, sequence: 1 };
+        assert!(worker.is_current(Some(3), original));
+        latest_attempt.store(2, Ordering::Release);
+        assert!(!worker.is_current(Some(3), original));
+        let replacement = super::StreamAttempt { generation: 3, sequence: 2 };
+        assert!(worker.is_current(Some(3), replacement));
+        assert!(!worker.is_current(Some(4), replacement));
     }
 
     /// A resize queued behind its stream's start goes into the start
@@ -418,18 +447,18 @@ mod tests {
                     eprintln!("{:?} frame {size:?}", listed.elapsed());
                     got_frame = got_frame.or(size);
                 }
-                Ok(StreamMsg::Started(g)) if g == generation => {
+                Ok(StreamMsg::Started(id)) if worker.is_current(Some(generation), id) => {
                     eprintln!("{:?} started", listed.elapsed());
                     assert!(got_frame.is_some(), "Started before a frame");
                     break;
                 }
-                Ok(StreamMsg::Failed(g, e)) if g == generation => {
+                Ok(StreamMsg::Failed(id, e)) if worker.is_current(Some(generation), id) => {
                     eprintln!("{:?} failed: {e:?}", listed.elapsed());
                     std::thread::sleep(Duration::from_secs(3));
                     generation += 1;
                     worker.start_android(generation, dev.clone(), 1600, frames.clone());
                 }
-                Ok(StreamMsg::Gone(g)) => panic!("gone ({g})"),
+                Ok(StreamMsg::Gone(id)) => panic!("gone ({id:?})"),
                 Ok(_) => {}
                 Err(futures::channel::mpsc::TryRecvError::Closed) => panic!("worker ended"),
                 Err(_) => std::thread::sleep(Duration::from_millis(20)),
@@ -468,7 +497,7 @@ mod tests {
                     }
                     Ok(StreamMsg::Failed(_, e)) => panic!("{what}: failed {e:?}"),
                     Ok(StreamMsg::Gone(_)) => panic!("{what}: gone"),
-                    Ok(StreamMsg::Started(g)) => assert_eq!(g, generation),
+                    Ok(StreamMsg::Started(id)) => assert_eq!(id.generation, generation),
                     Err(futures::channel::mpsc::TryRecvError::Closed) => panic!("worker ended"),
                     Err(_) => std::thread::sleep(Duration::from_millis(20)),
                 }
@@ -558,7 +587,8 @@ mod tests {
 
         let frames: Frames = Arc::new(FrameSlot::new());
         let (to_ui, _from_worker) = futures::channel::mpsc::unbounded();
-        let stream = start(1, &udid, frames.clone(), to_ui).unwrap();
+        let attempt = super::StreamAttempt { generation: 1, sequence: 1 };
+        let stream = start(attempt, &udid, frames.clone(), to_ui).unwrap();
         let (mut sizes, mut seen) = (Vec::new(), Vec::new());
         for turn in 0..4 {
             if turn > 0 {

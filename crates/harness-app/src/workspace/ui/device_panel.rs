@@ -1086,9 +1086,9 @@ impl HarnessWorkspace {
     ) {
         use crate::devices::worker::StreamMsg;
         let live = self.device_live;
-        let current = |generation: u64| live == Some(generation);
+        let current = |attempt| self.device_worker.as_ref().is_some_and(|worker| worker.is_current(live, attempt));
         match msg {
-            StreamMsg::Frame(generation) if current(generation) => {
+            StreamMsg::Frame(generation) if live == Some(generation) => {
                 let Some((frame, turn)) = self.device_frames.as_ref().and_then(|f| f.take()) else {
                     return;
                 };
@@ -1107,17 +1107,17 @@ impl HarnessWorkspace {
                     cx.notify();
                 }
             }
-            StreamMsg::Started(generation) if current(generation) => {
+            StreamMsg::Started(attempt) if current(attempt) => {
                 log::debug!("device: live view started");
                 self.device_tab.on_stream_started();
             }
-            StreamMsg::Failed(generation, e) if current(generation) => {
+            StreamMsg::Failed(attempt, e) if current(attempt) => {
                 log::info!("device: no live view ({e:?})");
                 let cmds = self.device_tab.on_stream_failed(e);
                 self.run_device_commands(cmds, cx);
                 cx.notify();
             }
-            StreamMsg::Gone(generation) if current(generation) => {
+            StreamMsg::Gone(attempt) if current(attempt) => {
                 let cmds = self.device_tab.on_gone();
                 self.run_device_commands(cmds, cx);
                 cx.notify();
