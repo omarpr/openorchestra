@@ -308,7 +308,7 @@ impl HarnessWorkspace {
             device_avd_inventory: Vec::new(),
             device_avd_list_error: None,
             device_boot_offer: None,
-            device_booting: None,
+            device_booting: Default::default(),
             device_shutdown_confirm: None,
             device_control_in_flight: false,
             device_control_running: None,

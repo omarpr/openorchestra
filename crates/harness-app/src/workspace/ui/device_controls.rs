@@ -78,9 +78,9 @@ pub(crate) fn boot_holds_the_bar(platform: Platform) -> bool {
 
 /// Whether the boot offer for `offer` is busy (says "Booting…" and ignores
 /// clicks): a control or simulator boot is running (`in_flight`), or this
-/// device is the Android emulator being waited for (`booting`).
-pub(crate) fn boot_busy(offer: &str, in_flight: bool, booting: Option<&str>) -> bool {
-    in_flight || booting == Some(offer)
+/// AVD is in the set of pending launches (`booting`).
+pub(crate) fn boot_busy(offer: &str, in_flight: bool, booting: &HashMap<String, bool>) -> bool {
+    in_flight || booting.contains_key(offer)
 }
 
 /// A successful background launch still needs confirmation from the UI poll.
@@ -483,7 +483,7 @@ impl HarnessWorkspace {
         let Some(device) = self.device_boot_offer.clone() else {
             return;
         };
-        if boot_busy(&device.udid, self.device_control_in_flight, self.device_booting.as_ref().map(|(id, _)| id.as_str())) {
+        if boot_busy(&device.udid, self.device_control_in_flight, &self.device_booting) {
             return;
         }
         super::device_panel::pick_for_boot(&mut self.device_tab, &mut self.prefs, &device.udid);
@@ -508,20 +508,17 @@ impl HarnessWorkspace {
         let Some(avd) = crate::devices::avd_id_of(&udid).map(str::to_string) else {
             return;
         };
-        self.device_booting = Some((udid.clone(), false));
+        self.device_booting.insert(udid.clone(), false);
         cx.notify();
         cx.spawn(async move |view, cx| {
             let result = cx
                 .background_spawn(async move { crate::devices::android::sdk::boot(&avd) })
                 .await;
             let _ = view.update(cx, |ws, cx| {
-                if let Some((id, ready)) = &mut ws.device_booting
-                    && *id == udid
-                {
-                    *ready = result.is_ok();
-                    if result.is_err() || boot_is_listed(&ws.device_list.android_running, id, *ready) {
-                        ws.device_booting = None;
-                    }
+                if result.is_err() || boot_is_listed(&ws.device_list.android_running, &udid, true) {
+                    ws.device_booting.remove(&udid);
+                } else if let Some(launched) = ws.device_booting.get_mut(&udid) {
+                    *launched = true;
                 }
                 if let Err(e) = result {
                     log::info!("device: {e}");
@@ -733,19 +730,23 @@ mod tests {
 
     #[test]
     fn an_android_boot_wait_holds_only_its_own_offer() {
-        // A simulator boot holds the bar, as before; an emulator's wait
-        // (up to a minute) doesn't.
+        use std::collections::HashMap;
+        // A simulator boot holds the bar. Android launches can overlap.
         assert!(boot_holds_the_bar(Platform::Ios));
         assert!(!boot_holds_the_bar(Platform::Android));
-        // While "android:m" is waited for, its offer is busy...
-        assert!(boot_busy("android:m", false, Some("android:m")));
-        // ...but another offer, and the bar on the device on screen, aren't.
-        assert!(!boot_busy("android:n", false, Some("android:m")));
-        assert!(!boot_busy("IOS-UDID", false, Some("android:m")));
+        let mut pending = HashMap::from([("android:m".into(), false)]);
+        assert!(boot_busy("android:m", false, &pending));
+        assert!(!boot_busy("android:n", false, &pending));
+        pending.insert("android:n".into(), true);
+        assert!(boot_busy("android:m", false, &pending));
+        assert!(boot_busy("android:n", false, &pending));
+        pending.remove("android:n");
+        assert!(boot_busy("android:m", false, &pending));
+        assert!(!boot_busy("android:n", false, &pending));
+        assert!(!boot_busy("IOS-UDID", false, &pending));
         assert_eq!(control_target(&watching_a(), false, false).as_deref(), Some("a"));
         // A control or a simulator boot running: every offer is busy.
-        assert!(boot_busy("android:n", true, None));
-        assert!(!boot_busy("android:n", false, None));
+        assert!(boot_busy("android:n", true, &pending));
     }
 
     #[test]
