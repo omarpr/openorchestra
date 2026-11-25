@@ -334,7 +334,10 @@ fn upright(
     }
     let art = frame.and_then(|(name, at)| Some((parts.node(name)?, at)));
     let background = art.and_then(|(part, at)| {
-        Some((part.node("background")?.value("image")?.to_string(), at))
+        let background = part.node("background")?;
+        let x = at.0.checked_add(background.offset("x")?)?;
+        let y = at.1.checked_add(background.offset("y")?)?;
+        Some((background.value("image")?.to_string(), (x, y)))
     });
     let mask = art
         .and_then(|(part, _)| part.node("foreground")?.value("mask"))
@@ -608,6 +611,16 @@ layouts {
         // A brace on a line of its own, and unknown keys, are fine.
         let odd = PIXEL_9_PRO.replace("parts {", "parts\n{\n  colour red").replace("corner_radius 109", "corner_radius 109\n      shape squircle");
         assert_eq!(parse_layout(&odd).unwrap().display, SkinRect { x: 60, y: 61, w: 1280, h: 2856 });
+    }
+
+    #[test]
+    fn background_offsets_are_relative_to_their_part() {
+        let text = NEXUS_5
+            .replace("image port_back.webp", "image port_back.webp\n      x 5\n      y 6")
+            .replace("name portrait\n      x 0\n      y 0", "name portrait\n      x 10\n      y 20");
+        let layout = parse_layout(&text).unwrap();
+        assert_eq!(layout.background, Some(("port_back.webp".to_string(), (15, 26))));
+        // The existing Pixel and Nexus assertions cover omitted offsets.
     }
 
     #[test]
