@@ -1,0 +1,9 @@
+emulator_controller.proto is copied unmodified from the Android Emulator
+(version 35.2.10, emulator/lib/emulator_controller.proto in the Android SDK).
+
+Copyright (C) 2018 The Android Open Source Project
+Licensed under the Apache License, Version 2.0
+(http://www.apache.org/licenses/LICENSE-2.0).
+
+The Rust client in src/devices/android/grpc/ is generated from it by
+script/gen-android-grpc.sh.

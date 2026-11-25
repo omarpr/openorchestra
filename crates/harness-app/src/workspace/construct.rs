@@ -306,6 +306,7 @@ impl HarnessWorkspace {
             device_menu_press: None,
             device_list: Default::default(),
             device_boot_offer: None,
+            device_booting: None,
             device_shutdown_confirm: None,
             device_control_in_flight: false,
             device_control_running: None,
@@ -313,11 +314,14 @@ impl HarnessWorkspace {
             device_control_ticket: 0,
             device_can_rotate: false,
             device_rotate_asking: false,
+            device_adb: false,
             device_appearance: None,
             #[cfg(target_os = "macos")]
             device_worker: None,
             #[cfg(target_os = "macos")]
             device_frames: None,
+            #[cfg(target_os = "macos")]
+            device_side: Default::default(),
             #[cfg(target_os = "macos")]
             device_to_ui,
             archived_repos,
@@ -861,6 +865,17 @@ impl HarnessWorkspace {
                 }
             }
         })
+        .detach();
+
+        // The picture's area changed size: an emulator streaming into it is
+        // asked (debounced) for frames of that size.
+        #[cfg(target_os = "macos")]
+        cx.subscribe(
+            &this.device_screen,
+            |ws, _, side: &crate::workspace::ui::device_panel::ScreenSide, cx| {
+                ws.on_device_screen_side(side.0, cx)
+            },
+        )
         .detach();
 
         // The Device tab's stream thread and stream report here: frames

@@ -26,8 +26,8 @@ use objc2_core_video::{
     kCVImageBufferYCbCrMatrix_ITU_R_601_4, kCVPixelBufferHeightKey,
     kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferMetalCompatibilityKey,
     kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey,
-    kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, CVPixelBuffer,
-    CVPixelBufferCreateWithIOSurface, CVPixelBufferPool,
+    kCVPixelFormatType_32BGRA, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, CVPixelBuffer,
+    CVPixelBufferCreateWithBytes, CVPixelBufferCreateWithIOSurface, CVPixelBufferPool,
 };
 use objc2_io_surface::IOSurfaceRef;
 use objc2_video_toolbox::{
@@ -137,6 +137,39 @@ impl PixelConverter {
         height: usize,
     ) -> Result<CFRetained<CVPixelBuffer>, String> {
         let source = wrap(src)?;
+        let destination = pooled(&mut self.pool, width, height)?;
+        // SAFETY: two live buffers of the same size; the source is BGRA and
+        // the destination 420f, a conversion VideoToolbox supports.
+        let status = unsafe { self.session.transfer_image(&source, &destination) };
+        if status != 0 {
+            return Err(format!("VTPixelTransferSessionTransferImage failed: {status}"));
+        }
+        Ok(destination)
+    }
+
+    /// An emulator frame, `width` × `height` RGBA8888 pixels in rows top
+    /// down (`rgba`, at least `width * height * 4` bytes), as a new 420f
+    /// buffer of the same size from the output pool. Android frames come
+    /// already turned for the device's orientation, so they are never
+    /// turned here.
+    pub(crate) fn convert_rgba(
+        &mut self,
+        rgba: Vec<u8>,
+        width: usize,
+        height: usize,
+    ) -> Result<CFRetained<CVPixelBuffer>, String> {
+        let row = width.checked_mul(4).ok_or("frame too wide")?;
+        let needed = row.checked_mul(height).ok_or("frame too large")?;
+        if width == 0 || height == 0 {
+            return Err(format!("empty frame ({width}×{height})"));
+        }
+        if rgba.len() < needed {
+            return Err(format!(
+                "short frame: {} bytes for {width}×{height} RGBA",
+                rgba.len()
+            ));
+        }
+        let source = wrap_rgba(rgba, width, height)?;
         let destination = pooled(&mut self.pool, width, height)?;
         // SAFETY: two live buffers of the same size; the source is BGRA and
         // the destination 420f, a conversion VideoToolbox supports.
@@ -380,6 +413,49 @@ fn wrap(surface: &IOSurfaceRef) -> Result<CFRetained<CVPixelBuffer>, String> {
     created(status, out, "CVPixelBufferCreateWithIOSurface")
 }
 
+/// `rgba` (`width` × `height`, rows top down and packed) as a 32BGRA
+/// CVPixelBuffer, swizzled in place rather than copied: CoreVideo refuses
+/// 32RGBA bytes (`kCVReturnInvalidPixelFormat`). The buffer owns the
+/// bytes: they are freed when CoreVideo releases it, however long
+/// VideoToolbox keeps it.
+fn wrap_rgba(
+    mut rgba: Vec<u8>,
+    width: usize,
+    height: usize,
+) -> Result<CFRetained<CVPixelBuffer>, String> {
+    for pixel in rgba[..width * height * 4].as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
+    unsafe extern "C-unwind" fn release(refcon: *mut c_void, _base: *const c_void) {
+        // SAFETY: `refcon` is the box leaked below, released exactly once.
+        drop(unsafe { Box::from_raw(refcon.cast::<Vec<u8>>()) });
+    }
+    let mut bytes = Box::new(rgba);
+    let base = NonNull::new(bytes.as_mut_ptr().cast::<c_void>()).ok_or("no frame bytes")?;
+    let refcon = Box::into_raw(bytes).cast::<c_void>();
+    let mut out = ptr::null_mut();
+    // SAFETY: `base` points at `height` packed rows of `width * 4` bytes
+    // (checked by the caller), which stay put while the box lives; the box
+    // is handed to the release callback, which CoreVideo calls once the
+    // buffer goes. Should creating it fail without calling back, the box
+    // leaks (never a dangling read).
+    let status = unsafe {
+        CVPixelBufferCreateWithBytes(
+            None,
+            width,
+            height,
+            kCVPixelFormatType_32BGRA,
+            base,
+            width * 4,
+            Some(release),
+            refcon,
+            None,
+            NonNull::from(&mut out),
+        )
+    };
+    created(status, out, "CVPixelBufferCreateWithBytes")
+}
+
 /// Takes ownership of what a CoreFoundation `Create` call returned.
 fn created<T: Type>(status: i32, out: *mut T, call: &str) -> Result<CFRetained<T>, String> {
     if status != 0 {
@@ -568,6 +644,39 @@ mod tests {
             assert_close(ycbcr_at(&out, red.0, red.1), RED_601);
             assert_close(ycbcr_at(&out, green.0, green.1), GREEN_601);
         }
+    }
+
+    /// RGBA8888 bytes, rows top down, as an emulator sends them.
+    fn rgba_frame(width: usize, height: usize, paint: impl Fn(usize, usize) -> [u8; 4]) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(width * height * 4);
+        for y in 0..height {
+            for x in 0..width {
+                bytes.extend_from_slice(&paint(x, y));
+            }
+        }
+        bytes
+    }
+
+    /// An emulator's RGBA frame becomes a 420f buffer of its own size, in
+    /// gpui's BT.601 colours. Red would come out blue were R and B swapped,
+    /// and the top rows are red, so rows upside down show too. Odd sizes
+    /// happen (the emulator keeps the device's aspect inside the box asked
+    /// for), and a short frame is refused rather than read past its end.
+    #[test]
+    fn rgba_frames_convert_to_420f() {
+        const RGBA_RED: [u8; 4] = [255, 0, 0, 255];
+        const RGBA_GREEN: [u8; 4] = [0, 255, 0, 255];
+        let mut converter = PixelConverter::new().unwrap();
+        for (w, h) in [(64, 128), (401, 889), (1080, 2400)] {
+            let frame = rgba_frame(w, h, |_, y| if y < h / 4 { RGBA_RED } else { RGBA_GREEN });
+            let out = converter.convert_rgba(frame, w, h).unwrap();
+            assert_420f(&out, w, h);
+            assert_close(ycbcr_at(&out, w / 2, h / 8), RED_601);
+            assert_close(ycbcr_at(&out, w / 2, h * 3 / 4), GREEN_601);
+        }
+        let short = vec![0; 64 * 128 * 4 - 1];
+        assert!(converter.convert_rgba(short, 64, 128).is_err());
+        assert!(converter.convert_rgba(Vec::new(), 0, 0).is_err());
     }
 
     /// Turning keeps gpui's BT.601 colours, at the simulator's real size too.

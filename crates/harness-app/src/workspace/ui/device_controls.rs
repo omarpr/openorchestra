@@ -1,7 +1,8 @@
 //! The Device tab's bottom bar: buttons under the picture that act on the
-//! simulator it shows (rotate, Home, appearance, text size, copy a
-//! screenshot, shut down), and the runs behind them; and Show frame, which
-//! only changes how the picture is drawn.
+//! simulator or Android emulator it shows (rotate, Home, Back on Android,
+//! appearance, text size, copy a screenshot, shut down), and the runs
+//! behind them; and Show frame, which only changes how the picture is
+//! drawn.
 //!
 //! A control acts only on the device on screen when it was clicked, only on
 //! a click, and off the UI thread. One runs at a time
@@ -11,7 +12,7 @@
 //! about a tenth of a second.
 
 use super::super::*;
-use crate::devices::DeviceInfo;
+use crate::devices::{DeviceInfo, Platform};
 use crate::devices::controls::{Appearance, Control, ControlOutcome};
 use crate::devices::tab_state::{DeviceTab, DeviceView};
 
@@ -38,10 +39,14 @@ pub(crate) fn button_pressed(running: Option<Control>, control: Control) -> bool
     running == Some(control)
 }
 
-/// The device whose picture the tab shows (live or screenshots), which is
-/// the one the bar's controls act on. None while nothing is shown.
+/// The device whose picture the tab shows (a simulator's, live or
+/// screenshots, or an emulator's), which is the one the bar's controls act
+/// on. None while nothing is shown.
 pub(crate) fn watched_device(tab: &DeviceTab) -> Option<&DeviceInfo> {
-    let (DeviceView::Live { udid } | DeviceView::Reduced { udid, .. }) = &tab.view else {
+    let (DeviceView::Live { udid }
+    | DeviceView::Reduced { udid, .. }
+    | DeviceView::Android { udid, why: None, .. }) = &tab.view
+    else {
         return None;
     };
     tab.booted.iter().find(|d| &d.udid == udid)
@@ -65,6 +70,19 @@ pub(crate) fn control_target(tab: &DeviceTab, boot_offer: bool, in_flight: bool)
     bar_target(tab, boot_offer).map(|d| d.udid.clone())
 }
 
+/// Whether booting a `platform` device holds the bar (one control at a
+/// time) for the whole boot.
+pub(crate) fn boot_holds_the_bar(platform: Platform) -> bool {
+    platform == Platform::Ios
+}
+
+/// Whether the boot offer for `offer` is busy (says "Booting…" and ignores
+/// clicks): a control or simulator boot is running (`in_flight`), or this
+/// device is the Android emulator being waited for (`booting`).
+pub(crate) fn boot_busy(offer: &str, in_flight: bool, booting: Option<&str>) -> bool {
+    in_flight || booting == Some(offer)
+}
+
 /// A control's button: its element id, icon and tooltip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ControlLook {
@@ -81,6 +99,7 @@ pub(crate) fn control_look(control: Control, appearance: Option<Appearance>) -> 
     match control {
         Control::Rotate => look("device-rotate", "icons/rotate_cw.svg", "Rotate"),
         Control::Home => look("device-home", "icons/oo/house.svg", "Home"),
+        Control::Back => look("device-back", "icons/arrow_left.svg", "Back"),
         Control::ToggleAppearance => match appearance {
             Some(Appearance::Dark) => {
                 look("device-appearance", "icons/oo/sun.svg", "Light appearance")
@@ -144,10 +163,15 @@ impl HarnessWorkspace {
             .as_ref()
             .filter(|(udid, _)| *udid == target.udid)
             .map(|&(_, a)| a);
-        let controls = crate::devices::controls::available_controls(
-            &self.device_tab.view,
-            self.device_can_rotate,
-        );
+        let controls = match target.platform {
+            Platform::Ios => crate::devices::controls::available_controls(
+                &self.device_tab.view,
+                self.device_can_rotate,
+            ),
+            Platform::Android => {
+                crate::devices::controls::android_controls(&self.device_tab.view, self.device_adb)
+            }
+        };
         let buttons: Vec<AnyElement> = controls
             .into_iter()
             .map(|control| {
@@ -210,6 +234,12 @@ impl HarnessWorkspace {
         ) else {
             return;
         };
+        if Platform::of_id(&udid) == Platform::Android {
+            // Emulators are only listed on macOS.
+            #[cfg(target_os = "macos")]
+            self.run_android_control(control, udid, cx);
+            return;
+        }
         // Home presses the device's button when its input helper is up;
         // otherwise (or if it doesn't answer in time) SpringBoard is brought
         // forward. A helper that gets to the press only after that leaves
@@ -247,6 +277,40 @@ impl HarnessWorkspace {
             });
         })
         .detach();
+    }
+
+    /// [`Self::run_device_control`] on the emulator `udid`, through its gRPC
+    /// or adb, as the newest list found it.
+    #[cfg(target_os = "macos")]
+    fn run_android_control(&mut self, control: Control, udid: String, cx: &mut Context<Self>) {
+        let Some(dev) = self.android_running(&udid) else {
+            return;
+        };
+        let appearance = self
+            .device_appearance
+            .as_ref()
+            .filter(|(known_for, _)| *known_for == udid)
+            .map(|&(_, a)| a);
+        self.begin_device_control(Some(control), cx);
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    crate::devices::android::controls::run(&dev, control, appearance)
+                })
+                .await;
+            let _ = view.update(cx, |ws, cx| {
+                ws.end_device_control();
+                ws.device_control_done(udid, result, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The running emulator `udid`, as the newest list found it.
+    #[cfg(target_os = "macos")]
+    fn android_running(&self, udid: &str) -> Option<crate::devices::AndroidRunning> {
+        self.device_tab.booted.iter().find(|d| d.udid == udid).and_then(|d| d.android.clone())
     }
 
     /// A control on `udid` finished: copy a screenshot, remember a new
@@ -396,6 +460,14 @@ impl HarnessWorkspace {
         {
             return;
         }
+        if device.platform == Platform::Android {
+            // Emulators are only listed on macOS.
+            #[cfg(target_os = "macos")]
+            if let Some(dev) = self.android_running(&device.udid) {
+                self.run_device_power(cx, move || crate::devices::android::controls::shutdown(&dev));
+            }
+            return;
+        }
         let udid = device.udid.clone();
         self.run_device_power(cx, move || crate::devices::controls::shutdown(&udid));
     }
@@ -403,16 +475,53 @@ impl HarnessWorkspace {
     /// The boot offer's Boot: make the offered device the user's pick (so the
     /// list that shows it running goes live on it) and boot it.
     pub(crate) fn boot_offered_device(&mut self, cx: &mut Context<Self>) {
-        if self.device_control_in_flight {
-            return;
-        }
         let Some(device) = self.device_boot_offer.clone() else {
             return;
         };
+        if boot_busy(&device.udid, self.device_control_in_flight, self.device_booting.as_deref()) {
+            return;
+        }
         super::device_panel::pick_for_boot(&mut self.device_tab, &mut self.prefs, &device.udid);
         self.save_prefs(cx);
         let udid = device.udid;
-        self.run_device_power(cx, move || crate::devices::controls::boot(&udid));
+        if boot_holds_the_bar(device.platform) {
+            self.run_device_power(cx, move || crate::devices::controls::boot(&udid));
+            return;
+        }
+        // Android devices are only listed on macOS.
+        #[cfg(target_os = "macos")]
+        self.boot_android(udid, cx);
+    }
+
+    /// Boot an AVD off the UI thread. Its wait (until the emulator lists
+    /// itself, up to a minute) keeps only its own offer saying "Booting…"
+    /// (`device_booting`); the bar stays free for the device on screen.
+    #[cfg(target_os = "macos")]
+    fn boot_android(&mut self, udid: String, cx: &mut Context<Self>) {
+        let Some(avd) = crate::devices::avd_id_of(&udid).map(str::to_string) else {
+            return;
+        };
+        self.device_booting = Some(udid.clone());
+        cx.notify();
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_spawn(async move { crate::devices::android::sdk::boot(&avd) })
+                .await;
+            let _ = view.update(cx, |ws, cx| {
+                if ws.device_booting.as_deref() == Some(udid.as_str()) {
+                    ws.device_booting = None;
+                }
+                if let Err(e) = result {
+                    log::info!("device: {e}");
+                    ws.set_error_note(error_line(&e));
+                }
+                if ws.device_shown {
+                    ws.refresh_devices(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Run a boot or shutdown off the UI thread; when it ends, say why if
@@ -480,7 +589,11 @@ fn bar_button(
 
 #[cfg(test)]
 mod tests {
-    use super::{control_look, control_target, error_line, outcome_note, watched_device};
+    use super::{
+        boot_busy, boot_holds_the_bar, control_look, control_target, error_line, outcome_note,
+        watched_device,
+    };
+    use crate::devices::Platform;
     use crate::devices::DeviceInfo;
     use crate::devices::controls::{Appearance, Control, ControlOutcome};
     use crate::devices::tab_state::{DeviceTab, DeviceView};
@@ -512,6 +625,7 @@ mod tests {
             name: format!("name-{udid}"),
             os: "iOS 27.2".into(),
             device_type: "iPhone-18-Pro".into(),
+            ..Default::default()
         }
     }
 
@@ -581,6 +695,48 @@ mod tests {
     }
 
     #[test]
+    fn the_bar_acts_on_the_android_device_on_screen() {
+        // An emulator with its picture: the bar (and Shut down) acts on it,
+        // with the Android controls; never the simulator's.
+        let mut tab = DeviceTab::new();
+        let emulator = DeviceInfo {
+            udid: "android:p".into(),
+            name: "p".into(),
+            platform: crate::devices::Platform::Android,
+            ..Default::default()
+        };
+        let ticket = tab.list_started();
+        tab.on_list(ticket, Ok(vec![emulator.clone()]));
+        assert_eq!(tab.selected.as_deref(), Some("android:p"));
+        assert_eq!(watched_device(&tab), Some(&emulator));
+        assert_eq!(control_target(&tab, false, false).as_deref(), Some("android:p"));
+        assert!(crate::devices::controls::available_controls(&tab.view, true).is_empty());
+        assert!(crate::devices::controls::android_controls(&tab.view, false).contains(&Control::Back));
+        // While it shows no picture (still starting, or its stream failed),
+        // nothing: as for a simulator with none.
+        tab.view = DeviceView::Android { udid: "android:p".into(), why: Some("x".into()), starting: true };
+        assert_eq!(watched_device(&tab), None);
+        assert_eq!(control_target(&tab, false, false), None);
+    }
+
+    #[test]
+    fn an_android_boot_wait_holds_only_its_own_offer() {
+        // A simulator boot holds the bar, as before; an emulator's wait
+        // (up to a minute) doesn't.
+        assert!(boot_holds_the_bar(Platform::Ios));
+        assert!(!boot_holds_the_bar(Platform::Android));
+        // While "android:m" is waited for, its offer is busy...
+        assert!(boot_busy("android:m", false, Some("android:m")));
+        // ...but another offer, and the bar on the device on screen, aren't.
+        assert!(!boot_busy("android:n", false, Some("android:m")));
+        assert!(!boot_busy("IOS-UDID", false, Some("android:m")));
+        assert_eq!(control_target(&watching_a(), false, false).as_deref(), Some("a"));
+        // A control or a simulator boot running: every offer is busy.
+        assert!(boot_busy("android:n", true, None));
+        assert!(!boot_busy("android:n", false, None));
+    }
+
+    #[test]
     fn a_second_click_while_one_runs_is_ignored() {
         let tab = watching_a();
         assert_eq!(control_target(&tab, false, true), None);
@@ -602,6 +758,7 @@ mod tests {
         let tooltip = |c| control_look(c, None).tooltip;
         assert_eq!(tooltip(Control::Rotate), "Rotate");
         assert_eq!(tooltip(Control::Home), "Home");
+        assert_eq!(tooltip(Control::Back), "Back");
         assert_eq!(tooltip(Control::TextSmaller), "Smaller text");
         assert_eq!(tooltip(Control::TextBigger), "Larger text");
         assert_eq!(tooltip(Control::Screenshot), "Copy screenshot");
@@ -634,6 +791,7 @@ mod tests {
         for control in [
             Control::Rotate,
             Control::Home,
+            Control::Back,
             Control::TextSmaller,
             Control::TextBigger,
             Control::Screenshot,

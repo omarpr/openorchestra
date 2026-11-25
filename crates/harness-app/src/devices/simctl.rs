@@ -113,11 +113,45 @@ fn runtime_os(key: &str) -> String {
     }
 }
 
-/// The simulators in the default device set, as the picker groups them.
+/// The simulators in the default device set, and the Android emulators, as
+/// the picker groups them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct DeviceList {
     pub booted: Vec<DeviceInfo>,
     pub shut_down: Vec<DeviceInfo>,
+    /// Running Android emulators, by name (`devices::android`; macOS only).
+    pub android_running: Vec<DeviceInfo>,
+    /// AVDs that aren't running, by name.
+    pub android_stopped: Vec<DeviceInfo>,
+}
+
+impl DeviceList {
+    /// Every running device the tab can watch: booted simulators first, so
+    /// one stays the default pick, then running emulators.
+    pub(crate) fn running(&self) -> Vec<DeviceInfo> {
+        self.booted.iter().chain(&self.android_running).cloned().collect()
+    }
+
+    /// The picker's list after a round: the simulators `ios` listed (none
+    /// without Xcode; the ones in `prev` while simctl fails for now), and
+    /// the Android groups of `android`, whatever simctl said.
+    pub(crate) fn merged(
+        prev: &DeviceList,
+        ios: &Result<DeviceList, ListError>,
+        android: DeviceList,
+    ) -> DeviceList {
+        let (booted, shut_down) = match ios {
+            Ok(list) => (list.booted.clone(), list.shut_down.clone()),
+            Err(ListError::NoXcode) => (Vec::new(), Vec::new()),
+            Err(ListError::Failed(_)) => (prev.booted.clone(), prev.shut_down.clone()),
+        };
+        DeviceList {
+            booted,
+            shut_down,
+            android_running: android.android_running,
+            android_stopped: android.android_stopped,
+        }
+    }
 }
 
 /// The available devices in `simctl list devices -j` output: booted ones and
@@ -154,6 +188,7 @@ pub(crate) fn parse_devices(json: &str) -> Result<DeviceList, String> {
                 name: name.to_string(),
                 os: os.clone(),
                 device_type: device_type.to_string(),
+                ..Default::default()
             });
         }
     }
@@ -277,7 +312,7 @@ pub(crate) fn screenshot_jpeg(udid: &str, dir: &Path) -> Result<Vec<u8>, String>
 
 #[cfg(test)]
 mod tests {
-    use super::{ListError, Ran, RunFailed, failure_text, list_outcome, shot_path};
+    use super::{DeviceInfo, DeviceList, ListError, Ran, RunFailed, failure_text, list_outcome, shot_path};
     use std::path::Path;
 
     // `xcrun` and its Unix paths exist only on macOS; on Windows
@@ -310,6 +345,40 @@ mod tests {
             stdout: String::new(),
             stderr: stderr.into(),
         })
+    }
+
+    fn named(udid: &str, platform: crate::devices::Platform) -> DeviceInfo {
+        DeviceInfo { udid: udid.into(), name: udid.into(), platform, ..Default::default() }
+    }
+
+    #[test]
+    fn android_is_listed_whatever_simctl_says() {
+        use crate::devices::Platform::{Android, Ios};
+        let android = DeviceList {
+            android_running: vec![named("android:p", Android)],
+            android_stopped: vec![named("android:m", Android)],
+            ..Default::default()
+        };
+        let prev = DeviceList {
+            booted: vec![named("a", Ios)],
+            shut_down: vec![named("b", Ios)],
+            android_running: vec![named("android:old", Android)],
+            ..Default::default()
+        };
+        let ios = DeviceList { booted: vec![named("c", Ios)], ..Default::default() };
+        // simctl worked: its simulators, and the emulators.
+        let got = DeviceList::merged(&prev, &Ok(ios.clone()), android.clone());
+        assert_eq!(got, DeviceList { booted: ios.booted, ..android.clone() });
+        // No Xcode (Android Studio only): no simulators, the emulators still.
+        let got = DeviceList::merged(&prev, &Err(ListError::NoXcode), android.clone());
+        assert_eq!(got, android);
+        // simctl failing for now: the simulators listed before, and the
+        // emulators as they are now.
+        let got = DeviceList::merged(&prev, &Err(ListError::Failed("x".into())), android.clone());
+        assert_eq!(
+            got,
+            DeviceList { booted: prev.booted.clone(), shut_down: prev.shut_down.clone(), ..android }
+        );
     }
 
     #[test]

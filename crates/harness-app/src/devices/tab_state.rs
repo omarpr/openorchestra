@@ -3,7 +3,7 @@
 //! It never does I/O; callers run the returned [`Command`]s.
 
 use super::simctl::ListError;
-use super::{choose_device, DeviceInfo, StreamError};
+use super::{choose_device, DeviceInfo, Platform, StreamError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DeviceView {
@@ -15,6 +15,13 @@ pub(crate) enum DeviceView {
     /// this Xcode's display API isn't supported.
     Reduced { udid: String, why: String, transient: bool },
     ShutDown { name: String },
+    /// A running Android emulator, streamed. `why`: its stream ended or
+    /// couldn't start, said in place of the picture; it is tried again
+    /// after a few lists (as a transient [`Self::Reduced`] is), never
+    /// reduced to screenshots. `starting`: that was an emulator still
+    /// booting, so the panel says so instead, and it's tried again on the
+    /// next list without using up the retries.
+    Android { udid: String, why: Option<String>, starting: bool },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,6 +105,12 @@ impl DeviceTab {
     }
 
     fn view_for(&self, udid: &str) -> DeviceView {
+        // Nothing of the simulator path (simctl, its stream or screenshots)
+        // is for an emulator, and why this Xcode reduced simulators is no
+        // reason to reduce it.
+        if Platform::of_id(udid) == Platform::Android {
+            return DeviceView::Android { udid: udid.into(), why: None, starting: false };
+        }
         match &self.reduced_why {
             Some(why) => DeviceView::Reduced {
                 udid: udid.into(),
@@ -110,7 +123,9 @@ impl DeviceTab {
 
     fn shows(&self, udid: &str) -> bool {
         matches!(&self.view,
-            DeviceView::Live { udid: u } | DeviceView::Reduced { udid: u, .. } if u == udid)
+            DeviceView::Live { udid: u }
+            | DeviceView::Reduced { udid: u, .. }
+            | DeviceView::Android { udid: u, .. } if u == udid)
     }
 
     /// Diff what should run against what runs, and return the commands.
@@ -119,7 +134,11 @@ impl DeviceTab {
             Running::Nothing
         } else {
             match &self.view {
-                DeviceView::Live { udid } => Running::Stream(udid.clone()),
+                // An emulator's stream too: the panel sends an Android id to
+                // the emulator, never to simctl.
+                DeviceView::Live { udid } | DeviceView::Android { udid, why: None, .. } => {
+                    Running::Stream(udid.clone())
+                }
                 DeviceView::Reduced { udid, .. } => Running::Screenshots(udid.clone()),
                 _ => Running::Nothing,
             }
@@ -160,11 +179,27 @@ impl DeviceTab {
             // a working stream.
             Err(ListError::Failed(_)) => return Vec::new(),
             Ok(list) => {
+                // A watched emulator that left the list has exited: it shut
+                // down, as a simulator's stream says when it goes. Its own
+                // stream may not have seen it: one saving its snapshot runs
+                // on for seconds after ending the call.
+                let left = match &self.view {
+                    DeviceView::Android { udid, .. } if !list.iter().any(|d| &d.udid == udid) => {
+                        Some(udid.clone())
+                    }
+                    _ => None,
+                };
+                let left = left.map(|udid| (self.name_of(&udid), udid));
                 self.booted = list;
                 if let Some((g, at)) = &self.gone
                     && (ticket > *at || !self.booted.iter().any(|d| &d.udid == g))
                 {
                     self.gone = None;
+                }
+                if let Some((name, udid)) = left {
+                    self.gone = Some((udid, self.lists_started));
+                    self.view = DeviceView::ShutDown { name };
+                    return self.reconcile();
                 }
                 let chosen = choose_device(
                     &self.booted,
@@ -184,6 +219,50 @@ impl DeviceTab {
         self.reconcile()
     }
 
+    /// A list fetched under `ticket` landed in two parts: the simulators
+    /// (`ios`, which may have failed) and the running Android emulators,
+    /// which count whatever simctl said.
+    pub(crate) fn on_lists(
+        &mut self,
+        ticket: u64,
+        ios: Result<Vec<DeviceInfo>, ListError>,
+        android: Vec<DeviceInfo>,
+    ) -> Vec<Command> {
+        match ios {
+            Ok(mut list) => {
+                list.extend(android);
+                self.on_list(ticket, Ok(list))
+            }
+            // A watched emulator that just left goes by way of "shut down".
+            Err(ListError::NoXcode)
+                if android.is_empty() && !matches!(self.view, DeviceView::Android { .. }) =>
+            {
+                self.on_list(ticket, Err(ListError::NoXcode))
+            }
+            // Android Studio without Xcode: the emulators alone.
+            Err(ListError::NoXcode) => self.on_list(ticket, Ok(android)),
+            Err(ListError::Failed(e)) => {
+                // The simulators are unknown for now: keep the ones the tab
+                // has, less one reported gone (a newer list brings it back
+                // if it really runs).
+                let gone = self.gone.as_ref().map(|(g, _)| g.clone());
+                let mut list: Vec<DeviceInfo> = self
+                    .booted
+                    .iter()
+                    .filter(|d| d.platform == Platform::Ios && Some(&d.udid) != gone.as_ref())
+                    .cloned()
+                    .collect();
+                list.extend(android);
+                if list == self.booted {
+                    // Nothing new: as for any failed list.
+                    self.on_list(ticket, Err(ListError::Failed(e)))
+                } else {
+                    self.on_list(ticket, Ok(list))
+                }
+            }
+        }
+    }
+
     pub(crate) fn on_select(&mut self, udid: &str) -> Vec<Command> {
         if !self.booted.iter().any(|d| d.udid == udid) {
             return Vec::new();
@@ -193,31 +272,44 @@ impl DeviceTab {
         self.gone = None;
         if !self.shows(udid) {
             self.view = self.view_for(udid);
+        } else if matches!(self.view, DeviceView::Android { why: Some(_), .. }) {
+            // Picking the failed emulator shown is asking to try again,
+            // retries used up or not.
+            if let Some(again) = self.retried() {
+                self.view = again;
+            }
         }
         self.reconcile()
     }
 
-    /// The live view couldn't start: screenshots instead. For good when
-    /// the display API is unsupported; otherwise for this start only (see
-    /// [`Retry`]).
+    /// The live view couldn't start (or ended): screenshots instead. For
+    /// good when the display API is unsupported; otherwise for this start
+    /// only (see [`Retry`]). An emulator's never falls back: its note shows
+    /// instead, and it is retried the same way.
     pub(crate) fn on_stream_failed(&mut self, err: StreamError) -> Vec<Command> {
+        let starting = matches!(err, StreamError::Starting(_));
         let (why, transient) = match err {
             StreamError::DeviceNotFound => return self.on_gone(),
             StreamError::NoXcode => ("Xcode not found".to_string(), true),
             StreamError::Unsupported(s) => (s.to_string(), false),
-            StreamError::Failed(s) => (s, true),
+            StreamError::Failed(s) | StreamError::Starting(s) => (s, true),
         };
+        if let DeviceView::Android { udid, why: None, .. } = &self.view {
+            let udid = udid.clone();
+            if starting {
+                self.next_list(&udid);
+            } else {
+                self.failed_again(&udid);
+            }
+            self.view = DeviceView::Android { udid, why: Some(why), starting };
+            return self.reconcile();
+        }
         let DeviceView::Live { udid } = &self.view else {
             return Vec::new();
         };
         let udid = udid.clone();
         if transient {
-            let failures = match &self.retry {
-                Some(r) if r.udid == udid => r.failures + 1,
-                _ => 1,
-            };
-            let lists_left = if failures <= LIST_RETRIES { 1 << (failures - 1) } else { 0 };
-            self.retry = Some(Retry { udid: udid.clone(), failures, lists_left });
+            self.failed_again(&udid);
         } else {
             self.reduced_why = Some(why.clone());
         }
@@ -225,10 +317,48 @@ impl DeviceTab {
         self.reconcile()
     }
 
-    /// Another good list while a transient fallback shows: live again once
-    /// its wait is over.
+    /// Another transient failure of `udid`'s stream: how many lists until
+    /// it's tried again.
+    fn failed_again(&mut self, udid: &str) {
+        let failures = match &self.retry {
+            Some(r) if r.udid == udid => r.failures + 1,
+            _ => 1,
+        };
+        let lists_left = if failures <= LIST_RETRIES { 1 << (failures - 1) } else { 0 };
+        self.retry = Some(Retry { udid: udid.to_string(), failures, lists_left });
+    }
+
+    /// `udid` is tried again on the next list, without counting as a
+    /// failure (an emulator still booting).
+    fn next_list(&mut self, udid: &str) {
+        let failures = match &self.retry {
+            Some(r) if r.udid == udid => r.failures,
+            _ => 0,
+        };
+        self.retry = Some(Retry { udid: udid.to_string(), failures, lists_left: 1 });
+    }
+
+    /// The view to try live again from, for a transient fallback or an
+    /// emulator whose stream failed; None for any other view.
+    fn retried(&self) -> Option<DeviceView> {
+        match &self.view {
+            DeviceView::Reduced { udid, transient: true, .. } => {
+                Some(DeviceView::Live { udid: udid.clone() })
+            }
+            DeviceView::Android { udid, why: Some(_), .. } => {
+                Some(DeviceView::Android { udid: udid.clone(), why: None, starting: false })
+            }
+            _ => None,
+        }
+    }
+
+    /// Another good list while a transient fallback (or a failed emulator
+    /// stream) shows: live again once its wait is over.
     fn count_down_retry(&mut self) {
-        let DeviceView::Reduced { udid, transient: true, .. } = &self.view else {
+        let Some(again) = self.retried() else {
+            return;
+        };
+        let (DeviceView::Live { udid } | DeviceView::Android { udid, .. }) = &again else {
             return;
         };
         let Some(retry) = self.retry.as_mut().filter(|r| &r.udid == udid && r.lists_left > 0)
@@ -237,26 +367,33 @@ impl DeviceTab {
         };
         retry.lists_left -= 1;
         if retry.lists_left == 0 {
-            self.view = DeviceView::Live { udid: udid.clone() };
+            self.view = again;
         }
     }
 
     pub(crate) fn on_gone(&mut self) -> Vec<Command> {
-        let (DeviceView::Live { udid } | DeviceView::Reduced { udid, .. }) = &self.view else {
+        let (DeviceView::Live { udid }
+        | DeviceView::Reduced { udid, .. }
+        | DeviceView::Android { udid, .. }) = &self.view
+        else {
             return Vec::new();
         };
-        let name = self
-            .booted
-            .iter()
-            .find(|d| &d.udid == udid)
-            .map(|d| d.name.clone())
-            .unwrap_or_else(|| udid.clone());
+        let name = self.name_of(udid);
         self.gone = Some((udid.clone(), self.lists_started));
         self.view = DeviceView::ShutDown { name };
         self.reconcile()
     }
 
-    /// The live view started: a later failure starts its backoff afresh.
+    /// `udid`'s name as last listed, else the id.
+    fn name_of(&self, udid: &str) -> String {
+        self.booted
+            .iter()
+            .find(|d| d.udid == udid)
+            .map_or_else(|| udid.to_string(), |d| d.name.clone())
+    }
+
+    /// The live view started (for an emulator: its first frame came): a
+    /// later failure starts its backoff afresh.
     // Elsewhere than macOS no stream starts.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn on_stream_started(&mut self) {
@@ -276,11 +413,12 @@ impl DeviceTab {
         self.reconcile()
     }
 
-    /// Back on screen. A transient fallback tries live again.
+    /// Back on screen. A transient fallback (or a failed emulator stream)
+    /// tries live again.
     pub(crate) fn on_shown(&mut self) -> Vec<Command> {
         self.hidden = false;
-        if let DeviceView::Reduced { udid, transient: true, .. } = &self.view {
-            self.view = DeviceView::Live { udid: udid.clone() };
+        if let Some(again) = self.retried() {
+            self.view = again;
         }
         self.reconcile()
     }
@@ -296,6 +434,7 @@ mod tests {
             name: format!("name-{udid}"),
             os: "iOS 27.2".into(),
             device_type: "iPhone-18-Pro".into(),
+            ..Default::default()
         }
     }
 
@@ -629,6 +768,290 @@ mod tests {
         // A live view that started resets the backoff.
         t.on_stream_started();
         assert_eq!(lists_until_retry(&mut t), Some(1));
+    }
+
+    fn android(udid: &str) -> DeviceInfo {
+        DeviceInfo {
+            udid: format!("android:{udid}"),
+            name: format!("name-{udid}"),
+            os: "Android".into(),
+            platform: crate::devices::Platform::Android,
+            ..Default::default()
+        }
+    }
+
+    fn watching(udid: &str) -> DeviceView {
+        DeviceView::Android { udid: format!("android:{udid}"), why: None, starting: false }
+    }
+
+    fn start(udid: &str) -> Command {
+        Command::StartStream(udid.into())
+    }
+
+    #[test]
+    fn an_android_device_streams_but_is_never_reduced() {
+        // Only an emulator: its stream starts (the panel sends an Android
+        // id to the emulator's stream, never to simctl), and stops while
+        // the tab is away.
+        let mut t = DeviceTab::new();
+        assert_eq!(fresh(&mut t, Ok(vec![android("p")])), vec![start("android:p")]);
+        assert_eq!(t.view, watching("p"));
+        assert_eq!(t.selected.as_deref(), Some("android:p"));
+        assert_eq!(t.on_hidden(), vec![Command::StopStream]);
+        assert_eq!(t.on_shown(), vec![start("android:p")]);
+        assert_eq!(t.on_obscured(true), vec![Command::StopStream]);
+        assert_eq!(t.on_obscured(false), vec![start("android:p")]);
+        // From a live simulator: its stream stops first.
+        let mut t = DeviceTab::new();
+        fresh(&mut t, Ok(vec![dev("a"), android("p")]));
+        assert_eq!(t.view, live("a"));
+        assert_eq!(t.on_select("android:p"), vec![Command::StopStream, start("android:p")]);
+        assert_eq!(t.view, watching("p"));
+        assert!(fresh(&mut t, Ok(vec![dev("a"), android("p")])).is_empty());
+        // And back.
+        assert_eq!(t.on_select("a"), vec![Command::StopStream, start("a")]);
+        // An Xcode whose display API is unsupported is no reason to reduce
+        // an emulator.
+        t.on_stream_failed(StreamError::Unsupported("SimDeviceScreen"));
+        assert_eq!(t.on_select("android:p"), vec![Command::StopScreenshots, start("android:p")]);
+        assert_eq!(t.view, watching("p"));
+        // Nor is a failing emulator stream ever a reason for screenshots.
+        let cmds = t.on_stream_failed(StreamError::Unsupported("anything"));
+        assert_eq!(cmds, vec![Command::StopStream]);
+        assert!(matches!(&t.view, DeviceView::Android { why: Some(_), .. }), "{:?}", t.view);
+        // Showing the tab tries it again; the emulator going away: shut
+        // down, then the next device.
+        t.on_hidden();
+        assert_eq!(t.on_shown(), vec![start("android:p")]);
+        assert_eq!(t.on_gone(), vec![Command::StopStream]);
+        assert_eq!(t.view, DeviceView::ShutDown { name: "name-p".into() });
+    }
+
+    /// An emulator stream that ends while the emulator is still listed:
+    /// its note shows, and it's tried again after 1, 2, 4 and 8 lists, then
+    /// not until the tab shows again. Each restart is the panel's, from the
+    /// newest list. Its first frame resets the backoff.
+    #[test]
+    fn an_emulator_stream_that_keeps_ending_is_retried_a_bounded_few_times() {
+        let mut t = DeviceTab::new();
+        fresh(&mut t, Ok(vec![android("p")]));
+        let cmds = t.on_stream_failed(StreamError::Failed("Unavailable: closed".into()));
+        assert_eq!(cmds, vec![Command::StopStream]);
+        assert_eq!(
+            t.view,
+            DeviceView::Android {
+                udid: "android:p".into(),
+                why: Some("Unavailable: closed".into()),
+                starting: false,
+            }
+        );
+        let retry_after = |t: &mut DeviceTab| {
+            (1..=100).find(|_| {
+                let cmds = fresh(t, Ok(vec![android("p")]));
+                assert!(cmds.iter().all(|c| *c == start("android:p")), "{cmds:?}");
+                !cmds.is_empty()
+            })
+        };
+        let mut waits = vec![retry_after(&mut t)];
+        for _ in 0..5 {
+            t.on_stream_failed(StreamError::Failed("x".into()));
+            waits.push(retry_after(&mut t));
+        }
+        assert_eq!(waits, vec![Some(1), Some(2), Some(4), Some(8), None, None]);
+        // Showing the tab again tries again, and a frame resets the wait.
+        t.on_hidden();
+        assert_eq!(t.on_shown(), vec![start("android:p")]);
+        t.on_stream_started();
+        t.on_stream_failed(StreamError::Failed("x".into()));
+        assert_eq!(retry_after(&mut t), Some(1));
+    }
+
+    /// An emulator still booting (listed moments ago, not answering yet):
+    /// "Starting…" rather than a failure, tried again on every list
+    /// however many times, and none of it uses up the retries a real
+    /// failure gets afterwards.
+    #[test]
+    fn a_booting_emulator_says_starting_and_keeps_its_retries() {
+        let mut t = DeviceTab::new();
+        fresh(&mut t, Ok(vec![android("p")]));
+        for _ in 0..20 {
+            let cmds = t.on_stream_failed(StreamError::Starting("not answering yet".into()));
+            assert_eq!(cmds, vec![Command::StopStream]);
+            assert_eq!(
+                t.view,
+                DeviceView::Android {
+                    udid: "android:p".into(),
+                    why: Some("not answering yet".into()),
+                    starting: true,
+                }
+            );
+            // One try per list: the next one.
+            assert_eq!(fresh(&mut t, Ok(vec![android("p")])), vec![start("android:p")]);
+            assert_eq!(t.view, watching("p"));
+        }
+        // A real failure after it starts its backoff from the first wait.
+        t.on_stream_failed(StreamError::Failed("Unauthenticated: x".into()));
+        assert!(matches!(t.view, DeviceView::Android { starting: false, why: Some(_), .. }));
+        assert_eq!(fresh(&mut t, Ok(vec![android("p")])), vec![start("android:p")]);
+        // Gone from the list while starting: shut down, and nothing more
+        // for it.
+        t.on_stream_failed(StreamError::Starting("not answering yet".into()));
+        assert!(fresh(&mut t, Ok(vec![])).is_empty());
+        assert_eq!(t.view, DeviceView::ShutDown { name: "name-p".into() });
+        assert!(fresh(&mut t, Ok(vec![])).is_empty());
+        assert_eq!(t.view, DeviceView::NoneRunning);
+    }
+
+    /// Picking the emulator already shown, once its stream failed, is an
+    /// explicit retry, even after the list retries ran out. Picking it
+    /// while it streams changes nothing.
+    #[test]
+    fn re_picking_a_failed_emulator_tries_it_again() {
+        let mut t = DeviceTab::new();
+        fresh(&mut t, Ok(vec![android("p")]));
+        assert!(t.on_select("android:p").is_empty());
+        // Fail each retry until the lists stop trying (after 4).
+        let mut retries = 0;
+        loop {
+            t.on_stream_failed(StreamError::Failed("x".into()));
+            if !(0..20).any(|_| !fresh(&mut t, Ok(vec![android("p")])).is_empty()) {
+                break;
+            }
+            retries += 1;
+        }
+        assert_eq!(retries, 4);
+        assert_eq!(t.on_select("android:p"), vec![start("android:p")]);
+        assert_eq!(t.view, watching("p"));
+    }
+
+    /// An emulator that shut down mid-stream (its stream reports it gone):
+    /// "shut down", as for a simulator; a list already under way that still
+    /// has it doesn't restart it, and the list without it moves on. Nothing
+    /// is ever started for it once it's gone.
+    #[test]
+    fn an_emulator_that_shut_down_mid_stream_is_not_restarted() {
+        let mut t = DeviceTab::new();
+        fresh(&mut t, Ok(vec![dev("a"), android("p")]));
+        t.on_select("android:p");
+        let under_way = t.list_started();
+        assert_eq!(t.on_gone(), vec![Command::StopStream]);
+        assert_eq!(t.view, DeviceView::ShutDown { name: "name-p".into() });
+        assert!(t.on_list(under_way, Ok(vec![dev("a"), android("p")])).is_empty());
+        assert_eq!(fresh(&mut t, Ok(vec![dev("a")])), vec![start("a")]);
+        // A failed stream whose emulator the next list drops: shut down,
+        // then the list after moves on, and nothing starts for the
+        // dropped one.
+        let mut t = DeviceTab::new();
+        fresh(&mut t, Ok(vec![android("p"), android("q")]));
+        t.on_stream_failed(StreamError::Failed("Unavailable: closed".into()));
+        assert!(fresh(&mut t, Ok(vec![android("q")])).is_empty());
+        assert_eq!(t.view, DeviceView::ShutDown { name: "name-p".into() });
+        assert_eq!(fresh(&mut t, Ok(vec![android("q")])), vec![start("android:q")]);
+        assert_eq!(t.view, watching("q"));
+        let mut t = DeviceTab::new();
+        fresh(&mut t, Ok(vec![android("p")]));
+        t.on_stream_failed(StreamError::Failed("Unavailable: closed".into()));
+        assert!(fresh(&mut t, Ok(vec![])).is_empty());
+        assert!(fresh(&mut t, Ok(vec![])).is_empty());
+        assert_eq!(t.view, DeviceView::NoneRunning);
+    }
+
+    /// A watched emulator that drops out of the list has shut down, as a
+    /// simulator's stream says when it goes ([`DeviceTab::on_gone`]):
+    /// whether its stream was still waiting for the process to exit (one
+    /// saving its Quick Boot snapshot takes seconds), had already ended
+    /// without seeing it go, or the Mac has no Xcode. The next list moves
+    /// on, as after any shutdown.
+    #[test]
+    fn a_watched_emulator_that_leaves_the_list_shut_down() {
+        let shut_down = DeviceView::ShutDown { name: "name-p".into() };
+        // Its stream still waiting: stopped, and "shut down".
+        let mut t = DeviceTab::new();
+        fresh(&mut t, Ok(vec![dev("a"), android("p")]));
+        t.on_select("android:p");
+        let under_way = t.list_started();
+        assert_eq!(fresh(&mut t, Ok(vec![dev("a")])), vec![Command::StopStream]);
+        assert_eq!(t.view, shut_down);
+        // A list fetched before it went doesn't bring it back.
+        assert!(t.on_list(under_way, Ok(vec![dev("a"), android("p")])).is_empty());
+        assert_eq!(t.view, shut_down);
+        assert_eq!(fresh(&mut t, Ok(vec![dev("a")])), vec![start("a")]);
+        // Its stream ended first ("Unavailable: Cancelling all calls")
+        // while the emulator was still exiting.
+        let mut t = DeviceTab::new();
+        fresh(&mut t, Ok(vec![android("p"), android("q")]));
+        t.on_stream_failed(StreamError::Failed("Unavailable: Cancelling all calls".into()));
+        assert!(fresh(&mut t, Ok(vec![android("q")])).is_empty());
+        assert_eq!(t.view, shut_down);
+        assert_eq!(fresh(&mut t, Ok(vec![android("q")])), vec![start("android:q")]);
+        // Still booting when it went.
+        let mut t = DeviceTab::new();
+        fresh(&mut t, Ok(vec![android("p")]));
+        t.on_stream_failed(StreamError::Starting("not answering yet".into()));
+        assert!(fresh(&mut t, Ok(vec![])).is_empty());
+        assert_eq!(t.view, shut_down);
+        assert!(fresh(&mut t, Ok(vec![])).is_empty());
+        assert_eq!(t.view, DeviceView::NoneRunning);
+        // Android Studio without Xcode: "shut down" before "Needs Xcode".
+        let mut t = DeviceTab::new();
+        let ticket = t.list_started();
+        t.on_lists(ticket, Err(ListError::NoXcode), vec![android("p")]);
+        let ticket = t.list_started();
+        assert_eq!(t.on_lists(ticket, Err(ListError::NoXcode), vec![]), vec![Command::StopStream]);
+        assert_eq!(t.view, shut_down);
+        let ticket = t.list_started();
+        assert!(t.on_lists(ticket, Err(ListError::NoXcode), vec![]).is_empty());
+        assert_eq!(t.view, DeviceView::NeedsXcode);
+        // A simulator leaving the list is not that: its stream says when
+        // it shut down.
+        let mut t = tab_on(&["a"]);
+        assert_eq!(fresh(&mut t, Ok(vec![])), vec![Command::StopStream]);
+        assert_eq!(t.view, DeviceView::NoneRunning);
+    }
+
+    #[test]
+    fn emulators_show_without_xcode_or_a_working_simctl() {
+        // No Xcode, an emulator running: it is watched.
+        let mut t = DeviceTab::new();
+        let ticket = t.list_started();
+        assert_eq!(
+            t.on_lists(ticket, Err(ListError::NoXcode), vec![android("p")]),
+            vec![start("android:p")]
+        );
+        assert_eq!(t.view, watching("p"));
+        // ...and once it stops, shut down, then the tab says Xcode is
+        // needed.
+        let ticket = t.list_started();
+        assert_eq!(t.on_lists(ticket, Err(ListError::NoXcode), vec![]), vec![Command::StopStream]);
+        assert_eq!(t.view, DeviceView::ShutDown { name: "name-p".into() });
+        let ticket = t.list_started();
+        assert!(t.on_lists(ticket, Err(ListError::NoXcode), vec![]).is_empty());
+        assert_eq!(t.view, DeviceView::NeedsXcode);
+        // simctl works: simulators and emulators together, simulators first.
+        let mut t = DeviceTab::new();
+        let ticket = t.list_started();
+        assert_eq!(
+            t.on_lists(ticket, Ok(vec![dev("a")]), vec![android("p")]),
+            vec![Command::StartStream("a".into())]
+        );
+        let ids = |t: &DeviceTab| t.booted.iter().map(|d| d.udid.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&t), ["a", "android:p"]);
+        // simctl failing for now with nothing new: nothing changes.
+        let failed = || Err(ListError::Failed("timeout".into()));
+        let ticket = t.list_started();
+        assert!(t.on_lists(ticket, failed(), vec![android("p")]).is_empty());
+        assert_eq!(t.view, live("a"));
+        // An emulator coming up meanwhile still shows; the simulators stay.
+        let ticket = t.list_started();
+        assert!(t.on_lists(ticket, failed(), vec![android("p"), android("q")]).is_empty());
+        assert_eq!(ids(&t), ["a", "android:p", "android:q"]);
+        assert_eq!(t.view, live("a"));
+        // A simulator reported gone isn't brought back by a failed list.
+        t.on_gone();
+        let ticket = t.list_started();
+        t.on_lists(ticket, failed(), vec![android("p")]);
+        assert!(!ids(&t).contains(&"a".to_string()), "{:?}", ids(&t));
+        assert_eq!(t.view, watching("p"));
     }
 
     #[test]

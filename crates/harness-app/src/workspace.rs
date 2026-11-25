@@ -926,7 +926,7 @@ pub struct HarnessWorkspace {
     /// run. Per window; the task, worktree and center-tab switch paths never
     /// touch it.
     device_tab: crate::devices::tab_state::DeviceTab,
-    /// The watched simulator's picture, its own entity so frames redraw it
+    /// The watched device's picture, its own entity so frames redraw it
     /// alone.
     device_screen: Entity<crate::workspace::ui::device_panel::DeviceScreen>,
     /// Whether `device_tab` was last told it is on screen
@@ -952,13 +952,18 @@ pub struct HarnessWorkspace {
     /// open menu's outside handler leaves that press to the button).
     device_menu_open: bool,
     device_menu_press: Option<gpui::Point<Pixels>>,
-    /// The last good device list, both groups, for the picker. Cleared when
-    /// Xcode is missing.
+    /// The picker's list: the simulators from the last good simctl list
+    /// (none when Xcode is missing) and the latest Android groups, which
+    /// count whatever simctl says.
     device_list: crate::devices::simctl::DeviceList,
     /// A shut-down device picked in the menu: the tab offers to boot it in
     /// place of the picture, until it is running or another device is
     /// picked.
     device_boot_offer: Option<crate::devices::DeviceInfo>,
+    /// The AVD being booted (its device id) while its boot waits for the
+    /// emulator to list itself. Unlike a simulator boot, it doesn't hold
+    /// the bar.
+    device_booting: Option<String>,
     /// The device the Shut down confirm asks about, captured from the
     /// picture on screen when Shut down was clicked.
     device_shutdown_confirm: Option<crate::devices::DeviceInfo>,
@@ -975,6 +980,10 @@ pub struct HarnessWorkspace {
     device_can_rotate: bool,
     /// That question is being asked; one ask at a time.
     device_rotate_asking: bool,
+    /// The Android SDK has adb (found off the UI thread with each list):
+    /// an emulator's Dark/Light and Text size run it, and are offered only
+    /// then.
+    device_adb: bool,
     /// The last known appearance of a device, read when it starts showing
     /// and after each switch: the appearance button names the other one.
     device_appearance: Option<(String, crate::devices::controls::Appearance)>,
@@ -984,6 +993,10 @@ pub struct HarnessWorkspace {
     /// The running stream's frame slot.
     #[cfg(target_os = "macos")]
     device_frames: Option<crate::devices::worker::Frames>,
+    /// The size an emulator's stream asks for, re-asked (debounced) as the
+    /// picture's area changes.
+    #[cfg(target_os = "macos")]
+    device_side: crate::workspace::ui::device_panel::SideRequest,
     /// Where the stream thread and the stream report; the receiving end is a
     /// task spawned in `new`.
     #[cfg(target_os = "macos")]

@@ -19,6 +19,9 @@ Unreleased is empty.
 - **Device tab controls** (macOS): rotate, Home, dark/light appearance, text size and copy-screenshot buttons under the live simulator view.
 - The Device tab draws the iPhone's frame and rounded screen (toggle with Show frame).
 - Click, drag, scroll and type on the Device tab's live view to use the simulator directly.
+- Android emulators in the Device tab: live picture, picked from the same list as iOS simulators, and stopped AVDs boot from the picker.
+- Click, scroll, type, and the Device bar's controls (plus Back) on Android emulators.
+- Android emulators get their device frame in the Device tab.
 
 ### Fixed
 

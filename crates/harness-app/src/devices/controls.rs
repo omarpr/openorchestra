@@ -27,6 +27,8 @@ const SPRINGBOARD: &str = "com.apple.springboard";
 pub(crate) enum Control {
     Rotate,
     Home,
+    /// Android's Back button (`devices::android::controls`).
+    Back,
     ToggleAppearance,
     TextSmaller,
     TextBigger,
@@ -200,6 +202,21 @@ pub(crate) fn available_controls(view: &DeviceView, rotate: bool) -> Vec<Control
     controls
 }
 
+/// The controls to offer for an Android emulator the tab shows: Rotate,
+/// Home and Back always (all through its gRPC); Dark/Light and Text size
+/// only with adb (`adb`), which they run. None while it shows no picture.
+pub(crate) fn android_controls(view: &DeviceView, adb: bool) -> Vec<Control> {
+    if !matches!(view, DeviceView::Android { why: None, .. }) {
+        return Vec::new();
+    }
+    let mut controls = vec![Control::Rotate, Control::Home, Control::Back];
+    if adb {
+        controls.extend([Control::ToggleAppearance, Control::TextSmaller, Control::TextBigger]);
+    }
+    controls.push(Control::Screenshot);
+    controls
+}
+
 /// What a `content_size increment|decrement` run means. At the largest size
 /// simctl exits 0 and prints "Already at max content size" on stdout; at the
 /// smallest it is silent, which cannot be told from a step that worked.
@@ -279,6 +296,7 @@ pub(crate) fn run_public(
         Control::Screenshot => screenshot_png(udid).map(ControlOutcome::Png),
         Control::Rotate => rotate(udid).map(|()| ControlOutcome::Done),
         Control::Home => launch_springboard(udid).map(|()| ControlOutcome::Done),
+        Control::Back => Err("a simulator has no Back button".to_string()),
     }
 }
 
@@ -436,6 +454,42 @@ mod tests {
             "The specified device was not found."
         );
         assert_eq!(springboard_failure("simctl timed out after 5 s".into()), "simctl timed out after 5 s");
+    }
+
+    #[test]
+    fn controls_without_adb_hide_appearance_and_text_size() {
+        let android = |why: Option<&str>| DeviceView::Android {
+            udid: "android:p".into(),
+            why: why.map(Into::into),
+            starting: false,
+        };
+        // With adb: the iOS bar's controls, with Back next to Home, and
+        // Rotate whatever devicectl can do.
+        assert_eq!(
+            android_controls(&android(None), true),
+            [
+                Control::Rotate,
+                Control::Home,
+                Control::Back,
+                Control::ToggleAppearance,
+                Control::TextSmaller,
+                Control::TextBigger,
+                Control::Screenshot
+            ]
+        );
+        // Without: only what goes through the emulator's gRPC.
+        assert_eq!(
+            android_controls(&android(None), false),
+            [Control::Rotate, Control::Home, Control::Back, Control::Screenshot]
+        );
+        // No picture (starting, or failed), or not an emulator: none.
+        assert!(android_controls(&android(Some("x")), true).is_empty());
+        assert!(android_controls(&live(), true).is_empty());
+        assert!(android_controls(&DeviceView::NoneRunning, true).is_empty());
+        // And a simulator's list never offers Back, nor anything for an
+        // emulator.
+        assert!(!available_controls(&live(), true).contains(&Control::Back));
+        assert!(available_controls(&android(None), true).is_empty());
     }
 
     #[test]

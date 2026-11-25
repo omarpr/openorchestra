@@ -1,11 +1,14 @@
-//! The thread that owns the Device tab's [`ScreenStream`] (macOS only).
+//! The thread that owns the Device tab's stream (macOS only): a
+//! simulator's [`ScreenStream`] or an emulator's [`AndroidStream`].
 //!
 //! `ScreenStream::start` blocks (`xcode-select`, then CoreSimulator's XPC)
-//! and the stream isn't `Send`, so neither belongs on the UI thread. One
-//! named thread per window starts and drops streams on request and reports
-//! back with the generation it was asked for; frames go from the stream's
-//! callback queue straight into a [`FrameSlot`], with one wake per burst,
-//! already turned upright for the device's orientation.
+//! and the stream isn't `Send`, so neither belongs on the UI thread; nor
+//! does connecting to an emulator, which this thread does on the stream's
+//! own tokio runtime before a thread of the stream's pumps its frames. One
+//! named thread per window starts and drops streams on request (one at a
+//! time) and reports back with the generation it was asked for; frames go
+//! from the stream's callback straight into a [`FrameSlot`], with one wake
+//! per burst, already upright (an emulator sends them so).
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -14,9 +17,10 @@ use futures::channel::mpsc::UnboundedSender;
 use objc2_core_foundation::CFRetained;
 use objc2_io_surface::IOSurfaceRef;
 
+use super::android::stream::{AndroidStream, StreamEvent, native_long_side, request_box};
 use super::convert::{PixelConverter, SendPixelBuffer};
 use super::sim_display::{ScreenEvent, ScreenStream};
-use super::{FrameSlot, Quarter, StreamError, quarter_for};
+use super::{AndroidRunning, FrameSlot, Quarter, StreamError, quarter_for};
 
 /// Where a stream's frames land, each with the turn that made it upright
 /// (the frame around it turns too); the UI takes from it on a
@@ -33,13 +37,57 @@ pub(crate) enum StreamMsg {
     Gone(u64),
 }
 
+/// What to stream.
+enum Target {
+    Simulator(String),
+    /// An emulator, in a square box of `side` device pixels (0: its
+    /// screen's own size).
+    Emulator { dev: AndroidRunning, side: u32 },
+}
+
 enum Request {
     Start {
         generation: u64,
-        udid: String,
+        target: Target,
         frames: Frames,
     },
+    /// Ask the emulator streaming under `generation` for frames of a new
+    /// size: the same generation and slot, so the picture stays until the
+    /// new size's first frame replaces it.
+    Resize { generation: u64, side: u32 },
     Stop,
+}
+
+/// What the thread runs.
+enum Current {
+    Simulator { _stream: ScreenStream },
+    Emulator {
+        generation: u64,
+        dev: AndroidRunning,
+        /// The box asked for.
+        size: (u32, u32),
+        frames: Frames,
+        _stream: AndroidStream,
+    },
+}
+
+/// The newer of two queued requests. A start or stop replaces whatever
+/// came before; a resize goes into the queued start of its own emulator
+/// stream (or replaces an older resize), and is dropped after anything
+/// else, being for a stream that is going.
+fn coalesce(earlier: Request, later: Request) -> Request {
+    let Request::Resize { generation, side } = later else {
+        return later;
+    };
+    match earlier {
+        Request::Start { generation: g, target: Target::Emulator { dev, .. }, frames }
+            if g == generation =>
+        {
+            Request::Start { generation, target: Target::Emulator { dev, side }, frames }
+        }
+        Request::Resize { .. } => later,
+        other => other,
+    }
 }
 
 /// The handle the UI keeps. Dropping it ends the thread, which drops the
@@ -60,9 +108,31 @@ impl StreamWorker {
     pub(crate) fn start(&self, generation: u64, udid: String, frames: Frames) {
         let _ = self.requests.send(Request::Start {
             generation,
-            udid,
+            target: Target::Simulator(udid),
             frames,
         });
+    }
+
+    /// Streams the emulator `dev`, asking for a square box of `side`
+    /// device pixels (0: its screen's own size). It reports `Started` with
+    /// its first frame.
+    pub(crate) fn start_android(
+        &self,
+        generation: u64,
+        dev: AndroidRunning,
+        side: u32,
+        frames: Frames,
+    ) {
+        let _ = self.requests.send(Request::Start {
+            generation,
+            target: Target::Emulator { dev, side },
+            frames,
+        });
+    }
+
+    /// Asks the emulator streaming under `generation` for a box of `side`.
+    pub(crate) fn resize(&self, generation: u64, side: u32) {
+        let _ = self.requests.send(Request::Resize { generation, side });
     }
 
     pub(crate) fn stop(&self) {
@@ -71,35 +141,109 @@ impl StreamWorker {
 }
 
 fn run(rx: Receiver<Request>, to_ui: UnboundedSender<StreamMsg>) {
-    let mut current: Option<ScreenStream> = None;
+    let mut current: Option<Current> = None;
     while let Ok(mut request) = rx.recv() {
         // Only the newest request matters: each start replaces the stream
         // and a stop ends it, so starts queued behind a later one are skipped.
         while let Ok(newer) = rx.try_recv() {
-            request = newer;
+            request = coalesce(request, newer);
         }
-        // Drop the old stream before starting the next: one registration at
-        // a time.
-        current = None;
-        let Request::Start {
-            generation,
-            udid,
-            frames,
-        } = request
-        else {
-            continue;
-        };
-        match start(generation, &udid, frames, to_ui.clone()) {
-            Ok(stream) => {
-                current = Some(stream);
-                let _ = to_ui.unbounded_send(StreamMsg::Started(generation));
+        let (generation, target, frames) = match request {
+            Request::Stop => {
+                current = None;
+                continue;
             }
+            Request::Start { generation, target, frames } => {
+                // Drop the old stream before starting the next: one
+                // registration (or call) at a time.
+                current = None;
+                (generation, target, frames)
+            }
+            Request::Resize { generation, side } => {
+                let Some(Current::Emulator { generation: g, dev, size, frames, .. }) = &current
+                else {
+                    continue;
+                };
+                if *g != generation || emulator_box(dev, side) == *size {
+                    continue;
+                }
+                let (dev, frames) = (dev.clone(), frames.clone());
+                current = None;
+                (generation, Target::Emulator { dev, side }, frames)
+            }
+        };
+        let started = match target {
+            Target::Simulator(udid) => start(generation, &udid, frames, to_ui.clone()).map(|s| {
+                let _ = to_ui.unbounded_send(StreamMsg::Started(generation));
+                Current::Simulator { _stream: s }
+            }),
+            Target::Emulator { dev, side } => {
+                let size = emulator_box(&dev, side);
+                start_android(generation, &dev, size, frames.clone(), to_ui.clone()).map(|s| {
+                    Current::Emulator { generation, dev, size, frames, _stream: s }
+                })
+            }
+        };
+        match started {
+            Ok(stream) => current = Some(stream),
             Err(e) => {
                 let _ = to_ui.unbounded_send(StreamMsg::Failed(generation, e));
             }
         }
     }
     drop(current);
+}
+
+/// The box to ask `dev` for: a square of `side`, no bigger than its
+/// screen (from the AVD's `config.ini`, when it can be read).
+fn emulator_box(dev: &AndroidRunning, side: u32) -> (u32, u32) {
+    let native = std::fs::read_to_string(dev.avd_dir.join("config.ini"))
+        .ok()
+        .and_then(|config| native_long_side(&config));
+    request_box(side, native)
+}
+
+/// Streams the emulator `dev` into `frames`, converting each frame to 420f
+/// on the stream's thread. `Started` goes with the first frame: a call
+/// that opens and ends without one counts as a failure, so it can't reset
+/// the tab's backoff. An end is `Gone` when the emulator exited, else a
+/// failure with its reason.
+fn start_android(
+    generation: u64,
+    dev: &AndroidRunning,
+    size: (u32, u32),
+    frames: Frames,
+    to_ui: UnboundedSender<StreamMsg>,
+) -> Result<AndroidStream, StreamError> {
+    let mut converter = PixelConverter::new().map_err(StreamError::Failed)?;
+    let (mut first, mut logged_error) = (true, false);
+    AndroidStream::start(dev, size, move |event| match event {
+        StreamEvent::Frame { width, height, rgba, turn } => {
+            match converter.convert_rgba(rgba, width as usize, height as usize) {
+                Ok(buffer) => {
+                    // Drawn as it comes; the turn maps touches back.
+                    if frames.put((SendPixelBuffer(buffer), turn)) {
+                        let _ = to_ui.unbounded_send(StreamMsg::Frame(generation));
+                    }
+                    if std::mem::take(&mut first) {
+                        let _ = to_ui.unbounded_send(StreamMsg::Started(generation));
+                    }
+                }
+                Err(e) if !logged_error => {
+                    logged_error = true;
+                    log::warn!("device: converting an emulator frame failed: {e}");
+                }
+                Err(_) => {}
+            }
+        }
+        StreamEvent::Ended { gone: true, why } => {
+            log::debug!("device: the emulator shut down ({why})");
+            let _ = to_ui.unbounded_send(StreamMsg::Gone(generation));
+        }
+        StreamEvent::Ended { gone: false, why } => {
+            let _ = to_ui.unbounded_send(StreamMsg::Failed(generation, StreamError::Failed(why)));
+        }
+    })
 }
 
 /// The surface the simulator draws into, kept between its `Surface` event
@@ -184,6 +328,176 @@ mod tests {
 
     use super::*;
     use crate::devices::controls::{Control, ControlOutcome, rotate, run_public};
+
+    fn emulator(side: u32) -> Target {
+        let dev = AndroidRunning {
+            pid: 7,
+            avd_id: "P".into(),
+            name: "P".into(),
+            grpc_port: 8554,
+            token: None,
+            serial_port: 5554,
+            avd_dir: "/nowhere".into(),
+        };
+        Target::Emulator { dev, side }
+    }
+
+    fn shape(r: &Request) -> (char, u64, u32) {
+        match r {
+            Request::Start { generation, target: Target::Emulator { side, .. }, .. } => {
+                ('E', *generation, *side)
+            }
+            Request::Start { generation, target: Target::Simulator(_), .. } => ('S', *generation, 0),
+            Request::Resize { generation, side } => ('R', *generation, *side),
+            Request::Stop => ('-', 0, 0),
+        }
+    }
+
+    /// A resize queued behind its stream's start goes into the start
+    /// (never losing the start), a later start or stop wins, and a resize
+    /// for another stream is dropped.
+    #[test]
+    fn a_resize_goes_into_the_start_queued_before_it() {
+        let frames = || -> Frames { Arc::new(FrameSlot::new()) };
+        let start = |g, target| Request::Start { generation: g, target, frames: frames() };
+        let resize = |g, side| Request::Resize { generation: g, side };
+        let cases = [
+            (start(2, emulator(800)), resize(2, 900), ('E', 2, 900)),
+            (start(2, emulator(800)), resize(1, 900), ('E', 2, 800)),
+            (start(2, Target::Simulator("u".into())), resize(2, 900), ('S', 2, 0)),
+            (resize(2, 800), resize(2, 900), ('R', 2, 900)),
+            (Request::Stop, resize(2, 900), ('-', 0, 0)),
+            (resize(2, 800), Request::Stop, ('-', 0, 0)),
+            (resize(2, 800), start(3, emulator(700)), ('E', 3, 700)),
+        ];
+        for (earlier, later, want) in cases {
+            assert_eq!(shape(&coalesce(earlier, later)), want);
+        }
+    }
+
+    /// Manual, on an AVD booted for the purpose (never anyone else's): start
+    /// `OO_TEST_AVD=<avd> cargo test android_worker_streams -- --ignored
+    /// --nocapture`, then boot the AVD. Streams it through the worker from
+    /// the moment it is listed (as Boot does), then, once booted: a resize
+    /// in the same generation, a turn (frames change shape in one stream)
+    /// and a stop.
+    #[test]
+    #[ignore]
+    fn android_worker_streams_resizes_and_stops() {
+        use objc2_core_video::{CVPixelBufferGetHeight, CVPixelBufferGetWidth};
+        use std::time::Instant;
+        let avd = std::env::var("OO_TEST_AVD").expect("set OO_TEST_AVD");
+        let adb = format!("{}/Library/Android/sdk/platform-tools/adb", std::env::var("HOME").unwrap());
+        let t0 = Instant::now();
+        let dev = loop {
+            if let Some(d) = crate::devices::android::discovery::running_emulators()
+                .into_iter()
+                .find(|r| r.avd_id == avd)
+            {
+                break d;
+            }
+            assert!(t0.elapsed() < Duration::from_secs(120), "never listed");
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        let listed = Instant::now();
+        eprintln!("listed after {:?}", t0.elapsed());
+        let (to_ui, mut from_worker) = futures::channel::mpsc::unbounded();
+        let worker = StreamWorker::spawn(to_ui).unwrap();
+        let frames: Frames = Arc::new(FrameSlot::new());
+        let size_of = |frames: &Frames| {
+            frames.take().map(|(b, _)| (CVPixelBufferGetWidth(&b.0), CVPixelBufferGetHeight(&b.0)))
+        };
+        // As the tab does: a failure is tried again a few seconds later.
+        let mut generation = 1;
+        worker.start_android(generation, dev.clone(), 1600, frames.clone());
+        let mut got_frame = None;
+        while listed.elapsed() < Duration::from_secs(120) {
+            match from_worker.try_recv() {
+                Ok(StreamMsg::Frame(g)) if g == generation => {
+                    let size = size_of(&frames);
+                    eprintln!("{:?} frame {size:?}", listed.elapsed());
+                    got_frame = got_frame.or(size);
+                }
+                Ok(StreamMsg::Started(g)) if g == generation => {
+                    eprintln!("{:?} started", listed.elapsed());
+                    assert!(got_frame.is_some(), "Started before a frame");
+                    break;
+                }
+                Ok(StreamMsg::Failed(g, e)) if g == generation => {
+                    eprintln!("{:?} failed: {e:?}", listed.elapsed());
+                    std::thread::sleep(Duration::from_secs(3));
+                    generation += 1;
+                    worker.start_android(generation, dev.clone(), 1600, frames.clone());
+                }
+                Ok(StreamMsg::Gone(g)) => panic!("gone ({g})"),
+                Ok(_) => {}
+                Err(futures::channel::mpsc::TryRecvError::Closed) => panic!("worker ended"),
+                Err(_) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+        let first = got_frame.expect("a frame");
+        assert!(first.0.max(first.1) <= 1600, "{first:?}");
+        // Wait for the boot to finish before turning it.
+        let booted = || {
+            std::process::Command::new(&adb)
+                .args(["-s", &format!("emulator-{}", dev.serial_port), "shell", "getprop", "sys.boot_completed"])
+                .output()
+                .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "1")
+        };
+        while !booted() {
+            assert!(listed.elapsed() < Duration::from_secs(180), "never booted");
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        eprintln!("booted after {:?} listed", listed.elapsed());
+        std::thread::sleep(Duration::from_secs(3));
+        // Drain, then wait for the frame that matches.
+        let wait_for = |rx: &mut futures::channel::mpsc::UnboundedReceiver<StreamMsg>,
+                        want: &dyn Fn((usize, usize)) -> bool,
+                        what: &str| {
+            let at = Instant::now();
+            while at.elapsed() < Duration::from_secs(10) {
+                match rx.try_recv() {
+                    Ok(StreamMsg::Frame(g)) => {
+                        assert_eq!(g, generation, "a frame of another generation");
+                        if let Some(size) = size_of(&frames) {
+                            eprintln!("{what}: frame {size:?} after {:?}", at.elapsed());
+                            if want(size) {
+                                return size;
+                            }
+                        }
+                    }
+                    Ok(StreamMsg::Failed(_, e)) => panic!("{what}: failed {e:?}"),
+                    Ok(StreamMsg::Gone(_)) => panic!("{what}: gone"),
+                    Ok(StreamMsg::Started(g)) => assert_eq!(g, generation),
+                    Err(futures::channel::mpsc::TryRecvError::Closed) => panic!("worker ended"),
+                    Err(_) => std::thread::sleep(Duration::from_millis(20)),
+                }
+            }
+            panic!("{what}: no such frame in 10 s");
+        };
+        while from_worker.try_recv().is_ok() {}
+        let _ = frames.take();
+        worker.resize(generation, 800);
+        let small = wait_for(&mut from_worker, &|(w, h)| w.max(h) <= 800, "resize to 800");
+        assert_eq!(small.0.max(small.1), 800, "{small:?}");
+        let serial = format!("emulator-{}", dev.serial_port);
+        let turned = std::process::Command::new(&adb).args(["-s", &serial, "emu", "rotate"]).status();
+        assert!(turned.unwrap().success());
+        wait_for(&mut from_worker, &|(w, h)| w > h, "rotate");
+        worker.stop();
+        std::thread::sleep(Duration::from_millis(500));
+        while from_worker.try_recv().is_ok() {}
+        let _ = frames.take();
+        let at = Instant::now();
+        let _ = std::process::Command::new(&adb).args(["-s", &serial, "emu", "rotate"]).status();
+        while at.elapsed() < Duration::from_secs(2) {
+            if let Ok(StreamMsg::Frame(_)) = from_worker.try_recv() {
+                panic!("a frame after the stop");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        eprintln!("stopped: silent for 2 s across a turn");
+    }
 
     /// A coarse grid of luma samples, row by row.
     const GRID: usize = 32;
