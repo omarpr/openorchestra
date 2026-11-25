@@ -79,6 +79,13 @@ pub(crate) fn control_target(
     bar_target(tab, boot_offer, android_picture).map(|d| d.udid.clone())
 }
 
+fn same_shutdown_target(captured: &DeviceInfo, current: &DeviceInfo) -> bool {
+    captured.udid == current.udid
+        && captured.platform == current.platform
+        && (captured.platform == Platform::Ios
+            || captured.android.as_ref().is_some_and(|run| current.android.as_ref() == Some(run)))
+}
+
 /// Whether booting a `platform` device holds the bar (one control at a
 /// time) for the whole boot.
 pub(crate) fn boot_holds_the_bar(platform: Platform) -> bool {
@@ -329,12 +336,6 @@ impl HarnessWorkspace {
         .detach();
     }
 
-    /// The running emulator `udid`, as the newest list found it.
-    #[cfg(target_os = "macos")]
-    fn android_running(&self, udid: &str) -> Option<crate::devices::AndroidRunning> {
-        self.device_tab.booted.iter().find(|d| d.udid == udid).and_then(|d| d.android.clone())
-    }
-
     /// A control on `udid` finished: copy a screenshot, remember a new
     /// appearance, and leave the note it calls for.
     fn device_control_done(
@@ -478,14 +479,14 @@ impl HarnessWorkspace {
         self.device_shutdown_confirm = None;
         cx.notify();
         if self.device_control_in_flight
-            || self.device_bar_target(cx).map(|d| d.udid.as_str()) != Some(device.udid.as_str())
+            || !self.device_bar_target(cx).is_some_and(|current| same_shutdown_target(device, current))
         {
             return;
         }
         if device.platform == Platform::Android {
             // Emulators are only listed on macOS.
             #[cfg(target_os = "macos")]
-            if let Some(dev) = self.android_running(&device.udid) {
+            if let Some(dev) = device.android.clone() {
                 self.run_device_power(cx, move || crate::devices::android::controls::shutdown(&dev));
             }
             return;
@@ -748,6 +749,26 @@ mod tests {
         tab.view = DeviceView::Android { udid: "android:p".into(), why: Some("x".into()), starting: true };
         assert_eq!(watched_device(&tab), None);
         assert_eq!(control_target(&tab, false, false, false), None);
+    }
+
+    #[test]
+    fn a_shutdown_confirmation_cannot_follow_an_avd_restart() {
+        use super::same_shutdown_target;
+        let captured = DeviceInfo {
+            udid: "android:p".into(),
+            platform: Platform::Android,
+            android: Some(crate::devices::AndroidRunning {
+                pid: 10, avd_id: "p".into(), name: "p".into(), grpc_port: 8554,
+                token: None, serial_port: 5554, avd_dir: "/p".into(),
+            }),
+            ..Default::default()
+        };
+        let mut replacement = captured.clone();
+        replacement.android.as_mut().unwrap().pid += 1;
+        assert!(same_shutdown_target(&captured, &captured));
+        assert!(!same_shutdown_target(&captured, &replacement));
+        assert!(same_shutdown_target(&dev("a"), &dev("a")));
+        assert!(!same_shutdown_target(&dev("a"), &dev("b")));
     }
 
     #[test]

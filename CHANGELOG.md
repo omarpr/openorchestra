@@ -25,6 +25,7 @@ Unreleased is empty.
 
 ### Fixed
 
+- An Android shutdown confirmation expires when the emulator restarts.
 - The Device tab replaces the picture and its controls together when an AVD restarts.
 - The Device tab tracks simultaneous Android boots independently.
 - Android boot offers stay busy until the picker sees the emulator running.
