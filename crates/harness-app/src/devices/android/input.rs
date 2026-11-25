@@ -236,8 +236,8 @@ fn run(
                 batch.push(more);
             }
             for cmd in coalesce(std::mem::take(&mut batch)) {
-                send(&mut client, cmd, size, token).await?;
-                if !std::mem::replace(&mut worked, true) {
+                let delivered = send(&mut client, cmd, size, token).await?;
+                if delivered && !std::mem::replace(&mut worked, true) {
                     let _ = events.unbounded_send(HelperEvent::Worked(serial));
                 }
             }
@@ -251,7 +251,6 @@ fn run(
     })
 }
 
-/// Sends one command, each call bounded by [`CALL_TIMEOUT`].
 /// The screen touches are mapped onto: `config.ini`'s `hw.lcd` size, or
 /// the skin's display when the config leaves the size to the skin.
 fn touch_size(dev: &AndroidRunning) -> Option<(u32, u32)> {
@@ -266,15 +265,17 @@ pub(crate) fn resolved_touch_size(config: Option<&str>, skin: Option<(u32, u32)>
     config.and_then(native_size).or(skin)
 }
 
+/// Sends one command, each call bounded by [`CALL_TIMEOUT`]. Returns false
+/// when a touch cannot be mapped and no input was sent.
 async fn send(
     client: &mut Client,
     cmd: Cmd,
     size: Option<(u32, u32)>,
     token: Option<&str>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     match cmd {
         Cmd::Touch(phase, x, y) => {
-            let size = size.ok_or_else(|| "The emulator's screen size isn't known".to_string())?;
+            let Some(size) = size else { return Ok(false) };
             let event = touch_event(phase, device_point(x, y, size));
             within(client.send_touch(authorized(event, token)?)).await
         }
@@ -302,7 +303,8 @@ async fn send(
             tokio::time::sleep(PASTE_SETTLE).await;
             Ok(())
         }
-    }
+    }?;
+    Ok(true)
 }
 
 /// A call's outcome within [`CALL_TIMEOUT`], as one line.
@@ -332,6 +334,23 @@ mod tests {
         );
         assert_eq!(resolved_touch_size(Some("skin.path = pixel_9_pro\n"), Some((1280, 2856))), Some((1280, 2856)));
         assert_eq!(resolved_touch_size(None, None), None);
+    }
+
+    #[test]
+    fn an_unmappable_touch_does_not_fail_the_input_worker() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+            let mut client = Client::new(channel);
+            // An invalid header would fail any RPC. All phases are dropped
+            // before touching the transport, with no worker failure.
+            for phase in [TouchPhase::Down, TouchPhase::Move, TouchPhase::Up] {
+                assert_eq!(
+                    send(&mut client, Cmd::Touch(phase, 0.5, 0.5), None, Some("\n")).await,
+                    Ok(false),
+                );
+            }
+        });
     }
 
     #[test]
