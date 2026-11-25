@@ -1,6 +1,9 @@
-//! The Device tab's pure model: simulator listing, device choice and
-//! the single-frame hand-off between the capture thread and the UI.
+//! The Device tab's pure model: simulator (and Android emulator) listing,
+//! device choice and the single-frame hand-off between the capture thread
+//! and the UI.
 
+#[cfg(target_os = "macos")]
+pub(crate) mod android;
 pub(crate) mod chrome;
 pub(crate) mod controls;
 #[cfg(target_os = "macos")]
@@ -15,15 +18,103 @@ pub(crate) mod worker;
 
 use std::sync::Mutex;
 
-/// A simulator.
+/// What kind of device a [`DeviceInfo`] is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Platform {
+    #[default]
+    Ios,
+    Android,
+}
+
+/// How Android device ids start: `"android:<avd.id>"`, so an AVD's id
+/// can't collide with an iOS UDID in the prefs, the picker or the tab.
+const ANDROID_PREFIX: &str = "android:";
+
+impl Platform {
+    /// The platform a device id belongs to.
+    pub(crate) fn of_id(id: &str) -> Platform {
+        if id.starts_with(ANDROID_PREFIX) {
+            Platform::Android
+        } else {
+            Platform::Ios
+        }
+    }
+}
+
+/// The device id of the AVD `avd_id`.
+#[cfg(target_os = "macos")]
+pub(crate) fn android_device_id(avd_id: &str) -> String {
+    format!("{ANDROID_PREFIX}{avd_id}")
+}
+
+/// The AVD id inside an Android device id; None for an iOS one.
+#[cfg(target_os = "macos")]
+pub(crate) fn avd_id_of(device_id: &str) -> Option<&str> {
+    device_id.strip_prefix(ANDROID_PREFIX)
+}
+
+/// The Android groups alone (`devices::android`).
+#[cfg(target_os = "macos")]
+pub(crate) use android::list_android;
+
+/// Android devices are only found on macOS: none.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn list_android() -> AndroidInventory {
+    AndroidInventory { running: Vec::new(), configured: Ok(Vec::new()) }
+}
+
+pub(crate) struct AndroidInventory {
+    pub running: Vec<DeviceInfo>,
+    pub configured: Result<Vec<DeviceInfo>, String>,
+}
+
+/// Whether the Android SDK has adb, which an emulator's appearance and
+/// text size controls run. Checks the disk: call it off the main thread.
+#[cfg(target_os = "macos")]
+pub(crate) fn adb_available() -> bool {
+    android::controls::adb().is_some()
+}
+
+/// No emulators elsewhere than macOS, so no adb either.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn adb_available() -> bool {
+    false
+}
+
+/// A running Android emulator, as its discovery file
+/// (`~/Library/Caches/TemporaryItems/avd/running/pid_<pid>.ini`) lists it.
+// Only found (made) on macOS, in `devices::android`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AndroidRunning {
+    /// The emulator's (qemu's) pid, from the file name.
+    pub pid: u32,
+    /// `avd.id`: "Pixel_9_Pro_API_35".
+    pub avd_id: String,
+    /// `avd.name`: "Pixel 9 Pro API 35".
+    pub name: String,
+    pub grpc_port: u16,
+    /// The gRPC bearer token, when the emulator wrote one.
+    pub token: Option<String>,
+    /// The console port (5554), which also names its adb serial.
+    pub serial_port: u16,
+    pub avd_dir: std::path::PathBuf,
+}
+
+/// A simulator or an Android emulator (running, or a stopped AVD).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct DeviceInfo {
+    /// A simulator's UDID, or `"android:<avd.id>"`.
     pub udid: String,
     pub name: String,
-    /// "iOS 27.2"
+    /// "iOS 27.2", or "Android".
     pub os: String,
-    /// "iPhone-18-Pro"
+    /// "iPhone-18-Pro"; empty for Android.
     pub device_type: String,
+    pub platform: Platform,
+    /// A running emulator's discovery entry; None for a stopped AVD and
+    /// for iOS.
+    pub android: Option<AndroidRunning>,
 }
 
 /// Why a device stream could not start or kept going.
@@ -35,6 +126,9 @@ pub(crate) enum StreamError {
     Unsupported(&'static str),
     DeviceNotFound,
     Failed(String),
+    /// An emulator listed moments ago isn't answering yet: it is still
+    /// booting, which is no failure.
+    Starting(String),
 }
 
 /// The device to watch: the user's pick if it is booted, else the one being
@@ -126,6 +220,7 @@ mod tests {
             name: udid.into(),
             os: "iOS 27.2".into(),
             device_type: "iPhone-18-Pro".into(),
+            ..Default::default()
         }
     }
 
@@ -138,6 +233,7 @@ mod tests {
                 name: "iPhone 18 Pro".into(),
                 os: "iOS 27.2".into(),
                 device_type: "iPhone-18-Pro".into(),
+                ..Default::default()
             }]
         );
     }
@@ -155,7 +251,7 @@ mod tests {
 
     #[test]
     fn parses_booted_and_shut_down_groups() {
-        let DeviceList { booted, shut_down } = parse_devices(ALL).unwrap();
+        let DeviceList { booted, shut_down, .. } = parse_devices(ALL).unwrap();
         // Each group sorted by name, then OS.
         assert_eq!(names(&booted), [("iPhone 18 Pro", "iOS 27.0"), ("iPhone 18 Pro", "iOS 27.2")]);
         assert_eq!(names(&shut_down), [("iPad Air 13-inch (M4)", "iOS 27.0"), ("iPhone 18", "iOS 27.2")]);

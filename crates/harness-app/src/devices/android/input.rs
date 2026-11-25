@@ -1,0 +1,489 @@
+//! Input to the Android emulator the Device tab shows: touches, keys and
+//! pastes, through its gRPC `sendTouch`, `sendKey` and `setClipboard` (see
+//! "Spike findings" 5 and 6 in the Android Device tab design).
+//!
+//! - **Touches** are device pixels of the screen in its natural
+//!   orientation (`hw.lcd.width` × `hw.lcd.height`), whichever way it is
+//!   turned: the UI maps a click back through the turn the frame came with
+//!   to 0…1 ratios of that screen, and they are scaled here. A finger is
+//!   down with pressure 1024 (the guest's range) and lifts with 0.
+//! - **Keys** go one keystroke per call, as Chromium-style USB codes
+//!   (`0x07 << 16 | usage`): the emulator's `text` drops non-ASCII and
+//!   silently drops a whole call over its budget, so it is never used.
+//! - **A paste** (⌘V) sets the emulator's clipboard, then presses Ctrl+V.
+//! - Scrolling is a synthesised swipe, as on iOS: `injectWheel` does
+//!   nothing on a phone AVD.
+//!
+//! One [`AndroidInput`] per watched emulator. The UI only queues; a thread
+//! of its own connects on the first input (on a current-thread tokio
+//! runtime), then sends in order, each run of moves cut to its last. The
+//! first call that fails ends it, reported as a [`HelperEvent::Failed`]
+//! like the simulator helper's, so the tab's retry and keyboard rules apply
+//! unchanged. Dropping the handle lets it send what is already queued (a
+//! lift, the last keys) and end.
+
+use std::io;
+use std::net::{Ipv4Addr, SocketAddr};
+use std::time::Duration;
+
+use futures::channel::mpsc::UnboundedSender;
+use hyper_util::rt::TokioIo;
+use tokio::net::TcpStream;
+use tonic::transport::Endpoint;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender as CmdSender};
+
+use super::grpc::keyboard_event::{KeyCodeType, KeyEventType};
+use super::grpc::{ClipData, KeyboardEvent, Touch, TouchEvent};
+use super::stream::{CONNECT_TIMEOUT, Client, authorized, native_size, status_text, without_token};
+use crate::devices::AndroidRunning;
+use crate::devices::input::{DeviceInput, HelperEvent, MAX_PASTE, TouchPhase};
+
+/// A finger's pressure while down: the top of the guest's 0–1024 range.
+pub(crate) const PRESSURE: i32 = 1024;
+/// The one finger the mouse and the scroll drive.
+pub(crate) const FINGER: i32 = 0;
+/// The USB HID keyboard page, as the emulator wants it on each usage.
+pub(crate) const USB_KEYBOARD: u32 = 0x07 << 16;
+/// USB HID usages (keyboard page).
+const LEFT_CONTROL: u16 = 0xE0;
+const KEY_V: u16 = 0x19;
+/// The key names that press Android's Home and Back buttons.
+pub(crate) const HOME_KEY: &str = "GoHome";
+pub(crate) const BACK_KEY: &str = "GoBack";
+/// How long one input call may take before the emulator counts as not
+/// answering.
+const CALL_TIMEOUT: Duration = Duration::from_secs(3);
+/// The guest's clipboard and its keys aren't kept in order with each
+/// other: a paste's Ctrl+V sent straight after its clipboard, or the next
+/// paste's clipboard sent straight after it, can paste the wrong text (seen
+/// live: three pastes back to back gave the first, then the last twice).
+/// So a paste waits this long after setting the clipboard, and again after
+/// its Ctrl+V before anything else goes.
+pub(crate) const PASTE_SETTLE: Duration = Duration::from_millis(250);
+
+/// A point given as 0…1 ratios of the natural screen, in the device pixels
+/// of a `(width, height)` screen; never off it.
+pub(crate) fn device_point(x: f64, y: f64, (width, height): (u32, u32)) -> (i32, i32) {
+    let pixel = |ratio: f64, side: u32| {
+        let ratio = if ratio.is_nan() { 0.5 } else { ratio.clamp(0.0, 1.0) };
+        let last = f64::from(side.max(1) - 1);
+        (ratio * f64::from(side)).round().min(last) as i32
+    };
+    (pixel(x, width), pixel(y, height))
+}
+
+/// The touch event for the finger at device pixel `at`: pressed while
+/// down or moving, released (pressure 0) when it lifts.
+pub(crate) fn touch_event(phase: TouchPhase, (x, y): (i32, i32)) -> TouchEvent {
+    let pressure = if phase == TouchPhase::Up { 0 } else { PRESSURE };
+    TouchEvent {
+        touches: vec![Touch { x, y, identifier: FINGER, pressure, ..Default::default() }],
+        display: 0,
+    }
+}
+
+/// A USB keyboard usage going down or up.
+pub(crate) fn usb_key(usage: u16, down: bool) -> KeyboardEvent {
+    let event_type = if down { KeyEventType::Keydown } else { KeyEventType::Keyup };
+    KeyboardEvent {
+        code_type: KeyCodeType::Usb as i32,
+        event_type: event_type as i32,
+        key_code: (USB_KEYBOARD | u32::from(usage)) as i32,
+        ..Default::default()
+    }
+}
+
+/// A press of the key named `name` (`HOME_KEY`, `BACK_KEY`).
+pub(crate) fn named_key(name: &str) -> KeyboardEvent {
+    KeyboardEvent {
+        event_type: KeyEventType::Keypress as i32,
+        key: name.to_string(),
+        ..Default::default()
+    }
+}
+
+/// What a paste of `text` sends: the clipboard, then Ctrl+V.
+pub(crate) fn paste_calls(text: &str) -> (ClipData, Vec<KeyboardEvent>) {
+    let keys = vec![
+        usb_key(LEFT_CONTROL, true),
+        usb_key(KEY_V, true),
+        usb_key(KEY_V, false),
+        usb_key(LEFT_CONTROL, false),
+    ];
+    (ClipData { text: text.to_string() }, keys)
+}
+
+/// What one paste puts on the clipboard: at most [`MAX_PASTE`] characters,
+/// as on a simulator.
+pub(crate) fn paste_text(text: &str) -> String {
+    text.chars().take(MAX_PASTE).collect()
+}
+
+/// Keys that let go of a paste, best effort, after any of its key calls
+/// failed. A timeout does not say the key never went down, so both are
+/// released whatever had already been sent. Each is sent on its own: one
+/// failing does not skip the other.
+pub(crate) fn paste_key_releases() -> [KeyboardEvent; 2] {
+    [usb_key(KEY_V, false), usb_key(LEFT_CONTROL, false)]
+}
+
+/// One thing to send.
+#[derive(Clone, Debug, PartialEq)]
+enum Cmd {
+    /// x and y are 0…1 ratios of the natural screen.
+    Touch(TouchPhase, f64, f64),
+    Key(u16, bool),
+    Paste(String),
+}
+
+impl Cmd {
+    fn is_move(&self) -> bool {
+        matches!(self, Cmd::Touch(TouchPhase::Move, ..))
+    }
+}
+
+/// Commands waiting to be sent, each run of moves cut to its last (as for
+/// the simulator helper, `input::coalesce`).
+fn coalesce(cmds: Vec<Cmd>) -> Vec<Cmd> {
+    let mut out: Vec<Cmd> = Vec::with_capacity(cmds.len());
+    for cmd in cmds {
+        if cmd.is_move() && out.last().is_some_and(Cmd::is_move) {
+            out.pop();
+        }
+        out.push(cmd);
+    }
+    out
+}
+
+/// Input to one running emulator.
+pub(crate) struct AndroidInput {
+    cmds: CmdSender<Cmd>,
+}
+
+impl AndroidInput {
+    /// Starts input to `dev` on a thread of its own; what becomes of it
+    /// arrives on `events`, tagged `serial`. Err only when the thread
+    /// can't start.
+    pub(crate) fn spawn(
+        dev: &AndroidRunning,
+        serial: u64,
+        events: UnboundedSender<HelperEvent>,
+    ) -> Result<AndroidInput, String> {
+        let (cmds, rx) = tokio::sync::mpsc::unbounded_channel();
+        let dev = dev.clone();
+        std::thread::Builder::new()
+            .name("oo-android-input".into())
+            .spawn(move || {
+                let token = dev.token.clone();
+                if let Err(why) = run(&dev, serial, rx, &events) {
+                    let why = without_token(&why, token.as_deref());
+                    log::info!("device: emulator input stopped: {why}");
+                    let _ = events.unbounded_send(HelperEvent::Failed(serial, why));
+                }
+            })
+            .map_err(|e| format!("starting the emulator input thread: {e}"))?;
+        Ok(AndroidInput { cmds })
+    }
+
+    fn send(&self, cmd: Cmd) {
+        let _ = self.cmds.send(cmd);
+    }
+}
+
+impl DeviceInput for AndroidInput {
+    fn touch(&self, phase: TouchPhase, x: f64, y: f64) {
+        self.send(Cmd::Touch(phase, x, y));
+    }
+
+    fn key(&self, usage: u16, down: bool) {
+        self.send(Cmd::Key(usage, down));
+    }
+
+    /// Through the emulator's clipboard, in one go: any text, up to
+    /// [`MAX_PASTE`] characters.
+    fn text(&self, text: &str) {
+        self.send(Cmd::Paste(paste_text(text)));
+    }
+}
+
+/// The input thread: connects on the first command, then sends each batch
+/// until the handle is dropped (and what it queued is sent) or a call
+/// fails. It waits on the runtime, which keeps the connection's own task
+/// running meanwhile.
+fn run(
+    dev: &AndroidRunning,
+    serial: u64,
+    mut cmds: UnboundedReceiver<Cmd>,
+    events: &UnboundedSender<HelperEvent>,
+) -> Result<(), String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("starting the input runtime: {e}"))?;
+    let token = dev.token.as_deref();
+    runtime.block_on(async {
+        // Nothing is connected until there is something to send.
+        let Some(first) = cmds.recv().await else {
+            return Ok(());
+        };
+        if !super::discovery::still_emulator(dev.pid) {
+            return Err("The emulator has shut down".to_string());
+        }
+        // Touch mapping needs the screen's size. A config.ini that leaves
+        // it to the skin, or omits it, must not stop keys and paste.
+        let size = touch_size(dev);
+        let mut client =
+            connect_input(dev.grpc_port, || super::discovery::is_same_run(dev)).await?;
+        let _ = events.unbounded_send(HelperEvent::Ready(serial));
+        let mut worked = false;
+        let mut batch = vec![first];
+        loop {
+            while let Ok(more) = cmds.try_recv() {
+                batch.push(more);
+            }
+            for cmd in coalesce(std::mem::take(&mut batch)) {
+                let delivered = send(&mut client, cmd, size, token).await?;
+                if delivered && !std::mem::replace(&mut worked, true) {
+                    let _ = events.unbounded_send(HelperEvent::Worked(serial));
+                }
+            }
+            // Between batches; None once the handle is gone and its queue
+            // sent.
+            match cmds.recv().await {
+                Some(next) => batch.push(next),
+                None => return Ok(()),
+            }
+        }
+    })
+}
+
+/// Verify the run after dialing and before exposing the transport to input.
+/// A broken connection must fail the sink so tonic cannot silently redial
+/// a port that may now belong to another emulator.
+async fn connect_input(port: u16, still_selected: impl FnOnce() -> bool) -> Result<Client, String> {
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let endpoint = Endpoint::from_shared(format!("http://{address}"))
+        .map_err(|e| e.to_string())?
+        .connect_timeout(CONNECT_TIMEOUT);
+    let mut address = Some(address);
+    let connector = tower::service_fn(move |_| {
+        let address = address.take();
+        async move {
+            let address = address.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotConnected, "The emulator input connection ended")
+            })?;
+            TcpStream::connect(address).await.map(TokioIo::new)
+        }
+    });
+    let channel = endpoint.connect_with_connector(connector).await
+        .map_err(|e| format!("Couldn't connect to the emulator: {e}"))?;
+    if !still_selected() {
+        return Err("The selected emulator run has ended".into());
+    }
+    Ok(Client::new(channel))
+}
+
+/// The screen touches are mapped onto: `config.ini`'s `hw.lcd` size, or
+/// the skin's display when the config leaves the size to the skin.
+fn touch_size(dev: &AndroidRunning) -> Option<(u32, u32)> {
+    let config = std::fs::read_to_string(dev.avd_dir.join("config.ini")).ok();
+    let skin = super::skin::skin_for(&dev.avd_dir)
+        .map(|skin| (skin.layout.display.w, skin.layout.display.h));
+    resolved_touch_size(config.as_deref(), skin)
+}
+
+/// `config`'s `hw.lcd` size when it has one, otherwise the skin's display.
+pub(crate) fn resolved_touch_size(config: Option<&str>, skin: Option<(u32, u32)>) -> Option<(u32, u32)> {
+    config.and_then(native_size).or(skin)
+}
+
+/// Sends one command, each call bounded by [`CALL_TIMEOUT`]. Returns false
+/// when a touch cannot be mapped and no input was sent.
+async fn send(
+    client: &mut Client,
+    cmd: Cmd,
+    size: Option<(u32, u32)>,
+    token: Option<&str>,
+) -> Result<bool, String> {
+    match cmd {
+        Cmd::Touch(phase, x, y) => {
+            let Some(size) = size else { return Ok(false) };
+            let event = touch_event(phase, device_point(x, y, size));
+            within(client.send_touch(authorized(event, token)?)).await
+        }
+        Cmd::Key(usage, down) => within(client.send_key(authorized(usb_key(usage, down), token)?)).await,
+        Cmd::Paste(text) => {
+            let (clip, keys) = paste_calls(&text);
+            within(client.set_clipboard(authorized(clip, token)?)).await?;
+            tokio::time::sleep(PASTE_SETTLE).await;
+            for key in keys {
+                let went = match authorized(key, token) {
+                    Ok(key) => within(client.send_key(key)).await,
+                    Err(e) => Err(e),
+                };
+                if let Err(why) = went {
+                    // Best effort: never leave Ctrl or V held. A timeout
+                    // may still have delivered the key that just failed.
+                    for up in paste_key_releases() {
+                        if let Ok(up) = authorized(up, token) {
+                            let _ = within(client.send_key(up)).await;
+                        }
+                    }
+                    return Err(why);
+                }
+            }
+            tokio::time::sleep(PASTE_SETTLE).await;
+            Ok(())
+        }
+    }?;
+    Ok(true)
+}
+
+/// A call's outcome within [`CALL_TIMEOUT`], as one line.
+async fn within<T>(
+    call: impl std::future::Future<Output = Result<tonic::Response<T>, tonic::Status>>,
+) -> Result<(), String> {
+    match tokio::time::timeout(CALL_TIMEOUT, call).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(status)) => Err(status_text(&status)),
+        Err(_) => Err(format!("The emulator didn't answer within {} s", CALL_TIMEOUT.as_secs())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_connection_to_a_replaced_emulator_is_rejected_before_input() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (client, accepted) = tokio::time::timeout(CONNECT_TIMEOUT, async {
+                futures::join!(connect_input(port, || false), listener.accept())
+            }).await.expect("connect to the replacement listener");
+            assert!(accepted.is_ok());
+            assert_eq!(client.err().as_deref(), Some("The selected emulator run has ended"));
+        });
+    }
+
+    #[test]
+    fn keys_do_not_need_a_touch_size() {
+        // config.ini with no lcd size: the skin's display is the touch
+        // map. Neither: there is no touch map, and that is not a reason
+        // to refuse keys (the worker keeps running; see `touch_size`).
+        assert_eq!(resolved_touch_size(Some("hw.lcd.width = 1080\n"), Some((100, 200))), Some((100, 200)));
+        assert_eq!(
+            resolved_touch_size(Some("hw.lcd.width = 1080\nhw.lcd.height = 2400\n"), Some((1, 1))),
+            Some((1080, 2400))
+        );
+        assert_eq!(resolved_touch_size(Some("skin.path = pixel_9_pro\n"), Some((1280, 2856))), Some((1280, 2856)));
+        assert_eq!(resolved_touch_size(None, None), None);
+    }
+
+    #[test]
+    fn an_unmappable_touch_does_not_fail_the_input_worker() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+            let mut client = Client::new(channel);
+            // An invalid header would fail any RPC. All phases are dropped
+            // before touching the transport, with no worker failure.
+            for phase in [TouchPhase::Down, TouchPhase::Move, TouchPhase::Up] {
+                assert_eq!(
+                    send(&mut client, Cmd::Touch(phase, 0.5, 0.5), None, Some("\n")).await,
+                    Ok(false),
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn a_touch_is_device_pixels_with_full_pressure_until_it_lifts() {
+        let size = (1080, 2400);
+        assert_eq!(device_point(0.0, 0.0, size), (0, 0));
+        assert_eq!(device_point(0.5, 0.5, size), (540, 1200));
+        // The far edge is the last pixel, and nothing goes off the screen.
+        assert_eq!(device_point(1.0, 1.0, size), (1079, 2399));
+        assert_eq!(device_point(-0.2, 1.7, size), (0, 2399));
+        assert_eq!(device_point(f64::NAN, 0.25, size), (540, 600));
+        for (phase, pressure) in [(TouchPhase::Down, PRESSURE), (TouchPhase::Move, PRESSURE), (TouchPhase::Up, 0)] {
+            let event = touch_event(phase, (300, 200));
+            assert_eq!(event.display, 0);
+            let [touch] = event.touches[..] else { panic!("{event:?}") };
+            assert_eq!((touch.x, touch.y, touch.identifier, touch.pressure), (300, 200, FINGER, pressure));
+        }
+    }
+
+    #[test]
+    fn keys_are_usb_codes_one_keystroke_a_call() {
+        let a = usb_key(0x04, true);
+        assert_eq!(a.code_type, KeyCodeType::Usb as i32);
+        assert_eq!(a.event_type, KeyEventType::Keydown as i32);
+        assert_eq!(a.key_code, 0x070004);
+        assert!(a.key.is_empty() && a.text.is_empty());
+        let shift_up = usb_key(0xE1, false);
+        assert_eq!((shift_up.event_type, shift_up.key_code), (KeyEventType::Keyup as i32, 0x0700E1));
+    }
+
+    #[test]
+    fn back_and_home_use_key_names() {
+        for (name, want) in [(HOME_KEY, "GoHome"), (BACK_KEY, "GoBack")] {
+            let key = named_key(name);
+            assert_eq!(key.key, want);
+            assert_eq!(key.event_type, KeyEventType::Keypress as i32);
+            assert_eq!(key.key_code, 0);
+            assert!(key.text.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_paste_is_the_clipboard_then_ctrl_v() {
+        let (clip, keys) = paste_calls("héllo, wörld");
+        assert_eq!(clip.text, "héllo, wörld");
+        let sent: Vec<(i32, i32)> = keys.iter().map(|k| (k.event_type, k.key_code)).collect();
+        let (down, up) = (KeyEventType::Keydown as i32, KeyEventType::Keyup as i32);
+        assert_eq!(sent, [(down, 0x0700E0), (down, 0x070019), (up, 0x070019), (up, 0x0700E0)]);
+        assert!(keys.iter().all(|k| k.code_type == KeyCodeType::Usb as i32 && k.text.is_empty()));
+    }
+
+    #[test]
+    fn a_failed_paste_lets_go_of_ctrl_and_v() {
+        // Whatever had been sent, including a first key whose delivery
+        // timed out: let go of V and of Ctrl, independently.
+        let ups = paste_key_releases();
+        let (up, ctrl) = (KeyEventType::Keyup as i32, 0x0700E0);
+        assert_eq!((ups[0].event_type, ups[0].key_code), (up, 0x070019));
+        assert_eq!((ups[1].event_type, ups[1].key_code), (up, ctrl));
+    }
+
+    #[test]
+    fn an_android_paste_is_capped_like_ios() {
+        assert_eq!(paste_text("héllo"), "héllo");
+        let long = "é".repeat(MAX_PASTE + 50);
+        assert_eq!(paste_text(&long).chars().count(), MAX_PASTE);
+    }
+
+    #[test]
+    fn moves_are_coalesced_and_everything_else_kept_in_order() {
+        use TouchPhase::*;
+        let t = |p, x| Cmd::Touch(p, x, 0.5);
+        let sent = coalesce(vec![
+            t(Down, 0.1),
+            t(Move, 0.2),
+            t(Move, 0.3),
+            t(Up, 0.3),
+            Cmd::Key(4, true),
+            t(Move, 0.4),
+            Cmd::Paste("x".into()),
+            t(Move, 0.5),
+            t(Move, 0.6),
+        ]);
+        assert_eq!(
+            sent,
+            [t(Down, 0.1), t(Move, 0.3), t(Up, 0.3), Cmd::Key(4, true), t(Move, 0.4), Cmd::Paste("x".into()), t(Move, 0.6)]
+        );
+    }
+}
+

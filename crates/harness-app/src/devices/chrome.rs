@@ -43,6 +43,13 @@
 //! with the frame off, the panel's colour with the same hole (it covers the
 //! picture's corners). Parsing and layout are all-platform; rendering
 //! (CoreGraphics) is macOS only.
+//!
+//! An Android emulator's frame comes from its AVD's skin instead
+//! (`devices::android::skin`, [`FrameArt::Skin`]): a background image round
+//! the screen and a foreground drawn over it, laid out in the skin's pixels
+//! as a chrome is in points, through the same layout, overlay and cache. Its
+//! screen's shape is a corner radius ([`ScreenMask::Rounded`]), which also
+//! rounds an AVD with no skin.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -112,16 +119,65 @@ pub(crate) struct NineSlice {
     pub left: String,
 }
 
-/// A device chrome: where its PDFs are, which they are, and its insets.
-// Read only by the macOS renderer.
+/// A device's frame art, and how far it reaches past the screen.
+// Read only by the macOS renderer; Android skins are only read on macOS.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct FrameArt {
-    pub dir: PathBuf,
-    pub pieces: NineSlice,
-    /// `images.composite`, the whole frame in one PDF, if the chrome has one.
-    pub composite: Option<String>,
-    pub sizing: Insets,
+pub(crate) enum FrameArt {
+    /// A simulator's DeviceKit chrome: where its PDFs are and which they
+    /// are. Its units are points.
+    DeviceKit {
+        dir: PathBuf,
+        pieces: NineSlice,
+        /// `images.composite`, the whole frame in one PDF, if the chrome has
+        /// one.
+        composite: Option<String>,
+        sizing: Insets,
+    },
+    /// An Android emulator's skin (`devices::android::skin`). Its units are
+    /// the skin's pixels, the display's own.
+    Skin {
+        /// The background image (`back.webp`), drawn at its own size.
+        back: PathBuf,
+        /// Where the background's top left is, from the frame's top left.
+        back_at: (f32, f32),
+        /// The foreground (`mask.webp`), the display's size: drawn over the
+        /// picture (the screen's corners, the camera's cutout), which shows
+        /// only where it is clear.
+        foreground: Option<PathBuf>,
+        /// The display's corner radius the skin gives. Without one the art
+        /// alone shapes the framed screen: most skins' foreground rounds
+        /// only the corners' last few pixels, and the older ones' screens
+        /// are square.
+        corner: Option<f32>,
+        /// The radius of the screen's corners as the frame shows them: the
+        /// larger of `corner` (0 without one) and the curve the foreground
+        /// leaves clear. What the focus ring follows with the frame on.
+        shown_corner: f32,
+        sizing: Insets,
+    },
+}
+
+impl FrameArt {
+    /// How far the frame reaches past the screen on each side.
+    pub(crate) fn sizing(&self) -> Insets {
+        match self {
+            FrameArt::DeviceKit { sizing, .. } | FrameArt::Skin { sizing, .. } => *sizing,
+        }
+    }
+}
+
+/// What cuts the screen's shape out of the overlay.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ScreenMask {
+    /// A `framebufferMask` PDF, opaque where the screen shows, stretched over
+    /// it.
+    Pdf(PathBuf),
+    /// A rectangle with corners of the spec's `screen_corner_pt` (square
+    /// without one): an emulator's screen.
+    // Made only for Android emulators, which are only found on macOS.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Rounded,
 }
 
 /// What the Device tab draws a device type with. A missing part leaves its
@@ -133,8 +189,8 @@ pub(crate) struct ChromeSpec {
     pub screen_pt: Option<(f32, f32)>,
     /// Its corner radius, in points (0 for a square screen).
     pub screen_corner_pt: Option<f32>,
-    /// The `framebufferMask` PDF.
-    pub mask: Option<PathBuf>,
+    /// The screen's shape: the `framebufferMask` PDF, or rounded corners.
+    pub mask: Option<ScreenMask>,
     /// Only with `screen_pt`: the frame is laid out around it.
     pub frame: Option<FrameArt>,
 }
@@ -142,7 +198,17 @@ pub(crate) struct ChromeSpec {
 impl ChromeSpec {
     /// The frame's layout, when there is a frame.
     pub(crate) fn geometry(&self) -> Option<FrameGeometry> {
-        Some(FrameGeometry { screen_pt: self.screen_pt?, sizing: self.frame.as_ref()?.sizing })
+        Some(FrameGeometry { screen_pt: self.screen_pt?, sizing: self.frame.as_ref()?.sizing() })
+    }
+
+    /// The corner radius the focus ring follows (`focus_ring`'s
+    /// `corner_pt`): with a skin's frame on (`framed`), the screen's corners
+    /// as its art shows them; otherwise the screen's own.
+    pub(crate) fn ring_corner(&self, framed: bool) -> Option<f32> {
+        match &self.frame {
+            Some(FrameArt::Skin { shown_corner, .. }) if framed => Some(*shown_corner),
+            _ => self.screen_corner_pt,
+        }
     }
 }
 
@@ -237,14 +303,15 @@ pub(crate) fn spec_from(
     let mask = profile
         .mask
         .map(|name| res.join(format!("{name}.pdf")))
-        .filter(|p| p.is_file());
+        .filter(|p| p.is_file())
+        .map(ScreenMask::Pdf);
     let frame = profile.chrome.filter(|_| screen_pt.is_some()).and_then(|id| {
         // "com.apple.dt.devicekit.chrome.phone11" -> "phone11.devicechrome".
         let short = id.rsplit('.').next()?;
         let dir = chrome_root.join(format!("{short}.devicechrome/Contents/Resources"));
         let json = std::fs::read_to_string(dir.join("chrome.json")).ok()?;
         let (pieces, sizing, composite) = parse_chrome_json(&json)?;
-        Some(FrameArt { dir, pieces, composite, sizing })
+        Some(FrameArt::DeviceKit { dir, pieces, composite, sizing })
     });
     Some(ChromeSpec { screen_pt, screen_corner_pt, mask, frame })
 }
@@ -447,13 +514,17 @@ pub(crate) mod render {
     use std::path::Path;
 
     use image::RgbaImage;
-    use objc2_core_foundation::{CFRetained, CFURL, CGPoint, CGRect, CGSize};
+    use objc2_core_foundation::{CFData, CFRetained, CFURL, CGPoint, CGRect, CGSize};
     use objc2_core_graphics::{
-        CGBitmapContextCreate, CGColorSpace, CGContext, CGImageAlphaInfo, CGImageByteOrderInfo,
+        CGBitmapContextCreate, CGBitmapInfo, CGColorRenderingIntent, CGColorSpace, CGContext,
+        CGDataProvider, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo, CGInterpolationQuality,
         CGPDFBox, CGPDFDocument, CGPDFPage,
     };
 
-    use super::{ChromeSpec, FrameArt, OverlayKey, PxRect, Quarter, Rect, hole_px, turned_size};
+    use super::{
+        ChromeSpec, FrameArt, NineSlice, OverlayKey, PxRect, Quarter, Rect, ScreenMask, hole_px,
+        turned_size,
+    };
 
     /// A page of a PDF, and its size in points. The document is kept with
     /// its page, which it owns.
@@ -592,9 +663,8 @@ pub(crate) mod render {
     /// as a line). Each edge is its cross-section repeated exactly between
     /// the corners, and the corners are drawn at their size. So no join
     /// can leave a gap or a doubled row.
-    fn draw_frame(canvas: &mut Canvas, art: &FrameArt, s: f32) -> Option<()> {
-        let piece = |name: &str| open(&art.dir.join(format!("{name}.pdf")));
-        let p = &art.pieces;
+    fn draw_frame(canvas: &mut Canvas, dir: &Path, p: &NineSlice, s: f32) -> Option<()> {
+        let piece = |name: &str| open(&dir.join(format!("{name}.pdf")));
         let (tl, t, tr, r, br, b, bl, l) = (
             piece(&p.top_left)?,
             piece(&p.top)?,
@@ -646,25 +716,15 @@ pub(crate) mod render {
         Some(())
     }
 
-    /// Cut `mask` (stretched over `hole`) out of `canvas`'s pixels: each is
-    /// kept by (1 − the mask's alpha). No mask cuts the whole rect.
-    fn cut(pixels: &mut [u8], width: usize, hole: PxRect, mask: Option<&Pdf>) -> Option<()> {
+    /// Cut the screen out of `pixels` (a `width` wide overlay) at `hole`:
+    /// each pixel there is kept by `keep` (one alpha a pixel of the hole,
+    /// row by row), or with no `keep` the whole rect goes.
+    fn cut(pixels: &mut [u8], width: usize, hole: PxRect, keep: Option<&[u8]>) {
         let (x0, y0, x1, y1) = (hole.x0 as usize, hole.y0 as usize, hole.x1 as usize, hole.y1 as usize);
-        let (hw, hh) = (x1 - x0, y1 - y0);
-        if hw == 0 || hh == 0 {
-            return Some(());
-        }
-        let shape = match mask {
-            Some(pdf) => {
-                let m = Canvas::new(hw, hh)?;
-                m.draw(pdf, Rect { x: 0.0, y: 0.0, w: hw as f32, h: hh as f32 });
-                Some(m.into_pixels())
-            }
-            None => None,
-        };
-        for y in 0..hh {
+        let hw = x1 - x0;
+        for y in 0..y1 - y0 {
             for x in 0..hw {
-                let keep = shape.as_ref().map_or(0, |m| 255 - u32::from(m[(y * hw + x) * 4 + 3]));
+                let keep = keep.and_then(|k| k.get(y * hw + x)).map_or(0, |&k| u32::from(k));
                 let at = ((y0 + y) * width + x0 + x) * 4;
                 let Some(px) = pixels.get_mut(at..at + 4) else {
                     continue;
@@ -675,7 +735,22 @@ pub(crate) mod render {
                 }
             }
         }
-        Some(())
+    }
+
+    /// How much of the overlay stays over each pixel of a `w` × `h` hole
+    /// for `mask`: none where the screen shows. A PDF mask is opaque where
+    /// the screen shows; rounded corners of `corner` pixels keep what is
+    /// outside them. None: nothing stays.
+    fn keep_for(mask: Option<&ScreenMask>, w: usize, h: usize, corner: f32) -> Option<Vec<u8>> {
+        match mask? {
+            ScreenMask::Pdf(path) => {
+                let pdf = open(path)?;
+                let m = Canvas::new(w, h)?;
+                m.draw(&pdf, Rect { x: 0.0, y: 0.0, w: w as f32, h: h as f32 });
+                Some(m.into_pixels().as_chunks::<4>().0.iter().map(|px| 255 - px[3]).collect())
+            }
+            ScreenMask::Rounded => Some(super::outside_corners(w, h, corner)),
+        }
     }
 
     /// Premultiplied to straight alpha.
@@ -691,6 +766,95 @@ pub(crate) mod render {
         }
     }
 
+    /// `art` (straight RGBA, as decoded) as a CGImage, over a copy of its
+    /// pixels.
+    fn cg_image(art: &RgbaImage) -> Option<CFRetained<CGImage>> {
+        let (w, h) = (art.width() as usize, art.height() as usize);
+        let data = CFData::from_bytes(art.as_raw());
+        let provider = CGDataProvider::with_cf_data(Some(&data))?;
+        let space = CGColorSpace::new_device_rgb()?;
+        // SAFETY: the provider holds w × h × 4 bytes, RGBA with straight
+        // alpha last, as described; a null decode array is allowed.
+        unsafe {
+            CGImage::new(
+                w,
+                h,
+                8,
+                32,
+                w * 4,
+                Some(&space),
+                CGBitmapInfo(CGImageAlphaInfo::Last.0),
+                Some(&provider),
+                std::ptr::null(),
+                true,
+                CGColorRenderingIntent::RenderingIntentDefault,
+            )
+        }
+    }
+
+    impl Canvas {
+        /// Draw `image` stretched over `r` (pixels, origin top left; a
+        /// fraction of a pixel off the grid is fine: its edges land where
+        /// `r` puts them).
+        fn draw_image(&self, image: &CGImage, r: Rect) {
+            if r.w <= 0.0 || r.h <= 0.0 {
+                return;
+            }
+            let ctx = Some(&*self.ctx);
+            CGContext::save_g_state(ctx);
+            CGContext::set_interpolation_quality(ctx, CGInterpolationQuality::High);
+            CGContext::draw_image(ctx, self.cg_rect(r), Some(image));
+            CGContext::restore_g_state(ctx);
+        }
+    }
+
+    /// A skin's frame: its background, anchored on the screen's hole so the
+    /// art's screen edge is the picture's. Returns the foreground's
+    /// premultiplied pixels, one pixel of the hole each (row by row), to
+    /// composite after the background's rounded opening is cut.
+    fn draw_skin(
+        canvas: &mut Canvas,
+        back: &Path,
+        back_at: (f32, f32),
+        foreground: Option<&Path>,
+        geometry: super::FrameGeometry,
+        hole: PxRect,
+    ) -> Option<Option<Vec<u8>>> {
+        let (sw, sh) = geometry.screen_pt;
+        let (hw, hh) = hole.size();
+        if sw <= 0.0 || sh <= 0.0 || hw == 0 || hh == 0 {
+            return None;
+        }
+        let (sx, sy) = (hw as f32 / sw, hh as f32 / sh);
+        let art = crate::devices::android::skin::art(back)?;
+        let i = geometry.sizing;
+        let at = Rect {
+            x: hole.x0 as f32 + (back_at.0 - i.left) * sx,
+            y: hole.y0 as f32 + (back_at.1 - i.top) * sy,
+            w: art.width() as f32 * sx,
+            h: art.height() as f32 * sy,
+        };
+        canvas.draw_image(&*cg_image(&art)?, at);
+        let Some(path) = foreground else {
+            return Some(None);
+        };
+        // Drawn on its own first: compositing it before the rounded cut
+        // would retain the underlay's colour through a translucent edge.
+        let (hw, hh) = (hw as usize, hh as usize);
+        let fg = Canvas::new(hw, hh)?;
+        let whole = Rect { x: 0.0, y: 0.0, w: hw as f32, h: hh as f32 };
+        // The foreground is optional decoration: losing it must not throw
+        // away the background already drawn.
+        let Some(art) = crate::devices::android::skin::art(path) else {
+            return Some(None);
+        };
+        let Some(image) = cg_image(&art) else {
+            return Some(None);
+        };
+        fg.draw_image(&image, whole);
+        Some(Some(fg.into_pixels()))
+    }
+
     pub(crate) fn overlay(spec: &ChromeSpec, key: &OverlayKey) -> Option<RgbaImage> {
         let (pw, ph) = turned_size((key.size_px.0 as f32, key.size_px.1 as f32), key.turn);
         let (pw, ph) = (pw as usize, ph as usize);
@@ -698,11 +862,13 @@ pub(crate) mod render {
             return None;
         }
         let mut canvas = Canvas::new(pw, ph)?;
-        let mask = match &spec.mask {
-            Some(path) => Some(open(path)?),
-            None => None,
-        };
         let whole = Rect { x: 0.0, y: 0.0, w: pw as f32, h: ph as f32 };
+        // A skin foreground goes over the background only after its rounded
+        // opening is cut, preserving the foreground's own transparency.
+        let mut foreground_pixels: Option<Vec<u8>> = None;
+        // A framed skin's own corner radius, in place of the spec's (none
+        // for a skin that gives none).
+        let mut skin_corner: Option<Option<f32>> = None;
         let hole = if key.framed {
             let art = spec.frame.as_ref()?;
             let geometry = spec.geometry()?;
@@ -718,26 +884,50 @@ pub(crate) mod render {
             };
             canvas.fill(under, key.fill);
             let frame_pt = geometry.frame_pt(Quarter::None);
-            let composite = art
-                .composite
-                .as_ref()
-                .and_then(|name| open(&art.dir.join(format!("{name}.pdf"))))
-                .filter(|pdf| {
-                    let size = (pdf.bounds.size.width as f32, pdf.bounds.size.height as f32);
-                    super::composite_fits(size, frame_pt)
-                });
-            match composite {
-                Some(pdf) => canvas.draw(&pdf, whole),
-                None => draw_frame(&mut canvas, art, pw as f32 / frame_pt.0)?,
+            match art {
+                FrameArt::DeviceKit { dir, pieces, composite, .. } => {
+                    let composite = composite
+                        .as_ref()
+                        .and_then(|name| open(&dir.join(format!("{name}.pdf"))))
+                        .filter(|pdf| {
+                            let size = (pdf.bounds.size.width as f32, pdf.bounds.size.height as f32);
+                            super::composite_fits(size, frame_pt)
+                        });
+                    match composite {
+                        Some(pdf) => canvas.draw(&pdf, whole),
+                        None => draw_frame(&mut canvas, dir, pieces, pw as f32 / frame_pt.0)?,
+                    }
+                }
+                FrameArt::Skin { back, back_at, foreground, corner, .. } => {
+                    skin_corner = Some(*corner);
+                    foreground_pixels =
+                        draw_skin(&mut canvas, back, *back_at, foreground.as_deref(), geometry, screen)?;
+                }
             }
             screen
         } else {
-            mask.as_ref()?;
+            spec.mask.as_ref()?;
             canvas.fill(whole, key.fill);
             PxRect { x0: 0, y0: 0, x1: pw as i64, y1: ph as i64 }
         };
+        let (hw, hh) = hole.size();
+        // The screen's corners, scaled from points to the hole's pixels.
+        let corner = match (spec.screen_pt, skin_corner.unwrap_or(spec.screen_corner_pt)) {
+            (Some((sw, _)), Some(r)) if sw > 0.0 => r * hw as f32 / sw,
+            _ => 0.0,
+        };
+        let keep = match &spec.mask {
+            Some(mask) => Some(keep_for(Some(mask), hw as usize, hh as usize, corner)?),
+            None => None,
+        };
+        cut(&mut canvas.pixels, pw, hole, keep.as_deref());
+        if let Some(foreground) = foreground_pixels {
+            let (x0, y0) = (hole.x0 as usize, hole.y0 as usize);
+            for (y, row) in foreground.chunks_exact(hw as usize * 4).enumerate() {
+                canvas.blend(x0, y0 + y, row);
+            }
+        }
         let mut pixels = canvas.into_pixels();
-        cut(&mut pixels, pw, hole, mask.as_ref())?;
         unpremultiply(&mut pixels);
         let upright = RgbaImage::from_raw(pw as u32, ph as u32, pixels)?;
         Some(match key.turn {
@@ -747,6 +937,33 @@ pub(crate) mod render {
             Quarter::Cw270 => image::imageops::rotate270(&upright),
         })
     }
+}
+
+/// For a `w` × `h` screen with corners of `corner` pixels, how much of what
+/// covers each pixel stays (row by row): all of it outside the rounded
+/// corners, none inside, and the coverage on their edge.
+// Only the macOS renderer cuts.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn outside_corners(w: usize, h: usize, corner: f32) -> Vec<u8> {
+    let r = corner.min(w as f32 / 2.0).min(h as f32 / 2.0).max(0.0);
+    let mut keep = vec![0u8; w * h];
+    if r <= 0.0 {
+        return keep;
+    }
+    let (fw, fh) = (w as f32, h as f32);
+    for y in 0..h {
+        let cy = y as f32 + 0.5;
+        // The corner circles' centres, and how far into a corner this row is.
+        let dy = if cy < r { r - cy } else if cy > fh - r { cy - (fh - r) } else { continue };
+        for x in 0..w {
+            let cx = x as f32 + 0.5;
+            let dx = if cx < r { r - cx } else if cx > fw - r { cx - (fw - r) } else { continue };
+            // How much of the pixel is inside the curve, about.
+            let inside = (r - (dx * dx + dy * dy).sqrt() + 0.5).clamp(0.0, 1.0);
+            keep[y * w + x] = ((1.0 - inside) * 255.0).round() as u8;
+        }
+    }
+    keep
 }
 
 /// gpui's rounding of a logical edge to device pixels (its
@@ -1028,6 +1245,62 @@ mod tests {
         assert_eq!(focus_ring(framed, canvas, None, None, Quarter::None, 2.0).1, 2.0);
     }
 
+    /// With an Android skin's frame on, the ring follows the screen's
+    /// corners as the frame shows them (its art rounds them more than the
+    /// skin's radius); frame off, the screen's own, which cut it. A
+    /// simulator's are its screen's either way.
+    #[test]
+    fn the_focus_ring_follows_a_skins_shown_corners() {
+        let r = |x, y, w, h| Rect { x, y, w, h };
+        let skin = ChromeSpec {
+            screen_pt: Some((1280.0, 2856.0)),
+            screen_corner_pt: Some(109.0),
+            mask: Some(ScreenMask::Rounded),
+            frame: Some(FrameArt::Skin {
+                back: "/s/back.webp".into(),
+                back_at: (0.0, 0.0),
+                foreground: Some("/s/mask.webp".into()),
+                corner: Some(109.0),
+                shown_corner: 171.0,
+                sizing: Insets { left: 60.0, top: 61.0, right: 68.0, bottom: 57.0 },
+            }),
+        };
+        assert_eq!(skin.ring_corner(true), Some(171.0));
+        assert_eq!(skin.ring_corner(false), Some(109.0));
+        // At a quarter of the display's size, framed: 171 / 4, plus the ring.
+        let canvas = r(0.0, 0.0, 400.0, 800.0);
+        let picture = r(20.0, 20.0, 320.0, 714.0);
+        let ring = |framed| {
+            let corner = skin.ring_corner(framed);
+            focus_ring(picture, canvas, skin.screen_pt, corner, Quarter::None, 2.0).1
+        };
+        assert_eq!(ring(true), 171.0 / 4.0 + 2.0);
+        assert_eq!(ring(false), 109.0 / 4.0 + 2.0);
+        // A simulator: its screen's corners, framed or not.
+        let mut sim = skin.clone();
+        sim.screen_corner_pt = Some(62.0);
+        sim.frame = Some(FrameArt::DeviceKit {
+            dir: "/c".into(),
+            pieces: NineSlice {
+                top_left: String::new(),
+                top: String::new(),
+                top_right: String::new(),
+                right: String::new(),
+                bottom_right: String::new(),
+                bottom: String::new(),
+                bottom_left: String::new(),
+                left: String::new(),
+            },
+            composite: None,
+            sizing: Insets { left: 18.0, top: 18.0, right: 18.0, bottom: 18.0 },
+        });
+        assert_eq!(sim.ring_corner(true), Some(62.0));
+        assert_eq!(sim.ring_corner(false), Some(62.0));
+        // No spec'd corners: none.
+        sim.screen_corner_pt = None;
+        assert_eq!(sim.ring_corner(true), None);
+    }
+
     /// A device type bundle and a chrome root in `dir`, laid out as Xcode
     /// lays them out, with the plists already as JSON. `chrome`: whether the
     /// named chrome is installed.
@@ -1059,13 +1332,17 @@ mod tests {
         assert_eq!(spec.screen_pt, Some((402.0, 874.0)));
         assert_eq!(spec.screen_corner_pt, Some(62.0));
         assert_eq!(
-            spec.mask.as_deref(),
-            Some(bundle.join("Contents/Resources/4E5532ED-1470-47D1-BDF4-7AA90C26957A.pdf").as_path())
+            spec.mask,
+            Some(ScreenMask::Pdf(
+                bundle.join("Contents/Resources/4E5532ED-1470-47D1-BDF4-7AA90C26957A.pdf")
+            ))
         );
-        let frame = spec.frame.unwrap();
-        assert_eq!(frame.dir, root.join("phone11.devicechrome/Contents/Resources"));
-        assert_eq!(frame.pieces.left, "Phone Left");
-        assert_eq!(frame.sizing.top, 18.0);
+        let Some(FrameArt::DeviceKit { dir, pieces, sizing, .. }) = spec.frame else {
+            panic!("a DeviceKit frame");
+        };
+        assert_eq!(dir, root.join("phone11.devicechrome/Contents/Resources"));
+        assert_eq!(pieces.left, "Phone Left");
+        assert_eq!(sizing.top, 18.0);
     }
 
     #[test]
@@ -1411,7 +1688,7 @@ mod tests {
             screen_pt: Some((402.0, 874.0)),
             screen_corner_pt: Some(62.0),
             mask: None,
-            frame: Some(FrameArt {
+            frame: Some(FrameArt::DeviceKit {
                 dir: dir.path().to_path_buf(),
                 pieces: NineSlice {
                     top_left: name("TL"),
@@ -1498,8 +1775,8 @@ mod tests {
         ChromeSpec {
             screen_pt: Some((402.0, 874.0)),
             screen_corner_pt: Some(62.0),
-            mask: Some(dir.join("mask.pdf")),
-            frame: Some(FrameArt {
+            mask: Some(ScreenMask::Pdf(dir.join("mask.pdf"))),
+            frame: Some(FrameArt::DeviceKit {
                 dir: dir.to_path_buf(),
                 pieces: NineSlice {
                     top_left: name("TL"),
@@ -1530,13 +1807,36 @@ mod tests {
     fn the_picture_never_shows_past_the_rounded_screen() {
         let dir = tempfile::tempdir().unwrap();
         let spec = phone_like(dir.path());
+        let leaks = leaks(&spec, &[Quarter::None, Quarter::Cw90], SIZES, ORIGINS);
+        assert!(leaks.is_empty(), "{} leaking pixels, e.g. {:?}", leaks.len(), &leaks[..leaks.len().min(6)]);
+    }
+
+    /// (Display scale, frame width) and panel origins to paint at: the
+    /// user's size (a frame about 712 px wide at 2×, and at 1.5×), at
+    /// awkward origins.
+    #[cfg(target_os = "macos")]
+    const SIZES: &[(f32, f32)] = &[(2.0, 356.0), (1.5, 356.0), (2.0, 357.3), (1.5, 349.7)];
+    #[cfg(target_os = "macos")]
+    const ORIGINS: &[(f32, f32)] = &[(0.0, 0.0), (8.25, 3.4), (11.3, 7.75), (4.6, 0.5)];
+
+    /// The picture pixels `spec`'s framed overlay leaves showing outside
+    /// its hole, painted the way gpui paints, at `sizes` and `origins`, in
+    /// `turns`.
+    #[cfg(target_os = "macos")]
+    #[allow(clippy::type_complexity)]
+    fn leaks(
+        spec: &ChromeSpec,
+        turns: &[Quarter],
+        sizes: &[(f32, f32)],
+        origins: &[(f32, f32)],
+    ) -> Vec<(f32, f32, f32, f32, Quarter, i64, i64)> {
         let geometry = spec.geometry().unwrap();
         let mut leaks = Vec::new();
-        for (scale, width) in [(2.0, 356.0), (1.5, 356.0), (2.0, 357.3), (1.5, 349.7)] {
-            for (ox, oy) in [(0.0, 0.0), (8.25, 3.4), (11.3, 7.75), (4.6, 0.5)] {
-                for turn in [Quarter::None, Quarter::Cw90] {
+        for &(scale, width) in sizes {
+            for &(ox, oy) in origins {
+                for &turn in turns {
                     let (fw, fh) = geometry.frame_pt(turn);
-                    let container = if turn == Quarter::None {
+                    let container = if matches!(turn, Quarter::None | Quarter::Cw180) {
                         Rect { x: ox, y: oy, w: width, h: width * fh / fw + 40.0 }
                     } else {
                         Rect { x: ox, y: oy, w: width * fw / fh, h: width + 0.37 }
@@ -1550,10 +1850,24 @@ mod tests {
                         framed: true,
                         fill: [10, 20, 30, 255],
                     };
-                    let overlay = render::overlay(&spec, &key).unwrap();
+                    let overlay = render::overlay(spec, &key).unwrap();
                     let (od, pd) = (snap(p.overlay, scale), snap(p.picture, scale));
                     let hole = hole_px(p.overlay_px, geometry, turn);
                     let (ow, oh) = overlay.dimensions();
+                    // Rectangular leak checks do not cover these points:
+                    // they are inside hole_px but outside the rounded curve.
+                    for (x, y) in [
+                        (hole.x0, hole.y0),
+                        (hole.x1 - 1, hole.y0),
+                        (hole.x0, hole.y1 - 1),
+                        (hole.x1 - 1, hole.y1 - 1),
+                    ] {
+                        // A soft art edge may be 254; a missed cut is clear.
+                        assert!(
+                            overlay.get_pixel(x as u32, y as u32).0[3] >= 254,
+                            "uncovered rounded corner at scale {scale}, width {width}, origin {ox},{oy}, {turn:?}: {x},{y}"
+                        );
+                    }
                     for y in pd.y0..pd.y1 {
                         for x in pd.x0..pd.x1 {
                             // gpui stretches the sprite over its snapped rect.
@@ -1574,7 +1888,319 @@ mod tests {
                 }
             }
         }
+        leaks
+    }
+
+    /// The Pixel 9 Pro's skin, as its `layout` lays it out: a 1280 × 2856
+    /// display at (60, 61) in a 1408 × 2974 frame, corners of 109.
+    #[cfg(target_os = "macos")]
+    fn pixel_9_pro() -> FrameGeometry {
+        FrameGeometry {
+            screen_pt: (1280.0, 2856.0),
+            sizing: Insets { left: 60.0, top: 61.0, right: 68.0, bottom: 57.0 },
+        }
+    }
+
+    /// A stand-in skin at about a quarter of the Pixel 9 Pro's size (so
+    /// its art is quick to encode and decode): a 320 × 714 display at
+    /// (15, 15) in a 352 × 744 frame.
+    #[cfg(target_os = "macos")]
+    fn small_skin() -> FrameGeometry {
+        FrameGeometry {
+            screen_pt: (320.0, 714.0),
+            sizing: Insets { left: 15.0, top: 15.0, right: 17.0, bottom: 15.0 },
+        }
+    }
+
+    /// A blue camera dot at the display's top middle, in [`small_skin`]'s
+    /// foreground.
+    #[cfg(target_os = "macos")]
+    fn camera(x: u32, y: u32) -> bool {
+        let (dx, dy) = (x as f32 - 160.0, y as f32 - 22.5);
+        dx * dx + dy * dy < 10.0 * 10.0
+    }
+
+    /// Stand-in art (not Google's) for [`small_skin`] in `dir`: a red body
+    /// clear over the display, and a foreground opaque blue where `mask`
+    /// says (none: no foreground). `corner`: the layout's radius, if any.
+    #[cfg(target_os = "macos")]
+    fn skin_like(dir: &Path, corner: Option<f32>, mask: Option<fn(u32, u32) -> bool>) -> ChromeSpec {
+        let g = small_skin();
+        let back = image::RgbaImage::from_fn(352, 744, |x, y| {
+            let screen = (15..335).contains(&x) && (15..729).contains(&y);
+            image::Rgba(if screen { [0, 0, 0, 0] } else { [200, 30, 40, 255] })
+        });
+        back.save_with_format(dir.join("back.webp"), image::ImageFormat::WebP).unwrap();
+        let foreground = mask.map(|mask| {
+            let art = image::RgbaImage::from_fn(320, 714, |x, y| {
+                image::Rgba(if mask(x, y) { [0, 0, 255, 255] } else { [0, 0, 0, 0] })
+            });
+            art.save_with_format(dir.join("mask.webp"), image::ImageFormat::WebP).unwrap();
+            dir.join("mask.webp")
+        });
+        ChromeSpec {
+            screen_pt: Some(g.screen_pt),
+            // Frame off: the skin's radius or the default.
+            screen_corner_pt: Some(corner.unwrap_or(320.0 * 0.08)),
+            mask: Some(ScreenMask::Rounded),
+            frame: Some(FrameArt::Skin {
+                back: dir.join("back.webp"),
+                back_at: (0.0, 0.0),
+                foreground,
+                corner,
+                shown_corner: corner.unwrap_or(0.0),
+                sizing: g.sizing,
+            }),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn android_overlay_hole_matches_the_display_rect() {
+        use crate::devices::android::skin::{AndroidSkin, parse_layout, tests::PIXEL_9_PRO};
+        let layout = parse_layout(PIXEL_9_PRO).expect("the Pixel 9 Pro's layout");
+        let skin = AndroidSkin { layout, back: "/s/back.webp".into(), mask: None };
+        let g = skin.spec().geometry().expect("a frame");
+        assert_eq!(g, pixel_9_pro());
+        // At the skin's own size, the hole is the display, in every turn
+        // (where `rotate*` moves it).
+        let at = |turn| {
+            let (w, h) = turned_size((1408.0, 2974.0), turn);
+            hole_px((w as u32, h as u32), g, turn)
+        };
+        assert_eq!(at(Quarter::None), PxRect { x0: 60, y0: 61, x1: 1340, y1: 2917 });
+        assert_eq!(at(Quarter::Cw90), PxRect { x0: 57, y0: 60, x1: 2913, y1: 1340 });
+        assert_eq!(at(Quarter::Cw180), PxRect { x0: 68, y0: 57, x1: 1348, y1: 2913 });
+        assert_eq!(at(Quarter::Cw270), PxRect { x0: 61, y0: 68, x1: 2917, y1: 1348 });
+        // Painted in a panel, the picture is exactly that hole of the
+        // overlay as drawn, whichever way the emulator is turned.
+        for scale in [1.0, 1.5, 2.0, 3.0] {
+            for (ox, oy) in [(0.0, 0.0), (8.25, 3.4), (11.3, 7.75)] {
+                for turn in [Quarter::None, Quarter::Cw90, Quarter::Cw180, Quarter::Cw270] {
+                    let container = Rect { x: ox, y: oy, w: 357.3, h: 731.9 };
+                    let p = painted(place(container, (0.0, 0.0), Some(g), turn), Some(g), turn, scale);
+                    let od = snap(p.overlay, scale);
+                    assert_eq!(od.size(), p.overlay_px, "{scale} {turn:?}");
+                    let hole = hole_px(p.overlay_px, g, turn);
+                    let at = PxRect { x0: od.x0 + hole.x0, y0: od.y0 + hole.y0, x1: od.x0 + hole.x1, y1: od.y0 + hole.y1 };
+                    assert_eq!(snap(p.picture, scale), at, "{scale} {ox},{oy} {turn:?}");
+                    // The display's share of the frame on each side.
+                    let (fw, fh) = turned_size((p.overlay_px.0 as f32, p.overlay_px.1 as f32), turn);
+                    let left = hole_px((fw as u32, fh as u32), g, Quarter::None).x0 as f32 / fw;
+                    assert!((left - 60.0 / 1408.0).abs() < 1.0 / fw, "{scale} {turn:?} {left}");
+                }
+            }
+        }
+    }
+
+    /// The skin's overlay: its art round the hole, the screen clear in
+    /// it but for the foreground's camera and the rounded corners, in the
+    /// right colours (BGRA out), turned with the emulator.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn android_overlay_draws_the_skin_round_the_screen() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = skin_like(dir.path(), Some(109.0 / 4.0), Some(camera));
+        let g = spec.geometry().unwrap();
+        let fill = [10, 200, 30, 255];
+        for turn in [Quarter::None, Quarter::Cw90, Quarter::Cw180, Quarter::Cw270] {
+            // The skin's own size.
+            let size_px = match turn {
+                Quarter::None | Quarter::Cw180 => (352, 744),
+                Quarter::Cw90 | Quarter::Cw270 => (744, 352),
+            };
+            let key = OverlayKey { device_type: "a".into(), size_px, turn, framed: true, fill };
+            let overlay = render::overlay(&spec, &key).unwrap();
+            assert_eq!(overlay.dimensions(), size_px);
+            // Upright again, to look in the portrait layout.
+            let upright = match turn {
+                Quarter::None => overlay.clone(),
+                Quarter::Cw90 => image::imageops::rotate270(&overlay),
+                Quarter::Cw180 => image::imageops::rotate180(&overlay),
+                Quarter::Cw270 => image::imageops::rotate90(&overlay),
+            };
+            let hole = hole_px((352, 744), g, Quarter::None);
+            assert_eq!(hole, PxRect { x0: 15, y0: 15, x1: 335, y1: 729 }, "{turn:?}");
+            let px = |x: i64, y: i64| upright.get_pixel(x as u32, y as u32).0;
+            // The body, red, BGRA: 40, 30, 200.
+            assert_eq!(px(5, 300), [40, 30, 200, 255], "{turn:?}");
+            assert_eq!(px(hole.x1 + 2, 300), [40, 30, 200, 255], "{turn:?}");
+            // The screen shows in the hole, right up to its edges.
+            assert_eq!(px(175, 400)[3], 0, "{turn:?}");
+            for (x, y) in [(hole.x0, 400), (hole.x1 - 1, 400), (175, hole.y0), (175, hole.y1 - 1)] {
+                assert_eq!(px(x, y)[3], 0, "{turn:?} edge {x},{y}");
+            }
+            // The camera dot over it, blue (BGRA 255, 0, 0).
+            let camera = px(hole.x0 + 160, hole.y0 + 22);
+            assert_eq!(camera, [255, 0, 0, 255], "{turn:?}");
+            // Its corners: covered (by the panel's colour where the art is
+            // clear, and the art's soft edge), never the picture.
+            assert_eq!(px(hole.x0, hole.y0)[3], 255, "{turn:?}");
+            assert_eq!(px(hole.x1 - 1, hole.y1 - 1)[3], 255, "{turn:?}");
+            assert_eq!(px(hole.x0 + 3, hole.y0 + 3), [30, 200, 10, 255], "{turn:?}");
+        }
+        // Nothing shows past the rounded screen, at any size or turn (a
+        // few of each: the art takes a while to decode in a debug build).
+        let all = [Quarter::None, Quarter::Cw90, Quarter::Cw180, Quarter::Cw270];
+        let leaks = leaks(&spec, &all, &[SIZES[0], SIZES[3]], &[ORIGINS[1], ORIGINS[3]]);
         assert!(leaks.is_empty(), "{} leaking pixels, e.g. {:?}", leaks.len(), &leaks[..leaks.len().min(6)]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn skin_foreground_is_composited_after_the_screen_cutout() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = skin_like(dir.path(), Some(109.0 / 4.0), Some(camera));
+        let art = image::RgbaImage::from_fn(320, 714, |x, y| {
+            if (150..170).contains(&x) && (390..410).contains(&y) {
+                image::Rgba([0, 0, 255, 128])
+            } else if camera(x, y) {
+                image::Rgba([0, 0, 255, 255])
+            } else {
+                image::Rgba([0, 0, 0, 0])
+            }
+        });
+        art.save_with_format(dir.path().join("mask.webp"), image::ImageFormat::WebP).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(dir.path().join("mask.webp"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
+            .unwrap();
+        let key = OverlayKey {
+            device_type: "a".into(),
+            size_px: (352, 744),
+            turn: Quarter::None,
+            framed: true,
+            fill: [10, 200, 30, 255],
+        };
+        let overlay = render::overlay(&spec, &key).unwrap();
+        // No green from the opaque panel underlay survives in the
+        // translucent blue; the opaque camera still covers completely.
+        assert_eq!(overlay.get_pixel(175, 410).0, [255, 0, 0, 128]);
+        assert_eq!(overlay.get_pixel(175, 37).0, [255, 0, 0, 255]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_broken_optional_foreground_keeps_the_skin_background() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = skin_like(dir.path(), Some(109.0 / 4.0), Some(camera));
+        std::fs::write(dir.path().join("mask.webp"), b"not webp").unwrap();
+        let key = OverlayKey {
+            device_type: "a".into(),
+            size_px: (352, 744),
+            turn: Quarter::None,
+            framed: true,
+            fill: [10, 200, 30, 255],
+        };
+        let overlay = render::overlay(&spec, &key).expect("the background without its foreground");
+        assert_eq!(overlay.get_pixel(5, 300).0, [40, 30, 200, 255]);
+        assert_eq!(overlay.get_pixel(175, 400).0[3], 0);
+        assert_eq!(overlay.get_pixel(15, 15).0[3], 255);
+    }
+
+    /// A framed skin that gives no corner radius is shaped by its art
+    /// alone: where its foreground is clear the screen shows, so the
+    /// default radius never paints the panel's colour inside the bezel
+    /// (pixel_6's foreground rounds only its corners' last few pixels).
+    /// With no foreground either (nexus_5), the screen is square. Frame
+    /// off, the default radius still rounds it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_framed_skin_without_a_radius_is_shaped_by_its_art() {
+        // Opaque only in a small triangle at each corner, as pixel_6's.
+        fn tips(x: u32, y: u32) -> bool {
+            let (dx, dy) = (x.min(319 - x), y.min(713 - y));
+            dx + dy < 3
+        }
+        let fill = [10, 200, 30, 255];
+        let key = |framed| OverlayKey {
+            device_type: "a".into(),
+            size_px: if framed { (352, 744) } else { (320, 714) },
+            turn: Quarter::None,
+            framed,
+            fill,
+        };
+        for (name, mask) in [("pixel_6", Some(tips as fn(u32, u32) -> bool)), ("nexus_5", None)] {
+            let dir = tempfile::tempdir().unwrap();
+            let spec = skin_like(dir.path(), None, mask);
+            let g = spec.geometry().unwrap();
+            let overlay = render::overlay(&spec, &key(true)).unwrap();
+            let hole = hole_px((352, 744), g, Quarter::None);
+            // Every pixel of the hole is the picture's, but under the
+            // foreground's tips (and a pixel round them, its soft edge).
+            let mut covered = Vec::new();
+            for y in hole.y0..hole.y1 {
+                for x in hole.x0..hole.x1 {
+                    let (sx, sy) = ((x - hole.x0) as u32, (y - hole.y0) as u32);
+                    let (dx, dy) = (sx.min(319 - sx), sy.min(713 - sy));
+                    let near_tip = mask.is_some() && dx + dy < 5;
+                    let px = overlay.get_pixel(x as u32, y as u32).0;
+                    if !near_tip && px[3] != 0 {
+                        covered.push((sx, sy, px));
+                    }
+                }
+            }
+            assert!(covered.is_empty(), "{name}: {} covered, e.g. {:?}", covered.len(), &covered[..covered.len().min(5)]);
+            // A tip is the foreground's, blue.
+            if mask.is_some() {
+                assert_eq!(overlay.get_pixel(hole.x0 as u32, hole.y0 as u32).0, [255, 0, 0, 255], "{name}");
+            }
+            // Frame off: the default radius (25.6 here) rounds the screen.
+            let bare = render::overlay(&spec, &key(false)).unwrap();
+            assert_eq!(bare.get_pixel(3, 3).0, [30, 200, 10, 255], "{name}");
+            assert_eq!(bare.get_pixel(160, 357).0[3], 0, "{name}");
+        }
+    }
+
+    /// Frame off (or no skin), an emulator's screen is rounded by its
+    /// corner radius alone.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_emulator_without_a_frame_gets_rounded_corners() {
+        let spec = ChromeSpec {
+            screen_pt: Some((1080.0, 2400.0)),
+            screen_corner_pt: Some(86.4),
+            mask: Some(ScreenMask::Rounded),
+            frame: None,
+        };
+        let fill = [10, 200, 30, 255];
+        let key = OverlayKey { device_type: "a".into(), size_px: (270, 600), turn: Quarter::None, framed: false, fill };
+        let overlay = render::overlay(&spec, &key).unwrap();
+        let px = |x: u32, y: u32| overlay.get_pixel(x, y).0;
+        // 86.4 at a quarter: corners of 21.6. Its corner pixel is the
+        // panel's; along the edges and inside, the picture shows.
+        for (x, y) in [(0, 0), (269, 0), (0, 599), (269, 599), (3, 3)] {
+            assert_eq!(px(x, y), [30, 200, 10, 255], "{x},{y}");
+        }
+        for (x, y) in [(135, 0), (0, 300), (269, 300), (135, 599), (135, 300), (10, 10)] {
+            assert_eq!(px(x, y)[3], 0, "{x},{y}");
+        }
+        // A framed overlay needs a frame.
+        assert!(render::overlay(&spec, &OverlayKey { framed: true, ..key }).is_none());
+    }
+
+    #[test]
+    fn rounded_corners_cover_only_outside_the_curve() {
+        let keep = outside_corners(40, 60, 10.0);
+        let at = |x: usize, y: usize| keep[y * 40 + x];
+        // Each corner pixel is covered; the middle and the edges' middles
+        // aren't.
+        for (x, y) in [(0, 0), (39, 0), (0, 59), (39, 59), (1, 1)] {
+            assert_eq!(at(x, y), 255, "{x},{y}");
+        }
+        for (x, y) in [(20, 30), (20, 0), (0, 30), (39, 30), (20, 59), (10, 0), (0, 10), (5, 5)] {
+            assert_eq!(at(x, y), 0, "{x},{y}");
+        }
+        // On the curve, partly: (2, 3)'s centre is 9.92 from the circle's.
+        let edge = at(2, 3);
+        assert!(edge > 0 && edge < 255, "{edge}");
+        // Square: nothing covered. A radius past half the side is half the side.
+        assert!(outside_corners(8, 8, 0.0).iter().all(|&k| k == 0));
+        assert_eq!(outside_corners(8, 8, 100.0)[0], 255);
+        assert_eq!(outside_corners(8, 8, 100.0)[3 * 8 + 3], 0);
+        assert!(outside_corners(0, 0, 4.0).is_empty());
     }
 
     #[test]

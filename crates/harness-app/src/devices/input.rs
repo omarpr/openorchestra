@@ -59,6 +59,31 @@ pub(crate) enum TouchPhase {
     Up,
 }
 
+/// Where the Device tab's touches and keys go: a simulator's
+/// `oo-device-input` helper ([`InputHelper`]) or an Android emulator's gRPC
+/// (`devices::android::input`). Each call only queues: none blocks.
+pub(crate) trait DeviceInput {
+    /// A finger at (x, y), 0…1 ratios of the portrait (natural) screen,
+    /// top-left origin.
+    fn touch(&self, phase: TouchPhase, x: f64, y: f64);
+    /// A USB HID keyboard usage, down or up.
+    fn key(&self, usage: u16, down: bool);
+    /// The Mac's clipboard text, as ⌘V puts it on the device.
+    fn text(&self, text: &str);
+
+    /// A key pressed and released, inside Shift when `shift`.
+    fn press(&self, usage: u16, shift: bool) {
+        if shift {
+            self.key(LEFT_SHIFT, true);
+        }
+        self.key(usage, true);
+        self.key(usage, false);
+        if shift {
+            self.key(LEFT_SHIFT, false);
+        }
+    }
+}
+
 /// One command to the helper.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Line {
@@ -253,34 +278,6 @@ impl InputHelper {
         let _ = self.lines.send(line);
     }
 
-    /// A finger at (x, y), 0…1 ratios of the portrait screen.
-    pub(crate) fn touch(&self, phase: TouchPhase, x: f64, y: f64) {
-        self.send(Line::Touch(phase, x, y));
-    }
-
-    pub(crate) fn key(&self, usage: u16, down: bool) {
-        self.send(Line::Key(usage, down));
-    }
-
-    /// A key pressed and released, inside Shift when `shift`.
-    pub(crate) fn press(&self, usage: u16, shift: bool) {
-        if shift {
-            self.key(LEFT_SHIFT, true);
-        }
-        self.key(usage, true);
-        self.key(usage, false);
-        if shift {
-            self.key(LEFT_SHIFT, false);
-        }
-    }
-
-    /// Types `text` key by key (a US keyboard; see [`text_keys`]).
-    pub(crate) fn text(&self, text: &str) {
-        for (usage, shift) in text_keys(text) {
-            self.press(usage, shift);
-        }
-    }
-
     /// Presses Home, if the helper gets to it within [`HOME_DEADLINE`]. The
     /// receiver gets the helper's answer (an error when it was late), or
     /// hangs up if the helper ends first.
@@ -292,6 +289,23 @@ impl InputHelper {
             .push_back(tx);
         self.send(Line::home_now());
         rx
+    }
+}
+
+impl DeviceInput for InputHelper {
+    fn touch(&self, phase: TouchPhase, x: f64, y: f64) {
+        self.send(Line::Touch(phase, x, y));
+    }
+
+    fn key(&self, usage: u16, down: bool) {
+        self.send(Line::Key(usage, down));
+    }
+
+    /// Types `text` key by key (a US keyboard; see [`text_keys`]).
+    fn text(&self, text: &str) {
+        for (usage, shift) in text_keys(text) {
+            self.press(usage, shift);
+        }
     }
 }
 
@@ -569,6 +583,10 @@ pub(crate) enum KeyAction {
     Paste,
     /// Esc: give the keyboard back to the app.
     Unfocus,
+    /// A held ⌘V's repeats: nothing on the device (each would paste the
+    /// whole clipboard again, queued long after the key is let go), and
+    /// nothing in the app.
+    Ignore,
     /// Not the device's: an app shortcut (every other ⌘ chord), or a key
     /// with nothing to send.
     Pass,
@@ -613,6 +631,15 @@ pub(crate) fn key_action(stroke: &Keystroke) -> KeyAction {
     match (chars.next(), chars.next()) {
         (Some(c), None) => usage_for_char(c).map_or(KeyAction::Pass, |(u, s)| press(u, s || m.shift)),
         _ => KeyAction::Pass,
+    }
+}
+
+/// [`key_action`] for a key-down that may be a held key's repeat (`held`):
+/// a held ⌘V pastes once. Other held keys repeat, as typing does.
+pub(crate) fn key_down_action(stroke: &Keystroke, held: bool) -> KeyAction {
+    match key_action(stroke) {
+        KeyAction::Paste if held => KeyAction::Ignore,
+        action => action,
     }
 }
 
@@ -733,6 +760,17 @@ mod tests {
         assert_eq!(key_action(&stroke("e", Some("´"), alt)), KeyAction::Pass);
         let ctrl = Modifiers { control: true, ..Default::default() };
         assert_eq!(key_action(&stroke("c", None, ctrl)), KeyAction::Pass);
+    }
+
+    #[test]
+    fn a_held_cmd_v_pastes_once() {
+        // Its first press pastes; the repeats while it is held do nothing.
+        assert_eq!(key_down_action(&cmd("v", false), false), KeyAction::Paste);
+        assert_eq!(key_down_action(&cmd("v", false), true), KeyAction::Ignore);
+        // A held letter or arrow still repeats, and ⌘ chords stay the app's.
+        assert_eq!(key_down_action(&plain("a", Some("a")), true), press(0x04, false));
+        assert_eq!(key_down_action(&plain("left", None), true), press(0x50, false));
+        assert_eq!(key_down_action(&cmd("c", false), true), KeyAction::Pass);
     }
 
     #[test]

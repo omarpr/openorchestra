@@ -19,9 +19,28 @@ Unreleased is empty.
 - **Device tab controls** (macOS): rotate, Home, dark/light appearance, text size and copy-screenshot buttons under the live simulator view.
 - The Device tab draws the iPhone's frame and rounded screen (toggle with Show frame).
 - Click, drag, scroll and type on the Device tab's live view to use the simulator directly.
+- Android emulators in the Device tab: live picture, picked from the same list as iOS simulators, and stopped AVDs boot from the picker.
+- Click, scroll, type, and the Device bar's controls (plus Back) on Android emulators.
+- Android emulators get their device frame in the Device tab.
 
 ### Fixed
 
+- Android boot errors show the launcher’s first failure message.
+- Android boot can be retried if the launched emulator exits before the picker sees it.
+- Android input stays tied to the verified emulator connection if its port is reused.
+- Android keyboard and paste stay available when the emulator screen size is unknown.
+- The Device tab retries when an Android stream cannot produce a usable first frame.
+- The Device tab clears the Android picture and touch area when the display goes inactive.
+- A replaced Android screenshot stream cannot stop its replacement after a resize.
+- Android settings and graceful shutdown stay tied to the selected emulator run.
+- An Android shutdown confirmation expires when the emulator restarts.
+- The Device tab replaces the picture and its controls together when an AVD restarts.
+- The Device tab tracks simultaneous Android boots independently.
+- Android boot offers stay busy until the picker sees the emulator running.
+- The Device picker keeps its last AVD inventory and reports Android listing failures.
+- The iOS screenshot fallback stays active while listing simulators fails.
+- Android live-view retries continue when listing iOS simulators fails.
+- The Device tab returns keyboard focus and backs off when input cannot start.
 - An unknown tools-panel tab in prefs.json no longer resets every setting.
 
 ## 1.5.0 - 2026-11-22

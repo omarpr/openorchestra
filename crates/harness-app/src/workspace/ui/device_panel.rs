@@ -1,6 +1,7 @@
-//! The tools panel's Device tab: a view of a booted iOS simulator, picked
-//! from the Mac's simulators. A shut-down one can be booted from the picker,
-//! and the bar under the picture (`device_controls`) drives the shown one or
+//! The tools panel's Device tab: a view of a booted iOS simulator or a
+//! running Android emulator, picked from the Mac's simulators and AVDs. A
+//! shut-down one, or a stopped AVD, can be booted from the picker, and the
+//! bar under the picture (`device_controls`) drives the shown simulator or
 //! shuts it down.
 //!
 //! What runs is decided by `devices::tab_state::DeviceTab`; this file feeds
@@ -12,19 +13,23 @@
 //! The selection belongs to the window, not the task: nothing on the task,
 //! worktree or center-tab switch paths touches it.
 
+use std::cell::Cell;
 use std::collections::VecDeque;
+use std::rc::Rc;
 use std::sync::OnceLock;
+use std::time::Instant;
 
 use gpui::{AnyView, ImageFormat, RenderImage, StyleRefinement};
 
 use super::super::*;
 use super::device_controls::error_line;
+use super::device_input::InputTarget;
 use crate::devices::simctl::{DeviceList, ListError};
 use crate::devices::tab_state::{Command, DeviceTab, DeviceView};
 use crate::devices::chrome::{
     ChromeSpec, OverlayCache, OverlayKey, Painted, Rect, focus_ring, frame_around, painted, place,
 };
-use crate::devices::{DeviceInfo, Quarter, StreamError};
+use crate::devices::{DeviceInfo, Platform, Quarter, StreamError};
 
 /// How often the device list is polled while the tab is on screen.
 pub(crate) const DEVICE_POLL: Duration = Duration::from_secs(3);
@@ -38,6 +43,65 @@ const REDUCED_NOTE: &str =
 /// For a fallback that may pass (no display yet while a device boots, say);
 /// the tooltip says why.
 const RETRY_NOTE: &str = "Reduced frame rate — the live view couldn't start";
+
+/// How long the picture area must keep a new size before an emulator is
+/// asked for frames of it (a drag of the panel's edge is one request).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) const RESIZE_QUIET: Duration = Duration::from_millis(300);
+
+/// The side of the square box an emulator streams in, debounced: the
+/// picture area's longer side, in device pixels, asked for only once it
+/// has kept a new value for [`RESIZE_QUIET`]. A start asks at once.
+// Only the macOS emulator stream asks.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Debug, Default)]
+pub(crate) struct SideRequest {
+    /// What the stream was last asked for.
+    asked: Option<u32>,
+    /// A different side measured since, and when it was first seen.
+    pending: Option<(u32, Instant)>,
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+impl SideRequest {
+    /// A stream started, asking for `side`: nothing is pending.
+    pub(crate) fn started(&mut self, side: u32) {
+        self.asked = Some(side);
+        self.pending = None;
+    }
+
+    /// The area measured `side` at `now`. True when that is a new side to
+    /// wait on: check [`Self::due`] after [`RESIZE_QUIET`].
+    pub(crate) fn measured(&mut self, side: u32, now: Instant) -> bool {
+        if self.pending.is_some_and(|(pending, _)| pending == side) {
+            return false;
+        }
+        if self.asked == Some(side) {
+            self.pending = None;
+            return false;
+        }
+        self.pending = Some((side, now));
+        true
+    }
+
+    /// The side to ask for at `now`, once: when the area has kept it for
+    /// [`RESIZE_QUIET`].
+    pub(crate) fn due(&mut self, now: Instant) -> Option<u32> {
+        let (side, since) = self.pending?;
+        if now.saturating_duration_since(since) < RESIZE_QUIET {
+            return None;
+        }
+        self.started(side);
+        Some(side)
+    }
+}
+
+/// Whether starting `udid` does the simulator's side work (its appearance
+/// read with simctl, input, its device type's frame, the forced-screenshots
+/// switch). An emulator's picture is its stream alone.
+pub(crate) fn simulator_work(udid: &str) -> bool {
+    Platform::of_id(udid) == Platform::Ios
+}
 
 /// The line over a Reduced picture. `transient`: the live view failed for
 /// a reason that may pass and is tried again.
@@ -139,8 +203,55 @@ pub(crate) enum PickAction {
     Boot,
 }
 
+/// The picker's groups, in order, each with its devices and whether each
+/// is stopped (offers Boot): running devices, then shut-down ones, each
+/// with the simulators first and the Android emulators after (a row's
+/// label names its OS). Empty groups are left out.
+pub(crate) fn picker_groups(list: &DeviceList) -> Vec<(&'static str, Vec<(&DeviceInfo, bool)>)> {
+    fn rows(groups: [&[DeviceInfo]; 2], stopped: bool) -> Vec<(&DeviceInfo, bool)> {
+        groups.into_iter().flatten().map(|d| (d, stopped)).collect()
+    }
+    [
+        ("Running", rows([&list.booted, &list.android_running], false)),
+        ("Shut down", rows([&list.shut_down, &list.android_stopped], true)),
+    ]
+    .into_iter()
+    .filter(|(_, group)| !group.is_empty())
+    .collect()
+}
+
+/// Whether the picker has an Android group: emulators running or AVDs to
+/// boot.
+fn lists_android(list: &DeviceList) -> bool {
+    !list.android_running.is_empty() || !list.android_stopped.is_empty()
+}
+
+/// What the body says with nothing to watch: its title and the line under
+/// it. `needs_xcode`: simctl isn't there. With Android in the picker it
+/// speaks of devices, so a Mac with only Android Studio isn't told to
+/// install Xcode.
+pub(crate) fn idle_copy(list: &DeviceList, needs_xcode: bool) -> (&'static str, &'static str) {
+    if lists_android(list) {
+        ("No device running", "Boot one from the picker.")
+    } else if needs_xcode {
+        ("Needs Xcode", "Install Xcode to watch iOS simulators here.")
+    } else {
+        ("No simulator running", "Simulators your agents boot show up here.")
+    }
+}
+
+/// The picker's label while no device is chosen.
+pub(crate) fn picker_placeholder(list: &DeviceList) -> &'static str {
+    if lists_android(list) { "Choose a device" } else { "Choose a simulator" }
+}
+
+/// The stopped device (a shut-down simulator or AVD) with id `udid`.
+fn stopped_device<'a>(list: &'a DeviceList, udid: &str) -> Option<&'a DeviceInfo> {
+    list.shut_down.iter().chain(&list.android_stopped).find(|d| d.udid == udid)
+}
+
 pub(crate) fn picker_action(list: &DeviceList, pick: &str) -> PickAction {
-    if list.shut_down.iter().any(|d| d.udid == pick) {
+    if stopped_device(list, pick).is_some() {
         PickAction::Boot
     } else {
         PickAction::Watch
@@ -164,7 +275,28 @@ pub(crate) fn boot_offer_after_list(
     offer.filter(|o| !booted.iter().any(|d| d.udid == o.udid))
 }
 
-/// The simulator's picture. Its own entity, embedded cached, so a new frame
+/// Keep the full last successful inventory while the SDK is unavailable,
+/// then hide AVDs discovery currently reports as running.
+fn apply_android_inventory(
+    cached: &mut Vec<DeviceInfo>,
+    inventory: crate::devices::AndroidInventory,
+) -> (DeviceList, Option<String>) {
+    let error = match inventory.configured {
+        Ok(avds) => {
+            *cached = avds;
+            None
+        }
+        Err(error) => Some(error),
+    };
+    let android_stopped = cached
+        .iter()
+        .filter(|avd| !inventory.running.iter().any(|d| d.udid == avd.udid))
+        .cloned()
+        .collect();
+    (DeviceList { android_running: inventory.running, android_stopped, ..DeviceList::default() }, error)
+}
+
+/// The device's picture. Its own entity, embedded cached, so a new frame
 /// re-renders this view alone.
 ///
 /// It draws the device's frame around the picture (or, with Show frame
@@ -204,6 +336,37 @@ pub(crate) struct DeviceScreen {
     /// Redraws the corners in the panel's colour when the theme changes.
     _theme: gpui::Subscription,
     pub(super) input: super::device_input::ScreenInput,
+    /// The picture area's longer side in device pixels, as last painted (0
+    /// before the first paint); a change is emitted as a [`ScreenSide`].
+    side: Rc<Cell<u32>>,
+}
+
+/// The picture area's longer side changed: this many device pixels.
+// Only the macOS emulator stream reads it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) struct ScreenSide(pub u32);
+
+impl gpui::EventEmitter<ScreenSide> for DeviceScreen {}
+
+/// Notes the longer side of the picture area `bounds`, in device pixels,
+/// and emits it from `this` when it changed.
+fn report_side(
+    bounds: gpui::Bounds<Pixels>,
+    window: &Window,
+    seen: &Cell<u32>,
+    this: &gpui::WeakEntity<DeviceScreen>,
+    cx: &mut App,
+) {
+    let longer = f32::from(bounds.size.width).max(f32::from(bounds.size.height));
+    let side = (longer * window.scale_factor()).round() as u32;
+    if side == 0 || seen.replace(side) == side {
+        return;
+    }
+    let this = this.clone();
+    // Not mid-paint: emitting updates the workspace.
+    cx.defer(move |cx| {
+        let _ = this.update(cx, |_, cx| cx.emit(ScreenSide(side)));
+    });
 }
 
 /// The picture on show, as painted.
@@ -294,7 +457,16 @@ impl DeviceScreen {
             overlay_failed: Vec::new(),
             _theme: cx.observe_global::<crate::theme::HarnessTheme>(|_, cx| cx.notify()),
             input: super::device_input::ScreenInput::new(cx),
+            side: Rc::new(Cell::new(0)),
         }
+    }
+
+    /// The picture area's longer side in device pixels; 0 before it was
+    /// first painted.
+    // Only the macOS emulator stream asks.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn side(&self) -> u32 {
+        self.side.get()
     }
 
     /// Show nothing (a stream or the screenshots stopped, or another device
@@ -339,10 +511,16 @@ impl DeviceScreen {
         true
     }
 
-    /// The device shown is of `device_type`: read its chrome off the UI
-    /// thread. Asked on each start until it's known: a read that timed out
-    /// isn't cached (`chrome_for`), so the next start tries again.
-    pub(crate) fn set_device_type(&mut self, device_type: String, cx: &mut Context<Self>) {
+    /// The device shown is of `device_type` (a simulator's type, or an
+    /// emulator's `skin::chrome_key`): read its chrome off the UI thread
+    /// with `read`. Asked on each start until it's known: a read that timed
+    /// out isn't cached (`chrome_for`), so the next start tries again.
+    pub(crate) fn set_device_type(
+        &mut self,
+        device_type: String,
+        read: impl FnOnce() -> Option<Arc<ChromeSpec>> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
         let same = self.device_type.as_deref() == Some(device_type.as_str());
         if same && (self.spec.is_some() || self.spec_reading) {
             return;
@@ -354,11 +532,7 @@ impl DeviceScreen {
         }
         self.spec_reading = true;
         cx.spawn(async move |this, cx| {
-            let spec = {
-                let device_type = device_type.clone();
-                cx.background_spawn(async move { crate::devices::chrome::chrome_for(&device_type) })
-                    .await
-            };
+            let spec = cx.background_spawn(async move { read() }).await;
             if spec.is_none() {
                 log::debug!("device: no frame or mask for {device_type}");
             }
@@ -371,6 +545,13 @@ impl DeviceScreen {
             });
         })
         .detach();
+    }
+
+    pub(super) fn has_live_frame(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        return self.frame.is_some();
+        #[cfg(not(target_os = "macos"))]
+        false
     }
 
     pub(crate) fn set_show_frame(&mut self, show: bool, cx: &mut Context<Self>) {
@@ -468,9 +649,18 @@ impl DeviceScreen {
 
 impl Render for DeviceScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let side = self.side.clone();
+        let this = cx.entity().downgrade();
         let Some((picture, turn)) = self.picture() else {
             self.no_input_picture();
-            return div().size_full().into_any_element();
+            // Measured even with no picture yet: an emulator's first frame
+            // is asked for at this size.
+            return gpui::canvas(
+                |_, _, _| {},
+                move |bounds, (), window, cx| report_side(bounds, window, &side, &this, cx),
+            )
+            .size_full()
+            .into_any_element();
         };
         // Taps map back through the turn the picture was drawn with, which
         // for a screenshot is a guess in landscape: that stays watch-only.
@@ -487,10 +677,10 @@ impl Render for DeviceScreen {
         let overlays = self.overlays.clone();
         let wanted = self.overlay_wanted.clone();
         let fill = fill_of(crate::theme::theme(cx).bg1);
-        let this = cx.entity().downgrade();
         let canvas = gpui::canvas(
             |_, _, _| {},
             move |bounds, (), window, cx| {
+                report_side(bounds, window, &side, &this, cx);
                 let placement = place(rect_of(bounds), picture.size(), geometry, turn);
                 // On the device-pixel grid: the picture exactly in the
                 // overlay's hole.
@@ -536,7 +726,7 @@ impl Render for DeviceScreen {
                     painted.picture,
                     rect_of(bounds),
                     spec.as_ref().and_then(|s| s.screen_pt),
-                    spec.as_ref().and_then(|s| s.screen_corner_pt),
+                    spec.as_ref().and_then(|s| s.ring_corner(framed)),
                     turn,
                     super::device_input::RING,
                 );
@@ -609,17 +799,35 @@ impl HarnessWorkspace {
         }
     }
 
-    /// List the simulators now, off the UI thread. One at a time.
+    /// List the simulators and Android emulators now, off the UI thread.
+    /// One at a time.
     pub(crate) fn refresh_devices(&mut self, cx: &mut Context<Self>) {
         if std::mem::replace(&mut self.device_listing, true) {
             return;
         }
         let ticket = self.device_tab.list_started();
+        #[cfg(target_os = "macos")]
+        let launched: Vec<_> = self.device_booting.values().flatten().cloned().collect();
         cx.spawn(async move |view, cx| {
             let list = cx
-                .background_spawn(async move { crate::devices::simctl::list_devices() })
+                .background_spawn(async move {
+                    // Android rides on the simulator list (no poll of its
+                    // own), but counts whatever simctl says.
+                    let lists = (crate::devices::simctl::list_devices(), crate::devices::list_android());
+                    #[cfg(target_os = "macos")]
+                    let exited = launched.into_iter()
+                        .filter(|run| !crate::devices::android::discovery::is_same_run(run))
+                        .collect();
+                    #[cfg(not(target_os = "macos"))]
+                    let exited = Vec::new();
+                    (lists, crate::devices::adb_available(), exited)
+                })
                 .await;
-            let _ = view.update(cx, |ws, cx| ws.apply_device_list(ticket, list, cx));
+            let ((ios, android), adb, exited) = list;
+            let _ = view.update(cx, |ws, cx| {
+                ws.device_adb = adb;
+                ws.apply_device_list(ticket, ios, android, exited, cx)
+            });
         })
         .detach();
     }
@@ -627,11 +835,14 @@ impl HarnessWorkspace {
     fn apply_device_list(
         &mut self,
         ticket: u64,
-        list: Result<DeviceList, ListError>,
+        ios: Result<DeviceList, ListError>,
+        android: crate::devices::AndroidInventory,
+        exited: Vec<crate::devices::AndroidRunning>,
         cx: &mut Context<Self>,
     ) {
         self.device_listing = false;
-        match &list {
+        let mut offer = self.device_boot_offer.take();
+        match &ios {
             Err(ListError::Failed(e)) => {
                 log::debug!("device: listing simulators failed: {e}");
                 self.device_list_error = Some(e.clone());
@@ -639,19 +850,31 @@ impl HarnessWorkspace {
             Err(ListError::NoXcode) => {
                 self.device_listed = true;
                 self.device_list_error = None;
-                self.device_list = DeviceList::default();
-                self.device_boot_offer = None;
+                // No simulator can be booted without Xcode.
+                offer = offer.filter(|o| o.platform == Platform::Android);
             }
-            Ok(got) => {
+            Ok(_) => {
                 self.device_listed = true;
                 self.device_list_error = None;
-                self.device_list = got.clone();
-                self.device_boot_offer =
-                    boot_offer_after_list(self.device_boot_offer.take(), &got.booted);
             }
         }
-        // The state machine watches booted devices only.
-        let mut cmds = self.device_tab.on_list(ticket, list.map(|l| l.booted));
+        let (android, avd_error) = apply_android_inventory(&mut self.device_avd_inventory, android);
+        if let Some(why) = &avd_error {
+            log::debug!("device: listing AVDs failed: {why}");
+        }
+        self.device_avd_list_error = avd_error;
+        // The emulators count whatever simctl said.
+        self.device_list = DeviceList::merged(&self.device_list, &ios, android);
+        self.device_booting.retain(|id, launched| {
+            super::device_controls::boot_should_wait(
+                id, launched.as_ref(), &self.device_list.android_running, &exited,
+            )
+        });
+        self.device_boot_offer = boot_offer_after_list(offer, &self.device_list.running());
+        // The state machine watches running devices only.
+        let android_running = self.device_list.android_running.clone();
+        let mut cmds =
+            self.device_tab.on_lists(ticket, ios.map(|l| l.booted), android_running);
         // After the list, so an offer that just ended starts the device the
         // list chose, not the one watched before it.
         cmds.extend(
@@ -669,8 +892,7 @@ impl HarnessWorkspace {
             PickAction::Watch => self.watch_device(udid, cx),
             PickAction::Boot => {
                 self.device_menu_open = false;
-                self.device_boot_offer =
-                    self.device_list.shut_down.iter().find(|d| d.udid == udid).cloned();
+                self.device_boot_offer = stopped_device(&self.device_list, udid).cloned();
                 // Nothing streams under the offer; the poll still lists, so
                 // the offer sees its device come up.
                 let cmds = self
@@ -700,33 +922,42 @@ impl HarnessWorkspace {
     pub(crate) fn run_device_commands(&mut self, cmds: Vec<Command>, cx: &mut Context<Self>) {
         let mut queue = VecDeque::from(cmds);
         while let Some(cmd) = queue.pop_front() {
-            if let Command::StartStream(udid) | Command::StartScreenshots(udid) = &cmd {
-                // For the appearance button: the device may have changed,
-                // or been switched by someone else while the tab was away.
+            if let Command::StartStream(udid) | Command::StartScreenshots(udid) = &cmd
+                && simulator_work(udid)
+            {
+                // For the appearance button: the device may have
+                // changed, or been switched by someone else while the
+                // tab was away.
                 self.read_device_appearance(udid.clone(), cx);
                 // Input goes to it now (and to nothing it replaced).
-                let target = Some(udid.clone());
+                let target = Some(InputTarget::Simulator(udid.clone()));
                 self.device_screen
                     .update(cx, |screen, cx| screen.set_input_target(target, cx));
                 // Its frame.
-                if let Some(device) = self.device_tab.booted.iter().find(|d| &d.udid == udid) {
+                if let Some(device) = self.device_tab.booted.iter().find(|d| &d.udid == udid)
+                {
                     let device_type = device.device_type.clone();
-                    self.device_screen
-                        .update(cx, |screen, cx| screen.set_device_type(device_type, cx));
+                    let read = {
+                        let device_type = device_type.clone();
+                        move || crate::devices::chrome::chrome_for(&device_type)
+                    };
+                    self.device_screen.update(cx, |screen, cx| {
+                        screen.set_device_type(device_type, read, cx)
+                    });
                 }
             }
             match cmd {
                 Command::StartStream(udid) => {
                     let generation = self.next_device_generation(cx);
-                    let started = if force_screenshots() {
+                    let started = if simulator_work(&udid) && force_screenshots() {
                         Err(StreamError::Unsupported(
                             "OO_DEVICE_FORCE_SCREENSHOTS is set",
                         ))
                     } else {
-                        self.start_device_stream(generation, udid)
+                        self.start_device_stream(generation, udid, cx)
                     };
                     if let Err(e) = started {
-                        log::info!("device: no live view ({e:?}); using screenshots");
+                        log::info!("device: no live view ({e:?})");
                         queue.extend(self.device_tab.on_stream_failed(e));
                     }
                 }
@@ -757,6 +988,9 @@ impl HarnessWorkspace {
 
     fn stop_device_work(&mut self, cx: &mut Context<Self>) {
         self.device_live = None;
+        if self.device_appearance.as_ref().is_some_and(|(id, _)| !simulator_work(id)) {
+            self.device_appearance = None;
+        }
         #[cfg(target_os = "macos")]
         {
             self.device_frames = None;
@@ -767,9 +1001,27 @@ impl HarnessWorkspace {
         });
     }
 
+    /// Starts `udid`'s stream on the stream thread: a simulator's, or an
+    /// emulator's at the picture area's size (from the newest list's
+    /// discovery entry, so a restart never goes to a port another emulator
+    /// took over).
     #[cfg(target_os = "macos")]
-    fn start_device_stream(&mut self, generation: u64, udid: String) -> Result<(), StreamError> {
+    fn start_device_stream(
+        &mut self,
+        generation: u64,
+        udid: String,
+        cx: &mut Context<Self>,
+    ) -> Result<(), StreamError> {
         use crate::devices::worker::StreamWorker;
+        let emulator = match Platform::of_id(&udid) {
+            Platform::Ios => None,
+            Platform::Android => Some(
+                self.device_tab
+                    .android_stream_target()
+                    .cloned()
+                    .ok_or(StreamError::DeviceNotFound)?,
+            ),
+        };
         if self.device_worker.is_none() {
             let worker = StreamWorker::spawn(self.device_to_ui.clone())
                 .map_err(|e| StreamError::Failed(format!("starting the stream thread: {e}")))?;
@@ -777,15 +1029,63 @@ impl HarnessWorkspace {
         }
         let frames = Arc::new(crate::devices::FrameSlot::new());
         self.device_frames = Some(frames.clone());
-        if let Some(worker) = &self.device_worker {
-            worker.start(generation, udid, frames);
+        let Some(worker) = &self.device_worker else {
+            return Ok(());
+        };
+        match emulator {
+            None => worker.start(generation, udid, frames),
+            Some(dev) => {
+                let dir = dev.avd_dir.clone();
+                let chrome = crate::devices::android::skin::chrome_key(&dir, dev.pid);
+                self.device_screen.update(cx, |screen, cx| {
+                    screen.set_device_type(chrome, move || crate::devices::android::skin::chrome_for_avd(&dir), cx);
+                });
+                let side = self.device_screen.read(cx).side();
+                self.device_side.started(side);
+                worker.start_android(generation, dev, side, frames);
+            }
         }
         Ok(())
     }
 
     #[cfg(not(target_os = "macos"))]
-    fn start_device_stream(&mut self, _generation: u64, _udid: String) -> Result<(), StreamError> {
+    fn start_device_stream(
+        &mut self,
+        _generation: u64,
+        _udid: String,
+        _cx: &mut Context<Self>,
+    ) -> Result<(), StreamError> {
         Err(StreamError::Unsupported("iOS simulators need macOS"))
+    }
+
+    /// The picture's area is now `side` device pixels on its longer side:
+    /// an emulator streaming into it is asked for that size once it has
+    /// stayed put for [`RESIZE_QUIET`]. A simulator's stream has its own
+    /// size.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn on_device_screen_side(&mut self, side: u32, cx: &mut Context<Self>) {
+        let Some(generation) = self.device_live else {
+            return;
+        };
+        if !matches!(self.device_tab.view, DeviceView::Android { why: None, .. })
+            || !self.device_side.measured(side, Instant::now())
+        {
+            return;
+        }
+        cx.spawn(async move |view, cx| {
+            cx.background_executor().timer(RESIZE_QUIET).await;
+            let _ = view.update(cx, |ws, _| {
+                if ws.device_live != Some(generation) {
+                    return;
+                }
+                if let (Some(side), Some(worker)) =
+                    (ws.device_side.due(Instant::now()), &ws.device_worker)
+                {
+                    worker.resize(generation, side);
+                }
+            });
+        })
+        .detach();
     }
 
     /// What the stream thread and the stream report.
@@ -795,29 +1095,50 @@ impl HarnessWorkspace {
         msg: crate::devices::worker::StreamMsg,
         cx: &mut Context<Self>,
     ) {
-        use crate::devices::worker::StreamMsg;
+        use crate::devices::worker::{FrameUpdate, StreamMsg};
         let live = self.device_live;
-        let current = |generation: u64| live == Some(generation);
+        let current = |attempt| self.device_worker.as_ref().is_some_and(|worker| worker.is_current(live, attempt));
         match msg {
-            StreamMsg::Frame(generation) if current(generation) => {
-                let Some((frame, turn)) = self.device_frames.as_ref().and_then(|f| f.take()) else {
+            StreamMsg::Frame(generation) if live == Some(generation) => {
+                let Some(update) = self.device_frames.as_ref().and_then(|f| f.take()) else {
                     return;
                 };
-                // The picture's entity only: the workspace isn't notified.
-                self.device_screen
-                    .update(cx, |screen, cx| screen.show_frame(frame.0, turn, cx));
+                let FrameUpdate::Picture(frame, turn) = update else {
+                    if self.device_screen.read(cx).has_live_frame() {
+                        self.device_screen.update(cx, |screen, cx| {
+                            screen.clear(cx);
+                            screen.set_input_target(None, cx);
+                        });
+                        cx.notify();
+                    }
+                    return;
+                };
+                // Enable input and the bar only once this run has a picture.
+                // Subsequent frames only redraw the picture's entity.
+                let first = !self.device_screen.read(cx).has_live_frame();
+                let emulator = first.then(|| self.device_tab.android_stream_target()).flatten().cloned();
+                let android_picture = emulator.is_some();
+                self.device_screen.update(cx, |screen, cx| {
+                    if let Some(dev) = emulator {
+                        screen.set_input_target(Some(InputTarget::Emulator(dev)), cx);
+                    }
+                    screen.show_frame(frame.0, turn, cx);
+                });
+                if android_picture {
+                    cx.notify();
+                }
             }
-            StreamMsg::Started(generation) if current(generation) => {
+            StreamMsg::Started(attempt) if current(attempt) => {
                 log::debug!("device: live view started");
                 self.device_tab.on_stream_started();
             }
-            StreamMsg::Failed(generation, e) if current(generation) => {
-                log::info!("device: no live view ({e:?}); using screenshots");
+            StreamMsg::Failed(attempt, e) if current(attempt) => {
+                log::info!("device: no live view ({e:?})");
                 let cmds = self.device_tab.on_stream_failed(e);
                 self.run_device_commands(cmds, cx);
                 cx.notify();
             }
-            StreamMsg::Gone(generation) if current(generation) => {
+            StreamMsg::Gone(attempt) if current(attempt) => {
                 let cmds = self.device_tab.on_gone();
                 self.run_device_commands(cmds, cx);
                 cx.notify();
@@ -901,10 +1222,21 @@ impl HarnessWorkspace {
         hx: &HarnessTheme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let avd_error = self.device_avd_list_error.as_deref();
+        let show_avd_error_in_body = avd_error.is_some()
+            && self.device_boot_offer.is_none()
+            && matches!(self.device_tab.view, DeviceView::NeedsXcode | DeviceView::NoneRunning);
         let body = match &self.device_tab.view {
+            _ if show_avd_error_in_body => device_empty(
+                hx, "Couldn't list Android virtual devices".into(), avd_error.map(error_line).map(Into::into),
+            ),
             // Nothing yet rather than "No simulator running" for a moment,
-            // unless listing failed.
-            _ if !self.device_listed => {
+            // unless listing failed. An emulator or an AVD's boot offer
+            // shows regardless.
+            view if !self.device_listed
+                && self.device_boot_offer.is_none()
+                && !matches!(view, DeviceView::Android { .. }) =>
+            {
                 match list_failure_line(self.device_listed, self.device_list_error.as_deref()) {
                     Some(line) => {
                         device_empty(hx, "Couldn't list simulators".into(), Some(line.into()))
@@ -913,18 +1245,31 @@ impl HarnessWorkspace {
                 }
             }
             _ if self.device_boot_offer.is_some() => self.render_boot_offer(hx, cx),
-            DeviceView::NeedsXcode => device_empty(
-                hx,
-                "Needs Xcode".into(),
-                Some("Install Xcode to watch iOS simulators here.".into()),
-            ),
-            DeviceView::NoneRunning => device_empty(
-                hx,
-                "No simulator running".into(),
-                Some("Simulators your agents boot show up here.".into()),
-            ),
+            view @ (DeviceView::NeedsXcode | DeviceView::NoneRunning) => {
+                let needs_xcode = *view == DeviceView::NeedsXcode;
+                let (title, detail) = idle_copy(&self.device_list, needs_xcode);
+                device_empty(hx, title.into(), Some(detail.into()))
+            }
             DeviceView::ShutDown { name } => device_empty(hx, format!("{name} shut down"), None),
-            DeviceView::Live { .. } => self.render_device_screen(),
+            DeviceView::Live { .. } | DeviceView::Android { why: None, .. } => {
+                self.render_device_screen()
+            }
+            // Still booting, tried again on the next list; or its stream
+            // ended or couldn't start: why, until it's tried again.
+            DeviceView::Android { udid, why: Some(why), starting } => {
+                let name = self
+                    .device_tab
+                    .booted
+                    .iter()
+                    .find(|d| &d.udid == udid)
+                    .map_or_else(|| udid.clone(), |d| d.name.clone());
+                let detail = if *starting {
+                    "Starting…".to_string()
+                } else {
+                    format!("No picture: {}", error_line(why))
+                };
+                device_empty(hx, name, Some(detail.into()))
+            }
             DeviceView::Reduced { why, transient, .. } => div()
                 .flex()
                 .flex_col()
@@ -950,6 +1295,11 @@ impl HarnessWorkspace {
             .flex_1()
             .min_h_0()
             .children(self.render_device_picker(hx, cx))
+            .children(avd_error.filter(|_| !show_avd_error_in_body).map(|why| {
+                div().id("device-avd-list-error").px_3().py_1().text_xs().text_color(hx.tx2)
+                    .tooltip(tip(why.to_string()))
+                    .child("Couldn't list Android virtual devices")
+            }))
             .child(body)
             .children(self.render_device_controls(hx, cx))
             .into_any_element()
@@ -960,7 +1310,11 @@ impl HarnessWorkspace {
         let Some(device) = &self.device_boot_offer else {
             return div().flex_1().into_any_element();
         };
-        let busy = self.device_control_in_flight;
+        let busy = super::device_controls::boot_busy(
+            &device.udid,
+            self.device_control_in_flight,
+            &self.device_booting,
+        );
         let label = if busy {
             format!("Booting {}…", device.name)
         } else {
@@ -1027,8 +1381,8 @@ impl HarnessWorkspace {
         hx: &HarnessTheme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let DeviceList { booted, shut_down } = &self.device_list;
-        if booted.is_empty() && shut_down.is_empty() {
+        let groups = picker_groups(&self.device_list);
+        if groups.is_empty() {
             return None;
         }
         let label = |d: &DeviceInfo| format!("{} · {}", d.name, d.os);
@@ -1037,13 +1391,13 @@ impl HarnessWorkspace {
             Some(offer) => Some(offer.udid.as_str()),
             None => self.device_tab.selected.as_deref(),
         };
-        let current = booted
+        let current = groups
             .iter()
-            .chain(shut_down)
+            .flat_map(|(_, group)| group.iter().map(|&(d, _)| d))
             .chain(&self.device_boot_offer)
             .find(|d| Some(d.udid.as_str()) == shown)
             .map(label)
-            .unwrap_or_else(|| "Choose a simulator".to_string());
+            .unwrap_or_else(|| picker_placeholder(&self.device_list).to_string());
         let open = self.device_menu_open;
         let button = div()
             .id("device-picker")
@@ -1095,10 +1449,7 @@ impl HarnessWorkspace {
                         cx.notify();
                     }
                 }));
-            for (heading, group) in [("Running", booted), ("Shut down", shut_down)] {
-                if group.is_empty() {
-                    continue;
-                }
+            for (heading, group) in &groups {
                 list = list.child(
                     div()
                         .px_2()
@@ -1106,9 +1457,9 @@ impl HarnessWorkspace {
                         .pb(px(2.0))
                         .text_xs()
                         .text_color(hx.tx2)
-                        .child(heading),
+                        .child(*heading),
                 );
-                for d in group {
+                for &(d, _) in group {
                     let is_shown = Some(d.udid.as_str()) == shown;
                     let udid = d.udid.clone();
                     list = list.child(
@@ -1169,12 +1520,15 @@ fn device_empty(
 #[cfg(test)]
 mod tests {
     use super::{
-        PickAction, PollTick, Shoot, boot_offer_after_list, device_on_screen, list_failure_line,
-        may_shoot, overlay_for, pick_device, pick_for_boot, picker_action, poll_tick, reduced_note,
-        shot_turn, sync_shown,
+        PickAction, PollTick, RESIZE_QUIET, Shoot, SideRequest, boot_offer_after_list,
+        device_on_screen, list_failure_line, may_shoot, overlay_for, pick_device, pick_for_boot,
+        idle_copy, picker_action, picker_groups, picker_placeholder, poll_tick, reduced_note,
+        shot_turn, simulator_work, sync_shown,
     };
     use crate::devices::Quarter;
-    use crate::devices::chrome::{ChromeSpec, FrameGeometry, Insets, Placement, Rect, painted};
+    use crate::devices::chrome::{
+        ChromeSpec, FrameGeometry, Insets, Placement, Rect, ScreenMask, painted,
+    };
     use crate::devices::DeviceInfo;
     use crate::devices::simctl::DeviceList;
     use crate::devices::tab_state::{Command, DeviceTab};
@@ -1186,7 +1540,175 @@ mod tests {
             name: format!("name-{udid}"),
             os: "iOS 27.2".into(),
             device_type: "iPhone-18-Pro".into(),
+            ..Default::default()
         }
+    }
+
+    fn android(avd: &str) -> DeviceInfo {
+        DeviceInfo {
+            udid: format!("android:{avd}"),
+            name: format!("name-{avd}"),
+            os: "Android".into(),
+            platform: crate::devices::Platform::Android,
+            ..Default::default()
+        }
+    }
+
+    fn with_android() -> DeviceList {
+        DeviceList {
+            booted: vec![dev("a")],
+            shut_down: vec![dev("b")],
+            android_running: vec![android("p")],
+            android_stopped: vec![android("m")],
+        }
+    }
+
+    /// On a Mac with only Android Studio (no Xcode, AVDs in the picker), or
+    /// any Mac whose picker has Android devices, the empty tab and the
+    /// picker speak of devices, not simulators. Without Android: as ever.
+    #[test]
+    fn avd_listing_failures_keep_the_inventory_and_exclude_running_devices() {
+        use super::apply_android_inventory;
+        use crate::devices::AndroidInventory;
+        let avd = android("p");
+        let mut cached = Vec::new();
+        let (listed, error) = apply_android_inventory(
+            &mut cached, AndroidInventory { running: vec![], configured: Ok(vec![avd.clone()]) },
+        );
+        assert_eq!(listed.android_stopped, vec![avd.clone()]);
+        assert!(error.is_none());
+        let (listed, error) = apply_android_inventory(
+            &mut cached, AndroidInventory { running: vec![avd.clone()], configured: Err("timeout".into()) },
+        );
+        assert!(listed.android_stopped.is_empty());
+        assert_eq!(error.as_deref(), Some("timeout"));
+        let (listed, _) = apply_android_inventory(
+            &mut cached, AndroidInventory { running: vec![], configured: Err("timeout".into()) },
+        );
+        assert_eq!(listed.android_stopped, vec![avd]);
+        let (listed, error) = apply_android_inventory(
+            &mut cached, AndroidInventory { running: vec![], configured: Ok(vec![]) },
+        );
+        assert!(listed.android_stopped.is_empty());
+        assert!(error.is_none());
+    }
+
+    #[test]
+    fn the_empty_tab_speaks_of_devices_when_android_is_listed() {
+        let avd = DeviceInfo {
+            udid: "android:Medium_Phone_API_35".into(),
+            name: "Medium Phone API 35".into(),
+            platform: crate::devices::Platform::Android,
+            ..Default::default()
+        };
+        let stopped = DeviceList { android_stopped: vec![avd.clone()], ..Default::default() };
+        let running = DeviceList { android_running: vec![avd], ..Default::default() };
+        let device = ("No device running", "Boot one from the picker.");
+        for list in [&stopped, &running] {
+            assert_eq!(idle_copy(list, true), device);
+            assert_eq!(idle_copy(list, false), device);
+            assert_eq!(picker_placeholder(list), "Choose a device");
+        }
+        let ios = DeviceList::default();
+        assert_eq!(
+            idle_copy(&ios, true),
+            ("Needs Xcode", "Install Xcode to watch iOS simulators here.")
+        );
+        assert_eq!(
+            idle_copy(&ios, false),
+            ("No simulator running", "Simulators your agents boot show up here.")
+        );
+        assert_eq!(picker_placeholder(&ios), "Choose a simulator");
+    }
+
+    #[test]
+    fn android_devices_share_the_running_and_shut_down_groups() {
+        let ids = |list: &DeviceList| -> Vec<(&'static str, Vec<(String, bool)>)> {
+            picker_groups(list)
+                .into_iter()
+                .map(|(heading, group)| {
+                    (heading, group.into_iter().map(|(d, stopped)| (d.udid.clone(), stopped)).collect())
+                })
+                .collect()
+        };
+        let s = |id: &str, stopped| (id.to_string(), stopped);
+        // Grouped by state, not platform: simulators first in each group.
+        assert_eq!(
+            ids(&with_android()),
+            [
+                ("Running", vec![s("a", false), s("android:p", false)]),
+                ("Shut down", vec![s("b", true), s("android:m", true)]),
+            ]
+        );
+        // Empty groups are left out; Android alone still shows.
+        let only = DeviceList { android_stopped: vec![android("m")], ..Default::default() };
+        assert_eq!(ids(&only), [("Shut down", vec![s("android:m", true)])]);
+        assert!(picker_groups(&DeviceList::default()).is_empty());
+    }
+
+    /// Dragging the panel's edge measures many sizes; the emulator is asked
+    /// once, for the last, after it has stayed put. Coming back to the
+    /// size asked for asks nothing.
+    #[test]
+    fn a_resize_is_debounced_into_one_request() {
+        let t0 = std::time::Instant::now();
+        let at = |ms: u64| t0 + std::time::Duration::from_millis(ms);
+        let quiet = RESIZE_QUIET.as_millis() as u64;
+        let mut side = SideRequest::default();
+        side.started(1600);
+        assert!(!side.measured(1600, at(0)), "the size asked for");
+        assert!(side.measured(1500, at(0)));
+        assert!(side.measured(1400, at(50)));
+        assert!(side.measured(1300, at(100)));
+        assert!(!side.measured(1300, at(150)), "the same size again");
+        assert_eq!(side.due(at(100 + quiet - 1)), None);
+        assert_eq!(side.due(at(100 + quiet)), Some(1300));
+        assert_eq!(side.due(at(100 + 2 * quiet)), None, "asked once");
+        // Away and back within the wait: nothing to ask.
+        assert!(side.measured(1200, at(1000)));
+        assert!(!side.measured(1300, at(1010)));
+        assert_eq!(side.due(at(1000 + 2 * quiet)), None);
+        // A new start asks for its own size; what was pending is dropped.
+        assert!(side.measured(1000, at(2000)));
+        side.started(900);
+        assert_eq!(side.due(at(2000 + 2 * quiet)), None);
+        assert!(!side.measured(900, at(3000)));
+    }
+
+    /// Starting an emulator does none of a simulator's side work (simctl's
+    /// appearance read, input, its frame, forced screenshots).
+    #[test]
+    fn only_a_simulator_gets_the_simulator_side_work() {
+        assert!(simulator_work("0F291397-02EB-448E-BDFF-320883371EB1"));
+        assert!(!simulator_work("android:Pixel_9_Pro_API_35"));
+    }
+
+    #[test]
+    fn a_stopped_avd_offers_boot() {
+        let list = with_android();
+        assert_eq!(picker_action(&list, "android:m"), PickAction::Boot);
+        // A running emulator is watched.
+        assert_eq!(picker_action(&list, "android:p"), PickAction::Watch);
+        // Booting it makes it the pick; the offer lasts until the emulator
+        // is running, and then the tab goes to it.
+        let (mut tab, _) = watching_a();
+        let mut prefs = Prefs::default();
+        pick_for_boot(&mut tab, &mut prefs, "android:m");
+        assert_eq!(prefs.device_udid.as_deref(), Some("android:m"));
+        let offer = Some(android("m"));
+        assert_eq!(boot_offer_after_list(offer.clone(), &list.running()), offer);
+        let up = DeviceList {
+            android_running: vec![android("p"), android("m")],
+            android_stopped: vec![],
+            ..with_android()
+        };
+        assert_eq!(boot_offer_after_list(offer, &up.running()), None);
+        let ticket = tab.list_started();
+        assert_eq!(
+            tab.on_list(ticket, Ok(up.running())),
+            vec![Command::StopStream, Command::StartStream("android:m".into())]
+        );
+        assert_eq!(tab.selected.as_deref(), Some("android:m"));
     }
 
     /// A shown tab watching `a`, out of `a` and `b`.
@@ -1207,6 +1729,20 @@ mod tests {
         let rest = &src[start + name.len()..];
         let end = rest.find("\n    pub(crate) fn ").unwrap_or(rest.len());
         &rest[..end]
+    }
+
+    /// Starting an emulator's stream runs no adb (no appearance read): a
+    /// start comes with every list while it boots, and adb could start or
+    /// restart someone else's adb server. Only a simulator's start reads
+    /// its appearance (simctl); an emulator's toggle reads on first click.
+    #[test]
+    fn an_emulator_start_runs_no_adb() {
+        let body = method_body(include_str!("device_panel.rs"), "pub(crate) fn run_device_commands(");
+        let reads: Vec<usize> = body.match_indices("self.read_device_appearance(").map(|(i, _)| i).collect();
+        let simulator = body.find("&& simulator_work(udid)").expect("the simulator guard");
+        let start = body.find("match cmd").expect("stream dispatch");
+        assert_eq!(reads.len(), 1, "{reads:?}");
+        assert!(simulator < reads[0] && reads[0] < start, "an emulator's start reads its appearance");
     }
 
     #[test]
@@ -1290,6 +1826,7 @@ mod tests {
         let list = DeviceList {
             booted: vec![dev("a")],
             shut_down: vec![dev("b")],
+            ..Default::default()
         };
         assert_eq!(picker_action(&list, "a"), PickAction::Watch);
         assert_eq!(picker_action(&list, "b"), PickAction::Boot);
@@ -1416,7 +1953,7 @@ mod tests {
         let spec = ChromeSpec {
             screen_pt: Some((402.0, 874.0)),
             screen_corner_pt: Some(62.0),
-            mask: Some("/m.pdf".into()),
+            mask: Some(ScreenMask::Pdf("/m.pdf".into())),
             frame: None,
         };
         let screen = Rect { x: 0.0, y: 0.0, w: 201.0, h: 437.0 };
