@@ -490,6 +490,8 @@ impl DeviceScreen {
             return;
         }
         self.stop_input();
+        // The painted bounds belong to the device that just left.
+        self.input.hit.set(None);
         self.input.failed = false;
         self.input.target = target.as_ref().map(device_id);
         self.input.reach = target;
