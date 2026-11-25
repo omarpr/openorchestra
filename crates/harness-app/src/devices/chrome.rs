@@ -843,7 +843,15 @@ pub(crate) mod render {
         let (hw, hh) = (hw as usize, hh as usize);
         let fg = Canvas::new(hw, hh)?;
         let whole = Rect { x: 0.0, y: 0.0, w: hw as f32, h: hh as f32 };
-        fg.draw_image(&*cg_image(&*crate::devices::android::skin::art(path)?)?, whole);
+        // The foreground is optional decoration: losing it must not throw
+        // away the background already drawn.
+        let Some(art) = crate::devices::android::skin::art(path) else {
+            return Some(None);
+        };
+        let Some(image) = cg_image(&art) else {
+            return Some(None);
+        };
+        fg.draw_image(&image, whole);
         let fg = fg.into_pixels();
         let (x0, y0) = (hole.x0 as usize, hole.y0 as usize);
         for (y, row) in fg.chunks_exact(hw * 4).enumerate() {
@@ -2026,6 +2034,25 @@ mod tests {
         let all = [Quarter::None, Quarter::Cw90, Quarter::Cw180, Quarter::Cw270];
         let leaks = leaks(&spec, &all, &[SIZES[0], SIZES[3]], &[ORIGINS[1], ORIGINS[3]]);
         assert!(leaks.is_empty(), "{} leaking pixels, e.g. {:?}", leaks.len(), &leaks[..leaks.len().min(6)]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_broken_optional_foreground_keeps_the_skin_background() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = skin_like(dir.path(), Some(109.0 / 4.0), Some(camera));
+        std::fs::write(dir.path().join("mask.webp"), b"not webp").unwrap();
+        let key = OverlayKey {
+            device_type: "a".into(),
+            size_px: (352, 744),
+            turn: Quarter::None,
+            framed: true,
+            fill: [10, 200, 30, 255],
+        };
+        let overlay = render::overlay(&spec, &key).expect("the background without its foreground");
+        assert_eq!(overlay.get_pixel(5, 300).0, [40, 30, 200, 255]);
+        assert_eq!(overlay.get_pixel(175, 400).0[3], 0);
+        assert_eq!(overlay.get_pixel(15, 15).0[3], 255);
     }
 
     /// A framed skin that gives no corner radius is shaped by its art
