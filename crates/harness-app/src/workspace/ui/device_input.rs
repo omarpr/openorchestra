@@ -556,7 +556,11 @@ impl DeviceScreen {
         };
         let key = retry_key(reach);
         let gave_up = matches!(&self.input.retry, Some((k, r)) if *k == key && r.gave_up());
-        takes_input_for(Platform::of_id(udid), helper_path().is_some(), gave_up)
+        let platform = Platform::of_id(udid);
+        // An emulator never uses the simulator helper. Looking the helper
+        // up reads the disk, and this runs on the UI thread.
+        let helper_built = platform == Platform::Ios && helper_path().is_some();
+        takes_input_for(platform, helper_built, gave_up)
     }
 
     /// The input for the device on screen, started if need be (and
