@@ -924,11 +924,11 @@ impl HarnessWorkspace {
                     // toggle reads it on its first click instead.
                     #[cfg(target_os = "macos")]
                     self.device_screen.update(cx, |screen, cx| {
-                        let avd_dir = running.as_ref().map(|r| r.avd_dir.clone());
+                        let chrome = running.as_ref().map(|r| (r.avd_dir.clone(), r.pid));
                         screen.set_input_target(running.map(InputTarget::Emulator), cx);
-                        match avd_dir {
-                            Some(dir) => {
-                                let key = crate::devices::android::skin::chrome_key(&dir);
+                        match chrome {
+                            Some((dir, pid)) => {
+                                let key = crate::devices::android::skin::chrome_key(&dir, pid);
                                 let read = move || crate::devices::android::skin::chrome_for_avd(&dir);
                                 screen.set_device_type(key, read, cx);
                             }

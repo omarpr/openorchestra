@@ -422,9 +422,11 @@ pub(crate) fn chrome_for_avd(avd_dir: &Path) -> Option<Arc<ChromeSpec>> {
     spec_for_avd(&config, skin.as_ref()).map(Arc::new)
 }
 
-/// The overlay cache's name for the AVD at `avd_dir`.
-pub(crate) fn chrome_key(avd_dir: &Path) -> String {
-    format!("android:{}", avd_dir.display())
+/// The overlay cache's name for one running instance (`pid`) of the AVD at
+/// `avd_dir`. A later boot reads its skin again; retries within this boot
+/// keep the same key.
+pub(crate) fn chrome_key(avd_dir: &Path, pid: u32) -> String {
+    format!("android:{pid}:{}", avd_dir.display())
 }
 
 /// How many decoded images [`art`] keeps: one skin's background and
@@ -894,7 +896,9 @@ layouts {
         assert!(chrome_for_avd(&avd).unwrap().frame.is_some());
         assert_eq!(skin_for(&avd).unwrap().back, skin.join("back.webp"));
         assert_eq!(chrome_for_avd(&dir.path().join("none.avd")), None);
-        assert_eq!(chrome_key(&avd), format!("android:{}", avd.display()));
+        assert_eq!(chrome_key(&avd, 7), format!("android:7:{}", avd.display()));
+        assert_eq!(chrome_key(&avd, 7), chrome_key(&avd, 7));
+        assert_ne!(chrome_key(&avd, 7), chrome_key(&avd, 8));
     }
 
     /// Manual, to look at the frame (needs an AVD with a skin, such as the
@@ -936,7 +940,7 @@ layouts {
             let shown = framed.then_some(geometry);
             let p = painted(place(container, picture, shown, turn), shown, turn, scale);
             let key = OverlayKey {
-                device_type: chrome_key(&avd),
+                device_type: chrome_key(&avd, 1),
                 size_px: p.overlay_px,
                 turn,
                 framed,
