@@ -25,6 +25,8 @@ Unreleased is empty.
 
 ### Fixed
 
+- The Device tab returns keyboard focus and backs off when input cannot start.
+
 - An unknown tools-panel tab in prefs.json no longer resets every setting.
 
 ## 1.5.0 - 2026-11-22

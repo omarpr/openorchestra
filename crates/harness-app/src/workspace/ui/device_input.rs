@@ -219,6 +219,13 @@ pub(crate) fn give_back_keyboard(current: bool, took_it: bool) -> bool {
     current && took_it
 }
 
+/// A failure belongs to the input being started or the installed sink. A
+/// synchronous spawn error has no sink yet; a stopped or superseded serial
+/// must still be ignored.
+fn failed_helper_is_current(serial: u64, current: u64, has_sink: bool, starting: bool) -> bool {
+    serial == current && (has_sink || starting)
+}
+
 /// Whether a change of device must check the keyboard: whenever the
 /// picture was clicked for one. Not only while it has focus by focus-in
 /// and focus-out's count: deactivating the window (to Xcode or
@@ -567,7 +574,7 @@ impl DeviceScreen {
 
     /// The input for the device on screen, started if need be (and
     /// allowed: a failing one is retried a few times, a while apart).
-    fn helper(&mut self) -> Option<&dyn DeviceInput> {
+    fn helper(&mut self, cx: &mut Context<Self>) -> Option<&dyn DeviceInput> {
         if self.input.sink.is_none() {
             let udid = self.input.target.clone()?;
             let reach = self.input.reach.clone()?;
@@ -595,7 +602,7 @@ impl DeviceScreen {
             match started {
                 Ok(sink) => self.input.sink = Some(sink),
                 Err(e) => {
-                    log::info!("device: no input: {e}");
+                    self.on_helper_failed(serial, e, true, cx);
                     return None;
                 }
             }
@@ -617,27 +624,37 @@ impl DeviceScreen {
                     retry.worked();
                 }
             }
-            HelperEvent::Failed(serial, why) => {
-                let current = current(serial);
-                if give_back_keyboard(current, self.input.keyboard_for.is_some()) {
-                    self.settle_keyboard(true, cx);
-                }
-                if !current {
-                    return;
-                }
-                log::info!("device: device input stopped: {why}");
-                self.input.sink = None;
-                self.input.ready = false;
-                self.input.touching.set(false);
-                self.input.swipe = Swipe::default();
-                self.input.failed = true;
-                if let Some((_, retry)) = &mut self.input.retry {
-                    retry.failed(Instant::now());
-                }
-                cx.notify();
-            }
+            HelperEvent::Failed(serial, why) => self.on_helper_failed(serial, why, false, cx),
             _ => {}
         }
+    }
+
+    fn on_helper_failed(
+        &mut self,
+        serial: u64,
+        why: String,
+        starting: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let current = failed_helper_is_current(
+            serial, self.input.serial, self.input.sink.is_some(), starting,
+        );
+        if give_back_keyboard(current, self.input.keyboard_for.is_some()) {
+            self.settle_keyboard(true, cx);
+        }
+        if !current {
+            return;
+        }
+        log::info!("device: device input stopped: {why}");
+        self.input.sink = None;
+        self.input.ready = false;
+        self.input.touching.set(false);
+        self.input.swipe = Swipe::default();
+        self.input.failed = true;
+        if let Some((_, retry)) = &mut self.input.retry {
+            retry.failed(Instant::now());
+        }
+        cx.notify();
     }
 
     /// Home through the helper, for the bar: the receiver gets its answer.
@@ -658,7 +675,7 @@ impl DeviceScreen {
 
     fn send_touch(&mut self, phase: TouchPhase, at: Point<Pixels>, hit: Hit) {
         let (x, y) = clamped_to_device(at, hit.screen, hit.turn);
-        if let Some(helper) = self.helper() {
+        if let Some(helper) = self.input.sink.as_ref().map(Sink::input) {
             helper.touch(phase, x, y);
         }
     }
@@ -679,6 +696,7 @@ impl DeviceScreen {
                 }
                 self.input.keyboard_for = self.input.target.clone();
                 self.lift_all();
+                self.helper(cx);
                 self.send_touch(TouchPhase::Down, event.position, hit);
                 self.input.touching.set(self.input.sink.is_some());
                 self.input.touch_at = event.position;
@@ -715,6 +733,9 @@ impl DeviceScreen {
         let precise = matches!(event.delta, gpui::ScrollDelta::Pixels(_));
         let delta = event.delta.pixel_delta(SCROLL_LINE);
         let swiped = self.input.swipe.scroll(event.position, delta, event.touch_phase, precise, hit.screen);
+        if !swiped.is_empty() {
+            self.helper(cx);
+        }
         for (phase, at) in swiped {
             self.send_touch(phase, at, hit);
         }
@@ -749,7 +770,7 @@ impl DeviceScreen {
             KeyAction::Paste => {
                 // No helper: ⌘V is left to the app.
                 let text = cx.read_from_clipboard().and_then(|item| item.text());
-                if let Some(helper) = self.helper() {
+                if let Some(helper) = self.helper(cx) {
                     if let Some(text) = text {
                         helper.text(&text);
                     }
@@ -757,7 +778,7 @@ impl DeviceScreen {
                 }
             }
             KeyAction::Press { usage, shift } => {
-                if let Some(helper) = self.helper() {
+                if let Some(helper) = self.helper(cx) {
                     helper.press(usage, shift);
                     cx.stop_propagation();
                 }
@@ -854,6 +875,14 @@ mod tests {
     fn close(got: Option<(f64, f64)>, want: (f64, f64)) {
         let (x, y) = got.unwrap_or_else(|| panic!("no point, wanted {want:?}"));
         assert!((x - want.0).abs() < 1e-6 && (y - want.1).abs() < 1e-6, "{got:?} != {want:?}");
+    }
+
+    #[test]
+    fn a_synchronous_failure_counts_before_a_sink_exists() {
+        assert!(failed_helper_is_current(5, 5, false, true));
+        assert!(failed_helper_is_current(5, 5, true, false));
+        assert!(!failed_helper_is_current(5, 5, false, false));
+        assert!(!failed_helper_is_current(4, 5, true, false));
     }
 
     #[test]
