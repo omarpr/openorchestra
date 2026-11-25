@@ -1494,9 +1494,27 @@ mod tests {
         // A tap on its search field, then typing, key by key, and two
         // pastes straight after each other, one with letters adb's text
         // would drop.
+        let dump_hierarchy = || {
+            shell(&["uiautomator", "dump", "/data/local/tmp/oo-device-input.xml"]);
+            shell(&["cat", "/data/local/tmp/oo-device-input.xml"])
+        };
+        fn attribute<'a>(node: &'a str, name: &str) -> Option<&'a str> {
+            node.split_once(&format!(" {name}=\""))?.1.split_once('"').map(|(value, _)| value)
+        }
+        fn nodes(hierarchy: &str) -> impl Iterator<Item = &str> {
+            hierarchy.split("<node ").skip(1).filter_map(|node| node.split_once('>').map(|(attrs, _)| attrs))
+        }
         settings(true);
         let fresh = shot("c0-settings");
-        tap(0.5, 0.2475);
+        // Settings moves its search bar with display and font settings.
+        let hierarchy = dump_hierarchy();
+        let search_bar = nodes(&hierarchy)
+            .find(|node| attribute(node, "resource-id").is_some_and(|id| id.ends_with(":id/search_action_bar")))
+            .expect("Settings search action");
+        let bounds = attribute(search_bar, "bounds").expect("search action bounds");
+        let coords: Vec<f32> = bounds.split(['[', ']', ',']).filter_map(|n| n.parse().ok()).collect();
+        let [left, top, right, bottom] = coords[..] else { panic!("invalid search action bounds: {bounds}") };
+        tap((left + right) / (2.0 * fresh.0 as f32), (top + bottom) / (2.0 * fresh.1 as f32));
         sleep(ms(2000));
         let search = shot("c1-search");
         check(differ(&fresh, &search) > 3.0, format!("tap search ({:.1})", differ(&fresh, &search)));
@@ -1510,10 +1528,11 @@ mod tests {
         sink.text(" wörld!");
         sleep(ms(1500));
         shot("c3-pasted");
-        shell(&["uiautomator", "dump", "/data/local/tmp/oo-device-input.xml"]);
-        let hierarchy = shell(&["cat", "/data/local/tmp/oo-device-input.xml"]);
-        let expected = "text=\"Wifi 2 héllo wörld!\"";
-        assert!(hierarchy.contains(expected), "the guest field must contain exactly {expected}: {hierarchy}");
+        let hierarchy = dump_hierarchy();
+        let focused = nodes(&hierarchy)
+            .find(|node| attribute(node, "focused") == Some("true") && attribute(node, "class") == Some("android.widget.EditText"))
+            .expect("a focused Android search field");
+        assert_eq!(attribute(focused, "text"), Some("Wifi 2 héllo wörld!"));
         assert_eq!(run(&dev, Control::Home, None), Ok(ControlOutcome::Done));
         sleep(ms(1000));
 
