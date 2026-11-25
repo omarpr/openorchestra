@@ -224,10 +224,9 @@ fn run(
         if !super::discovery::still_emulator(dev.pid) {
             return Err("The emulator has shut down".to_string());
         }
-        let size = std::fs::read_to_string(dev.avd_dir.join("config.ini"))
-            .ok()
-            .and_then(|config| native_size(&config))
-            .ok_or_else(|| "The emulator's screen size isn't in its config.ini".to_string())?;
+        // Touch mapping needs the screen's size. A config.ini that leaves
+        // it to the skin, or omits it, must not stop keys and paste.
+        let size = touch_size(dev);
         let mut client = connect(dev.grpc_port).await.map_err(|(_, why)| why)?;
         let _ = events.unbounded_send(HelperEvent::Ready(serial));
         let mut worked = false;
@@ -253,9 +252,29 @@ fn run(
 }
 
 /// Sends one command, each call bounded by [`CALL_TIMEOUT`].
-async fn send(client: &mut Client, cmd: Cmd, size: (u32, u32), token: Option<&str>) -> Result<(), String> {
+/// The screen touches are mapped onto: `config.ini`'s `hw.lcd` size, or
+/// the skin's display when the config leaves the size to the skin.
+fn touch_size(dev: &AndroidRunning) -> Option<(u32, u32)> {
+    let config = std::fs::read_to_string(dev.avd_dir.join("config.ini")).ok();
+    let skin = super::skin::skin_for(&dev.avd_dir)
+        .map(|skin| (skin.layout.display.w, skin.layout.display.h));
+    resolved_touch_size(config.as_deref(), skin)
+}
+
+/// `config`'s `hw.lcd` size when it has one, otherwise the skin's display.
+pub(crate) fn resolved_touch_size(config: Option<&str>, skin: Option<(u32, u32)>) -> Option<(u32, u32)> {
+    config.and_then(native_size).or(skin)
+}
+
+async fn send(
+    client: &mut Client,
+    cmd: Cmd,
+    size: Option<(u32, u32)>,
+    token: Option<&str>,
+) -> Result<(), String> {
     match cmd {
         Cmd::Touch(phase, x, y) => {
+            let size = size.ok_or_else(|| "The emulator's screen size isn't known".to_string())?;
             let event = touch_event(phase, device_point(x, y, size));
             within(client.send_touch(authorized(event, token)?)).await
         }
@@ -300,6 +319,20 @@ async fn within<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keys_do_not_need_a_touch_size() {
+        // config.ini with no lcd size: the skin's display is the touch
+        // map. Neither: there is no touch map, and that is not a reason
+        // to refuse keys (the worker keeps running; see `touch_size`).
+        assert_eq!(resolved_touch_size(Some("hw.lcd.width = 1080\n"), Some((100, 200))), Some((100, 200)));
+        assert_eq!(
+            resolved_touch_size(Some("hw.lcd.width = 1080\nhw.lcd.height = 2400\n"), Some((1, 1))),
+            Some((1080, 2400))
+        );
+        assert_eq!(resolved_touch_size(Some("skin.path = pixel_9_pro\n"), Some((1280, 2856))), Some((1280, 2856)));
+        assert_eq!(resolved_touch_size(None, None), None);
+    }
 
     #[test]
     fn a_touch_is_device_pixels_with_full_pressure_until_it_lifts() {
