@@ -1854,6 +1854,20 @@ mod tests {
                     let (od, pd) = (snap(p.overlay, scale), snap(p.picture, scale));
                     let hole = hole_px(p.overlay_px, geometry, turn);
                     let (ow, oh) = overlay.dimensions();
+                    // Rectangular leak checks do not cover these points:
+                    // they are inside hole_px but outside the rounded curve.
+                    for (x, y) in [
+                        (hole.x0, hole.y0),
+                        (hole.x1 - 1, hole.y0),
+                        (hole.x0, hole.y1 - 1),
+                        (hole.x1 - 1, hole.y1 - 1),
+                    ] {
+                        // A soft art edge may be 254; a missed cut is clear.
+                        assert!(
+                            overlay.get_pixel(x as u32, y as u32).0[3] >= 254,
+                            "uncovered rounded corner at scale {scale}, width {width}, origin {ox},{oy}, {turn:?}: {x},{y}"
+                        );
+                    }
                     for y in pd.y0..pd.y1 {
                         for x in pd.x0..pd.x1 {
                             // gpui stretches the sprite over its snapped rect.
