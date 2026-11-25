@@ -22,14 +22,19 @@
 //! unchanged. Dropping the handle lets it send what is already queued (a
 //! lift, the last keys) and end.
 
+use std::io;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use futures::channel::mpsc::UnboundedSender;
+use hyper_util::rt::TokioIo;
+use tokio::net::TcpStream;
+use tonic::transport::Endpoint;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender as CmdSender};
 
 use super::grpc::keyboard_event::{KeyCodeType, KeyEventType};
 use super::grpc::{ClipData, KeyboardEvent, Touch, TouchEvent};
-use super::stream::{Client, authorized, connect, native_size, status_text, without_token};
+use super::stream::{CONNECT_TIMEOUT, Client, authorized, native_size, status_text, without_token};
 use crate::devices::AndroidRunning;
 use crate::devices::input::{DeviceInput, HelperEvent, MAX_PASTE, TouchPhase};
 
@@ -227,7 +232,8 @@ fn run(
         // Touch mapping needs the screen's size. A config.ini that leaves
         // it to the skin, or omits it, must not stop keys and paste.
         let size = touch_size(dev);
-        let mut client = connect(dev.grpc_port).await.map_err(|(_, why)| why)?;
+        let mut client =
+            connect_input(dev.grpc_port, || super::discovery::is_same_run(dev)).await?;
         let _ = events.unbounded_send(HelperEvent::Ready(serial));
         let mut worked = false;
         let mut batch = vec![first];
@@ -249,6 +255,32 @@ fn run(
             }
         }
     })
+}
+
+/// Verify the run after dialing and before exposing the transport to input.
+/// A broken connection must fail the sink so tonic cannot silently redial
+/// a port that may now belong to another emulator.
+async fn connect_input(port: u16, still_selected: impl FnOnce() -> bool) -> Result<Client, String> {
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let endpoint = Endpoint::from_shared(format!("http://{address}"))
+        .map_err(|e| e.to_string())?
+        .connect_timeout(CONNECT_TIMEOUT);
+    let mut address = Some(address);
+    let connector = tower::service_fn(move |_| {
+        let address = address.take();
+        async move {
+            let address = address.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotConnected, "The emulator input connection ended")
+            })?;
+            TcpStream::connect(address).await.map(TokioIo::new)
+        }
+    });
+    let channel = endpoint.connect_with_connector(connector).await
+        .map_err(|e| format!("Couldn't connect to the emulator: {e}"))?;
+    if !still_selected() {
+        return Err("The selected emulator run has ended".into());
+    }
+    Ok(Client::new(channel))
 }
 
 /// The screen touches are mapped onto: `config.ini`'s `hw.lcd` size, or
@@ -321,6 +353,20 @@ async fn within<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_connection_to_a_replaced_emulator_is_rejected_before_input() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (client, accepted) = tokio::time::timeout(CONNECT_TIMEOUT, async {
+                futures::join!(connect_input(port, || false), listener.accept())
+            }).await.expect("connect to the replacement listener");
+            assert!(accepted.is_ok());
+            assert_eq!(client.err().as_deref(), Some("The selected emulator run has ended"));
+        });
+    }
 
     #[test]
     fn keys_do_not_need_a_touch_size() {

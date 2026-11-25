@@ -262,6 +262,9 @@ objc2-user-notifications = "0.3"
 tonic = { version = "0.14", default-features = false, features = ["channel", "codegen"] }
 tonic-prost = "0.14"
 prost = "0.14"
+# Android input gives tonic a single TCP connection to its verified run.
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+tower = { version = "0.5", default-features = false, features = ["util"] }
 # The Android picture's stream (devices/android/stream.rs) runs on a
 # current-thread runtime with a connect timeout. These features are already
 # on through gpui_tokio; declared because the stream uses them.
