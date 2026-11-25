@@ -23,10 +23,14 @@ use super::convert::{PixelConverter, SendPixelBuffer};
 use super::sim_display::{ScreenEvent, ScreenStream};
 use super::{AndroidRunning, FrameSlot, Quarter, StreamError, quarter_for};
 
-/// Where a stream's frames land, each with the turn that made it upright
-/// (the frame around it turns too); the UI takes from it on a
-/// [`StreamMsg::Frame`].
-pub(crate) type Frames = Arc<FrameSlot<(SendPixelBuffer, Quarter)>>;
+/// The latest picture, including an explicitly inactive Android display.
+pub(crate) enum FrameUpdate {
+    Picture(SendPixelBuffer, Quarter),
+    Inactive,
+}
+
+/// A [`StreamMsg::Frame`] wakes the UI to take the latest picture state.
+pub(crate) type Frames = Arc<FrameSlot<FrameUpdate>>;
 
 /// A lifecycle message belongs to one attempt within a picture's generation.
 #[derive(Clone, Copy, Debug)]
@@ -232,11 +236,16 @@ fn start_android(
     let mut converter = PixelConverter::new().map_err(StreamError::Failed)?;
     let (mut first, mut logged_error) = (true, false);
     AndroidStream::start(dev, size, move |event| match event {
+        StreamEvent::Inactive => {
+            if frames.put(FrameUpdate::Inactive) {
+                let _ = to_ui.unbounded_send(StreamMsg::Frame(attempt.generation));
+            }
+        }
         StreamEvent::Frame { width, height, rgba, turn } => {
             match converter.convert_rgba(rgba, width as usize, height as usize) {
                 Ok(buffer) => {
                     // Drawn as it comes; the turn maps touches back.
-                    if frames.put((SendPixelBuffer(buffer), turn)) {
+                    if frames.put(FrameUpdate::Picture(SendPixelBuffer(buffer), turn)) {
                         let _ = to_ui.unbounded_send(StreamMsg::Frame(attempt.generation));
                     }
                     if std::mem::take(&mut first) {
@@ -317,7 +326,7 @@ fn start(
         let turn = quarter_for(*orientation);
         match converter.convert(surface, turn) {
             Ok(buffer) => {
-                if frames.put((SendPixelBuffer(buffer), turn)) {
+                if frames.put(FrameUpdate::Picture(SendPixelBuffer(buffer), turn)) {
                     let _ = to_ui.unbounded_send(StreamMsg::Frame(attempt.generation));
                 }
             }
@@ -434,7 +443,10 @@ mod tests {
         let worker = StreamWorker::spawn(to_ui).unwrap();
         let frames: Frames = Arc::new(FrameSlot::new());
         let size_of = |frames: &Frames| {
-            frames.take().map(|(b, _)| (CVPixelBufferGetWidth(&b.0), CVPixelBufferGetHeight(&b.0)))
+            match frames.take()? {
+                FrameUpdate::Picture(b, _) => Some((CVPixelBufferGetWidth(&b.0), CVPixelBufferGetHeight(&b.0))),
+                FrameUpdate::Inactive => None,
+            }
         };
         // As the tab does: a failure is tried again a few seconds later.
         let mut generation = 1;
@@ -596,7 +608,8 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(2000));
             let frame = frames.take().expect("a frame since the turn");
-            let (fw, fh, frame) = frame_grid(&frame.0.0);
+            let FrameUpdate::Picture(picture, _) = frame else { panic!("no picture") };
+            let (fw, fh, frame) = frame_grid(&picture.0);
             let png = match run_public(&udid, Control::Screenshot, None) {
                 Ok(ControlOutcome::Png(png)) => png,
                 other => panic!("no screenshot: {other:?}"),

@@ -1084,12 +1084,22 @@ impl HarnessWorkspace {
         msg: crate::devices::worker::StreamMsg,
         cx: &mut Context<Self>,
     ) {
-        use crate::devices::worker::StreamMsg;
+        use crate::devices::worker::{FrameUpdate, StreamMsg};
         let live = self.device_live;
         let current = |attempt| self.device_worker.as_ref().is_some_and(|worker| worker.is_current(live, attempt));
         match msg {
             StreamMsg::Frame(generation) if live == Some(generation) => {
-                let Some((frame, turn)) = self.device_frames.as_ref().and_then(|f| f.take()) else {
+                let Some(update) = self.device_frames.as_ref().and_then(|f| f.take()) else {
+                    return;
+                };
+                let FrameUpdate::Picture(frame, turn) = update else {
+                    if self.device_screen.read(cx).has_live_frame() {
+                        self.device_screen.update(cx, |screen, cx| {
+                            screen.clear(cx);
+                            screen.set_input_target(None, cx);
+                        });
+                        cx.notify();
+                    }
                     return;
                 };
                 // Enable input and the bar only once this run has a picture.

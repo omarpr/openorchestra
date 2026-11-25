@@ -25,6 +25,7 @@ Unreleased is empty.
 
 ### Fixed
 
+- The Device tab clears the Android picture and touch area when the display goes inactive.
 - A replaced Android screenshot stream cannot stop its replacement after a resize.
 - Android settings and graceful shutdown stay tied to the selected emulator run.
 - An Android shutdown confirmation expires when the emulator restarts.

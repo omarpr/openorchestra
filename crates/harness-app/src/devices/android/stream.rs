@@ -173,6 +173,8 @@ pub(crate) fn request_box(side: u32, native_long: Option<u32>) -> (u32, u32) {
 
 /// What a stream reports, on its own thread.
 pub(crate) enum StreamEvent {
+    /// The display is inactive. The RPC stays open for a later picture.
+    Inactive,
     /// A frame: `width` × `height` RGBA8888, rows top down, upright, and
     /// the turn that made it so ([`quarter_for_rotation`]).
     Frame { width: u32, height: u32, rgba: Vec<u8>, turn: Quarter },
@@ -285,6 +287,20 @@ pub(crate) async fn connect(port: u16) -> Result<Client, (bool, String)> {
     Ok(EmulatorControllerClient::new(channel).max_decoding_message_size(MAX_DECODING_MESSAGE_SIZE))
 }
 
+fn image_event(image: Image) -> Option<StreamEvent> {
+    // The emulator represents an inactive display with an empty zero-size
+    // image, which may omit its format entirely.
+    if image.image.is_empty() && image.format.as_ref().is_none_or(|f| f.width == 0 && f.height == 0) {
+        return Some(StreamEvent::Inactive);
+    }
+    let format = image.format?;
+    if format.format != ImgFormat::Rgba8888 as i32 {
+        return None;
+    }
+    let turn = format.rotation.map_or(Quarter::None, |r| quarter_for_rotation(r.rotation));
+    Some(StreamEvent::Frame { width: format.width, height: format.height, rgba: image.image, turn })
+}
+
 /// Hands each frame to `on_event` until the call ends, then reports the
 /// end once.
 async fn pump(
@@ -296,15 +312,9 @@ async fn pump(
     let (why, unavailable) = loop {
         match frames.message().await {
             Ok(Some(image)) => {
-                let Some(format) = image.format.as_ref() else {
-                    continue;
-                };
-                if format.format != ImgFormat::Rgba8888 as i32 {
-                    continue;
+                if let Some(event) = image_event(image) {
+                    on_event(event);
                 }
-                let (width, height) = (format.width, format.height);
-                let turn = format.rotation.map_or(Quarter::None, |r| quarter_for_rotation(r.rotation));
-                on_event(StreamEvent::Frame { width, height, rgba: image.image, turn });
             }
             Ok(None) => break ("The emulator ended the picture".to_string(), false),
             Err(status) => {
@@ -469,6 +479,22 @@ mod tests {
     }
 
     #[test]
+    fn inactive_display_is_distinct_from_a_bad_visible_frame() {
+        assert!(matches!(image_event(Image::default()), Some(StreamEvent::Inactive)));
+        let frame = |width, height| Image {
+            format: Some(ImageFormat {
+                format: ImgFormat::Rgba8888 as i32,
+                width,
+                height,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(matches!(image_event(frame(0, 0)), Some(StreamEvent::Inactive)));
+        assert!(matches!(image_event(frame(2, 2)), Some(StreamEvent::Frame { .. })));
+    }
+
+    #[test]
     fn an_error_is_one_line_of_its_causes() {
         let status = tonic::Status::unauthenticated("Missing the 'authorization' header\nmore");
         assert_eq!(status_text(&status), "Unauthenticated: Missing the 'authorization' header");
@@ -530,6 +556,7 @@ mod tests {
                         )
                     }), took))
                 }
+                StreamEvent::Inactive => return,
                 StreamEvent::Ended { gone, why } => Err((gone, why)),
             };
             let _ = tx.send(report);
