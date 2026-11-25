@@ -486,11 +486,13 @@ impl HarnessWorkspace {
         let udid = device.udid;
         if boot_holds_the_bar(device.platform) {
             self.run_device_power(cx, move || crate::devices::controls::boot(&udid));
-            return;
+        } else {
+            // Android devices are only listed on macOS. No `return` above:
+            // on Windows this arm is empty, and a trailing return is
+            // clippy::needless_return under `-D warnings`.
+            #[cfg(target_os = "macos")]
+            self.boot_android(udid, cx);
         }
-        // Android devices are only listed on macOS.
-        #[cfg(target_os = "macos")]
-        self.boot_android(udid, cx);
     }
 
     /// Boot an AVD off the UI thread. Its wait (until the emulator lists
