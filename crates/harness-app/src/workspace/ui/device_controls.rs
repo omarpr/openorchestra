@@ -12,7 +12,7 @@
 //! about a tenth of a second.
 
 use super::super::*;
-use crate::devices::{DeviceInfo, Platform};
+use crate::devices::{AndroidRunning, DeviceInfo, Platform};
 use crate::devices::controls::{Appearance, Control, ControlOutcome};
 use crate::devices::tab_state::{DeviceTab, DeviceView};
 
@@ -95,13 +95,21 @@ pub(crate) fn boot_holds_the_bar(platform: Platform) -> bool {
 /// Whether the boot offer for `offer` is busy (says "Booting…" and ignores
 /// clicks): a control or simulator boot is running (`in_flight`), or this
 /// AVD is in the set of pending launches (`booting`).
-pub(crate) fn boot_busy(offer: &str, in_flight: bool, booting: &HashMap<String, bool>) -> bool {
+pub(crate) fn boot_busy(
+    offer: &str, in_flight: bool, booting: &HashMap<String, Option<AndroidRunning>>,
+) -> bool {
     in_flight || booting.contains_key(offer)
 }
 
-/// A successful background launch still needs confirmation from the UI poll.
-pub(crate) fn boot_is_listed(running: &[DeviceInfo], id: &str, launched: bool) -> bool {
-    launched && running.iter().any(|d| d.udid == id)
+/// A poll can only clear a launch whose AVD is now listed or whose exact
+/// run the poll checked and found gone. An older poll may know neither.
+pub(crate) fn boot_should_wait(
+    id: &str,
+    launched: Option<&AndroidRunning>,
+    running: &[DeviceInfo],
+    exited: &[AndroidRunning],
+) -> bool {
+    launched.is_none_or(|run| !running.iter().any(|d| d.udid == id) && !exited.contains(run))
 }
 
 /// A control's button: its element id, icon and tooltip.
@@ -526,21 +534,24 @@ impl HarnessWorkspace {
         let Some(avd) = crate::devices::avd_id_of(&udid).map(str::to_string) else {
             return;
         };
-        self.device_booting.insert(udid.clone(), false);
+        self.device_booting.insert(udid.clone(), None);
         cx.notify();
         cx.spawn(async move |view, cx| {
             let result = cx
                 .background_spawn(async move { crate::devices::android::sdk::boot(&avd) })
                 .await;
             let _ = view.update(cx, |ws, cx| {
-                if result.is_err() || boot_is_listed(&ws.device_list.android_running, &udid, true) {
-                    ws.device_booting.remove(&udid);
-                } else if let Some(launched) = ws.device_booting.get_mut(&udid) {
-                    *launched = true;
-                }
-                if let Err(e) = result {
-                    log::info!("device: {e}");
-                    ws.set_error_note(error_line(&e));
+                match result {
+                    Ok(run) => {
+                        if let Some(launch) = ws.device_booting.get_mut(&udid) {
+                            *launch = Some(run);
+                        }
+                    }
+                    Err(e) => {
+                        ws.device_booting.remove(&udid);
+                        log::info!("device: {e}");
+                        ws.set_error_note(error_line(&e));
+                    }
                 }
                 if ws.device_shown {
                     ws.refresh_devices(cx);
@@ -777,10 +788,10 @@ mod tests {
         // A simulator boot holds the bar. Android launches can overlap.
         assert!(boot_holds_the_bar(Platform::Ios));
         assert!(!boot_holds_the_bar(Platform::Android));
-        let mut pending = HashMap::from([("android:m".into(), false)]);
+        let mut pending = HashMap::from([("android:m".into(), None)]);
         assert!(boot_busy("android:m", false, &pending));
         assert!(!boot_busy("android:n", false, &pending));
-        pending.insert("android:n".into(), true);
+        pending.insert("android:n".into(), None);
         assert!(boot_busy("android:m", false, &pending));
         assert!(boot_busy("android:n", false, &pending));
         pending.remove("android:n");
@@ -793,13 +804,20 @@ mod tests {
     }
 
     #[test]
-    fn a_successful_launch_stays_busy_until_the_picker_sees_that_avd() {
-        use super::boot_is_listed;
+    fn a_launch_stays_busy_until_it_is_listed_or_the_exact_run_exits() {
+        use super::{AndroidRunning, boot_should_wait};
+        let run = AndroidRunning {
+            pid: 10, avd_id: "p".into(), name: "p".into(), grpc_port: 8554,
+            token: None, serial_port: 5554, avd_dir: "/p".into(),
+        };
+        let older = AndroidRunning { pid: 9, ..run.clone() };
         let running = [DeviceInfo { udid: "android:p".into(), ..Default::default() }];
-        assert!(!boot_is_listed(&running, "android:p", false));
-        assert!(!boot_is_listed(&[], "android:p", true));
-        assert!(!boot_is_listed(&running, "android:q", true));
-        assert!(boot_is_listed(&running, "android:p", true));
+
+        assert!(boot_should_wait("android:p", None, &running, &[]));
+        assert!(boot_should_wait("android:p", Some(&run), &[], &[]));
+        assert!(boot_should_wait("android:p", Some(&run), &[], &[older]));
+        assert!(!boot_should_wait("android:p", Some(&run), &[], std::slice::from_ref(&run)));
+        assert!(!boot_should_wait("android:p", Some(&run), &running, &[]));
     }
 
     #[test]

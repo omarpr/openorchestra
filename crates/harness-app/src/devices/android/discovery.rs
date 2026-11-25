@@ -101,13 +101,16 @@ pub(crate) fn still_emulator(pid: u32) -> bool {
     pid_alive(pid) && is_emulator_process(process_name(pid).as_deref())
 }
 
-/// The discovery record must still describe this run. A live qemu PID on
-/// its own cannot distinguish a reused PID.
+/// Look up a particular process without deduplicating by AVD name.
+pub(crate) fn running_emulator(pid: u32) -> Option<AndroidRunning> {
+    let path = running_dir()?.join(format!("pid_{pid}.ini"));
+    let dev = parse_running_ini(&std::fs::read_to_string(path).ok()?, pid)?;
+    still_emulator(pid).then_some(dev)
+}
+
+/// A live qemu PID on its own cannot distinguish a reused PID.
 pub(crate) fn is_same_run(dev: &AndroidRunning) -> bool {
-    let current = running_dir()
-        .and_then(|dir| std::fs::read_to_string(dir.join(format!("pid_{}.ini", dev.pid))).ok())
-        .and_then(|text| parse_running_ini(&text, dev.pid));
-    current.as_ref() == Some(dev) && still_emulator(dev.pid)
+    running_emulator(dev.pid).as_ref() == Some(dev)
 }
 
 /// How long ago the emulator `pid` listed itself (its file's age); None

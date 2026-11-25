@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use crate::devices::AndroidRunning;
 use crate::ports::{RunFailed, run_bounded_why};
 
 /// `emulator -list-avds` takes about 25 ms (spike).
@@ -124,7 +125,7 @@ pub(crate) fn boot_failure(log: &str, code: Option<i32>) -> String {
 /// the temp dir. Returns once the emulator lists itself as running, or
 /// with the log's first error if it exits first. Blocks: call it off the
 /// main thread.
-pub(crate) fn boot(avd_id: &str) -> Result<(), String> {
+pub(crate) fn boot(avd_id: &str) -> Result<AndroidRunning, String> {
     use std::os::unix::process::CommandExt;
     let sdk = sdk().ok_or_else(|| "The Android SDK wasn't found".to_string())?;
     let dir = std::env::temp_dir().join("openorchestra-device");
@@ -151,8 +152,8 @@ pub(crate) fn boot(avd_id: &str) -> Result<(), String> {
             Ok(None) => {}
             Err(e) => break Err(format!("watching the emulator: {e}")),
         }
-        if super::discovery::running_emulators().iter().any(|e| e.avd_id == avd_id) {
-            break Ok(());
+        if let Some(run) = super::discovery::running_emulator(child.id()).filter(|d| d.avd_id == avd_id) {
+            break Ok(run);
         }
         if !logged_slow_boot && started.elapsed() > SLOW_BOOT {
             log::info!("device: {avd_id} hasn't listed itself after {} s", SLOW_BOOT.as_secs());

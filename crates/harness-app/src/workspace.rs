@@ -963,9 +963,9 @@ pub struct HarnessWorkspace {
     /// place of the picture, until it is running or another device is
     /// picked.
     device_boot_offer: Option<crate::devices::DeviceInfo>,
-    /// Pending Android boots by device ID, with a flag for launches that
-    /// have succeeded and are waiting for the picker to see them running.
-    device_booting: HashMap<String, bool>,
+    /// Pending Android boots by device ID. A completed launch records the
+    /// exact run until the picker sees it or the process exits.
+    device_booting: HashMap<String, Option<crate::devices::AndroidRunning>>,
     /// The device the Shut down confirm asks about, captured from the
     /// picture on screen when Shut down was clicked.
     device_shutdown_confirm: Option<crate::devices::DeviceInfo>,

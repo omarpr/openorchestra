@@ -806,19 +806,27 @@ impl HarnessWorkspace {
             return;
         }
         let ticket = self.device_tab.list_started();
+        #[cfg(target_os = "macos")]
+        let launched: Vec<_> = self.device_booting.values().flatten().cloned().collect();
         cx.spawn(async move |view, cx| {
             let list = cx
                 .background_spawn(async move {
                     // Android rides on the simulator list (no poll of its
                     // own), but counts whatever simctl says.
                     let lists = (crate::devices::simctl::list_devices(), crate::devices::list_android());
-                    (lists, crate::devices::adb_available())
+                    #[cfg(target_os = "macos")]
+                    let exited = launched.into_iter()
+                        .filter(|run| !crate::devices::android::discovery::is_same_run(run))
+                        .collect();
+                    #[cfg(not(target_os = "macos"))]
+                    let exited = Vec::new();
+                    (lists, crate::devices::adb_available(), exited)
                 })
                 .await;
-            let ((ios, android), adb) = list;
+            let ((ios, android), adb, exited) = list;
             let _ = view.update(cx, |ws, cx| {
                 ws.device_adb = adb;
-                ws.apply_device_list(ticket, ios, android, cx)
+                ws.apply_device_list(ticket, ios, android, exited, cx)
             });
         })
         .detach();
@@ -829,6 +837,7 @@ impl HarnessWorkspace {
         ticket: u64,
         ios: Result<DeviceList, ListError>,
         android: crate::devices::AndroidInventory,
+        exited: Vec<crate::devices::AndroidRunning>,
         cx: &mut Context<Self>,
     ) {
         self.device_listing = false;
@@ -857,7 +866,9 @@ impl HarnessWorkspace {
         // The emulators count whatever simctl said.
         self.device_list = DeviceList::merged(&self.device_list, &ios, android);
         self.device_booting.retain(|id, launched| {
-            !super::device_controls::boot_is_listed(&self.device_list.android_running, id, *launched)
+            super::device_controls::boot_should_wait(
+                id, launched.as_ref(), &self.device_list.android_running, &exited,
+            )
         });
         self.device_boot_offer = boot_offer_after_list(offer, &self.device_list.running());
         // The state machine watches running devices only.

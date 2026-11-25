@@ -25,6 +25,7 @@ Unreleased is empty.
 
 ### Fixed
 
+- Android boot can be retried if the launched emulator exits before the picker sees it.
 - Android input stays tied to the verified emulator connection if its port is reused.
 - Android keyboard and paste stay available when the emulator screen size is unknown.
 - The Device tab retries when an Android stream cannot produce a usable first frame.
