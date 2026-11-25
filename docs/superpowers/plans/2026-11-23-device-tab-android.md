@@ -102,8 +102,8 @@ Per the spec's "Spike first". It produces findings only. Write them into the spe
 ### Task 4: Input and controls
 
 **Files:**
-- Create: `crates/harness-app/src/devices/android/input.rs` (`sendTouch`, `injectWheel`, `sendKey`)
-- Modify: `workspace/ui/device_input.rs` (a small input-sink trait that the iOS helper and Android both implement; Android scrolls with the real wheel, not a synthesised swipe), `devices/controls.rs` and `workspace/ui/device_controls.rs` (per-platform controls, plus a Back button for Android)
+- Create: `crates/harness-app/src/devices/android/input.rs` (`sendTouch`, `sendKey`)
+- Modify: `workspace/ui/device_input.rs` (a small input-sink trait that the iOS helper and Android both implement; Android wheel and trackpad input synthesises swipes through `sendTouch`), `devices/controls.rs` and `workspace/ui/device_controls.rs` (per-platform controls, plus a Back button for Android)
 - Modify: `CHANGELOG.md` (`### Added`: `- Click, scroll, type, and the Device bar's controls (plus Back) on Android emulators.`)
 
 **Interfaces:**
@@ -118,7 +118,7 @@ Per the spec's "Spike first". It produces findings only. Write them into the spe
 
 - [ ] **Step 1:** Write the failing tests:
   - `android_touch_maps_to_device_pixels` (each turn)
-  - `wheel_deltas_pass_through_without_a_swipe`
+  - `android_scroll_is_a_synthesised_swipe`
   - `back_and_home_use_key_names`
   - `font_scale_steps_and_stops_at_the_ends`
   - `controls_without_adb_hide_appearance_and_text_size`
