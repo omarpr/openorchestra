@@ -576,8 +576,7 @@ mod tests {
         })
         .unwrap();
         let serial = format!("emulator-{}", dev.serial_port);
-        let home = std::env::var("HOME").unwrap();
-        let adb = format!("{home}/Library/Android/sdk/platform-tools/adb");
+        let adb = super::super::controls::adb().expect("adb in the selected Android SDK");
         let killed = std::process::Command::new(adb).args(["-s", &serial, "emu", "kill"]).status();
         assert!(killed.unwrap().success());
         let at = std::time::Instant::now();

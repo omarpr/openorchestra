@@ -387,7 +387,7 @@ mod tests {
         use objc2_core_video::{CVPixelBufferGetHeight, CVPixelBufferGetWidth};
         use std::time::Instant;
         let avd = std::env::var("OO_TEST_AVD").expect("set OO_TEST_AVD");
-        let adb = format!("{}/Library/Android/sdk/platform-tools/adb", std::env::var("HOME").unwrap());
+        let adb = crate::devices::android::controls::adb().expect("adb in the selected Android SDK");
         let t0 = Instant::now();
         let dev = loop {
             if let Some(d) = crate::devices::android::discovery::running_emulators()
