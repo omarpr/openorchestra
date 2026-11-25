@@ -114,11 +114,12 @@ pub(crate) fn paste_text(text: &str) -> String {
     text.chars().take(MAX_PASTE).collect()
 }
 
-/// After a paste's keys failed with `sent` of them gone, the key that lets
-/// go of Ctrl, if it was left held.
-pub(crate) fn ctrl_release_after(sent: usize) -> Option<KeyboardEvent> {
-    // Ctrl goes down first and up last (`paste_calls`).
-    (1..4).contains(&sent).then(|| usb_key(LEFT_CONTROL, false))
+/// Keys that let go of a paste, best effort, after any of its key calls
+/// failed. A timeout does not say the key never went down, so both are
+/// released whatever had already been sent. Each is sent on its own: one
+/// failing does not skip the other.
+pub(crate) fn paste_key_releases() -> [KeyboardEvent; 2] {
+    [usb_key(KEY_V, false), usb_key(LEFT_CONTROL, false)]
 }
 
 /// One thing to send.
@@ -263,17 +264,18 @@ async fn send(client: &mut Client, cmd: Cmd, size: (u32, u32), token: Option<&st
             let (clip, keys) = paste_calls(&text);
             within(client.set_clipboard(authorized(clip, token)?)).await?;
             tokio::time::sleep(PASTE_SETTLE).await;
-            for (sent, key) in keys.into_iter().enumerate() {
+            for key in keys {
                 let went = match authorized(key, token) {
                     Ok(key) => within(client.send_key(key)).await,
                     Err(e) => Err(e),
                 };
                 if let Err(why) = went {
-                    // Best effort: never leave Ctrl held on the device.
-                    if let Some(up) = ctrl_release_after(sent)
-                        && let Ok(up) = authorized(up, token)
-                    {
-                        let _ = within(client.send_key(up)).await;
+                    // Best effort: never leave Ctrl or V held. A timeout
+                    // may still have delivered the key that just failed.
+                    for up in paste_key_releases() {
+                        if let Ok(up) = authorized(up, token) {
+                            let _ = within(client.send_key(up)).await;
+                        }
                     }
                     return Err(why);
                 }
@@ -349,15 +351,13 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_paste_lets_go_of_ctrl() {
-        // Nothing sent, or all four: Ctrl isn't held.
-        assert!(ctrl_release_after(0).is_none());
-        assert!(ctrl_release_after(4).is_none());
-        // Ctrl went down and its up didn't go: let go of it.
-        for sent in 1..=3 {
-            let up = ctrl_release_after(sent).expect("Ctrl up");
-            assert_eq!((up.event_type, up.key_code), (KeyEventType::Keyup as i32, 0x0700E0));
-        }
+    fn a_failed_paste_lets_go_of_ctrl_and_v() {
+        // Whatever had been sent, including a first key whose delivery
+        // timed out: let go of V and of Ctrl, independently.
+        let ups = paste_key_releases();
+        let (up, ctrl) = (KeyEventType::Keyup as i32, 0x0700E0);
+        assert_eq!((ups[0].event_type, ups[0].key_code), (up, 0x070019));
+        assert_eq!((ups[1].event_type, ups[1].key_code), (up, ctrl));
     }
 
     #[test]
