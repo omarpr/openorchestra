@@ -23,7 +23,7 @@ use super::grpc::{ImageFormat, ParameterValue, PhysicalModelValue, VmRunState};
 use super::input::{BACK_KEY, HOME_KEY, named_key};
 use super::stream::{Client, authorized, connect, status_text, without_token};
 use crate::devices::AndroidRunning;
-use crate::devices::controls::{Appearance, Control, ControlOutcome, TogglePlan, toggle_plan};
+use crate::devices::controls::{Appearance, Control, ControlOutcome};
 use crate::ports::{RunFailed, run_bounded_why};
 
 /// The text sizes Text size steps through, smallest first, as `settings`
@@ -103,13 +103,13 @@ pub(crate) fn rotation_after(z: f32) -> f32 {
     next * 90.0
 }
 
-/// Runs a control on `dev`. `appearance`: what the tab knows its
-/// appearance is, for the toggle (None reads it first). Blocks: call it
-/// off the main thread.
+/// Runs a control on `dev`. `_appearance` is the tab's cached value for
+/// display; a toggle reads the guest rather than trusting that cache.
+/// Blocks: call it off the main thread.
 pub(crate) fn run(
     dev: &AndroidRunning,
     control: Control,
-    appearance: Option<Appearance>,
+    _appearance: Option<Appearance>,
 ) -> Result<ControlOutcome, String> {
     let token = dev.token.clone();
     match control {
@@ -147,10 +147,7 @@ pub(crate) fn run(
             Ok(ControlOutcome::Png(image))
         }
         Control::ToggleAppearance => {
-            let next = match toggle_plan(appearance) {
-                TogglePlan::Set(next) => next,
-                TogglePlan::ReadFirst => toggled(night_mode(dev)?),
-            };
+            let next = toggled(night_mode(dev)?);
             let night = if next == Appearance::Dark { "yes" } else { "no" };
             adb_shell(dev, &["cmd", "uimode", "night", night])?;
             Ok(ControlOutcome::Appearance(next))
@@ -185,9 +182,8 @@ fn night_mode(dev: &AndroidRunning) -> Result<Option<Appearance>, String> {
     adb_shell(dev, &["cmd", "uimode", "night"]).map(|out| parse_night(&out))
 }
 
-/// `dev`'s appearance now, through adb. Only the live test asks: the bar
-/// reads it on the toggle's first click (`TogglePlan::ReadFirst`), never
-/// unasked.
+/// `dev`'s appearance now, through adb. Only the live test asks directly;
+/// the bar reads it as part of each toggle, never unasked.
 #[cfg(test)]
 pub(crate) fn read_appearance(dev: &AndroidRunning) -> Result<Appearance, String> {
     night_mode(dev)?.ok_or_else(|| "night mode is neither on nor off".to_string())
