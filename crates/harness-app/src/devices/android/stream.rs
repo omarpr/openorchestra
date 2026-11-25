@@ -44,6 +44,8 @@ const EXIT_GRACE: Duration = Duration::from_secs(3);
 /// before its process exits.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(20);
 const EXIT_POLL: Duration = Duration::from_millis(250);
+/// Wait this long for a usable frame after a visible startup frame fails.
+const FRAME_RECOVERY: Duration = Duration::from_secs(3);
 
 /// What to make of a call that ended, `waited` after its end.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -192,14 +194,15 @@ pub(crate) struct AndroidStream {
 
 impl AndroidStream {
     /// Connects to `dev` and asks for frames fitting `size`, then calls
-    /// `on_event` with each, on a thread of the stream's own. Blocks for up
+    /// `on_event` with each, on a thread of the stream's own. A callback
+    /// error means a frame could not be displayed. Blocks for up
     /// to [`CONNECT_TIMEOUT`]. A refused call (a bad token, say) is an
     /// error here; [`StreamError::DeviceNotFound`] when the emulator has
     /// already gone.
     pub(crate) fn start(
         dev: &AndroidRunning,
         size: (u32, u32),
-        on_event: impl FnMut(StreamEvent) + Send + 'static,
+        on_event: impl FnMut(StreamEvent) -> Result<(), String> + Send + 'static,
     ) -> Result<AndroidStream, StreamError> {
         if !super::discovery::still_emulator(dev.pid) {
             return Err(StreamError::DeviceNotFound);
@@ -287,18 +290,64 @@ pub(crate) async fn connect(port: u16) -> Result<Client, (bool, String)> {
     Ok(EmulatorControllerClient::new(channel).max_decoding_message_size(MAX_DECODING_MESSAGE_SIZE))
 }
 
-fn image_event(image: Image) -> Option<StreamEvent> {
+fn image_event(image: Image) -> Result<StreamEvent, String> {
     // The emulator represents an inactive display with an empty zero-size
     // image, which may omit its format entirely.
     if image.image.is_empty() && image.format.as_ref().is_none_or(|f| f.width == 0 && f.height == 0) {
-        return Some(StreamEvent::Inactive);
+        return Ok(StreamEvent::Inactive);
     }
-    let format = image.format?;
+    let format = image.format.ok_or_else(|| "the image has no format".to_string())?;
     if format.format != ImgFormat::Rgba8888 as i32 {
-        return None;
+        return Err("the image is not RGBA".into());
     }
     let turn = format.rotation.map_or(Quarter::None, |r| quarter_for_rotation(r.rotation));
-    Some(StreamEvent::Frame { width: format.width, height: format.height, rgba: image.image, turn })
+    Ok(StreamEvent::Frame { width: format.width, height: format.height, rgba: image.image, turn })
+}
+
+/// Wait for a usable first visible frame after a failed conversion. Empty
+/// inactive images and healthy idle displays can wait indefinitely.
+async fn pump_frames(
+    mut message: impl AsyncFnMut() -> Result<Option<Image>, tonic::Status>,
+    on_event: &mut impl FnMut(StreamEvent) -> Result<(), String>,
+    recovery: Duration,
+) -> Result<Option<tonic::Status>, String> {
+    let mut needs_picture = true;
+    let mut recovering: Option<(tokio::time::Instant, String)> = None;
+    loop {
+        let next = match &recovering {
+            Some((deadline, why)) => {
+                let timed_out = || format!("Couldn't display the emulator's first frame: {why}");
+                // A ready receive can win timeout_at even after its deadline.
+                if tokio::time::Instant::now() >= *deadline {
+                    return Err(timed_out());
+                }
+                tokio::time::timeout_at(*deadline, message()).await.map_err(|_| timed_out())?
+            }
+            None => message().await,
+        };
+        let image = match next {
+            Ok(Some(image)) => image,
+            Ok(None) => return Ok(None),
+            Err(status) => return Ok(Some(status)),
+        };
+        let event = image_event(image);
+        if matches!(event, Ok(StreamEvent::Inactive)) {
+            needs_picture = true;
+            recovering = None;
+            let _ = on_event(StreamEvent::Inactive);
+            continue;
+        }
+        match event.and_then(&mut *on_event) {
+            Ok(()) => {
+                needs_picture = false;
+                recovering = None;
+            }
+            Err(why) if needs_picture && recovering.is_none() => {
+                recovering = Some((tokio::time::Instant::now() + recovery, why));
+            }
+            Err(_) => {}
+        }
+    }
 }
 
 /// Hands each frame to `on_event` until the call ends, then reports the
@@ -307,20 +356,18 @@ async fn pump(
     mut frames: tonic::Streaming<Image>,
     pid: u32,
     token: Option<String>,
-    mut on_event: impl FnMut(StreamEvent),
+    mut on_event: impl FnMut(StreamEvent) -> Result<(), String>,
 ) {
-    let (why, unavailable) = loop {
-        match frames.message().await {
-            Ok(Some(image)) => {
-                if let Some(event) = image_event(image) {
-                    on_event(event);
-                }
-            }
-            Ok(None) => break ("The emulator ended the picture".to_string(), false),
-            Err(status) => {
-                let text = without_token(&status_text(&status), token.as_deref());
-                break (text, status.code() == tonic::Code::Unavailable);
-            }
+    let result = pump_frames(async || frames.message().await, &mut on_event, FRAME_RECOVERY).await;
+    let (why, unavailable) = match result {
+        Ok(None) => ("The emulator ended the picture".to_string(), false),
+        Ok(Some(status)) => {
+            let text = without_token(&status_text(&status), token.as_deref());
+            (text, status.code() == tonic::Code::Unavailable)
+        }
+        Err(why) => {
+            let _ = on_event(StreamEvent::Ended { gone: false, why });
+            return;
         }
     };
     drop(frames);
@@ -337,7 +384,7 @@ async fn pump(
             }
         }
     };
-    on_event(StreamEvent::Ended { gone, why });
+    let _ = on_event(StreamEvent::Ended { gone, why });
 }
 
 /// `text` with `token` (when there is one) blanked out.
@@ -480,7 +527,7 @@ mod tests {
 
     #[test]
     fn inactive_display_is_distinct_from_a_bad_visible_frame() {
-        assert!(matches!(image_event(Image::default()), Some(StreamEvent::Inactive)));
+        assert!(matches!(image_event(Image::default()), Ok(StreamEvent::Inactive)));
         let frame = |width, height| Image {
             format: Some(ImageFormat {
                 format: ImgFormat::Rgba8888 as i32,
@@ -490,8 +537,60 @@ mod tests {
             }),
             ..Default::default()
         };
-        assert!(matches!(image_event(frame(0, 0)), Some(StreamEvent::Inactive)));
-        assert!(matches!(image_event(frame(2, 2)), Some(StreamEvent::Frame { .. })));
+        assert!(matches!(image_event(frame(0, 0)), Ok(StreamEvent::Inactive)));
+        assert!(matches!(image_event(frame(2, 2)), Ok(StreamEvent::Frame { .. })));
+    }
+
+    #[test]
+    fn a_bad_first_visible_frame_times_out_but_an_inactive_display_waits() {
+        use std::collections::VecDeque;
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rgba = |bytes| Image {
+            format: Some(ImageFormat {
+                format: ImgFormat::Rgba8888 as i32, width: 2, height: 2, ..Default::default()
+            }),
+            image: vec![0; bytes],
+            ..Default::default()
+        };
+        let recovery = Duration::from_millis(20);
+        for (frames, expected) in [
+            (vec![rgba(5)], true),
+            (vec![rgba(5), rgba(16)], false),
+            (vec![rgba(5), Image::default()], false),
+            (vec![Image::default()], false),
+        ] {
+            let mut frames = VecDeque::from(frames);
+            let mut display = |event| match event {
+                StreamEvent::Frame { rgba, .. } if rgba.len() != 16 => Err("bad pixels".into()),
+                _ => Ok(()),
+            };
+            let result = rt.block_on(async {
+                tokio::time::timeout(Duration::from_millis(70), pump_frames(
+                    async || match frames.pop_front() {
+                        Some(frame) => Ok(Some(frame)),
+                        None => futures::future::pending().await,
+                    },
+                    &mut display,
+                    recovery,
+                )).await
+            });
+            if expected {
+                assert!(matches!(result, Ok(Err(why)) if why.contains("bad pixels")));
+            } else {
+                assert!(result.is_err(), "{result:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn consecutive_invalid_frames_cannot_extend_startup_recovery() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let result = rt.block_on(pump_frames(
+            async || Ok(Some(Image { image: vec![1], ..Default::default() })),
+            &mut |_| Ok(()),
+            Duration::from_millis(20),
+        ));
+        assert!(matches!(result, Err(why) if why.contains("no format")));
     }
 
     #[test]
@@ -556,10 +655,11 @@ mod tests {
                         )
                     }), took))
                 }
-                StreamEvent::Inactive => return,
+                StreamEvent::Inactive => return Ok(()),
                 StreamEvent::Ended { gone, why } => Err((gone, why)),
             };
             let _ = tx.send(report);
+            Ok(())
         })
         .unwrap();
         eprintln!("connected in {:?}, asked for {size:?} (native long side {native:?})", started.elapsed());
@@ -581,7 +681,7 @@ mod tests {
         }
         // A wrong token is refused, as a note.
         let wrong = AndroidRunning { token: Some("wrong".into()), ..dev.clone() };
-        match AndroidStream::start(&wrong, size, |_| {}) {
+        match AndroidStream::start(&wrong, size, |_| Ok(())) {
             Err(StreamError::Failed(why)) => {
                 eprintln!("wrong token: {why}");
                 assert!(why.starts_with("Unauthenticated"), "{why}");
@@ -600,6 +700,7 @@ mod tests {
             if let StreamEvent::Ended { gone, why } = event {
                 let _ = tx.send((gone, why));
             }
+            Ok(())
         })
         .unwrap();
         let serial = format!("emulator-{}", dev.serial_port);

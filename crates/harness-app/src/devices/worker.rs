@@ -235,37 +235,41 @@ fn start_android(
 ) -> Result<AndroidStream, StreamError> {
     let mut converter = PixelConverter::new().map_err(StreamError::Failed)?;
     let (mut first, mut logged_error) = (true, false);
-    AndroidStream::start(dev, size, move |event| match event {
-        StreamEvent::Inactive => {
-            if frames.put(FrameUpdate::Inactive) {
-                let _ = to_ui.unbounded_send(StreamMsg::Frame(attempt.generation));
+    AndroidStream::start(dev, size, move |event| {
+        match event {
+            StreamEvent::Inactive => {
+                if frames.put(FrameUpdate::Inactive) {
+                    let _ = to_ui.unbounded_send(StreamMsg::Frame(attempt.generation));
+                }
             }
-        }
-        StreamEvent::Frame { width, height, rgba, turn } => {
-            match converter.convert_rgba(rgba, width as usize, height as usize) {
-                Ok(buffer) => {
-                    // Drawn as it comes; the turn maps touches back.
-                    if frames.put(FrameUpdate::Picture(SendPixelBuffer(buffer), turn)) {
-                        let _ = to_ui.unbounded_send(StreamMsg::Frame(attempt.generation));
+            StreamEvent::Frame { width, height, rgba, turn } => {
+                match converter.convert_rgba(rgba, width as usize, height as usize) {
+                    Ok(buffer) => {
+                        if frames.put(FrameUpdate::Picture(SendPixelBuffer(buffer), turn)) {
+                            let _ = to_ui.unbounded_send(StreamMsg::Frame(attempt.generation));
+                        }
+                        if std::mem::take(&mut first) {
+                            let _ = to_ui.unbounded_send(StreamMsg::Started(attempt));
+                        }
                     }
-                    if std::mem::take(&mut first) {
-                        let _ = to_ui.unbounded_send(StreamMsg::Started(attempt));
+                    Err(e) => {
+                        if !logged_error {
+                            logged_error = true;
+                            log::warn!("device: converting an emulator frame failed: {e}");
+                        }
+                        return Err(e);
                     }
                 }
-                Err(e) if !logged_error => {
-                    logged_error = true;
-                    log::warn!("device: converting an emulator frame failed: {e}");
-                }
-                Err(_) => {}
+            }
+            StreamEvent::Ended { gone: true, why } => {
+                log::debug!("device: the emulator shut down ({why})");
+                let _ = to_ui.unbounded_send(StreamMsg::Gone(attempt));
+            }
+            StreamEvent::Ended { gone: false, why } => {
+                let _ = to_ui.unbounded_send(StreamMsg::Failed(attempt, StreamError::Failed(why)));
             }
         }
-        StreamEvent::Ended { gone: true, why } => {
-            log::debug!("device: the emulator shut down ({why})");
-            let _ = to_ui.unbounded_send(StreamMsg::Gone(attempt));
-        }
-        StreamEvent::Ended { gone: false, why } => {
-            let _ = to_ui.unbounded_send(StreamMsg::Failed(attempt, StreamError::Failed(why)));
-        }
+        Ok(())
     })
 }
 

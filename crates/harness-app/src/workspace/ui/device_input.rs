@@ -1388,6 +1388,7 @@ mod tests {
                 if let StreamEvent::Frame { width, height, turn, .. } = event {
                     *seen.lock().unwrap() = Some((width, height, turn));
                 }
+                Ok(())
             })
             .unwrap()
         };
