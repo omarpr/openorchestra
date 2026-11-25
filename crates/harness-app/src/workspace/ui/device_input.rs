@@ -1316,9 +1316,39 @@ mod tests {
                 missed.borrow_mut().push(what);
             }
         };
+        struct PointerLocationRestore {
+            adb: std::path::PathBuf,
+            serial: String,
+            original: String,
+        }
+        impl Drop for PointerLocationRestore {
+            fn drop(&mut self) {
+                let setting = match self.original.trim() {
+                    "" | "null" => ["delete", "pointer_location"],
+                    _ => ["put", "pointer_location"],
+                };
+                let mut command = std::process::Command::new(&self.adb);
+                command.args(["-s", &self.serial, "shell", "settings", setting[0], "system", setting[1]]);
+                if self.original.trim() != "null" && !self.original.trim().is_empty() {
+                    command.arg(self.original.trim());
+                }
+                match command.output() {
+                    Ok(out) if out.status.success() => {}
+                    Ok(out) => eprintln!("device: restoring pointer_location: {}", String::from_utf8_lossy(&out.stderr)),
+                    Err(e) => eprintln!("device: restoring pointer_location: {e}"),
+                }
+            }
+        }
+
         // What it changes, to put back, even if an assertion panics.
         let font_restore = FontScaleRestore::new(&dev);
         let night_before = read_appearance(&dev).unwrap();
+        let pointer_before = shell(&["settings", "get", "system", "pointer_location"]);
+        let pointer_restore = PointerLocationRestore {
+            adb: adb_path.clone(),
+            serial: serial.clone(),
+            original: pointer_before.clone(),
+        };
         shell(&["settings", "put", "system", "pointer_location", "1"]);
 
         // The picture as the tab gets it: its size and the turn it came with.
@@ -1507,7 +1537,8 @@ mod tests {
         // Put back what was changed. The shutdown check below deliberately
         // writes a different font scale after this restoration.
         drop(font_restore);
-        shell(&["settings", "delete", "system", "pointer_location"]);
+        drop(pointer_restore);
+        assert_eq!(shell(&["settings", "get", "system", "pointer_location"]), pointer_before);
         drop(sink);
         drop(stream);
         let mut got = Vec::new();
