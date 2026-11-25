@@ -59,8 +59,13 @@ pub(crate) use android::list_android;
 
 /// Android devices are only found on macOS: none.
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn list_android() -> simctl::DeviceList {
-    simctl::DeviceList::default()
+pub(crate) fn list_android() -> AndroidInventory {
+    AndroidInventory { running: Vec::new(), configured: Ok(Vec::new()) }
+}
+
+pub(crate) struct AndroidInventory {
+    pub running: Vec<DeviceInfo>,
+    pub configured: Result<Vec<DeviceInfo>, String>,
 }
 
 /// Whether the Android SDK has adb, which an emulator's appearance and

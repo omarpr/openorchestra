@@ -25,6 +25,7 @@ Unreleased is empty.
 
 ### Fixed
 
+- The Device picker keeps its last AVD inventory and reports Android listing failures.
 - The iOS screenshot fallback stays active while listing simulators fails.
 - Android live-view retries continue when listing iOS simulators fails.
 

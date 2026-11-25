@@ -11,19 +11,16 @@ pub(crate) mod sdk;
 pub(crate) mod skin;
 pub(crate) mod stream;
 
-use super::simctl::DeviceList;
-use super::{AndroidRunning, DeviceInfo, Platform};
+use super::{AndroidInventory, AndroidRunning, DeviceInfo, Platform};
 
 /// What the picker shows for an Android device.
 const OS: &str = "Android";
 
-/// `list` with the Android group: the `running` emulators and the AVDs in
-/// `avds` that aren't running, each sorted by name.
-pub(crate) fn with_android(
-    mut list: DeviceList,
+/// The running emulators and the configured AVDs, each sorted by name.
+fn inventory(
     running: Vec<AndroidRunning>,
-    avds: Vec<String>,
-) -> DeviceList {
+    avds: Result<Vec<String>, String>,
+) -> AndroidInventory {
     let device = |avd_id: &str, name: String, android: Option<AndroidRunning>| DeviceInfo {
         udid: super::android_device_id(avd_id),
         name,
@@ -32,33 +29,28 @@ pub(crate) fn with_android(
         platform: Platform::Android,
         android,
     };
-    let mut stopped: Vec<DeviceInfo> = avds
-        .iter()
-        .filter(|avd| !running.iter().any(|r| &r.avd_id == *avd))
-        .map(|avd| device(avd, avd.replace('_', " "), None))
-        .collect();
-    stopped.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.udid.cmp(&b.udid)));
+    let configured = avds.map(|avds| {
+        let mut avds: Vec<_> = avds
+            .iter()
+            .map(|avd| device(avd, avd.replace('_', " "), None))
+            .collect();
+        avds.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.udid.cmp(&b.udid)));
+        avds
+    });
     let mut running: Vec<DeviceInfo> = running
         .into_iter()
         .map(|r| device(&r.avd_id.clone(), r.name.clone(), Some(r)))
         .collect();
     running.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.udid.cmp(&b.udid)));
-    list.android_running = running;
-    list.android_stopped = stopped;
-    list
+    AndroidInventory { running, configured }
 }
 
 /// The Android emulators running now and the stopped AVDs (none without an
 /// SDK), in a list of their own. Blocks briefly (a directory read and
 /// `emulator -list-avds`, about 25 ms): call it off the main thread, and
 /// only when the simulators are listed (the tab is on screen).
-pub(crate) fn list_android() -> DeviceList {
-    let list = DeviceList::default();
-    let avds = sdk::list_avds().unwrap_or_else(|e| {
-        log::debug!("device: listing AVDs failed: {e}");
-        Vec::new()
-    });
-    with_android(list, discovery::running_emulators(), avds)
+pub(crate) fn list_android() -> AndroidInventory {
+    inventory(discovery::running_emulators(), sdk::list_avds())
 }
 
 #[cfg(test)]
@@ -105,39 +97,13 @@ mod tests {
     }
 
     #[test]
-    fn running_emulators_and_stopped_avds_join_the_list() {
-        let ios = DeviceInfo { udid: "U".into(), name: "iPhone 18".into(), ..Default::default() };
-        let list = DeviceList { booted: vec![ios.clone()], ..Default::default() };
+    fn running_discovery_survives_an_avd_listing_failure() {
         let pixel = running("Pixel_9_Pro_API_35", "Pixel 9 Pro API 35");
-        let got = with_android(
-            list,
-            vec![pixel.clone()],
-            vec!["Pixel_9_Pro_API_35".into(), "Medium_Phone_API_35".into(), "A_Tablet".into()],
-        );
-        // The simulators are untouched.
-        assert_eq!(got.booted, vec![ios.clone()]);
-        assert_eq!(
-            got.android_running,
-            vec![DeviceInfo {
-                udid: "android:Pixel_9_Pro_API_35".into(),
-                name: "Pixel 9 Pro API 35".into(),
-                os: "Android".into(),
-                device_type: String::new(),
-                platform: Platform::Android,
-                android: Some(pixel),
-            }]
-        );
-        // A running AVD isn't also stopped; the rest are, named from their
-        // ids, by name.
-        let stopped: Vec<(&str, &str)> =
-            got.android_stopped.iter().map(|d| (d.udid.as_str(), d.name.as_str())).collect();
-        assert_eq!(
-            stopped,
-            [("android:A_Tablet", "A Tablet"), ("android:Medium_Phone_API_35", "Medium Phone API 35")]
-        );
-        assert!(got.android_stopped.iter().all(|d| d.platform == Platform::Android && d.android.is_none()));
-        // Running: simulators first.
-        let ids: Vec<String> = got.running().into_iter().map(|d| d.udid).collect();
-        assert_eq!(ids, ["U", "android:Pixel_9_Pro_API_35"]);
+        let got = inventory(vec![pixel.clone()], Err("timeout".into()));
+        let dev = &got.running[0];
+        assert_eq!(dev.udid, "android:Pixel_9_Pro_API_35");
+        assert_eq!(dev.os, "Android");
+        assert_eq!(dev.android.as_ref(), Some(&pixel));
+        assert_eq!(got.configured, Err("timeout".into()));
     }
 }

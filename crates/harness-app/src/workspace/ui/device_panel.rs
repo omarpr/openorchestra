@@ -275,6 +275,27 @@ pub(crate) fn boot_offer_after_list(
     offer.filter(|o| !booted.iter().any(|d| d.udid == o.udid))
 }
 
+/// Keep the full last successful inventory while the SDK is unavailable,
+/// then hide AVDs discovery currently reports as running.
+fn apply_android_inventory(
+    cached: &mut Vec<DeviceInfo>,
+    inventory: crate::devices::AndroidInventory,
+) -> (DeviceList, Option<String>) {
+    let error = match inventory.configured {
+        Ok(avds) => {
+            *cached = avds;
+            None
+        }
+        Err(error) => Some(error),
+    };
+    let android_stopped = cached
+        .iter()
+        .filter(|avd| !inventory.running.iter().any(|d| d.udid == avd.udid))
+        .cloned()
+        .collect();
+    (DeviceList { android_running: inventory.running, android_stopped, ..DeviceList::default() }, error)
+}
+
 /// The device's picture. Its own entity, embedded cached, so a new frame
 /// re-renders this view alone.
 ///
@@ -811,7 +832,7 @@ impl HarnessWorkspace {
         &mut self,
         ticket: u64,
         ios: Result<DeviceList, ListError>,
-        android: DeviceList,
+        android: crate::devices::AndroidInventory,
         cx: &mut Context<Self>,
     ) {
         self.device_listing = false;
@@ -832,6 +853,11 @@ impl HarnessWorkspace {
                 self.device_list_error = None;
             }
         }
+        let (android, avd_error) = apply_android_inventory(&mut self.device_avd_inventory, android);
+        if let Some(why) = &avd_error {
+            log::debug!("device: listing AVDs failed: {why}");
+        }
+        self.device_avd_list_error = avd_error;
         // The emulators count whatever simctl said.
         self.device_list = DeviceList::merged(&self.device_list, &ios, android);
         self.device_boot_offer = boot_offer_after_list(offer, &self.device_list.running());
@@ -1191,7 +1217,14 @@ impl HarnessWorkspace {
         hx: &HarnessTheme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let avd_error = self.device_avd_list_error.as_deref();
+        let show_avd_error_in_body = avd_error.is_some()
+            && self.device_boot_offer.is_none()
+            && matches!(self.device_tab.view, DeviceView::NeedsXcode | DeviceView::NoneRunning);
         let body = match &self.device_tab.view {
+            _ if show_avd_error_in_body => device_empty(
+                hx, "Couldn't list Android virtual devices".into(), avd_error.map(error_line).map(Into::into),
+            ),
             // Nothing yet rather than "No simulator running" for a moment,
             // unless listing failed. An emulator or an AVD's boot offer
             // shows regardless.
@@ -1257,6 +1290,11 @@ impl HarnessWorkspace {
             .flex_1()
             .min_h_0()
             .children(self.render_device_picker(hx, cx))
+            .children(avd_error.filter(|_| !show_avd_error_in_body).map(|why| {
+                div().id("device-avd-list-error").px_3().py_1().text_xs().text_color(hx.tx2)
+                    .tooltip(tip(why.to_string()))
+                    .child("Couldn't list Android virtual devices")
+            }))
             .child(body)
             .children(self.render_device_controls(hx, cx))
             .into_any_element()
@@ -1523,6 +1561,33 @@ mod tests {
     /// On a Mac with only Android Studio (no Xcode, AVDs in the picker), or
     /// any Mac whose picker has Android devices, the empty tab and the
     /// picker speak of devices, not simulators. Without Android: as ever.
+    #[test]
+    fn avd_listing_failures_keep_the_inventory_and_exclude_running_devices() {
+        use super::apply_android_inventory;
+        use crate::devices::AndroidInventory;
+        let avd = android("p");
+        let mut cached = Vec::new();
+        let (listed, error) = apply_android_inventory(
+            &mut cached, AndroidInventory { running: vec![], configured: Ok(vec![avd.clone()]) },
+        );
+        assert_eq!(listed.android_stopped, vec![avd.clone()]);
+        assert!(error.is_none());
+        let (listed, error) = apply_android_inventory(
+            &mut cached, AndroidInventory { running: vec![avd.clone()], configured: Err("timeout".into()) },
+        );
+        assert!(listed.android_stopped.is_empty());
+        assert_eq!(error.as_deref(), Some("timeout"));
+        let (listed, _) = apply_android_inventory(
+            &mut cached, AndroidInventory { running: vec![], configured: Err("timeout".into()) },
+        );
+        assert_eq!(listed.android_stopped, vec![avd]);
+        let (listed, error) = apply_android_inventory(
+            &mut cached, AndroidInventory { running: vec![], configured: Ok(vec![]) },
+        );
+        assert!(listed.android_stopped.is_empty());
+        assert!(error.is_none());
+    }
+
     #[test]
     fn the_empty_tab_speaks_of_devices_when_android_is_listed() {
         let avd = DeviceInfo {

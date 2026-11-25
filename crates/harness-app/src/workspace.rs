@@ -956,6 +956,9 @@ pub struct HarnessWorkspace {
     /// (none when Xcode is missing) and the latest Android groups, which
     /// count whatever simctl says.
     device_list: crate::devices::simctl::DeviceList,
+    /// The last successful SDK inventory, including AVDs currently running.
+    device_avd_inventory: Vec<crate::devices::DeviceInfo>,
+    device_avd_list_error: Option<String>,
     /// A shut-down device picked in the menu: the tab offers to boot it in
     /// place of the picture, until it is running or another device is
     /// picked.
