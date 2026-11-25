@@ -25,6 +25,7 @@ Unreleased is empty.
 
 ### Fixed
 
+- Android boot errors show the launcher’s first failure message.
 - Android boot can be retried if the launched emulator exits before the picker sees it.
 - Android input stays tied to the verified emulator connection if its port is reused.
 - Android keyboard and paste stay available when the emulator screen size is unknown.

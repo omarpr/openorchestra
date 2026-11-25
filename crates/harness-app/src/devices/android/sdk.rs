@@ -94,27 +94,31 @@ pub(crate) fn boot_args(avd_id: &str) -> [&str; 5] {
     ["-avd", avd_id, "-no-window", "-gpu", "host"]
 }
 
-/// A log line without its "ERROR   | " style tag.
-fn untagged(line: &str) -> &str {
-    match line.split_once('|') {
-        Some((tag, rest)) if !tag.trim().is_empty() && tag.trim().chars().all(|c| c.is_ascii_uppercase()) => {
-            rest.trim()
+/// Emulator and launcher logs use both "ERROR |" and "emulator: ERROR:".
+fn log_line(line: &str) -> (Option<&str>, &str) {
+    let line = line.trim();
+    let line = line.strip_prefix("emulator:").map_or(line, str::trim_start);
+    if let Some((tag, message)) = line.split_once(['|', ':']) {
+        let tag = tag.trim();
+        if !tag.is_empty() && tag.bytes().all(|byte| byte.is_ascii_uppercase()) {
+            return (Some(tag), message.trim());
         }
-        _ => line.trim(),
+    }
+    match line.split_whitespace().next() {
+        Some(tag @ ("ERROR" | "FATAL" | "PANIC")) => (Some(tag), line[tag.len()..].trim_start()),
+        _ => (None, line),
     }
 }
 
-/// Why a boot failed, from the emulator's log: its first error line (the
-/// "ERROR | " or "FATAL | " tag dropped), else its last line, else the
-/// exit code.
+/// Why a boot failed: its first error message, else its last log
+/// message, else the process exit status.
 pub(crate) fn boot_failure(log: &str, code: Option<i32>) -> String {
-    let lines: Vec<&str> = log.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-    let error = lines
-        .iter()
-        .find(|l| l.starts_with("ERROR") || l.starts_with("FATAL"))
-        .or(lines.last());
+    let mut lines = log.lines().map(log_line).filter(|(_, message)| !message.is_empty());
+    let error = lines.clone()
+        .find(|(tag, _)| matches!(tag, Some("ERROR" | "FATAL" | "PANIC")))
+        .or_else(|| lines.next_back());
     match (error, code) {
-        (Some(line), _) => untagged(line).to_string(),
+        (Some((_, message)), _) => message.to_string(),
         (None, Some(code)) => format!("The emulator exited with code {code}"),
         (None, None) => "The emulator was stopped by a signal".to_string(),
     }
@@ -219,6 +223,19 @@ mod tests {
             boot_args("Pixel_9_Pro_API_35"),
             ["-avd", "Pixel_9_Pro_API_35", "-no-window", "-gpu", "host"]
         );
+    }
+
+    #[test]
+    fn launcher_errors_win_over_follow_up_hints() {
+        for (line, cause) in [
+            ("emulator: ERROR: emulator is already running", "emulator is already running"),
+            ("PANIC: hardware acceleration is required", "hardware acceleration is required"),
+            ("emulator: FATAL | could not start the guest", "could not start the guest"),
+            ("ERROR unable to start: unavailable", "unable to start: unavailable"),
+        ] {
+            let log = format!("INFO   | starting the emulator\n{line}\nPlease check your configuration.");
+            assert_eq!(boot_failure(&log, Some(1)), cause);
+        }
     }
 
     #[test]
