@@ -963,10 +963,9 @@ pub struct HarnessWorkspace {
     /// place of the picture, until it is running or another device is
     /// picked.
     device_boot_offer: Option<crate::devices::DeviceInfo>,
-    /// The AVD being booted (its device id) while its boot waits for the
-    /// emulator to list itself. Unlike a simulator boot, it doesn't hold
-    /// the bar.
-    device_booting: Option<String>,
+    /// The AVD being booted and whether its launch has succeeded. It stays
+    /// busy until the picker has seen it running.
+    device_booting: Option<(String, bool)>,
     /// The device the Shut down confirm asks about, captured from the
     /// picture on screen when Shut down was clicked.
     device_shutdown_confirm: Option<crate::devices::DeviceInfo>,

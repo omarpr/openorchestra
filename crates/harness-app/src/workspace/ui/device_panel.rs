@@ -860,6 +860,11 @@ impl HarnessWorkspace {
         self.device_avd_list_error = avd_error;
         // The emulators count whatever simctl said.
         self.device_list = DeviceList::merged(&self.device_list, &ios, android);
+        if self.device_booting.as_ref().is_some_and(|(id, ready)| {
+            super::device_controls::boot_is_listed(&self.device_list.android_running, id, *ready)
+        }) {
+            self.device_booting = None;
+        }
         self.device_boot_offer = boot_offer_after_list(offer, &self.device_list.running());
         // The state machine watches running devices only.
         let android_running = self.device_list.android_running.clone();
@@ -1308,7 +1313,7 @@ impl HarnessWorkspace {
         let busy = super::device_controls::boot_busy(
             &device.udid,
             self.device_control_in_flight,
-            self.device_booting.as_deref(),
+            self.device_booting.as_ref().map(|(id, _)| id.as_str()),
         );
         let label = if busy {
             format!("Booting {}…", device.name)

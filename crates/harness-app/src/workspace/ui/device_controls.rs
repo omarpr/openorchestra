@@ -83,6 +83,11 @@ pub(crate) fn boot_busy(offer: &str, in_flight: bool, booting: Option<&str>) -> 
     in_flight || booting == Some(offer)
 }
 
+/// A successful background launch still needs confirmation from the UI poll.
+pub(crate) fn boot_is_listed(running: &[DeviceInfo], id: &str, launched: bool) -> bool {
+    launched && running.iter().any(|d| d.udid == id)
+}
+
 /// A control's button: its element id, icon and tooltip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ControlLook {
@@ -478,7 +483,7 @@ impl HarnessWorkspace {
         let Some(device) = self.device_boot_offer.clone() else {
             return;
         };
-        if boot_busy(&device.udid, self.device_control_in_flight, self.device_booting.as_deref()) {
+        if boot_busy(&device.udid, self.device_control_in_flight, self.device_booting.as_ref().map(|(id, _)| id.as_str())) {
             return;
         }
         super::device_panel::pick_for_boot(&mut self.device_tab, &mut self.prefs, &device.udid);
@@ -495,23 +500,28 @@ impl HarnessWorkspace {
         }
     }
 
-    /// Boot an AVD off the UI thread. Its wait (until the emulator lists
-    /// itself, up to a minute) keeps only its own offer saying "Booting…"
+    /// Boot an AVD off the UI thread. While the emulator starts and the
+    /// picker catches up, only its own offer says "Booting…"
     /// (`device_booting`); the bar stays free for the device on screen.
     #[cfg(target_os = "macos")]
     fn boot_android(&mut self, udid: String, cx: &mut Context<Self>) {
         let Some(avd) = crate::devices::avd_id_of(&udid).map(str::to_string) else {
             return;
         };
-        self.device_booting = Some(udid.clone());
+        self.device_booting = Some((udid.clone(), false));
         cx.notify();
         cx.spawn(async move |view, cx| {
             let result = cx
                 .background_spawn(async move { crate::devices::android::sdk::boot(&avd) })
                 .await;
             let _ = view.update(cx, |ws, cx| {
-                if ws.device_booting.as_deref() == Some(udid.as_str()) {
-                    ws.device_booting = None;
+                if let Some((id, ready)) = &mut ws.device_booting
+                    && *id == udid
+                {
+                    *ready = result.is_ok();
+                    if result.is_err() || boot_is_listed(&ws.device_list.android_running, id, *ready) {
+                        ws.device_booting = None;
+                    }
                 }
                 if let Err(e) = result {
                     log::info!("device: {e}");
@@ -736,6 +746,16 @@ mod tests {
         // A control or a simulator boot running: every offer is busy.
         assert!(boot_busy("android:n", true, None));
         assert!(!boot_busy("android:n", false, None));
+    }
+
+    #[test]
+    fn a_successful_launch_stays_busy_until_the_picker_sees_that_avd() {
+        use super::boot_is_listed;
+        let running = [DeviceInfo { udid: "android:p".into(), ..Default::default() }];
+        assert!(!boot_is_listed(&running, "android:p", false));
+        assert!(!boot_is_listed(&[], "android:p", true));
+        assert!(!boot_is_listed(&running, "android:q", true));
+        assert!(boot_is_listed(&running, "android:p", true));
     }
 
     #[test]

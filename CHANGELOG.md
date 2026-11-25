@@ -25,12 +25,11 @@ Unreleased is empty.
 
 ### Fixed
 
+- Android boot offers stay busy until the picker sees the emulator running.
 - The Device picker keeps its last AVD inventory and reports Android listing failures.
 - The iOS screenshot fallback stays active while listing simulators fails.
 - Android live-view retries continue when listing iOS simulators fails.
-
 - The Device tab returns keyboard focus and backs off when input cannot start.
-
 - An unknown tools-panel tab in prefs.json no longer resets every setting.
 
 ## 1.5.0 - 2026-11-22

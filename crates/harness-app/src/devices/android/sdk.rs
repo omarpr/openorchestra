@@ -11,10 +11,9 @@ use crate::ports::{RunFailed, run_bounded_why};
 
 /// `emulator -list-avds` takes about 25 ms (spike).
 const LIST_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long a boot waits for the emulator to list itself as running. A
-/// headless boot on the GPU took 13-14 s to the home screen in the spike;
-/// it lists itself well before that.
-const BOOT_TIMEOUT: Duration = Duration::from_secs(60);
+/// A headless boot on the GPU took 13-14 s in the spike. Log very slow
+/// boots while continuing to observe their success or failure.
+const SLOW_BOOT: Duration = Duration::from_secs(60);
 const BOOT_POLL: Duration = Duration::from_millis(250);
 
 /// The SDK to use: `ANDROID_HOME`, then `ANDROID_SDK_ROOT`, then Android
@@ -123,9 +122,8 @@ pub(crate) fn boot_failure(log: &str, code: Option<i32>) -> String {
 /// Boots AVD `avd_id` headless, detached from the app (its own process
 /// group, so it keeps running when the app quits), its output to a log in
 /// the temp dir. Returns once the emulator lists itself as running, or
-/// with the log's first error if it exits first; after a minute without
-/// either it is left to come up (a later list shows it). Blocks: call it
-/// off the main thread.
+/// with the log's first error if it exits first. Blocks: call it off the
+/// main thread.
 pub(crate) fn boot(avd_id: &str) -> Result<(), String> {
     use std::os::unix::process::CommandExt;
     let sdk = sdk().ok_or_else(|| "The Android SDK wasn't found".to_string())?;
@@ -143,6 +141,7 @@ pub(crate) fn boot(avd_id: &str) -> Result<(), String> {
         .spawn()
         .map_err(|e| format!("The Android emulator could not start: {e}"))?;
     let started = Instant::now();
+    let mut logged_slow_boot = false;
     let outcome = loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -155,9 +154,9 @@ pub(crate) fn boot(avd_id: &str) -> Result<(), String> {
         if super::discovery::running_emulators().iter().any(|e| e.avd_id == avd_id) {
             break Ok(());
         }
-        if started.elapsed() > BOOT_TIMEOUT {
-            log::info!("device: {avd_id} hasn't listed itself after {} s", BOOT_TIMEOUT.as_secs());
-            break Ok(());
+        if !logged_slow_boot && started.elapsed() > SLOW_BOOT {
+            log::info!("device: {avd_id} hasn't listed itself after {} s", SLOW_BOOT.as_secs());
+            logged_slow_boot = true;
         }
         std::thread::sleep(BOOT_POLL);
     };
