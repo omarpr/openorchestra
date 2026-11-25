@@ -1,41 +1,16 @@
 #!/usr/bin/env bash
 # Regenerates crates/harness-app/src/devices/android/grpc/android.emulation.control.rs
 # from the vendored proto. Needs protoc on PATH. Never run by the build; the
-# output is checked in. Uses a throwaway cargo project so harness-app gains no
-# build dependency.
+# output is checked in. Its standalone Cargo project pins the generator
+# without adding an app build dependency.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 proto="$root/crates/harness-app/proto/android"
 out="$root/crates/harness-app/src/devices/android/grpc"
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
-
-mkdir -p "$tmp/src"
-cat > "$tmp/Cargo.toml" <<'TOML'
-[package]
-name = "gen"
-version = "0.0.0"
-edition = "2021"
-publish = false
-[workspace]
-[dependencies]
-tonic-prost-build = { version = "0.14", default-features = false }
-TOML
-cat > "$tmp/src/main.rs" <<'RS'
-fn main() {
-    let proto = std::env::var("PROTO_DIR").unwrap();
-    let out = std::env::var("OUT_DIR_GEN").unwrap();
-    tonic_prost_build::configure()
-        .build_server(false)
-        .build_transport(false)
-        .out_dir(&out)
-        .compile_protos(&[format!("{proto}/emulator_controller.proto")], &[proto])
-        .unwrap();
-}
-RS
-
-PROTO_DIR="$proto" OUT_DIR_GEN="$out" cargo run --quiet --manifest-path "$tmp/Cargo.toml"
+PROTO_DIR="$proto" OUT_DIR_GEN="$out" cargo run --quiet --locked \
+  --manifest-path "$root/script/android-grpc-gen/Cargo.toml" \
+  --target-dir "$root/target/android-grpc-gen"
 
 # Header: name the generator. (The generated file starts with its own
 # "@generated" line.)

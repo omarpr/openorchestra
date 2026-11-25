@@ -1,0 +1,8 @@
+[package]
+name = "android-grpc-gen"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[workspace]
+[dependencies]
+tonic-prost-build = { version = "0.14", default-features = false }
