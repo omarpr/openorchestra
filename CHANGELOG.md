@@ -12,6 +12,8 @@ Unreleased is empty.
 
 ## Unreleased
 
+## 1.6.0 - 2026-11-25
+
 ### Added
 
 - **Device tab** (macOS): watch a running iOS simulator live from the tools panel, picked from every simulator on the Mac. Falls back to about 2 frames a second when this Xcode's simulator display API isn't available.
