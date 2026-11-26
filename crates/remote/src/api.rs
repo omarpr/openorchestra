@@ -195,6 +195,7 @@ pub(crate) fn strip_port(host: &str) -> &str {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PairReq {
     code: String,
     device_name: String,
@@ -211,7 +212,10 @@ async fn pair(
     if !s.pair_attempt_allowed(peer.ip(), Instant::now()) {
         return error(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
     }
-    let Ok(req) = serde_json::from_slice::<PairReq>(&body) else {
+    if body.len() > MAX_BODY {
+        return error(StatusCode::PAYLOAD_TOO_LARGE, "too_large");
+    }
+    let Ok(Json(req)) = Json::<PairReq>::from_bytes(&body) else {
         return error(StatusCode::BAD_REQUEST, "bad_request");
     };
     if req.code.len() > MAX_CODE {
@@ -446,6 +450,7 @@ fn screenshot_still_allowed(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SendReq {
     text: String,
 }
@@ -710,7 +715,10 @@ async fn send(
     if device.read_only {
         return error(StatusCode::FORBIDDEN, "read_only");
     }
-    let Ok(req) = serde_json::from_slice::<SendReq>(&body) else {
+    if body.len() > MAX_BODY {
+        return error(StatusCode::PAYLOAD_TOO_LARGE, "too_large");
+    }
+    let Ok(Json(req)) = Json::<SendReq>::from_bytes(&body) else {
         return error(StatusCode::BAD_REQUEST, "bad_request");
     };
     if req.text.len() > MAX_SEND_TEXT {
@@ -1423,6 +1431,15 @@ mod tests {
             !marker.exists(),
             "helper must not run after device revocation"
         );
+    }
+
+    #[test]
+    fn json_requests_reject_unknown_fields() {
+        assert!(Json::<PairReq>::from_bytes(
+            br#"{"code":"1234-5678","device_name":"Phone","extra":true}"#
+        )
+        .is_err());
+        assert!(Json::<SendReq>::from_bytes(br#"{"text":"hello","extra":true}"#).is_err());
     }
 
     #[test]
