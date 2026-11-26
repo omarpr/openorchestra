@@ -12,6 +12,10 @@ Unreleased is empty.
 
 ## Unreleased
 
+### Security
+
+- Phone remote pairing and quick-reply requests use size-bounded, strict JSON deserialization.
+
 ## 1.6.0 - 2026-11-25
 
 ### Added
